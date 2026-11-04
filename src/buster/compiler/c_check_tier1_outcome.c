@@ -22,6 +22,8 @@ typedef enum CheckTier1Stage
     CHECK_TIER1_RESOURCE,
     CHECK_TIER1_PUBLICATION,
     CHECK_TIER1_VALUE_NUMBERING,
+    // The 128-bit integers' split into halves (ir_wide.c, #141), between promotion and the optimizer.
+    CHECK_TIER1_WIDE,
     CHECK_TIER1_STAGE_COUNT,
 } CheckTier1Stage;
 
@@ -61,6 +63,31 @@ typedef enum CheckTier1Fallback
     CHECK_TIER1_FALLBACK_FORBIDDEN,
 } CheckTier1Fallback;
 
+// What a call selection refused has (#1116), as bits of CheckTier1Outcome.call_kinds: the shapes of its arguments and
+// result that the selector's call boundary doesn't take (tier1_select_call_supported's predicates), so that a corpus's
+// refusals say which shape to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell
+// apart. A call has every kind it has, so the kinds' counts can sum past the calls'. Stack arguments are the arguments
+// past the boundary's limit (BUSTER_TIER1_SELECT_MAX_ARGUMENTS), not every argument the ABI passes on the stack, which
+// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's, or aggregates'
+// parts in registers past the staging slots. The boundary takes floating and long double arguments and results (#141),
+// with or without a record, so no kind names them: one with a record it refuses is an ABI record's.
+typedef enum CheckTier1CallKind
+{
+    CHECK_TIER1_CALL_INDIRECT,
+    CHECK_TIER1_CALL_VARIADIC,
+    CHECK_TIER1_CALL_ABI_RECORD,
+    CHECK_TIER1_CALL_STACK_ARGUMENTS,
+    CHECK_TIER1_CALL_NARROW_ARGUMENT,
+    CHECK_TIER1_CALL_OTHER_ARGUMENT,
+    CHECK_TIER1_CALL_OTHER_RESULT,
+    CHECK_TIER1_CALL_ARGUMENT_COUNT,
+    CHECK_TIER1_CALL_KIND_COUNT,
+} CheckTier1CallKind;
+
+static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT] = {
+    "indirect", "variadic", "abi-record", "stack-arguments", "narrow-argument", "other-argument", "other-result", "argument-count",
+};
+
 // These two domains have no upstream error enum: the adapter's exact refusal/capacity reason.
 #define BUSTER_CHECK_TIER1_NAKED 1u
 #define BUSTER_CHECK_TIER1_ARENA_RESERVE 1u
@@ -82,6 +109,8 @@ struct CheckTier1Outcome
     uint32_t emission_error;
     // The full IrCheck, including whether its dominance obligation was checked.
     bool dominance_checked;
+    // Where selection refused a call, the call's kinds (1 << CheckTier1CallKind); zero for any other outcome.
+    uint32_t call_kinds;
 };
 
 // Caller-owned regression control, immutable during a run. After a stage succeeds, substitute this raw error at its
@@ -98,7 +127,7 @@ struct CheckTier1Fault
     uint32_t detail;
 };
 
-static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn" };
+static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn", "wide" };
 static const char* const check_tier1_category_names[CHECK_TIER1_CATEGORY_COUNT] = { "unattempted", "compiled", "unsupported", "resource", "internal" };
 static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame", "certificate" };
 

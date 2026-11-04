@@ -89,6 +89,10 @@ static uint32_t asm_round_trip_operands(const X86Instruction* record, AsmRoundTr
         case X86_MATCH_XMM0:
             operand->class = BUSTER_X86_CLASS_XMM;
             break;
+        case X86_MATCH_ST0:
+            // The x87's st(0) beside an st(i) (#147).
+            operand->class = BUSTER_X86_CLASS_ST;
+            break;
         case X86_MATCH_CL:
             operand->class = BUSTER_X86_CLASS_GPR8;
             operand->reg = 1;
@@ -150,6 +154,11 @@ static bool asm_round_trip_same(const X86Instruction* original, const X86Instruc
 static uint32_t asm_round_trip_intel(const X86Instruction* record, char* text, uint32_t capacity, bool gnu)
 {
     char raw[512];
+#if __has_feature(memory_sanitizer)
+    // The stream's writes into raw happen inside libc, which MSan doesn't instrument: its shadow stays poisoned
+    // for the reads below unless it's marked here.
+    memset(raw, 0, sizeof(raw));
+#endif
     FILE* file = fmemopen(raw, sizeof(raw), "w");
     uint32_t length = 0;
     if (file != 0)
@@ -234,7 +243,9 @@ static void asm_round_trip_att_operand(const X86Instruction* record, const AsmRo
             }
             if (index)
             {
-                asm_round_trip_append(text, capacity, length, ",%%%s,%u", x86_gpr64_names[operand->index & BUSTER_X86_REGISTER_NUMBER], 1u << (operand->mode & BUSTER_X86_MODE_SCALE));
+                // A gather's or scatter's vector index is a register of the VSIB operand's class (#1115).
+                const char* name = (form->rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(operand->index, form->rm) : x86_gpr64_names[operand->index & BUSTER_X86_REGISTER_NUMBER];
+                asm_round_trip_append(text, capacity, length, ",%%%s,%u", name, 1u << (operand->mode & BUSTER_X86_MODE_SCALE));
             }
             asm_round_trip_append(text, capacity, length, ")");
         }
@@ -282,6 +293,24 @@ static void asm_round_trip_att_mnemonic(const X86FormDescription* form, const ch
     }
 }
 
+// The AT&T mnemonic of an x87 subtraction or division whose destination is st(i) (#147): the System V assembler's
+// reversed one, which GNU as reads `fsub %st, %st(1)` as (Intel's fsubr st(1), st(0)) and objdump prints Intel's as,
+// for a popping form always and another where st(i) isn't st(0) (asm_x87_operands' rule). NULL for any other record.
+static const char* asm_round_trip_x87_reversed(const X86FormDescription* form, const X86Instruction* record)
+{
+    static const char* const reversed[][2] = {
+        { "fsub", "fsubr" }, { "fsubr", "fsub" }, { "fdiv", "fdivr" }, { "fdivr", "fdiv" },
+        { "fsubp", "fsubrp" }, { "fsubrp", "fsubp" }, { "fdivp", "fdivrp" }, { "fdivrp", "fdivp" },
+    };
+    const char* result = NULL;
+    for (uint32_t i = 0; form->syntax == X86_SYNTAX_RM_ST && result == NULL && i < BUSTER_ARRAY_LENGTH(reversed); i += 1)
+    {
+        const bool popping = i >= 4;
+        result = strcmp(form->mnemonic, reversed[i][0]) == 0 && (popping || record->rm != 0) ? reversed[i][1] : NULL;
+    }
+    return result;
+}
+
 // The record in AT&T syntax: its mnemonic (and `suffix`), then its operands in reverse order, the destination's mask and
 // zeroing after it.
 static uint32_t asm_round_trip_att(const X86Instruction* record, const char* suffix, char* text, uint32_t capacity)
@@ -292,7 +321,15 @@ static uint32_t asm_round_trip_att(const X86Instruction* record, const char* suf
     const uint32_t count = asm_round_trip_operands(record, operands);
     x86_match_roles(form->syntax, roles);
     uint32_t length = 0;
-    asm_round_trip_att_mnemonic(form, suffix, text, capacity, &length);
+    const char* reversed = asm_round_trip_x87_reversed(form, record);
+    if (reversed != NULL)
+    {
+        asm_round_trip_append(text, capacity, &length, "%s", reversed);
+    }
+    else
+    {
+        asm_round_trip_att_mnemonic(form, suffix, text, capacity, &length);
+    }
     for (uint32_t i = count; i-- > 0;)
     {
         asm_round_trip_append(text, capacity, &length, i + 1 == count ? " " : ",");
@@ -510,9 +547,25 @@ static String8 asm_round_trip_gnu(AsmTest* test, const char* directory, const ch
     return bytes;
 }
 
+// Whether GNU as encodes the record's instruction with another form (x86_assembler_prefers_another_form), or gives a VEX
+// move between two vector registers its other direction's form to make the prefix VEX's two bytes: a register 8 to 15
+// in ModRM.rm needs VEX.B, which only the three bytes have, and in ModRM.reg VEX.R, which the two have (`vmovss xmm6,
+// xmm5, xmm14` is C5 52 11 F6, the store's form). Map 0F's pairs: 10 and 11, 28 and 29, 6F and 7F, and vmovq's 7E and
+// D6. The encoder tests never meet it: their sources force the form with {load} and {store}, which this syntax hasn't.
+static bool asm_round_trip_gnu_prefers(const X86Instruction* record)
+{
+    const X86FormDescription* form = x86_form_description(record->form);
+    const uint32_t last = form->opcode & 0xff;
+    const uint32_t rm = form->rm & BUSTER_X86_OPERAND_CLASS;
+    const bool swapped = form->family == BUSTER_X86_FAMILY_VEX && (record->mode & BUSTER_X86_MODE_MEMORY) == 0 && x86_opcode_map(form) == 1 && record->rm >= 8 &&
+                         record->rm < 16 && record->reg < 8 && (rm == BUSTER_X86_CLASS_XMM || rm == BUSTER_X86_CLASS_YMM) && rm == (form->reg & BUSTER_X86_OPERAND_CLASS) &&
+                         (last == 0x10 || last == 0x11 || last == 0x28 || last == 0x29 || last == 0x6f || last == 0x7f || last == 0x7e || last == 0xd6);
+    return swapped || x86_assembler_prefers_another_form(record);
+}
+
 // --cross-check: GNU as's bytes of each line, in its 16-byte slot, against the matcher's record's; a line where GNU as
-// would choose another encoding of the same instruction (x86_assembler_prefers_another_form, the encoder tests' list)
-// is counted instead.
+// would choose another encoding of the same instruction (asm_round_trip_gnu_prefers: the encoder tests' list and VEX's
+// moves between registers) is counted instead.
 static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uint64_t* random)
 {
     const uint32_t capacity = 32768;
@@ -531,6 +584,8 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
         const uint32_t count = copies != 0 ? asm_round_trip(test, random, 2, copies, intel, att, capacity) : 0;
         uint32_t compared = 0;
         uint32_t preferred = 0;
+        // The first counted lines' instructions, which the report names.
+        char named[96] = "";
         const char* names[] = { "round-trip-intel", "round-trip-att" };
         FILE* files[] = { intel, att };
         for (uint32_t syntax = 0; syntax < 2; syntax += 1)
@@ -548,8 +603,13 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
                 {
                     same = theirs[k] == 0xcc;
                 }
-                if (!same && x86_assembler_prefers_another_form(&copies[i].matched))
+                if (!same && asm_round_trip_gnu_prefers(&copies[i].matched))
                 {
+                    const uint64_t used = strlen(named);
+                    if (preferred < 4 && used + 24 < sizeof(named))
+                    {
+                        snprintf(named + used, sizeof(named) - used, "%s%s", used != 0 ? ", " : ": ", x86_form_description(copies[i].matched.form)->mnemonic);
+                    }
                     preferred += 1;
                 }
                 else
@@ -571,8 +631,8 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
                 }
             }
         }
-        printf("assembler round trip against GNU as: %u lines in each syntax, %u the same bytes, %u where GNU as chooses another encoding of the same instruction\n",
-               count, compared, preferred);
+        printf("assembler round trip against GNU as: %u lines in each syntax, %u the same bytes, %u where GNU as chooses another encoding of the same instruction%s\n",
+               count, compared, preferred, named);
         arena_release(&kept);
     }
     asm_test_check(test, okay, "round trip cross-check setup", 0);

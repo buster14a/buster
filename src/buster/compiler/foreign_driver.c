@@ -796,7 +796,7 @@ static const char* foreign_driver_executable_cause_name(ExecutableCause cause)
         "atom too large", "atom alignment", "array entry", "unsupported atom class", "ordered atom placement", "far atom", "atom sizes overflow", "far symbol", "far GOT target without a slot",
         "image too large", "TLS block too large", "section names too large", "unwind atom too large", "unwind atom malformed", "unwind range",
         "entry undefined", "entry not code", "unsupported version", "debug information", "debug symbol", "symbol table", "TLS call", "TLS section",
-        "string table", "text relocation", "absolute 32-bit relocation", "dynamic relocation", "relocation to address 0", "absolute relocation", "shared-library relocation",
+        "string table", "bound section", "text relocation", "absolute 32-bit relocation", "dynamic relocation", "relocation to address 0", "absolute relocation", "shared-library relocation",
     };
     return (uint32_t)cause < BUSTER_ARRAY_LENGTH(names) ? names[cause] : "unknown cause";
 }

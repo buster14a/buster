@@ -1682,7 +1682,17 @@ struct ProfileTimeRuns
     uint64_t warmups;
     uint64_t after_scalar_ms;
     int output;
+    // For a caller of profile_time_runs that reads the medians it prints (null for none): BUSTER_PROFILE_TIME_FIELDS
+    // of them per slot, in the slots' order (profile_time_slot), each as the line prints it: the wall time in
+    // nanoseconds, the user and system times in microseconds, the peak in KiB, the minor and major faults, the user
+    // cycles and the instructions.
+    uint64_t* medians;
+    // And each slot's status in its first warm-up (null for none), as waitpid gives it, -1 if the process couldn't run:
+    // time-runs fails a run only where its status differs from that one, which a caller that needs every process to
+    // succeed checks.
+    int* statuses;
 };
+#define BUSTER_PROFILE_TIME_FIELDS 8
 
 // A slot of a run: an executable, a copy of it (0 without copies) and a list.
 typedef struct ProfileTimeSlot ProfileTimeSlot;
@@ -2160,6 +2170,10 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
             if (warmup && run == 0)
             {
                 expected[s] = one.status;
+                if (t->statuses != 0)
+                {
+                    t->statuses[s] = one.status;
+                }
             }
             const bool same = exited && one.status == expected[s];
             failures += !same;
@@ -2185,17 +2199,22 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
     for (uint64_t s = 0; ready && s < slot_count; s += 1)
     {
         const ProfileTimeSlot slot = profile_time_slot(t, s);
-        uint64_t medians[8];
-        for (uint32_t field = 0; t->runs != 0 && field < 8; field += 1)
+        uint64_t medians[BUSTER_PROFILE_TIME_FIELDS] = { 0 };
+        for (uint32_t field = 0; t->runs != 0 && field < BUSTER_PROFILE_TIME_FIELDS; field += 1)
         {
             for (uint64_t r = 0; r < t->runs; r += 1)
             {
                 const ProfileTimed* one = &timed[r * slot_count + s];
-                const uint64_t fields[8] = { one->wall_ns, one->user_us, one->system_us, one->peak_kb, one->minor_faults, one->major_faults, one->cycles, one->instructions };
+                const uint64_t fields[BUSTER_PROFILE_TIME_FIELDS] = { one->wall_ns,      one->user_us,      one->system_us, one->peak_kb,
+                                                                      one->minor_faults, one->major_faults, one->cycles,    one->instructions };
                 values[r] = fields[field];
                 counted = counted && one->counted;
             }
             medians[field] = profile_median(values, t->runs);
+        }
+        if (t->medians != 0)
+        {
+            memcpy(t->medians + s * BUSTER_PROFILE_TIME_FIELDS, medians, sizeof(medians));
         }
         // values holds the sorted instructions now; the wall times' extremes again.
         for (uint64_t r = 0; r < t->runs; r += 1)

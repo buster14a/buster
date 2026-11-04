@@ -85,7 +85,8 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     const uint32_t count = base->token_count;
     const uint32_t plans = listed ? plan_count : 0;
     const uint32_t words = (count + 64) / 64;
-    uint8_t* compound_objects = mappings[0] + page - count;
+    // The base's declaration bits, with the compound literals' drawn here.
+    uint8_t* declaration_bits = mappings[0] + page - count;
     uint32_t* initializer_begins = (uint32_t*)(mappings[1] + page - (uint64_t)count * sizeof(uint32_t));
     uint32_t* declaration_tokens = (uint32_t*)(mappings[2] + page - (uint64_t)plans * sizeof(uint32_t));
     uint32_t* plan_first = (uint32_t*)(mappings[3] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -95,7 +96,8 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     for (uint32_t token = 0; token < count; token += 1)
     {
         const uint32_t draw = check_test_random(test);
-        compound_objects[token] = (uint8_t)(draw % 6 == 0);
+        const uint8_t kept = base->declaration_bits != NULL ? (uint8_t)(base->declaration_bits[token] & ~BUSTER_CHECK_BITS_COMPOUND) : 0;
+        declaration_bits[token] = (uint8_t)(kept | (draw % 6 == 0 ? BUSTER_CHECK_BITS_COMPOUND : 0));
         initializer_begins[token] = (draw >> 3) % 5 == 0 ? 0 : (draw >> 3) % 5 == 1 ? count + 1 : 1 + (draw >> 6) % count;
     }
     for (uint32_t i = 0; i < plans; i += 1)
@@ -105,7 +107,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
         declaration_tokens[i] = plans < count ? i * step + draw % step : draw % 9 == 0 ? count + draw % 3 : (draw >> 4) % (count != 0 ? count : 1);
     }
     CheckInput input = *base;
-    input.compound_objects = compound_objects;
+    input.declaration_bits = declaration_bits;
     Arena sparse = arena_reserve(UINT64_C(1) << 20);
     input.initializer_begins = check_sparse_from_values(&sparse, initializer_begins, count);
     const CheckInitializers initializers = { .declaration_tokens = declaration_tokens, .count = plans, .token_count = count };
@@ -131,7 +133,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     for (uint32_t i = plans; i-- > 0;)
     {
         const uint32_t declaration = declaration_tokens[i];
-        const bool literal = declaration < count && compound_objects[declaration] != 0;
+        const bool literal = declaration < count && check_input_bit(declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         uint32_t statement = BUSTER_CHECK_NONE;
         if (!literal)
         {
@@ -149,7 +151,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
                 expected_token = declaration;
             }
         }
-        expected_compound |= literal && base->static_objects[declaration] == 0;
+        expected_compound |= literal && check_input_bit(base->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) == 0;
         statements[i] = statement;
         same &= !literal || plan_next[i] == BUSTER_CHECK_NONE;
         same &= literal || statement != BUSTER_CHECK_NONE || plan_next[i] == poison;
@@ -269,10 +271,8 @@ static void check_test_program_scans(CheckTest* test)
         uint32_t* declarations = (uint32_t*)(mappings[3] + page - (uint64_t)count * sizeof(uint32_t));
         uint32_t* declaration_bodies = (uint32_t*)(mappings[4] + page - (uint64_t)count * sizeof(uint32_t));
         uint8_t* declaration_kinds = mappings[5] + page - count;
-        uint8_t* static_objects = mappings[6] + page - count;
+        uint8_t* declaration_bits = mappings[6] + page - count;
         uint32_t* objects = (uint32_t*)(mappings[7] + page - (uint64_t)count * sizeof(uint32_t));
-        uint8_t* defined = mappings[8] + page - count;
-        uint8_t* tentative = mappings[9] + page - count;
         CheckOp* ops = (CheckOp*)(mappings[10] + page - (uint64_t)count * sizeof(CheckOp));
         uint32_t* reached = (uint32_t*)(mappings[11] + page - (uint64_t)count * sizeof(uint32_t));
         uint8_t* roles = mappings[12] + page - count;
@@ -289,10 +289,9 @@ static void check_test_program_scans(CheckTest* test)
             declarations[token] = draw % 3 != 0 ? token : (draw >> 4) % count;
             declaration_bodies[token] = draw % 13 != 0 ? (draw >> 6) % count : count + draw % 2;
             declaration_kinds[token] = (uint8_t)(draw % 9 != 0 ? C_BINDING_OBJECT : C_BINDING_OBJECT + 1);
-            static_objects[token] = (uint8_t)((draw >> 9) % 3 == 0);
+            declaration_bits[token] = (uint8_t)(((draw >> 9) % 3 == 0 ? BUSTER_CHECK_BITS_STATIC : 0) | (((draw >> 11) & 1) != 0 ? BUSTER_CHECK_BITS_DEFINED : 0) |
+                                                (((draw >> 12) & 1) != 0 ? BUSTER_CHECK_BITS_TENTATIVE : 0));
             objects[token] = (draw >> 3) % (count + 2);
-            defined[token] = (uint8_t)((draw >> 11) & 1);
-            tentative[token] = (uint8_t)((draw >> 12) & 1);
             ops[token] = (CheckOp)((draw >> 13) % 4 == 0 ? CHECK_OP_BUILTIN_UNARY + (draw >> 15) % (CHECK_OP_COUNT - CHECK_OP_BUILTIN_UNARY) : (draw >> 15) % CHECK_OP_COUNT);
             reached[token] = (draw >> 20) % 3 == 0 ? 0 : 1 + (draw >> 22) % 4;
             roles[token] = (uint8_t)((draw >> 23) % 5 == 0 ? PARSE_ROLE_CLOSE_CASE : (draw >> 23) % 5 == 1 ? PARSE_ROLE_TERMINATOR : PARSE_ROLE_LEAF_RIGHT);
@@ -311,13 +310,11 @@ static void check_test_program_scans(CheckTest* test)
                 .declared_types = declared_types,
                 .declaration_kinds = declaration_kinds,
                 .objects = objects,
-                .static_objects = static_objects,
-                .defined = defined,
-                .tentative = tentative,
+                .declaration_bits = declaration_bits,
                 .initializer_nodes = check_sparse_from_values(&sparse, initializer_nodes, count),
                 .body_declarations = check_sparse_from_values(&sparse, body_declarations, count),
                 .declaration_bodies = check_sparse_from_values(&sparse, declaration_bodies, count),
-                .attributes = attributes,
+                .attributes = check_input_attributes_from(&sparse, attributes, count),
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
@@ -424,7 +421,7 @@ static void check_test_program_scans(CheckTest* test)
             for (uint32_t token = 0; token < count; token += 1)
             {
                 const uint32_t object = objects[token];
-                const bool event = declarations[token] == token && static_objects[token] && object != 0 && object <= count &&
+                const bool event = declarations[token] == token && check_input_bit(declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && object != 0 && object <= count &&
                                    declaration_kinds[token] == C_BINDING_FUNCTION &&
                                    (attributes[token] == &kinds_of_attributes[3] || attributes[token] == &kinds_of_attributes[5]);
                 events_right &= !event || expected_events >= events[0].count || events[0].keys[expected_events] == (((uint64_t)object << 32) | token);
@@ -1044,6 +1041,18 @@ static const char check_test_program_harness[] =
     "int external_apply_atomic_h2(_Atomic(ExternalAtomicH2)(*f)(_Atomic(ExternalAtomicH2),int),int n){ExternalAtomicH2 v={(short)n,(short)(-7*n)};"
     "_Atomic(ExternalAtomicH2) out=f(v,3);ExternalAtomicH2 r=out;return r[0]*5+r[1];}\n"
     "#endif\n"
+    // Vectors of 32 and 64 bytes both ways at every -march (#1193): passed in memory where the target's registers are
+    // narrower, and returned split across them as LLVM returns them (xmm0 and xmm1, xmm0 to xmm3, ymm0 and ymm1), or
+    // in ymm0 or zmm0 whole. Each element is changed, and the results are folded by their bytes.
+    "typedef int ExternalWide8 __attribute__((vector_size(32)));typedef double ExternalWide16 __attribute__((vector_size(64)));"
+    "static unsigned external_wide_fold(const void*p,unsigned long n){const unsigned char*b=p;unsigned h=2166136261u;"
+    "for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}"
+    "ExternalWide8 external_wide8(ExternalWide8 x,int k){for(int i=0;i<8;i++)x[i]=x[i]*3+k-i;return x;}"
+    "ExternalWide16 external_wide16(ExternalWide16 x,int k){for(int i=0;i<8;i++)x[i]=x[i]*0.5+k+i;return x;}"
+    "int external_apply_wide8(ExternalWide8(*f)(ExternalWide8,int),int n){ExternalWide8 v;for(int i=0;i<8;i++)v[i]=n*(i+3)-i;"
+    "ExternalWide8 r=f(v,n+1);return (int)external_wide_fold(&r,sizeof(r));}"
+    "int external_apply_wide16(ExternalWide16(*f)(ExternalWide16,int),int n){ExternalWide16 v;for(int i=0;i<8;i++)v[i]=n*0.25+i;"
+    "ExternalWide16 r=f(v,n+2);return (int)external_wide_fold(&r,sizeof(r));}\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
     // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
@@ -1115,8 +1124,11 @@ struct CheckTestProgramBuild
     char* oracle;
     size_t oracle_length;
     bool oracle_unsigned;
+    // The clang mode the cached oracle and checked object's source were built with.
+    const char* oracle_standard;
     uint8_t* object;
     uint64_t object_size;
+    const char* object_standard;
     bool mismatch;
 };
 
@@ -1161,9 +1173,10 @@ static void check_test_program_build_path(char* path, size_t size, const char* n
     snprintf(path, size, "%s/%s", check_test_program_build.directory, name);
 }
 
-// Compiles `name`.c, holding `text`, to `name`.o in the build's directory, its diagnostics in `out` and `err`.
-static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, bool char_unsigned, const char* out,
-                                       const char* err)
+// Compiles `name`.c, holding `text`, to `name`.o in the build's directory with clang's `standard` mode, its diagnostics
+// in `out` and `err`.
+static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, bool char_unsigned, const char* standard,
+                                       const char* out, const char* err)
 {
     char source[96];
     char object[96];
@@ -1175,6 +1188,7 @@ static bool check_test_program_compile(const char* clang, const char* name, cons
     char* compile[] = {
         (char*)clang,
         BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned),
+        (char*)standard,
         "-Wno-unused-command-line-argument",
         "-c",
         source,
@@ -1186,9 +1200,9 @@ static bool check_test_program_compile(const char* clang, const char* name, cons
 }
 
 // The build's directory, made on first use, with the harness of plain char's signedness compiled into it, and the
-// oracle of `text` compiled unless it is the last one's, with the same signedness (`*same_oracle`).
-static bool check_test_program_prepare(const char* clang, const char* text, size_t length, bool char_unsigned, const char* out, const char* err,
-                                       bool* same_oracle)
+// oracle of `text` compiled in `standard` unless it is the last one's, with the same signedness (`*same_oracle`).
+static bool check_test_program_prepare(const char* clang, const char* text, size_t length, bool char_unsigned, const char* standard, const char* out,
+                                       const char* err, bool* same_oracle)
 {
     CheckTestProgramBuild* build = &check_test_program_build;
     if (build->directory[0] == 0)
@@ -1203,17 +1217,17 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
     if (valid && !build->harness[char_unsigned])
     {
         build->harness[char_unsigned] = check_test_program_compile(clang, check_test_program_harness_name(char_unsigned), check_test_program_harness,
-                                                                   sizeof(check_test_program_harness) - 1, char_unsigned, out, err);
+                                                                   sizeof(check_test_program_harness) - 1, char_unsigned, "-std=gnu17", out, err);
         valid = build->harness[char_unsigned];
     }
     const bool same = build->oracle != 0 && build->oracle_unsigned == char_unsigned && build->oracle_length == length &&
-                      memcmp(build->oracle, text, length) == 0;
+                      strcmp(build->oracle_standard, standard) == 0 && memcmp(build->oracle, text, length) == 0;
     *same_oracle = same;
     if (valid && !same)
     {
         free(build->oracle);
         build->oracle = 0;
-        valid = check_test_program_compile(clang, "oracle", text, length, char_unsigned, out, err);
+        valid = check_test_program_compile(clang, "oracle", text, length, char_unsigned, standard, out, err);
         build->oracle = valid ? malloc(length) : 0;
         valid = valid && build->oracle != 0;
         if (valid)
@@ -1221,6 +1235,7 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
             memcpy(build->oracle, text, length);
             build->oracle_length = length;
             build->oracle_unsigned = char_unsigned;
+            build->oracle_standard = standard;
         }
     }
     return valid;
@@ -1252,7 +1267,7 @@ static void check_test_program_build_release(void)
 // clang's build of `oracle_source`, or of the program's own source where it is null; with `mismatch`, the run must find
 // the two different on some input rather than alike.
 static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* oracle_source, bool mismatch, const char* clang,
-                                                       bool char_unsigned, bool alignment_oracle, bool run_native, Arena* scratch)
+                                                       bool char_unsigned, bool alignment_oracle, bool run_native, const char* standard, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -1289,10 +1304,10 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     {
         valid = check_test_program_oracle(link, oracle_source != 0 ? oracle_source : source, &text, &length);
     }
-    valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
+    valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, standard, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
     const bool same = run_native && valid && same_oracle && build->object != 0 && build->mismatch == mismatch && build->object_size == size &&
-                      memcmp(build->object, bytes, size) == 0;
+                      strcmp(build->object_standard, standard) == 0 && memcmp(build->object, bytes, size) == 0;
     char harness_file[32];
     snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
     check_test_program_build_path(harness, sizeof(harness), harness_file);
@@ -1321,6 +1336,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         free(build->object);
         build->object = valid && run_native ? bytes : 0;
         build->object_size = valid && run_native ? size : 0;
+        build->object_standard = standard;
         build->mismatch = mismatch;
         bytes = valid && run_native ? 0 : bytes;
     }
@@ -1362,7 +1378,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
 
 static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
-    return check_test_program_execute_with_alignment(link, source, 0, false, clang, char_unsigned, false, true, scratch);
+    return check_test_program_execute_with_alignment(link, source, 0, false, clang, char_unsigned, false, true, "-std=gnu17", scratch);
 }
 
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
@@ -1420,22 +1436,22 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
     }
     for (uint32_t token = 0; valid && token < count; token += 1)
     {
-        if (input->declarations[token] == token && input->static_objects[token])
+        if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
         {
             const uint32_t object = input->objects[token];
             valid = object != 0 && object <= count;
             if (valid)
             {
                 result->latest_declarations[object] = token;
-                const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+                const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, token) : 0;
                 if (attributes != 0 && attributes->alignment_log2 > alignments[object])
                 {
                     alignments[object] = attributes->alignment_log2;
                 }
-                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
                 {
                     const uint32_t previous = definition[object];
-                    if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
+                    if (previous == BUSTER_CHECK_NONE || !check_input_bit(input->declaration_bits, previous, BUSTER_CHECK_BITS_DEFINED))
                     {
                         definition[object] = token;
                     }
@@ -1492,7 +1508,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);
-            if (plan == 0 && input->tentative[selected] && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            if (plan == 0 && check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_TENTATIVE) && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
             {
                 // Tentative arrays acquire one element at translation-unit end; earlier uses retain their
                 // historical incomplete TypeIds and cannot gain a retroactive sizeof result.
@@ -1652,7 +1668,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         uint32_t key_count = 0;
         for (uint32_t token = 0; keys != 0 && token < count; token += 1)
         {
-            if (input->declarations[token] == token && input->static_objects[token])
+            if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
             {
                 keys[key_count++] = (uint64_t)input->objects[token] << 32 | token;
             }
@@ -1698,7 +1714,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         {
             const uint32_t object = input->objects[token];
             if (input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (input->defined[token] || input->tentative[token]))
+                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
             {
                 expected[object] = 1;
             }
@@ -1763,7 +1779,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 // host can run it.
 static void check_test_program_source_native_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                                     int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native, uint32_t local_limit,
-                                                    const char* oracle_source, bool mismatch)
+                                                    const char* oracle_source, bool mismatch, uint32_t standard, bool gnu, const char* standard_flag)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1771,7 +1787,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
     PredefinesOptions predefines = check_test_program_predefines();
     predefines.char_unsigned = char_unsigned;
     const PPOptions pp_options = {
-        .language = { .standard = 2017, .gnu = true },
+        .language = { .standard = standard, .gnu = gnu },
         .no_standard_includes = !check_test_program_includes,
         .predefines = predefines,
         .target = target != NULL ? *target : (X86Target){ 0 },
@@ -1979,7 +1995,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             }
             check_test_expect(test,
                               check_test_program_execute_with_alignment(&code.link, source, oracle_source, mismatch, clang, char_unsigned, alignment_oracle,
-                                                                        run_native, &scratch),
+                                                                        run_native, standard_flag, &scratch),
                               description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
@@ -1997,13 +2013,15 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
 static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                                     int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0, NULL, false);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0, NULL, false,
+                                            2017, true, "-std=gnu17");
 }
 
 static void check_test_program_source_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                             int32_t expected_pools, uint32_t entry_limit, uint32_t local_limit)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit, NULL, false);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit, NULL, false, 2017,
+                                            true, "-std=gnu17");
 }
 
 static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
@@ -2028,12 +2046,19 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
+// A program fixture in another language mode, with clang reading the same source and mode as the oracle.
+static void check_test_program_source_standard(CheckTest* test, const char* source, const char* name, const char* clang, uint32_t standard, bool gnu,
+                                               const char* standard_flag)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, NULL, false, standard, gnu, standard_flag);
+}
+
 // A program fixture with plain char signed, x86-64's, against clang's build of another source of the same names, a
 // model of what the program computes or a mutant of it: the program must agree with it, or with `mismatch` differ from
 // it on some input.
 static void check_test_program_against(CheckTest* test, const char* source, const char* oracle_source, bool mismatch, const char* name, const char* clang)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, oracle_source, mismatch);
+    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, oracle_source, mismatch, 2017, true, "-std=gnu17");
 }
 
 static void check_test_program_initializer_facts(CheckTest* test)
@@ -2078,7 +2103,7 @@ static void check_test_program_initializer_facts(CheckTest* test)
             controls[i] = (CheckControl){ .kind = CHECK_CONTROL_INITIALIZE, .target = i };
             declarations[i] = i;
         }
-        const CheckInput input = { .token_count = COUNT, .static_objects = flags };
+        const CheckInput input = { .token_count = COUNT, .declaration_bits = flags };
         const CheckInitializers initializers = { .plans = plans, .count = COUNT, .declaration_tokens = declarations };
         const CheckProgram program = { .types = &types.table, .input = &input, .initializers = &initializers,
                                        .controls = controls, .control_count = COUNT };
@@ -2217,7 +2242,7 @@ static bool check_test_program_locals(const CheckProgram* program, const CheckLo
         const uint32_t body = check_sparse_get(input->declaration_bodies, token);
         const uint32_t object = input->objects[token];
         if (input->declarations[token] == token && body < count && openings[body] != 0 && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-            input->static_objects[token] == 0 && object <= count)
+            check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) == 0 && object <= count)
         {
             local[object] = 1;
         }
@@ -2430,7 +2455,13 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
                 snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
-                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
+                const bool named = reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0);
+                check_test_expect(test, named, description);
+                if (!named || lowered_ok != machine)
+                {
+                    fprintf(stderr, "test-checker: %s: lowered=%d status=%u reason=\"%s\", expected \"%s\"\n", name, lowered_ok, lowered.status,
+                            lowered.reason != NULL ? lowered.reason : "", reason != NULL ? reason : "");
+                }
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,
@@ -2569,6 +2600,8 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_copy_test.c"
 #include "c_check_program_folds_test.c"
 #include "c_check_program_fence_test.c"
+#include "c_check_program_atomic_access_test.c"
+#include "c_check_program_atomic_rmw_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -2858,7 +2891,7 @@ static void check_test_program_return_marks(CheckTest* test)
             CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, marks, stack, NULL);
+            check_program_return_flow(&writer, &body, marks, stack, NULL, true);
             const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
             bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
                         marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);
@@ -3276,6 +3309,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_copies(test, clang);
         check_test_program_folds(test, clang);
         check_test_program_fences(test, clang);
+        check_test_program_atomic_accesses(test, clang);
+        check_test_program_atomic_rmws(test, clang);
         check_test_program_batch(test);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
@@ -3370,6 +3405,47 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_local_bits(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
+        // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what
+        // `tested` computes, and clang's build of the same source in the same mode is the oracle the executable compares.
+        static const char implicit_int_source[] =
+            "x = 3;\n"
+            "typedef t;\n"
+            "t y = 1;\n"
+            "int q = 7;\n"
+            "*const p = &q;\n"
+            "*__restrict r = &q;\n"
+            "*__attribute__((unused)) a = &q;\n"
+            "struct S { const x; };\n"
+            "int tested(int n)\n"
+            "{\n"
+            "    return x == 3 && sizeof(x) == sizeof(int) && y == 1 && sizeof(y) == sizeof(int) && q == 7 && *p == 7 && *a == 7 &&\n"
+            "           *r == 7 && p == &q && a == &q && r == &q && sizeof(*p) == sizeof(int) && sizeof(const) == sizeof(int) &&\n"
+            "           sizeof(volatile) == sizeof(int) && sizeof(struct S) == sizeof(int) && (const)1 == 1 ? 0 : 1;\n"
+            "}\n";
+        check_test_program_source_standard(test, implicit_int_source, "implicit-int-c89", clang, 1989, false, "-std=c89");
+        check_test_program_source_standard(test, implicit_int_source, "implicit-int-gnu89", clang, 1989, true, "-std=gnu89");
+        // The issue's whole old-style program, run (#1121): a file-scope static and `helper`'s old-style definition
+        // read implicit int, `tested`'s `n` is the undeclared identifier-list kind and `i` a block-scope register —
+        // the call and the declarations' types decide the value clang's build of the same source computes.
+        static const char implicit_int_program_source[] =
+            "static x = 3;\n"
+            "helper(a) int a; { return a + 1; }\n"
+            "tested(n) { register i; i = helper(x + n); return i; }\n";
+        check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-c89", clang, 1989, false, "-std=c89");
+        check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-gnu89", clang, 1989, true, "-std=gnu89");
+        // Prototype parameters without a type specifier (#1121, after #1240's parser): a pointer declarator, a const, a
+        // register and a volatile object, and a pointer after a typed parameter, whose declaration the definition's
+        // `int *` must match — each parameter's type decides the value clang's build computes.
+        static const char implicit_int_parameter_source[] =
+            "static f(*p) { return *p + (int)sizeof(*p); }\n"
+            "static g(const x) { return x * 2; }\n"
+            "static h(register r) { return r + 1; }\n"
+            "static m(const *p, volatile v) { return *p - v; }\n"
+            "int k(int a, *p);\n"
+            "int k(int a, int *p) { return a + *p; }\n"
+            "int tested(int n) { int v = 5; return f(&v) + g(n) + h(n) + m(&v, n) + k(n, &v); }\n";
+        check_test_program_source_standard(test, implicit_int_parameter_source, "implicit-int-parameters-c89", clang, 1989, false, "-std=c89");
+        check_test_program_source_standard(test, implicit_int_parameter_source, "implicit-int-parameters-gnu89", clang, 1989, true, "-std=gnu89");
     }
     if (check_test_takes())
     {
@@ -5008,8 +5084,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                     "vla-bound-reference", true, true, 1, 0);
         check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
                                     "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
-        check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                           "typed-asm-goto-target", true, false, 0, 0, "asm goto");
+        check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                    "typed-asm-goto-target", true, true, 0, 0);
     }
     // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
     if (check_test_takes())

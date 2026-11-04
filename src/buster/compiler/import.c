@@ -833,7 +833,8 @@ static ImportResult import_sections(Link* link, const ImportElf* elf, uint32_t u
             uint8_t* section_bytes = link_class_is_zero_fill(class) || header.sh_size == 0 ? 0 : (uint8_t*)contents.pointer;
             const bool zero_fill_matches = link_class_is_zero_fill(class) == (header.sh_type == SHT_NOBITS);
             const AtomId atom = zero_fill_matches ? link_add_atom(link, class, (uint8_t)alignment_log2, header.sh_size, section_bytes, unit) : 0;
-            const bool prioritized = atom != 0 && (priority == BUSTER_IMPORT_NO_PRIORITY || link_add_priority(link, atom, priority));
+            const bool sectioned = atom != 0 && link_set_atom_section(link, atom, name);
+            const bool prioritized = sectioned && (priority == BUSTER_IMPORT_NO_PRIORITY || link_add_priority(link, atom, priority));
             if (atom == 0 || !prioritized)
             {
                 result = import_fail(zero_fill_matches ? IMPORT_ERROR_LINK : IMPORT_ERROR_UNSUPPORTED, header_offset);
@@ -1587,6 +1588,15 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
             import_store64(atoms->address + at, zero, atom_count);
             import_store32(object->section_atoms + first, _mm512_maskz_expand_epi64((__mmask8)classed, _mm512_add_epi64(lane_index, _mm512_set1_epi64(at))), n);
             atoms->count += atom_count;
+            // Each atom's input section's name, which a __start_ or __stop_ reference bounds: a few sections an object.
+            for (uint32_t rare = classed; result && rare != 0; rare &= rare - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(rare);
+                const Elf64_Shdr header = import_section_header(elf, first + lane);
+                String8 name = { 0 };
+                const AtomId atom = at + (AtomId)__builtin_popcount(classed & ((1u << lane) - 1));
+                result = import_section_name(elf, &header, &name) && link_set_atom_section(link, atom, name);
+            }
             // The arrays with a priority, a section at a time: there are a few in a library's thousands of objects.
             for (uint32_t rare = classed & prioritized; result && rare != 0; rare &= rare - 1)
             {

@@ -554,6 +554,9 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     if (error == TIER1_EMIT_OK)
     {
         tier1_emit_test_expect(test, emitted.general, "a floating value takes the CFG consumer");
+        tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted) && tier1_emit_test_saves_seen(&emitted),
+                               "every value a call stores, a floating one's xmm row among them, is loaded back (#1116)");
+        test->vector_saves += emitted.prepared.vector_save_mask != 0;
         // Every floating value's register is an xmm one of the allowed: its fragments' registers are its class's.
         bool classes = true;
         for (uint32_t k = 0; k < emitted.cfg.intervals.count; k += 1)
@@ -671,6 +674,8 @@ static void tier1_float_cases(Tier1EmitTest* test)
             tier1_float_compile(test, fixture, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : 0, (variant & 8) != 0);
         }
     }
+    // Some compile saves an xmm register around a call, so the rows' check reads such stores, not none (#1116).
+    tier1_emit_test_expect(test, test->vector_saves != 0, "a floating value lives past a call in an xmm register, whose row its call stores and loads");
 }
 
 // The cases in a bounded child, as tier1_stack_tests runs its own: a misplaced register or slot can fault or loop, which

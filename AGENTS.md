@@ -110,10 +110,10 @@ old `buster14a/buster` links now address this compiler.
 
 Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
-names. The repository-local `buster-fast-9700x` concurrency key is also retained.
-Queues use that prefix per PR/ref, each holding one pending run (a newer push
-replaces its PR's, and cancels the PR's run in progress); the runner hooks serialize every CI job with
-the shared host lock. These are operational resources, not canonical repository URLs; do not rename
+names. Keep the `buster-fast-9700x` concurrency prefix. PR queues replace pending
+and cancel in-progress superseded runs; main pushes use separate run-id groups
+so every revision keeps full hosted CI. Hardware jobs still share the host lock.
+These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
 
@@ -298,17 +298,16 @@ Where `~/llm-memory` doesn't exist, skip this.
 
 ## Build
 
-Use `./build.sh`, with Clang on Linux/x86-64; it produces `build/compiler`,
-including its tests and benchmarks. `BUSTER_HOST_ARCH=native` is the default;
+Use `./build.sh` (Clang, CMake 3.25+, Ninja): it builds Release, or
+`--config Debug`, incrementally in `build/cmake/VARIANT` and publishes that
+executable as `build/compiler`. `BUSTER_HOST_ARCH=native` is the default;
 use `x86-64` for the baseline scalar host and `znver5` for approved benchmark
 builds. Respect the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits
 debug information. Read [build details](docs/commands/build.md) before changing
-translation units, build order, baked tables or code-placement experiments.
+translation units, flags, baked tables or code-placement experiments.
 `build/` is disposable; never commit generated binaries or captures.
 
 ## Current repository and exact smoke commands
-
-- `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
 
@@ -408,16 +407,15 @@ preprocessor's predefines give as clang's do for the same options
 ## Command and module index
 
 Source entry points below are relative to `src/buster/compiler/`, except
-`tools/` paths. Each guide contains the full test/benchmark commands, owning
-files, flags and acceptance boundaries; the entries here are compact starting
-points. [Detailed section index](docs/commands/README.md#detailed-sections).
+`tools/` paths; each guide has the commands, files, flags and acceptance
+boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 
 - `test-assembler, benchmark-assembler` — `assembler.c` — [guide](docs/commands/assembler.md).
 - `test-bind, benchmark-bind` — `bind.c` — [guide](docs/commands/bind.md).
 - `test-bindings, test-parser-bindings` — `c_bindings.c` — [guide](docs/commands/bindings.md).
 - `test-branch-sizing, benchmark-branch-sizing` — `branch_sizing.c` — [guide](docs/commands/branch-sizing.md).
 - `./build.sh, bake-tables, test-baked-tables` — `baked.c` — [guide](docs/commands/build.md).
-- `test-builtins, test-check-builtins, test-builtin-lowering` — `c_builtin.c` — [guide](docs/commands/builtins.md).
+- `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` — `c_builtin.c` — [guide](docs/commands/builtins.md).
 - `check-call-graph, test-call-graph` — `call_graph.c` — [guide](docs/commands/call-graph.md).
 - `test-calling-convention, benchmark-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
 - `check, test-checker, test-checker-driver` — `c_checker.c` — [guide](docs/commands/checker.md).
@@ -435,6 +433,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
 - `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
+- `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
@@ -457,11 +456,10 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-lexer, benchmark-lexer` — `c_lexer.c` — [guide](docs/commands/lexer.md).
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
 - `benchmark-link` — `link_benchmark.c` — [guide](docs/commands/link-benchmark.md).
-- `test-lowering, benchmark-lowering-source` — `c_lowering.c` — [guide](docs/commands/lowering.md).
-- `test-lowering-templates` (`c_check_program_templates.c`), `measure-lowering-templates` (`c_check_lower_inventory.c`) — [guide](docs/commands/lowering.md#node-templates-1048).
+- `test-lowering, benchmark-lowering-source, test-lowering-templates, measure-lowering-templates` — `c_lowering.c`, `c_check_program_templates.c`, `c_check_lower_inventory.c` — [guide](docs/commands/lowering.md#node-templates-1048).
 - `test-object-writer, benchmark-object-writer` — `object_writer.c` — [guide](docs/commands/object-writer.md).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
-- `parallel, test-parallel` — `parallel.c` — [guide](docs/commands/parallel.md).
+- `parallel, test-parallel, test-tool` — `parallel.c`, `test_tool.c` — [guide](docs/commands/parallel.md).
 - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
 - `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
 - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).
@@ -471,13 +469,13 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-ssa, test-ssa-ir, test-ssa-source` — `ssa.c` — [guide](docs/commands/ssa.md).
 - `test-streaming, benchmark-streaming` — `streaming.c` — [guide](docs/commands/streaming.md).
 - `test-tier0, benchmark-backend, benchmark-backend-source` — `tier0.c` — [guide](docs/commands/tier0.md).
-- `test-tier1-select, test-tier1-pipeline, test-tier1-masks` — `tier1_select.c` — [guide](docs/commands/tier1.md).
+- `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` — `tier1_select.c` — [guide](docs/commands/tier1.md).
 - `test-tier1-allocation, benchmark-tier1-allocation` — `tier1_allocate.c` — [guide](docs/commands/tier1-allocation.md).
-- `benchmark-tier1-certificate`, allocation certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
+- `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
 - `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
 - `test-tier1-frame, test-tier1-frame-execution` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
 - `test-tier1-schedule, benchmark-tier1-schedule` — `tier1_schedule.c` — [guide](docs/commands/tier1-schedule.md).
-- `test-check-units` — `c_checker_driver.c` — [guide](docs/commands/translation-units.md).
+- `test-check-units, benchmark-check-units` — `c_checker_units.c` — [guide](docs/commands/translation-units.md).
 - `test-types, benchmark-types` — `c_types.c` — [guide](docs/commands/types.md).
 - `test-unwind, benchmark-unwind` — `unwind_tier0.c` — [guide](docs/commands/unwind.md).
 - `disassemble, test-x86-disassembler` — `x86_64_disassembler.c` — [guide](docs/commands/x86-disassembler.md).

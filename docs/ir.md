@@ -37,12 +37,11 @@ no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
 with `IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
-the SSA promoter's transactional refusal of a function with vectors, not
-successful promotion, and promotion of one whose only SIMD values are masks,
-which the promoter takes (#179); ordinary corpus mode continues to require
-promotion. The shared
+promotion of a function with vectors (#141) and of one whose only SIMD values
+are masks (#179), as ordinary corpus mode requires promotion of every
+function. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
 vector/mask calls remain unsupported. Native selection of vectors is
@@ -124,6 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
+| `intrinsic` | `a,b` of the result's type, `i32` or `i64`; `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands as a comparison's predicate is), each a pure operation the optimizer doesn't fold (#141): `mulhu`, an `i64`'s alone, the high 64 bits of their unsigned 128-bit product, which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); and the x86 builtins' bit manipulations, as BMI's instructions give them, `a` the source: `pdep` and `pext` (`a`'s low bits deposited at mask `b`'s set bits, or its bits there packed into the low ones), `bzhi` (`a` with its bits from `b`'s low byte up cleared, none past the width) and `bextr` (`a`'s bits from `b`'s low byte up, as many as its second byte says, zeros past the width), which the typed stream's rows of BMI2 and BMI1 lower to ([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins") |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -160,7 +160,10 @@ fixed parameters; additional variadic arguments must be nonvoid. `symbol_count`
 is an exclusive bound supplied by the translation unit; `UINT32_MAX` permits any
 nonzero, nonsentinel link ID. Zero is reserved by `link.c` and is rejected for
 both direct calls and symbol addresses. A call that passes or returns an
-aggregate by value has ABI records (`IrCall.abi`, below); the typed stream loses
+aggregate by value has ABI records (`IrCall.abi`, below), and so does one that
+passes an aggregate the convention ignores, as an empty struct of no bytes is,
+which a call without records would place in a register by its type (#141); the
+typed stream loses
 the named/variadic parameter boundary, as described below.
 
 ### Labels and `br_indirect`
@@ -360,7 +363,7 @@ as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
-refused, as #147's `TAIL_CALL` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
+refused, as #147's `TAIL_CALL` is (`IR_ERROR_UNSUPPORTED`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -387,7 +390,7 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_OPCODE`, and the
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
 for the output target (any, through the old entry points) with
 `IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything
@@ -443,6 +446,149 @@ reads every order of both scopes back, `test-ir-optimize`'s `fence-dce` and
 executor traces a fence among the stores, volatile loads and calls), and
 `tests/ir-source/fences.c` runs through both lowerings, promotion, the text's
 round trip and the IR's three forms against clang.
+
+### Atomic accesses (#1059)
+
+A `load` or a `store` with `BUSTER_IR_ATOMIC` in its flags is an atomic access
+of a C memory order (`BUSTER_IR_ORDER`'s bits: a load's `relaxed`, `consume`,
+`acquire` or `seq_cst`; a store's `relaxed`, `release` or `seq_cst`), of an
+integer of 1, 2, 4 or 8 bytes or a pointer, whose `align=N` is its size at
+least; printed after `align=N` (and `volatile`) as `atomic ORDER`. It is one access of its type's bytes that no pass
+splits, widens, merges, eliminates, forwards or moves past another access, a
+call or a fence: the guarantees of a volatile access (`BUSTER_IR_OBSERVABLE`,
+which promotion, private-field replacement, Tier 1's folding and both
+interpreters read in place of `BUSTER_IR_VOLATILE`) and those of its order. Its
+machine obligations are an ordinary access's, since a naturally aligned access
+of 1, 2, 4 or 8 bytes is atomic on x86-64 and its total store order gives a
+load's and a release store's orders, and, for a seq_cst store, the
+`fence.void seq_cst` after it, which the producer writes as its own instruction.
+Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
+any row with flags past `volatile` to the scalar rule), and the type and the
+alignment (`ir_atomic_access`): an atomic access declared below its natural
+alignment is refused, since the backend emits one access of its size whatever
+the address. The typed stream's producer is the C lowering's direct
+atomic load or store ([the builtin integration guide](c-builtins-integration.md)'s
+"Helper contracts and direct forms"): its marked `LOAD`, `STORE` or `SET`
+(`BUSTER_TYPED_ACCESS_ATOMIC`), which `ir_lower` translates with its class's
+natural alignment, which the checker proved, and refuses in another shape. `tests/ir/atomics.ir` reads every order back, `test-ir`'s verifier
+cases refuse an order a kind doesn't take, an order without the flag and an
+order past `seq_cst` and an 8-byte access aligned to 1 or 4 (as `test-ir-parse`
+refuses one written as text), and `tests/ir-source/atomics.c` runs through both
+lowerings, promotion, the text's round trip and the IR's three forms against
+clang, its `long`'s accesses printed `align=8`.
+
+### Atomic read/modify/writes (#1059)
+
+`rmw` (an integer of 1, 2, 4 or 8 bytes, a pointer's as `i64`; `a` the object's
+address, `b` the operand, of the result's type; its flags `BUSTER_IR_ATOMIC`, a C
+memory order, any of the six, since the locked access is a full barrier, and its
+operation (`BUSTER_IR_RMW_OPERATION`'s bits): `BUSTER_IR_RMW_EXCHANGE`,
+`BUSTER_IR_RMW_ADD` or `BUSTER_IR_RMW_COMPARE`, whose `b` is the expected value
+and `c` the desired one, of the result's type, an optional value the others
+have none of (`ir_optional_table`), since the IR's 64 operations leave no room
+for another; printed `rmw.iN %p, %v align=N xchg|add ORDER` and
+`rmw.iN %p, %e, %d align=N cas ORDER`) returns the object's old value and leaves
+the operand (an exchange), the sum (an addition), or the desired value where the
+old one is the expected one and the old one where it isn't (a compare-exchange,
+as `cmpxchg` writes it) in it, as one atomic access of its type's bytes: the
+typed stream's `ATOMIC_RMW`, which the C producer gives an exchange, an addition
+or a subtraction of a constant order, and its `ATOMIC_CAS`, whose address is a
+local's (`ir_lower` reads it), which it gives a compare-exchange
+([the builtin integration guide](c-builtins-integration.md)'s "Direct
+read/modify/writes"). Its alignment is its size at least, as an atomic load's
+is, and `ir_lower` gives it its class's natural one. No pass moves an access or a
+call across it, merges it or drops it: it is an optimizer root, neither value
+numbering nor loop-invariant motion takes it, and its address counts as taken,
+so promotion and private-field replacement leave its object in memory; dataflow
+reads its address and its operand, as a store's, and a compare-exchange's
+desired value, which inlining, rebuilding and every pass's operand mask
+(`ir_value_mask`) map as a call's optional destination is. Both verifiers check its flags
+(`ir_rmw_flags_valid`) and its type and alignment (`ir_atomic_access`, its own
+rule's, `IR_RULE_ATOMIC_RMW`); both interpreters run it as one thread does, a
+byte at a time through volatile accesses, refusing an address misaligned for its
+declared alignment and checking its object as a load's (undefined bytes are
+reported) before a store's (a compare-exchange's desired value is a use, even
+where it isn't stored). Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
+the operand copied to the scratch register, `xchg` or `lock xadd` of the object's
+width (never the narrow value's 32-bit register's), and the old value
+zero-extended as a load's is; a compare-exchange saves rax in the scratch
+register (reading an operand that was in rax from there), moves the expected
+value into rax, `lock cmpxchg` of the object's width, and the old value
+zero-extended from rax, rax restored unless it is the result's; a barrier no load
+folds past. `tests/ir/atomics.ir` reads every width, operation and order back,
+`test-ir`'s verifier cases refuse an operation past a compare-exchange, a
+compare-exchange without a desired value of its type and another operation with
+one, a non-atomic or a volatile one, an order past `seq_cst` and an 8-byte one
+aligned to 4 (and `test-ir-parse` one written as text aligned below its size, and
+the desired value's misuses), `test-tier1-select` runs each width's exchange,
+addition and compare-exchange (that succeeds and fails, each operand in rax in
+turn) on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
+through both lowerings, promotion, the text's round trip and the IR's three forms
+against clang.
+
+### Intrinsics (#141)
+
+`intrinsic` keeps its operation in `c` (`BUSTER_IR_INTRINSIC_*`): `mulhu`,
+`pdep`, `pext`, `bzhi` and `bextr`, one opcode since the opcode tables'
+byte-permute register holds 64 and was full, the 128-bit integers' `mulhu`
+before it the opcode's. The text names the operation after the operands, as a
+comparison's predicate (`%2 = intrinsic.i64 %0, %1 pdep`). Both verifiers check
+it by its own rule (`IR_RULE_INTRINSIC`, which the vector path checks with the
+others rather than deferring it): both operands of the result's type, `i32` or
+`i64`, an operation below the count, and `mulhu` an `i64`'s alone. The
+interpreter evaluates each as the instruction's pseudocode has it; the
+optimizer's passes neither fold it nor number its values, nor move it out of a
+loop; dead code removes an unused one. The typed stream's BMI rows lower to it
+([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), and Tier 1 selects
+`mulhu` as `mul` and the others as their VEX instructions ([the selection
+guide](tier1-selection.md)). `tests/ir/intrinsics.ir` reads each operation of
+both widths back, `test-ir-parse` refuses an unnamed or unknown operation, an
+`i32`'s `mulhu`, an `i16`'s and mixed operand types, `test-ir-interpreter` checks
+each against values a Zen 5's instructions give (an index, a start or a length
+at and past the width, of zero, and of the control's bytes alone), and
+`test-checker-driver`'s Tier 1 fixture of the builtins runs both units' code by
+`-march=x86-64-v3` against clang's.
+
+### Effects through the consumers (#1059)
+
+An audit of every IR and Tier 1 consumer for the effects #1059 asks to survive:
+ordering (fences, atomic accesses and read/modify/writes), volatility, the
+floating environment and termination.
+
+- **Constant propagation and dead code** (`ir_optimize.c`). Loads, stores,
+  calls, fences, `rmw`s, branches, returns and `unreachable` are unconditional
+  roots (`ir_optimize_roots`), never dropped or folded. The floating operations
+  are roots too, and nothing folds them: the pass has no floating arithmetic, so
+  a `FENV_ACCESS` region's rounding and exception flags stay the code's.
+- **GVN and LICM** take allow-lists of pure operations (`ir_gvn_classify`'s and
+  `ir_licm_classify`'s tables). Neither numbers nor moves a load, a store, a call,
+  a fence, an `rmw` or a floating operation other than `fneg`, so a new operation
+  is impure until it is listed.
+- **SROA and promotion** leave every address-taken or volatile slot, and every
+  observable access, in memory. The C lowering marks a volatile local's slot
+  address-taken.
+- **The inliner and the rebuild** copy each node's flags and alignment, and map an
+  `rmw`'s optional desired value as a call's optional destination. Dataflow reads
+  every operand `ir_value_mask` gives.
+- **Tier 1's scheduler** pins every record that touches memory (a fence's effect
+  is one), control, calls or MXCSR, or may fault. So a locked access, `mfence` and
+  every SSE floating operation keep their places (`test-tier1-schedule`).
+- **Tier 1's load folding** moves a load into its single consumer past no store,
+  call, fence, `rmw`, stack move or other load (`tier1_select_fold_barrier`):
+  - The typed stream doesn't carry a C access's volatility, so the IR's loads of
+    volatile objects aren't flagged `volatile`. Two volatile reads must keep their
+    order, so the IR treats every unflagged load as possibly volatile.
+  - A volatile or atomic load folds into nothing.
+  - `test-checker-driver`'s volatile-order check compiles two volatile reads
+    through pointers by `--tier1`, which once read the second first.
+- **Tier 0** keeps every entry in the stream's order.
+- **Termination:** `unreachable` is a root that ends its block, and the terminal
+  builtins' calls are roots and barriers, as every call is.
+
+Carrying a C access's volatility in the typed stream (a marker on `LOAD`, `STORE`
+and `SET`, and on locals and globals) would let Tier 1 fold past ordinary loads
+again. That change touches every lowering path's access emission, and it isn't
+made here.
 
 ### Dynamic stack contract
 
@@ -542,9 +688,17 @@ The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then
 emits into final-sized columns. Stack replay and irregular calls/control flow
 are shared ordered work. Locals begin in typed slots. Only expression-stack
-depths live across block boundaries receive temporary slots. Values are spilled
-before outgoing edges and reloaded in the receiving block; `JUMP_VALUE` therefore
-preserves conditional-expression arms even with an outer expression still live.
+depths live across block boundaries receive temporary slots, one for each depth
+and IR type that some block's incoming shape has (#1189), so that each slot holds
+one type and promotes. Every block is entered with one shape, so a block's
+stores and its successors' loads agree on each depth's type. One slot per depth
+held several types in a function whose `&&`, `||` and `?:` results differ in type
+at one depth, as Lua's `luaV_execute`'s do, and stayed in memory: each truth value
+a store, a load and its slot's address, which removing took 1.2% of speedtest1's
+`--tier1` instructions and 1.3% of Lua's (the Tier 1 guide's "Where the gap to
+clang -O2 is"). Values are spilled before outgoing edges and reloaded in the
+receiving block; `JUMP_VALUE` therefore preserves conditional-expression arms
+even with an outer expression still live.
 
 A separate preheader materializes slot addresses and initializes parameters.
 Backedges to source entry zero skip that initialization. The typed stream's U64

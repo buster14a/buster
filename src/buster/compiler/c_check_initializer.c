@@ -307,7 +307,11 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
 
 #include "c_check_init_history.c"
 
-static void check_init_warning(CheckInitWalker* walker, uint32_t token)
+// Above the warning bit in an excess event's payload.data: the initialized object's type goes in first_type and
+// the string-overflow form gets this marker, so the render picks clang's "initializer-string" message.
+#define CHECK_INIT_EXCESS_STRING UINT32_C(0x10000)
+
+static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId object_type, bool string)
 {
     if (walker->result->warning_count == 0)
     {
@@ -321,7 +325,8 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token)
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = walker->warning_completion,
-        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS },
+        .payload = { .first_type = object_type, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                     .data = (UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS) | (string ? CHECK_INIT_EXCESS_STRING : 0) },
     };
     check_init_semantic_warning(walker, &event, NULL, 0);
     CheckInitWarningCollector* warnings = walker->warnings;
@@ -891,8 +896,10 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     const bool replay = repeat != 0;
     CheckInitRange* range = replay ? repeat->first : 0;
     bool more = true;
+    uint32_t designators = 0;
     while (more && token < end && walker->result->status == CHECK_INIT_OK)
     {
+        designators += 1;
         CheckInitFrame* frame = &walker->frames[walker->depth - 1];
         const TypeId type = type_strip_aligned(walker->types, frame->type);
         const uint8_t kind = type_kind(walker->types, type);
@@ -1087,13 +1094,17 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     }
     if (walker->result->status == CHECK_INIT_OK)
     {
-        if (token >= end || parser->tokens.kinds[token] != PARSE_KIND_EQUAL)
+        // GNU's obsolete `[index] value` (and `[first ... last] value`): a designation of one array designator may
+        // leave out its `=`, as clang (ext_gnu_missing_equal_designator) and GCC take it; the parser refused the rest.
+        const bool equal = token < end && parser->tokens.kinds[token] == PARSE_KIND_EQUAL;
+        const bool gnu = token < end && designators == 1 && parser->tokens.kinds[*position] == PARSE_KIND_L_SQUARE;
+        if (!equal && !gnu)
         {
             check_init_fail(walker, CHECK_INIT_INVALID, token);
         }
         else
         {
-            token += 1;
+            token += equal;
             if (repeat != 0 && !replay)
             {
                 repeat->target_depth = walker->depth;
@@ -2089,7 +2100,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             {
                 if (size < string->byte_count - unit)
                 {
-                    check_init_warning(walker, token);
+                    check_init_warning(walker, token, type, true);
                 }
                 const CheckInitPart part = {
                     .kind = CHECK_INIT_BYTES,
@@ -2298,7 +2309,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     {
                         // Expression checking already visited this span. It contributes no initialization,
                         // conversion, runtime evaluation or reference, including calls and string addresses.
-                        check_init_warning(walker, token);
+                        check_init_warning(walker, token, frame->type, false);
                         token = stop;
                         after_value = true;
                         excess = true;

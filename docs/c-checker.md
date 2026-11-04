@@ -37,14 +37,18 @@ Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeli
 observed in a non-emitting action is not a promise that Buster can generate the
 corresponding instrumentation or parallel runtime calls.
 
-The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
-`-Werror` does not guarantee the warnings or build failures Clang gives for the
-same source: some warnings are not produced, and some produced warnings are not
-promoted by `-Werror`. For example, an unused local, an address of a local
-returned from a function, or a mismatched `printf` format can pass with
-`-Wall -Werror`. Use Clang as a separate diagnostic check when those warnings
-matter. The individual supported diagnostics and their boundaries are described
-in this guide; the remaining warning work is tracked in
+The driver gives Clang's common default and `-Wall`/`-Wextra` warnings for
+constant conversions and bounds, shifts and division, parenthesization, unused
+results and names, format calls, returned stack addresses, uninitialized reads
+and enum switches, with Clang's messages, places, notes and
+`#pragma clang diagnostic` policy; `-Werror` and its `=group` and
+`-Wno-error=` forms promote them. The remaining gaps are the full
+`-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
+computed `case` expressions in `-Wswitch`, and several rarer
+`-Wparentheses`/`-Wreturn-stack-address` shapes and `-Wunused-but-set-variable`,
+so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
+their boundaries and their differential tests are described in "Common
+warnings (#823)" below; the remaining work stays tracked in
 [#823](https://github.com/buster14a/buster/issues/823).
 
 `-c` and the direct path lower only the definitions that the unit's roots reach,
@@ -76,6 +80,24 @@ with its identifier and `-Wimplicit-function-declaration`, as Clang does;
 apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
 Parenthesized identifiers and non-call uses of ordinary names do not acquire an implicit type.
 
+C89's implicit `int` is read too (#1121): a declaration whose specifiers give no
+type has type `int`, at file scope and in a block, for objects, functions,
+parameters (an identifier list's and a prototype's, as in `int f(*p)`,
+`int g(const x)`, `int h(register r)` and `int k(int a, *p)`), members (`struct S { const x; };`), `register`/`auto`/`static`/
+`const` declarations and typedefs. A file-scope declaration with no specifier at
+all is such a declaration too (`x;`, `main() {}`, `f(a, b) {}`, `(x);`, `*p;`,
+and a declarator whose name follows a pointer's qualifier or attribute, as in
+`*const p`, `**const p`, `*__restrict p` and `*__attribute__((unused)) p`);
+a block-scope declaration needs a specifier to begin it, as `x;` there is an
+expression. A C89 type name may also hold only qualifiers, so `sizeof(const)`,
+`(const)1` and `sizeof(volatile)` are `int`; `sizeof(register)` and
+`sizeof(static)` still take the parser's error. C99 and later keep clang's
+missing-type diagnostic, which the parser reports before the checker runs; an
+old-style definition with a declared return type keeps its own
+undeclared-parameter diagnostic. In C99 `f(a, b) {}` the parser's missing
+return type at 1:1 stays before clang's first undeclared parameter at 1:6, as
+documented for the existing C99 boundary.
+
 Eligible library names are different (#804): their first undeclared use takes
 the library prototype from the frozen Clang builtin catalogue, then uses the
 ordinary C binding, argument-checking, ABI and external-symbol paths. The
@@ -101,7 +123,15 @@ borrows the prior declaration's diagnostic fact, not its closed-block type.
 `-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
 for plain library names, but do not disable explicit `__builtin_` spellings.
 `-fbuiltin` reverses the global disabling option; freestanding mode separately
-disables library builtins, matching the pinned Clang 23.1.4 oracle. A recognized
+disables library builtins, matching the pinned Clang 23.1.4 oracle. That
+release's table has `strlcat` and `strlcpy` as GNU library builtins, in GNU
+C89's warning and GNU C99's and later modes' error alike; 23.1.5's table drops
+them, so the oracle compares `clang --version` with 23.1.4, prints both
+releases when they differ, and skips only the plain names the found release is
+known to classify differently (the named list `cbuiltin_library_table_differences`:
+23.1.5's `strlcat` and `strlcpy`), a difference no named release explains still
+failing. Calls of `strlcat` and `strlcpy` are plain calls in every mode, by
+both paths: neither is one of the plain names buster folds. A recognized
 library declaration can still be formed in C23 when its diagnostic is
 suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
 
@@ -955,10 +985,12 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder, one at a time. The
-vector schedule finds contiguous regions whose type behavior is known to stay
-within builtin arithmetic types, and checks each region in postorder batches
-(`check_graph_region_postorder`). From the first node not yet done, a batch
+The scalar schedule processes graph nodes in postorder, one at a time. So
+does the vector schedule by default, with its leaves and statements' discards
+without their actions ("Node order or regions" below). With its regions
+(`CheckOptions.regions`), it finds contiguous regions whose type behavior is
+known to stay within builtin arithmetic types, and checks each region in
+postorder batches (`check_graph_region_postorder`). From the first node not yet done, a batch
 takes consecutive nodes that read none of each other, up to the batch size.
 The alternative, the region's level order (`check_graph_region`,
 `CheckOptions.level_order`), computes the nodes' relative dependency heights
@@ -1020,10 +1052,13 @@ before return.
 #133 left open which schedule the vector path's regions should take, decided
 by a benchmark on the same tables: their level order, or a vectorized walk in
 postorder. `benchmark-checker-source` times both in one build, with the same
-actions, type table and graph: its paths `vector` (the postorder batches, the
-default) and `levels` (`CheckOptions.level_order`), beside `scalar`. Before it
-times them, it checks that each gives the scalar path's typed stream, and
-`test-checker` compares both orders at every batch size with the scalar path.
+actions, type table and graph: its paths `regions` (the postorder batches,
+`CheckOptions.regions`, which were `vector`, the vector path's default, until
+#1050 made it node order: "Node order or regions" below) and `levels`
+(`CheckOptions.level_order`), beside `scalar`. Before it times them, it checks
+that each gives the scalar path's typed stream, and `test-checker` compares both
+orders at every batch size with the scalar path. The measurements below, from
+#133, name the postorder batches as they were then.
 
 Level order computes each region node's height from its operands, counts the
 heights, places the nodes by height, then checks each level in batches. The
@@ -1082,48 +1117,99 @@ catalogue's fixes, the comparison builtins, K&R definitions) cost 0.78M on
 `-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
 the commands, the trees and the logs.
 
+### Node order or regions
+
+#1050 measured what the regions do on `sqlite3.c`'s `-c`. A region's batch held
+1.4 nodes: in a tree's postorder a parent follows its last child, so the next
+node most often reads the one before it, and few of a region's nodes are the
+integer folds that a batch takes 8 lanes at a time. What every region paid was
+its machinery: a pass over its nodes for its leaves, then for each node a test
+of its done mark and of each operand's, the batch's packing, and the scan for
+the region's end. The vector path's default is node order now: each node in
+turn, a leaf without its action (`check_graph_leaf`), a statement's discard of
+an rvalue without its action (`check_graph_discard`), and any other node by its
+action, the integer folds by the scalar fold. A region's nodes are pure (they
+intern no type and have no effects), so in node order they make the same typed
+stream, the same table and the same objects. The regions stay, opt-in
+(`CheckOptions.regions`, which `CheckOptions.level_order` takes), for graphs
+whose independent folds fill a batch, as `benchmark-checker`'s synthetic ones
+do; `test-checker`, the graph tests' batch partitions and
+`benchmark-checker-source`'s `regions` path keep them checked and timed.
+
+The 9700X job of `232654c1` ([job 126383843829](https://github.com/buster14a/buster/actions/runs/41771140390/job/126383843829))
+timed `benchmark-checker-source` on the frozen `sqlite3.c`'s 2,608 bodies
+(311,601 nodes), as nanoseconds and cycles a node, medians of 21 passes:
+
+| Path | Every path in one process | Alone | After 100 ms of scalar work |
+| --- | --- | --- | --- |
+| node order (`vector`) | 28.435 ns, 156.9 | 28.131 ns, 155.5 | 28.778 ns, 159.2 |
+| regions | 31.597 ns, 174.8 | 31.123 ns, 172.5 | 31.454 ns, 174.3 |
+| transitions | 34.191 ns, 189.4 | 32.254 ns, 178.7 | 34.358 ns, 190.3 |
+| level order | 34.551 ns, 191.5 | 34.259 ns, 189.8 | 34.441 ns, 190.6 |
+| scalar | 46.318 ns, 254.9 | 46.152 ns, 254.2 | |
+
+Node order took 10.0% less time a node than the regions in one process, 9.6%
+alone and 8.5% after scalar work. On musl's `regcomp.c` (8,881 nodes) it took
+23.94 ns against the regions' 25.80, and the transitions 20.30. The 4-CPU Intel
+VM, with no PMU, agreed: the main loop of a cold `-c` of `sqlite3.c` took
+44.41M cycles in node order against 48.27M by the regions (−8.0%, medians of
+24 compiles each in ABBA order, the objects the same bytes).
+
 ### Memoized transitions
 
 #1050 found that a non-leaf node's action is, most of the time, a repeat: of
-`sqlite3.c`'s 128,459 non-leaf nodes without a constant to fold, 14,973 keys
-were distinct. With `CheckOptions.transitions` (the driver's
+`sqlite3.c`'s 311,601 body nodes, 172,121 non-leaf nodes the table takes have
+25,101 distinct keys. With `CheckOptions.transitions` (the driver's
 `--check-transitions`), the vector path (`check_graph_transitions`,
 `c_check_transitions.c`) checks those nodes by memoized transitions: a node
 whose inputs repeat an earlier node's writes that node's answer without running
-its action. They are opt-in: on the 9700X they took 4% less time than the
-regions on `sqlite3.c`'s bodies, about 0.5% of its compile, short of #1050's
-aim (below). Graphs with overload sets take the regions either way.
+its action. They are opt-in (below). Graphs with overload sets take the regions
+either way.
 
-When no operand or argument of a node holds a payload
-(`check_stream_value_rest`: a constant's value, an address constant's offset, a
-bit-field's place, a fault), the action is a function of a key. The key holds
-the node's operator, member, requested type, extensions (with the
-system-header bit) and floating environment, and each operand's and a call's
-arguments' type, flags, category and constant kind. It also holds the objects'
-pattern: which operands have an object and which share one.
+**Classes.** Each completed node's value has a class, a 32-bit id of its type,
+flags, category, constant kind and payload (every field of the value but its
+object), interned exactly on its first sight (`check_transitions_intern`). A
+value without a payload row (`check_stream_value_rest`) is its columns; one with
+a row is compared whole against its class's template, so that a constant, an
+address constant's offset and a bit-field's place each are a class. A value
+with a fault or an overload set has none (`BUSTER_CHECK_CLASS_UNKEYED`), and a
+node waiting in a batch is `BUSTER_CHECK_CLASS_PENDING`. The classes live in a
+column of the run's scratch (`levels`, which the later stages write before they
+read), with an open-addressed table of 16-byte slots and the payloads'
+templates.
 
-The key holds no object and no node. An action copies an object from an
-operand, and reads one only for zero and for equality between operands, which
-the pattern holds. It reads a node only as a new fault's place, and an answer
-with a fault isn't memoized.
+**The key.** An ordinary action is a function of a key of four 64-bit words:
+the node's operator, extensions (with the system-header bit), floating
+environment, a call's argument count and the objects' pattern (which operands
+have an object and which share one), its member, its requested type, its three
+operands' classes and a hash of a call's arguments' classes, each with whether
+it has an object; a call's arguments are compared whole beside the key. The
+key holds no object and no node. An action copies an object from an operand
+and reads one only for zero and for equality between operands, which the
+pattern holds: outside a constant evaluation, which isn't memoized, no action
+of the table's operators reads an object's identity
+(`check_const_load` and `check_const_union_allows` are a constant evaluation's,
+and the builtins that do are outside the table). An action reads a node only as
+a new fault's place, and an answer with a fault isn't memoized. A node with an
+operand of no class is a fold and runs its action.
 
 The first node of a key runs its action (a miss) and inserts its answer into a
-per-run table in the scratch arena. The answer is the value but its object, its
-conversions, diagnostic and its operand, warnings and a member's offset, a
-call's argument conversions, and its whole value as a template where it holds
-a payload: a static object's member, `&s.f`. It also names the operand whose
-object the value takes. A later node of the key (a hit) writes that answer with
-no `CheckAction` and no `CheckActionResult`.
+per-run table in the scratch arena. The answer is the value but its object (its
+class, type, flags, category and constant kind, and a payload's template, its
+class's), its conversions, diagnostic and its operand, warnings and a member's
+offset, and a call's argument conversions; it also names the operand whose
+object the value takes. A later node of the key (a hit) writes that answer and
+its class with no `CheckAction`, no `CheckActionResult` and no interning.
 
 A hit interns no type: every type the answer names was interned by its first
 node. The misses run in node order, so a fresh table's `TypeId`s are the
-scalar path's, which is what the regions' purity rule protected. Folds (an
-operand with a payload, most often a constant) and the operators the table
-doesn't take run their actions as before: the builtins, varargs, the
-variable-length arrays' operators, statement values, constant evaluations,
-vector members and plain library builtins' folds. Consecutive pure misses and
-folds that read none of each other go as one batch of `check_actions`, as the
-regions' batches did, so the integer folds still go 8 lanes at a time.
+scalar path's, which is what the regions' purity rule protected. Folds and the
+operators the table doesn't take run their actions as before: the builtins,
+varargs, the variable-length arrays' operators, statement values, constant
+evaluations, vector members and plain library builtins' folds; their values are
+interned after. Consecutive pure misses that read none of each other go as one
+batch of `check_actions`, as the regions' batches did, so the integer folds
+still go 8 lanes at a time.
 
 An answer that read the source position keeps what it read. Each tag whose
 completion `check_action_source_complete` asked about, with its answer, is a
@@ -1132,98 +1218,121 @@ tag read before its completion and after it thus takes two misses, the second
 writing over the first's entry. An answer that read a transparent union's
 activation, or more than four tags, isn't memoized.
 
-An entry is 128 bytes: its key's 64, compared whole by one AVX-512 compare,
-and its answer packed in the next cache line. A template, a call's arguments
-and a second guard go in side arrays. The slots are open-addressed, each an
-entry's index and its hash, two per entry. With its hash, an entry takes 148
-bytes. The table starts with room for an entry per 16 of the graph's nodes and
-at least 16 (a small graph's takes 2 KB, and 256 bytes of slots to clear),
-since `sqlite3.c`'s bodies took one per 19, and grows by doubling within a
-quarter of the room the run's scratch had left. An array's pages are touched
-only as its entries fill them, but the slots are cleared whole. Where its first
-size doesn't fit, it starts with at most 1,024 entries, and then with 16; where
-even that doesn't, the run takes the regions; where it can't grow, it stops
-inserting.
+**The loop.** A pass first gives each node its static word, 16 nodes at a time
+in AVX-512 with a scalar twin (`check_transition_statics`): a leaf, a node the
+table doesn't take, or the key's first word but its pattern, with the
+system-header bit gathered from the tokens' array (the lanes whose 4-byte
+gather would pass its end go one at a time). The node order's loop then holds
+only leaves and first-probe hits; every other node (a miss, a fold, a node
+reading a batch member, an operator the table doesn't take) goes out of line
+(`check_transition_other`), as do a payload's write and a call's argument
+conversions, so that the loop keeps its values in registers. Inlined into
+`check_graph_run`, the loop spilled its key and its columns' pointers to the
+stack on every node; out of line, the same code took about 8% less time on the
+VM below.
 
-`CheckOptions.verify_transitions` runs each hit's action too, keeps its answer
-and counts a difference (`CheckStatistics.transition_mismatches`), which fails
-the run. The driver's `--verify` (with `--check-transitions`) verifies, and so
-does `test-checker`, whose graphs and source fixtures the transitions check
-against the scalar path too. `CheckStatistics` counts
-hits, misses, folds, inserts and the table's entries, and `--time-stages`
+An entry is 128 bytes: its key and what the next nodes read (the class and the
+object's operand) in one cache line, its conversions and member offset in the
+next. A call's arguments and a second guard go in side arrays. The slots are
+open-addressed, each an entry's index and its hash's high half, two per entry.
+The table starts with room for an entry per 16 of the graph's nodes and a
+class's slot per 32, and at least 16 entries, since `sqlite3.c`'s bodies took
+an entry per 12 nodes and a class per 43, and grows by doubling within a
+quarter of the room the run's scratch had left. Where its first size doesn't
+fit, it starts with at most 1,024 entries, and then with 16; where even that
+doesn't, the run takes the regions; where it can't grow, it stops inserting,
+and where the classes can't, new values have none.
+
+`CheckOptions.verify_transitions` runs each hit's action too, the loop's
+first-probe hits' and those found after a batch ran (flushed hits), keeps its
+answer and counts a difference (`CheckStatistics.transition_mismatches`), which
+fails the run. The driver's `--verify` (with `--check-transitions`) verifies,
+and so does `test-checker`, whose graphs and source fixtures the transitions
+check against the scalar path too, each verified run's hits all verified
+(`transition_verified`). `CheckStatistics` counts hits (and of them the flushed
+ones), misses, folds, inserts and the table's entries, and `--time-stages`
 reports them as `time-check transition-*` lines. `benchmark-checker-source`
 prints them with each path's time.
 
 `test-checker --transitions` runs the section alone. Each fixture is checked by
 the scalar path, the oracle, and by the vector path's regions and its
-transitions in node order and in windows (below), and every stream must be the
-oracle's. A fixture of vector members, which the table doesn't take, puts them
-in windows past the first. Each fixture's hits, misses, folds and entries are
-pinned. The windows' keys and hashes must be `check_transition_key`'s and
-`check_transition_hash`'s for every node. A source of 1,500 structs runs in a
-sweep of scratch arenas from too small for the table's growth to room enough,
-then at the least room the run checks in, found by bisection (in any less, it
-fails whichever path it takes), where not even 16 entries fit and the regions
-must run, and in steps of 512 bytes past it, which must reach a table that takes
-entries. Each run that checks gives the oracle's stream, and the sweep must
-reach a table that stops inserting and one that takes every entry.
+transitions in batches of 32, 3 and 1, and every stream must be the oracle's.
+Each fixture's hits, flushed hits, misses, folds and entries are pinned, and a
+fixture's `(1 + 2) + 3` finds an earlier `3 + 3` only after `1 + 2`'s batch ran. Each node's class
+must be shared exactly with the nodes of the same value but its object, and the
+static words by 16 lanes must be the scalar path's, with system-header marks in
+arrays from the tokens' whole count down to fewer than a gather's 4 bytes. A
+source of 1,500 structs runs in a sweep of scratch arenas from too small for the
+table's growth to room enough, then at the least room the run checks in, found
+by bisection (in any less, it fails whichever path it takes), where not even 16
+entries fit and the regions must run, and in steps of 512 bytes past it, which
+must reach a table that takes entries. Each run that checks gives the oracle's
+stream, and the sweep must reach a table that stops inserting and one that takes
+every entry.
 
-#### Node order or windows
+#### What a hit costs
 
-The issue proposed keying 16 nodes at a time in postorder windows, resolving
-operands within a window in rounds. `CheckOptions.transition_windows`
-(`check_graph_transition_windows`) does that for windows of 64 nodes. A round
-keys the window's ready nodes 16 lanes at a time in AVX-512: gathering their
-operands' columns, building the objects' pattern, the header and the hash. Each
-lane then probes the table and compares its key whole. The misses run in node
-order as their turn comes.
+On a 4-CPU Xeon (Sapphire or Emerald Rapids, 2.1 GHz) VM without a PMU,
+`benchmark-checker-source` on `sqlite3.c`'s bodies, timed in check_graph_run's
+phases and by a second pass of the node order on its own warm table (a
+measuring patch, not kept): the run's validation took about 14 cycles a node and
+its loop about 145 by either path. The loop's misses took about 70: 21,000
+single misses of about 470 cycles of action each, and their interning and
+insertion about 200 more. A warm leaf took about 58 cycles and a warm hit about
+123: 42 to build its key, 38 to probe and check its guards and 44 to write its
+answer. A repeated action costs the regions about 160 cycles, so a hit saves
+about 40, which the misses' insertion and the leaves' interning spend again. An
+ideal memo over the same graph (every node a hit of a compact table, writing
+the same columns) took 18 ns a node, against the loop's 40 for its leaves and
+hits: the rest is the loop's own work per node.
 
-The rounds starve the lanes. On `sqlite3.c`'s bodies a window took 11.7 rounds
-and a batch held 2.97 nodes: a postorder's chains (`l->next->next->v`, a
-conversion over a call over a member) and the misses, each of whose dependents
-waits for the next round, leave most lanes empty. Building and probing a lane
-then cost as much as its action.
+The class design keyed constants, so that the first design's 27,822 folds became
+19,000 hits and 9,000 more misses: 146,916 hits and 25,205 misses, no fold. Per
+process, the transitions took 1.00 to 1.05 times the regions' time on that VM
+(medians of five processes), against 1.01 to 1.05 for the first design on the
+same host; a VM host before it had measured the first design 7% faster than the
+regions, the 9700X 4 to 7.5%.
 
-Node order keys each node from its operands' columns as it comes, one probe and
-one compare. It keeps no round state, and a hit's operands are the nodes just
-written, in the caches. `benchmark-checker-source` times both (`transitions`,
-node order; `windows`) beside the regions (`vector`, the default).
+#### On the 9700X, and the real compile
 
-On a 4-CPU Xeon (Emerald Rapids, 2.1 GHz) VM, pinned to one CPU: `sqlite3.c`'s
-2,608 bodies and 311,601 body nodes, each path a median of 21 interleaved
-passes, over six processes:
+The 9700X jobs of #1198 ([job 125700333685](https://github.com/buster14a/buster/actions/runs/41568611005/job/125700333685),
+[job 125709820070](https://github.com/buster14a/buster/actions/runs/41571004025/job/125709820070)) timed the
+graph run by `benchmark-checker-source`, whose passes run it again and again:
+`sqlite3.c`'s bodies took 32.33 to 34.29 ns a node by the transitions against
+35.18 to 36.58 by the regions (34.01 to 34.36 against 35.99 to 36.49 after
+100 ms of scalar work), and musl's `regcomp.c` 20.52 to 20.65 against 27.59 to
+28.42.
 
-| Path | ns a node |
-| --- | --- |
-| scalar | 132.4–137.2 |
-| transitions in node order (`transitions`) | 92.9–98.4 |
-| regions, the default (`vector`) | 97.1–102.6 |
-| levels | 100.6–108.4 |
-| windows | 119.0–129.9 |
+A real compile runs it once, and there the transitions lose. `sqlite3.c -c`
+on CPU 2, `measure-compile`'s medians of 11: `check-expressions` took 15.184 ms
+(14.919 to 15.640) with `--check-transitions` against 14.339 (14.243 to
+14.596) without; `time-runs`' medians of 21 put the compile at 113.66 against
+112.72 ms; `perf stat -r 11` counted 535.9 million user cycles against 531.7,
+though 1,130 million instructions against 1,206, and 2.72 million cache misses
+against 2.48. The table (about 4.5 MB of entries, slots, classes and templates
+for `sqlite3.c`), the class column and the static words are new lines to a
+single run, which the benchmark's repeated runs keep in the caches; their
+misses cost more than the instructions the hits save. Even without them, the
+benchmark's gain is about 1 ms of a 14.3 ms `check-expressions`.
 
-In each process the transitions took 0.8 to 9.3% less time a node than the
-regions, 3.9% at the median.
+Writing the leaves' and hits' columns later, 16 nodes at a time with gathers
+before an action or a pass needs them, took 6 to 16% more time on the VM than
+writing them in node order, as each output line is then written twice, far
+apart; direct open-addressed 64-byte entries without slots took 10% more.
 
-Node order made 128,081 hits, 16,218 misses (each inserted) and 27,822 folds.
-The windows made 126,495 hits and 17,804 misses, as a round probes nodes of one
-key before the first's insertion.
+#### The first design (#1146)
 
-Whole compiles (`-c --lanes 1 --time-stages`, 15 of each build in turn, the
-transitions against the regions): `check-expressions` took 37.43 ms against
-38.03 at the median, and the compile 304.1 ms against 313.2, with the same peak
-resident set. The table takes scratch pages the reader has already touched.
-
-The hits are concentrated: in a compile of `sqlite3.c`, 64 entries took 43.9%
-of them, 1,024 entries (128 KB) 77.7% and 4,096 entries 94.6%. So a hit's
-entry is mostly in the caches. On that VM, what a hit costs beyond a leaf is
-reading its operands' columns and writing the stream's ten output columns,
-which the actions it replaces wrote too; those common nodes' actions were
-cheap.
-
-#### On the 9700X, and other corpora
+The first design keyed each operand by its type, flags, category and constant
+kind in a 16-word key compared by one AVX-512 compare, and ran a node with a
+payload operand as a fold. Its windows (`CheckOptions.transition_windows`)
+keyed the ready nodes of 64-node windows 16 lanes at a time in rounds, as the
+issue proposed. The rounds starved the lanes: on `sqlite3.c`'s bodies a window
+took 11.7 rounds and a batch held 2.97 nodes, a postorder's chains and the
+misses' dependents leaving most lanes empty, and on the 9700X they took 55.13 ns
+a node against node order's 35.51; the class design removed them.
 
 The 9700X job of #1146 ([job 125383291201](https://github.com/buster14a/buster/actions/runs/41473866134/job/125383291201))
-timed the five paths on `sqlite3.c`'s bodies:
+timed the first design on `sqlite3.c`'s bodies:
 
 | Path | ns a node | after 100 ms of scalar work |
 | --- | --- | --- |
@@ -1235,65 +1344,137 @@ timed the five paths on `sqlite3.c`'s bodies:
 
 The transitions took 4.0% less time a node than the regions (3.3% after scalar
 work). The same job's `measure-compile` put `check-expressions` at 14.7 ms of a
-116.9 ms compile, and its profile `check_graph_transitions` at 2.70% of the
-cycles, `check_transition_key` at 1.44% and `check_transition_write` at 0.67%:
-keying, probing and writing take most of what the actions' copies saved, and
-the graph run's 4% is about 0.5% of the compile. #1050 asked for a large
-fraction of `check-expressions`, so the transitions stay opt-in
-(`CheckOptions.transitions`, the driver's `--check-transitions`) and the
-regions the default. The job times the transitions and the windows alone and
-after scalar work, musl's `regcomp.c` by every path, and `sqlite3.c`'s whole
-compile with them and without (`time-runs`, whose objects must be the same
-bytes) where the checker changes.
-
-That whole compile showed no gain ([job 125470563590](https://github.com/buster14a/buster/actions/runs/41499213226/job/125470563590),
+116.9 ms compile. The whole compile showed no gain ([job 125470563590](https://github.com/buster14a/buster/actions/runs/41499213226/job/125470563590),
 21 runs of each in a rotating order on CPU 2, the objects the same bytes): the
 regions took 118.43 ms (117.96 to 119.12) and the transitions 118.69 ms (117.96
-to 119.82), 0.2% more, with 557.3 and 559.2 million user cycles though the
-transitions ran 3.9% fewer instructions (1,229 million against 1,279 million).
-In the same job the graph run took 33.99 ns a node by the transitions against
-36.77 by the regions on `sqlite3.c`'s bodies (35.40 against 36.82 after scalar
-work), and 25.23 against 29.22 on musl's `regcomp.c`: the gain is real in the
-graph run but doesn't reach the compile.
+to 119.82). In the same job the graph run took 33.99 ns a node by the
+transitions against 36.77 by the regions on `sqlite3.c`'s bodies, and 25.23
+against 29.22 on musl's `regcomp.c`. The gain depended on the source: on the
+first VM host, Lua 5.4.8's `lvm.c` took 15% less time, its `lparser.c`,
+`lstrlib.c` and musl's `vfprintf.c` 3 to 5% more, as their keys repeated less;
+on a Ryzen 9 7940HS (Zen 4), the review of #1146 measured `lvm.c` 10 to 20%
+faster and `sqlite3.c` no faster.
 
-The gain depends on the source. On the VM, three processes of each file, each
-path a median of 21 interleaved passes, Lua 5.4.8's largest units, musl's from
-the frozen corpus and `sqlite3.c`, in ns a node, the range of the three
-processes' medians (the change is the transitions' time against the regions',
-the median and the range of the three processes'):
+### The per-node machinery (#1050)
 
-| File | Bodies | Nodes | Scalar | Regions | Levels | Transitions | Windows | Change | Hits / misses / folds |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Lua `lvm.c` | 32 | 19,786 | 108.8–125.0 | 81.5–84.6 | 87.0–89.8 | 68.6–79.1 | 113.0–114.4 | −15.4% (−15.9 to −6.6) | 7,649 / 622 / 3,731 |
-| Lua `lparser.c` | 96 | 5,989 | 122.9–130.0 | 80.2–85.3 | 81.8–90.1 | 83.1–84.6 | 124.0–130.1 | +2.9% (−0.9 to +4.9) | 2,097 / 689 / 520 |
-| Lua `lcode.c` | 103 | 5,982 | 120.9–125.2 | 81.1–106.9 | 86.2–101.0 | 76.9–86.9 | 123.9–135.2 | −6.8% (−18.8 to −3.3) | 1,773 / 452 / 1,030 |
-| Lua `lapi.c` | 93 | 6,601 | 108.0–116.0 | 73.2–77.8 | 76.8–79.6 | 63.6–66.3 | 101.4–102.9 | −14.4% (−18.2 to −11.8) | 3,084 / 590 / 514 |
-| Lua `lstrlib.c` | 73 | 5,604 | 124.9–138.3 | 84.4–91.2 | 88.3–92.3 | 88.9–94.3 | 130.9–137.8 | +5.3% (+3.4 to +7.1) | 1,736 / 622 / 540 |
-| musl `regcomp.c` | 41 | 8,881 | 118.4–128.4 | 77.9–94.2 | 80.8–104.6 | 68.9–92.4 | 101.6–121.5 | −7.0% (−13.6 to −1.8) | 3,480 / 739 / 714 |
-| musl `regexec.c` | 6 | 3,235 | 105.3–119.5 | 67.3–84.4 | 68.9–90.5 | 57.2–68.4 | 87.7–99.9 | −19.0% (−27.1 to −15.1) | 1,282 / 337 / 237 |
-| musl `vfprintf.c` | 36 | 4,864 | 113.3–125.1 | 76.2–78.3 | 82.3–83.0 | 79.4–80.7 | 124.8–126.2 | +4.5% (+1.4 to +5.9) | 1,213 / 494 / 859 |
-| `sqlite3.c` | 2,608 | 311,601 | 134.4–140.2 | 99.3–102.3 | 102.4–103.7 | 93.5–94.0 | 123.7–126.4 | −7.0% (−8.5 to −5.3) | 128,081 / 16,218 / 27,822 |
+#1050's last two rounds memoized the actions and found that what a hit skips
+isn't where the time goes: what every path pays is the machinery around each
+node. A profile of one cold `-c` of `sqlite3.c` (a VM's sampler and a
+per-operator `rdtsc` table, measuring patches not kept) put the stage's time in:
 
-The transitions pay where a key repeats: `lvm.c`'s nodes hit 92% of the times
-they were keyed and took 15% less time, and `lparser.c`, `lstrlib.c` and
-`vfprintf.c`, whose hits were 71 to 75%, took 3 to 5% more. On a 16-thread
-Ryzen 9 7940HS (Zen 4), the review of #1146 measured the same: `lvm.c` 10 to
-20% faster, 5,000 small functions much faster, and `sqlite3.c` no faster.
+- **building each action** (`check_graph_action`): copying each operand's
+  96-byte value into the action from a temporary that `check_stream_value`
+  cleared by two overlapping 32-byte stores, by a 32-byte load across both,
+  which no store can forward: the most sampled instruction of the stage;
+- **the warning pass** (`check_input_warning_graph`), a tenth of the stage's
+  user time, almost all of it cold reads of each candidate's conversion record
+  and whole value after the run;
+- **calls**, about 650 to 850 cycles each, 15% of the main loop: a call built a
+  408-byte action per argument to convert it;
+- **statements' discards**, the casts to void every expression statement ends
+  in, the most common operator after the leaves;
+- **the stream's columns**, which every node writes: skipping the conversions,
+  the diagnostics, their operands, the warnings and the members' offsets (a
+  bound, not a valid output) took 11% of the main loop.
 
-Whole compiles on the VM, each without and with `--check-transitions` as whole
-processes in a rotating order (`time-runs`), were too noisy there to decide:
-`sqlite3.c` (`-c`, one CPU, 21 runs) took 287.5 against 287.8 ms at the
-fastest, but 346.8 against 316.8 ms at the median, its runs spreading from 288
-to 1,016 ms. `lvm.c` (one CPU, 21 runs) took 29.5 against 29.3 ms at the
-median, and Lua's 32 units in one command (`-c` on the VM's 4 CPUs, 11 runs)
-199.0 against 203.7 ms, with 220 against 233 ms of user time: a unit's table
-starts empty, so small units pay their misses for few hits. Every object was
-the same bytes. The 9700X's `time-runs` comparison above decided: no gain.
+What the run does now, each step exact (both paths' streams, the objects and
+the diagnostics are the same bytes):
 
-The table takes 148 bytes an entry (128 for the entry, 16 for its two slots and
-4 for its hash). On `sqlite3.c`'s bodies its 32,768 entries' room took the run's
-scratch from 10,284,096 bytes with the regions to 16,503,552 (the 9700X job's
-`scratch_bytes`); its 16,218 entries touched 2 MB of it.
+- `check_stream_value_to` writes a node's value into its destination by each
+  case's own stores, the columns' case as one 64-byte and one 32-byte store;
+  the action's operands and arguments take it.
+- `check_graph_store` writes the result's value from the action's fields
+  (`check_stream_set_value_flags`) and its conversion records field by field.
+- `check_action_operand_value` converts a value as an operand of an action
+  whose context and guards alone it reads: a call converts each argument with
+  it, as an operand of the call.
+- The warning pass reads a source's conversion record and whole value only for
+  an integer constant expression of value zero without a fault, which two narrow
+  columns and the payload row say, and builds an ordered comparison's action
+  only where an operand can be a pointer: the exact preconditions of its two
+  warnings.
+- In a fresh output (`CheckOptions.fresh_output`, the C driver's), the run
+  clears no column and its main loop writes no zero (`CheckStream.zero_columns`):
+  the diagnostics, their operands, the warnings and their ignored kinds take
+  no memory where no node has one, and a first write reads no payload row.
+- The vector path writes a discard of an rvalue without its action
+  (`check_graph_discard`): the operand's value, its conversion to void and the
+  cast's provenance, by the same helpers in the same order as the action, where
+  the action would read nothing else (`check_graph_discard_taken`). The scalar
+  path keeps the action, the twin whose streams the tests compare.
+- `check_graph_constant_contexts` passes over 64 nodes that hold neither a
+  context nor a mark at a time, and `check_graph_is_leaf` reads no leaf's record
+  without overload candidates.
+- The vector path takes its nodes in node order, its regions opt-in ("Node
+  order or regions" above). With them, a region's end is found 64 marks at a
+  time (`check_graph_marked_end`), whose exit, a node at a time, had been the
+  main loop's most sampled branch on the 9700X, and a region batches only the
+  operators whose integer folds `check_actions` takes 8 lanes at a time
+  (`check_action_fold_operator`), another node whose operands are done checked
+  at once by its own action.
+- `check_stream_value` returns a value by assignment, as main's did: the
+  lowering, its main caller, takes it into registers or a value of its own, and
+  through `check_stream_value_to`'s stores clang had laid the lowering's
+  functions out anew, which cost `lower` 1.2 to 1.9% on the 9700X.
+- An action looks up only the kinds its operator reads: the comparisons' and
+  the additions' pointer pairs, a complement's complex operand, a vector
+  operation's types.
+
+The 9700X job's step "Compare check-expressions with the pull request's base
+over placements" compares a pull request's base and tree on `-c sqlite3.c`,
+with each build's stages, counters, profile and forwarding failures. The job of
+`232654c1` ([job 126383843829](https://github.com/buster14a/buster/actions/runs/41771140390/job/126383843829))
+compared the base, `2fef25b0`, with the tree (with
+`-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5
+-DSQLITE_ENABLE_RTREE`), each at four placements of its checker unit. Each
+placement's stages, as `measure-compile`'s medians of 11 runs, in ms (base →
+tree):
+
+| Placement | `check-expressions` | `lower` | `check-program` | span |
+| --- | --- | --- | --- | --- |
+| 0 | 14.330 → 10.493 (−26.8%) | 12.959 → 13.308 | 10.099 → 10.163 | 108.877 → 105.814 |
+| 1088 | 14.233 → 10.420 (−26.8%) | 12.973 → 12.963 | 10.183 → 10.042 | 109.198 → 105.093 |
+| 2112 | 14.704 → 10.482 (−28.7%) | 12.968 → 12.919 | 10.150 → 10.127 | 109.527 → 105.783 |
+| 3136 | 14.240 → 10.414 (−26.9%) | 13.010 → 12.946 | 10.186 → 10.122 | 109.344 → 105.354 |
+
+- `time-runs`, 5 runs of two fresh copies of each placement of each build, with
+  the base's executables again as the floor: the wall time went from
+  110.333 ms to 106.625 ms (−3.36%; −3.70% to −3.08% over the placements) and
+  the user cycles from 523.6M to 504.0M (−3.74%). The base again read −0.14%.
+- `perf stat` counters, 11 runs at placement 0:
+  - instructions: 1,219.5M → 1,172.9M;
+  - branch misses: 3.13M → 3.04M;
+  - failed store-to-load forwards (`ls_bad_status2.stli_other`): 5.96M → 4.24M.
+- Memory: the wait4 peak went from 282,608–283,884 KiB to 278,316–278,368
+  KiB over the placements. `check-expressions`' approximate peak growth went from 4,904 KiB
+  to 872 KiB.
+- `lower`:
+  - At placement 0 it took 2.7% longer: 13.308 ms (13.251 to 13.546) against
+    12.896 to 13.063 ms. Most of that is in `lower.statements`.
+  - At the other three placements it took 0.1% to 0.5% less.
+  - Since `check_stream_value` is by assignment again, the lowering's functions
+    are the base's instruction for instruction, but for data addresses. The
+    difference at placement 0 is the code's placement.
+  - Over the four placements its median is 12.95 ms against 12.97.
+- `check-program` read −1.4% to +0.6%.
+- The objects are the same bytes, which the step requires.
+
+`check-expressions` over the rounds, base → tree, in ms (placement 0; the
+fourth row's are medians over the placements):
+
+| Tree | `check-expressions` |
+| --- | --- |
+| `43b84486` | 14.346 → 12.744 (−11.2%) |
+| `837e3638` | 14.211 → 12.528 (−11.8%) |
+| `7da3876f` | 14.446 → 11.805 (−18.3%) |
+| `1244e794` | 14.37 → 11.61 (−19.2%) |
+| `232654c1` (node order) | 14.330 → 10.493 (−26.8%) |
+
+What remains is spread over the actions. The forwarding failures are one lead.
+One sample in 500 put 8.2% of the compile's failures in `check_graph_run`. A
+quarter of those were at two wide copies of values just written field by
+field: an operand's converted value returned whole (`check_action_operand`),
+and a result copied into its payload row (`check_stream_set_value_flags`).
 
 ## Constant evaluation
 
@@ -3189,7 +3370,9 @@ small one.
   waited on its first touch of each node's checked value and conversions, two
   arrays too large for the caches. A statement's nodes come before its root in
   the graph, so before each statement the lowering prefetches the next one's,
-  up to its root (`check_lower_prefetch`, its last 64 nodes at most).
+  up to its root (`check_lower_prefetch`, its last 64 nodes at most). #1048
+  removed it once the values were columns (#628), when its own work cost more
+  than the misses it hid ([the lowering guide](c-lowering.md)).
 
 The objects are the same bytes. On the 9700X, against main at `ad408cf2`
 (medians: the whole compile's of 10 rounds of `perf stat -r 3`, the two in
@@ -3499,6 +3682,111 @@ result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or
 8, `V` for none, then the intrinsic's name. `--print NAME` prints each object's trace of a
 case, every record it followed with the value it made. The files are removed
 unless `--keep` or a failure.
+
+## Common warnings (#823)
+
+`c_check_common_warnings.c`, included by the driver, reports the expression
+warnings that need the completed graph or the parser's operator tree:
+`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
+`-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
+bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
+`-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
+`-Wdangling-else` and `-Wuninitialized`. `c_check_binding.c` adds
+`-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
+`-Wunused-parameter` as sparse events, with the declaration's body deciding
+the completion, so they follow Clang's after-function order; a redeclaration
+inherits an earlier `unused` or `used` attribute. A file-scope variable's
+unused warning is given only in the main file, as Clang leaves a header's
+file-scope variables alone because every unit that includes the header shares
+them. The graph pass adds `-Wunused-but-set-parameter` for a parameter a
+statement assignment writes and no read uses.
+
+Each uses the shared warning policy, so a default or group option, a
+`#pragma clang diagnostic` change and `-Werror` promotion behave as the other
+sparse warnings do. A token from a system-header macro is suppressed by its
+spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
+for it. The `-Wswitch` check needs a named enum's source definition and literal
+enumerator `case` labels; it compares the enumerators' checked values, so
+aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
+computed case leaves the switch to a full constant evaluator.
+`-Wuninitialized` follows graph evaluation order: a local scalar object read
+before any write and not address-taken warns; a `sizeof` operand (except a
+variably modified type's bound), a void cast, an address computation, an
+unselected `&&`/`||`/`?:` arm, a static selection's unselected arms and
+controlling expression, and an assignment target are not reads, while an
+initializer's value, a compound assignment and an increment are, with the write
+ordered after the read. A brace initializer writes its object even without an
+expression node, and a variable read in its own initializer (braced or not) gets
+Clang's "within its own initialization" message. An unmodeled write through inline
+assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
+keeps a separate read that is not the target of the same compound assignment or
+increment.
+`-Wformat` checks the four `printf`-family names, a declaration's
+`format(printf, ...)` attribute, the integer class for every length modifier
+(`long` against `long long`, `%zd`, `%jd`, `%td`, ...; the signed and unsigned
+types of one class agree), `%n`'s integer pointer by class (`signed char *`,
+`short *`, `int *`, `long *`, `long long *`, and the unsigned counterparts),
+each `*` field width's `int` and `.*` field precision's `int`, extra and
+insufficient arguments, positional `%1$d`/`%2$d` conversions with positional
+widths and precisions and their used-argument counting, C23 `%b`/`%B` (whose
+expected name is the signed class), and wide `%ls`/`%lc` (and `%S`/`%C`)
+arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal formats'
+common conversions and sizes. Its literal-internal diagnostics keep Clang's
+column and the diagnostic collector's source order. The attribute's archetype
+is compared after the attribute checker's reserved-name stripping, so
+`__printf__` and `__gnu_printf__` check as `printf`. A `va_list` callee
+(`format(printf, N, 0)`) keeps scanning past an invalid conversion, as Clang's
+data arguments then start at the call's first: a positioned `%N$Q` stops the
+scan only once N passes the call's argument count. A conditional format whose
+condition folds selects its arm by the converted value, so
+`(unsigned char)256 ? "%d" : "%s"` checks `"%s"`.
+A common-warning pass whose scratch allocation fails reports
+`fatal error: common warning capacity exhausted` and fails the unit rather
+than publishing fewer warnings; the binding's unused-name columns report theirs
+as the checker input's resource error. The test hook
+`BUSTER_TEST_COMMON_WARNING_FAIL_AT=N`, read in every build as
+`BUSTER_TEST_LANE_FAIL_AT` is, fails the unit's Nth (from 0) common-warning
+scratch allocation.
+`-Wunused-value` covers a bare identifier or literal, a parenthesized
+comparison, a cast (including a typedef of `void`), a conditional, and a comma
+expression, parenthesized or not; a comma operand with a call, assignment or
+increment has an effect and does not get the left-operand warning. Its reports
+complete with the function's closing brace, as Clang's do, after the body's
+own warnings and before an unused declaration's.
+`-Warray-bounds` reports a direct array object, including a nested subscript
+such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
+struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
+declaration chain once, at its definition when it has one and otherwise at its
+first declaration; a shadowing local use does not keep a file-scope variable
+used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
+but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
+`else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
+`while` or `?:` condition; a write in that condition is a use of the parameter,
+not an unused-but-set statement write. The `-Wswitch` definition is the one its
+selector's tag type names, so a fixed underlying type and a shadowing tag in
+another scope resolve correctly. The return-flow walk runs for non-aggregate
+functions only where `-Wreturn-type` is enabled.
+
+`test-checker-driver`'s `check_test_driver_common_warnings` compares the
+filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
+`-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
+uninitialized evaluation contexts, static selections, self-initialization,
+read-modify-writes and VLA bounds, wide and width-mismatched formats, enum
+aliases, fixed-underlying and shadowing definitions, zero sign comparisons,
+array-member/nested/zero-length bounds, declaration chains, scope-aware enum
+definitions, brace initializers and self-initialization, bare/parenthesized/
+cast/conditional/comma unused values with side-effect operands and their
+function-end order, `for` conditions and writes, positional indexing and used-
+argument counting, C23 `%b`, integer classes, unsigned `%n` pointers, exact and
+precision formats, reserved-name archetypes, `va_list` invalid conversions,
+constant and nested conditional formats, and returned stack addresses line for
+line against Clang on both check paths; a filtered output that does not fit the
+comparison buffer fails its case. `check_test_driver_common_exhaustion` fails
+each common-warning scratch allocation in turn and requires the capacity error,
+then the unconstrained output once the index passes the last. The semantics are also covered by
+`test-checker`'s existing warning and constraint fixtures, and by
+`test-diagnostics` for their ordering.
 
 ## The constraint catalogue
 
@@ -4043,7 +4331,15 @@ the oracle.
   where it can decline, leave a token; a full run prints both counts per class.
   `benchmark-checker-bindings` prints a file's tokens acted at by class
   (`expression_classed`), declined by their classes' actions
-  (`expression_declined`) and of the walk's own class (`expression_scalar`). Every comparison of the two paths compares the
+  (`expression_declined`) and of the walk's own class (`expression_scalar`).
+  Its plain run (not `--only`, `--after-scalar` or `--pipeline`) then times
+  the walk by class in runs of the default handoff of their own, after its
+  samples, with `PPOptions.expression_timing` (three TSC reads a token, which
+  no compile sets): an `expression-classes` line with the walk's actions'
+  nanoseconds and the timing's own ticks a token, which it takes off every
+  class's, and an `expression-class` line per class with its tokens, those its
+  action left (whose visits its time includes), its nanoseconds (the median
+  over the passes) and its share. Every comparison of the two paths compares the
   graphs, leaves, argument slices, overload calls and `token_nodes`:
   - `test-checker`, for every source fixture
     (`check_test_source_graphs_equal`), with the overload heads;
@@ -4196,25 +4492,164 @@ the oracle.
   best walk interval: minimum 33.7 against 35.9 ms, median 37.8 against
   40.6 ms, for the build with only the trigger and the heads (21 rotated runs
   each).
+- **Measured on the 9700X (#1172).** The same step's `measure-compile` of
+  `sqlite3.c` (11 runs, medians), at #1172's `4cade144`: the walk's interval is
+  14.26 ms against #1144's 15.36 ms, with the leaves written once, the counters
+  by class and the literals' pass (below). Its parts: classes 0.43 ms, prepare
+  2.54, actions 8.96 and visits 2.41.
 - **Tried, and slower.** Identifier leaves built 16 at a time from gathered
   declaration columns, written before anything could read a leaf. That is
   before every token left to the walk's visit, whose node records the nodes
   before it. Those flushes averaged about 3 leaves on `sqlite3.c`, and the
   walk's minimum rose from 32.1 to 34.2 ms, so the leaves are written by their
   action. #1144 makes the leaves' contents ahead instead, without placing them
-  (above). Building the graph data-parallel needs node ids before any node is
-  written, which is #1038's remaining work. That means every value's consumer
-  found (its nearest ancestor that isn't a list, by pointer jumping), the
-  consumers' operand counts as a histogram, and a prefix sum. What still makes
-  it hard is the walk's own visits:
-  - each makes as many nodes as it decides, and reads its operands' columns,
-    so the ids after it are known only once it has run;
-  - the classes must then leave them few and far apart. They are 1.10% of
-    `sqlite3.c`'s tokens, one in about 59 acted at by class, and 4.14% of
-    `main.c`'s.
-  - The nodes' recording isn't such a barrier: nothing reads it before
-    `check_graph_record_finish`, which can record every node from its final
-    columns.
+  (above). The graph by passes, which would number the nodes before writing
+  any, is below.
+- **The literals' values (#1038).** `check_input_expression_literals` reads a
+  chunk's literals before its actions, as the identifiers' leaves are: a plain
+  decimal of one to nine digits without a leading zero (but `0`) is an `int`
+  of that value, and so is a preprocessor's int (`__LINE__`'s) up to
+  `INT_MAX`. Every other literal its action still parses
+  (`check_input_literal`). The vector path reads in stages over the chunk's
+  literals, 16 at a time, so that each stage's cache misses wait together:
+  names and sources; the sources' kinds, locations and ends; the ranges (one
+  of the two the last numbers were in, else `pp_find_range`'s search, which
+  all lanes take in step); then the two aligned words that hold each
+  spelling, four tokens a vector, whose digits one shuffle right-aligns and
+  pairs, quads and lanes multiply out. `check_input_literal_plain` is its
+  scalar twin. The scan test checks both paths on random chunks over three
+  guarded ranges of spellings, and every plain value against
+  `check_literal_number`; `test-checker`'s graph comparisons check the walk's
+  literals against the scalar walk's, which parses every literal.
+  - **What it costs, on the 9700X.** Most of a literal's cost is the first
+    read since the parser of its preprocessor columns and its source: on the
+    VM the pass takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms
+    warm on the same chunks. #1172's A/B on the 9700X compiled the frozen
+    corpus's `sqlite3.c` with the pass and with every literal parsed by its
+    action instead (a temporary option, gone since), the same object:
+    - rotated whole processes (`time-runs`, 11 each): 113.81 ms (113.60 to
+      114.37) against 115.21 ms (115.03 to 116.14), 539.5 million user cycles
+      against 547.4 million, and 1,281.8 million instructions against
+      1,299.8 million;
+    - the walk (`measure-compile`, 11 each, neither with a reference): 14.30 ms
+      against 15.69 ms, `prepare` 2.53 against 1.62 ms and `actions` 9.05
+      against 11.32 ms.
+
+    So the pass takes 0.9 ms to save 2.3 ms of the actions, 1.4 ms (1.2%) of
+    the compile. On the VM, whose gathers its microcode slows, the walk was
+    within its noise. The lexer reads the source and the preprocessor writes
+    those columns in order, as they make the tokens: that is where a literal's
+    value would cost little more again.
+- **Where the class actions' time goes.** `benchmark-checker-bindings` times
+  the walk by class (above). On the 9700X, the frozen corpus's `sqlite3.c`, 5
+  passes, at #1172's `4cade144` (with the literals' pass): the class actions
+  take 3.84 ms, 8.39 ns a token. The timing's own cost, 27.3 TSC ticks (7.2 ns)
+  a token, is taken off every class's and is the table's resolution: a class
+  whose residual a token is below it is marked, and is no measurement.
+
+  | class | tokens | ns a token | share | resolved |
+  | --- | --- | --- | --- | --- |
+  | the walk's own (scalar) | 6,639 | 263 | 45.4% | yes |
+  | literal | 44,307 | 10.3 | 11.9% | yes |
+  | prefix (913 left) | 8,381 | 45.2 | 9.9% | yes |
+  | identifier | 95,222 | 3.57 | 8.8% | no |
+  | terminator | 54,804 | 3.96 | 5.6% | no |
+  | member | 31,957 | 5.46 | 4.5% | no |
+  | call | 13,597 | 12.2 | 4.3% | yes |
+  | binary | 42,450 | 2.48 | 2.7% | no |
+  | separator | 25,264 | 2.78 | 1.8% | no |
+  | condition | 11,273 | 4.39 | 1.3% | no |
+  | subscript | 6,767 | 3.83 | 0.7% | no |
+  | string | 1,851 | 11.8 | 0.6% | yes |
+  | cast | 8,995 | 2.45 | 0.6% | no |
+  | list | 78,073 | 0.25 | 0.5% | no |
+  | group | 21,807 | 0.87 | 0.5% | no |
+  | return | 4,238 | 3.75 | 0.4% | no |
+  | postfix | 2,035 | 5.99 | 0.3% | no |
+  | ternary | 630 | 8.42 | 0.1% | yes |
+
+  The table is warm, as every pass of the benchmark is; the compile's walk is
+  cold, and its `actions` took 9.05 ms of the same head's 14.30 ms walk in the
+  compile-time step. What resolves is that the walk's own visits (45.4%), the
+  literals (11.9%), the prefixes (9.9%, 913 of whose 8,381 the visit takes) and
+  the calls (4.3%) are most of the warm actions. The operators and lists are
+  27.6% in all, 1.06 ms: the prefixes, calls and ternaries (14.3%) resolve,
+  and the others, from the members (4.5%) down to the lists, are each below
+  the resolution, 13.3% together. The identifiers and the terminators (8.8% and
+  5.6%), which are no operators, are below it too. The dispatch that #1038
+  found the walk's cost in (one long chain of tests a token) is gone with the
+  classes.
+- **The graph by passes (stages 2 and 4): a scalar probe, and the bound a
+  vector pass has to beat.** The numbering is probed by
+  `benchmark-checker-bindings`' `expression-numbering` line
+  (`PPOptions.expression_numbering`, `check_input_expression_numbering`): after
+  the coded walk, it numbers every acting token again in postorder, as such a
+  pass would before writing any node. Each value goes to its consumer's list
+  (the nearest ancestor that isn't a LIST, a GROUP or a SEPARATOR the walk
+  didn't visit), each operator's operands are read from its own list, a
+  terminator makes a discard a value, and the walk's visits are barriers that
+  take the walk's own nodes and value chains. Each node a class numbered is
+  checked against the walk's graph: its token, and but for a VALUE its first
+  operand; the barriers' nodes it only counts. Its time is the whole pass's,
+  from its columns' allocation and clearing to its last token, the check
+  outside it. On the 9700X, the frozen corpus's `sqlite3.c` (the same runs as
+  the table above), it numbers all 316,441 nodes and checks 311,454 of them
+  with no difference; written plainly it takes 3.21 ms warm, 10.2 ns a node,
+  where the operators and lists it would replace take 1.06 ms of the same
+  runs. (On the VM, with sqlite 3.53.2's amalgamation: 6.4 ms warm, 20.5 ns a
+  node.) What that shows, and what it doesn't:
+  - the consumer lists number the graph as the walk does, so a pass by them is
+    exact;
+  - this probe, a scalar loop of parent walks and list appends, costs three
+    times the per-token actions it would replace, before a node is written;
+  - it is not the stages' data-parallel design (node counts by class and a
+    prefix sum for the ids, the consumers by pointer jumping, operands by
+    segmented scans and gathers), which isn't built or measured. To pay on
+    `sqlite3.c`, such a numbering and the operators' writes together have to
+    take less than the operators' and lists' 1.06 ms warm, about 3.4 ns for
+    each of the walk's nodes;
+  - the walk's visits are its barriers: each makes as many nodes as it
+    decides, and reads its operands' columns, so the ids after it are known
+    only once it has run. On `sqlite3.c` they are 6,639 to 7,800, one in 58 to
+    69 tokens acted at by class (the VM's option set, then the 9700X's frozen
+    corpus), which cuts the runs a vector numbering would take to that many;
+  - the nodes' recording is no barrier: nothing reads it before
+    `check_graph_record_finish`.
+
+  The operators stay per token until a vector numbering is built and
+  measured against that bound; the stages stay open in #1038.
+- **The graph's first node.** The walk's first node, in `sqlite3.c` a string
+  at token 14, touches every graph column for the first time: each starts a
+  huge page the kernel clears. That one node took 3.2 ms of the walk on the VM
+  warm and over 100 ms after a build (the kernel compacting memory for huge
+  pages), most of the walk's system time (`expressions.usage`). It is the
+  graph's columns' first touch (#528's), not the walk's work: clearing them on
+  a parked lane while the reader's earlier passes run would take it off the
+  compile's path.
+- **Open question 2: one classification for the reader's walks.** It can't be
+  shared. The walk in source order (`check_input_resolve_range`) visits
+  259,625 of `sqlite3.c`'s tokens and 2,332,173 of `main.c`'s, of which the
+  token pass marks 236,159 and 2,129,308 ahead; the walk marks the other 9%
+  itself as it goes (`check_input_visit`: a declaration's activation point,
+  past its declarator). The expressions' classes read what that walk writes
+  (the declared types, the declarations, the specifiers' finishes and the
+  sparse columns), so they can be made only after it, and in postorder, not
+  source order. The two classifications are each one vector pass already:
+  the expressions' classes take 1.2 ms of `sqlite3.c` on the VM. What
+  `check_input_resolve_range` costs (5.18% of `-c` on the 9700X) is its own
+  per-token actions, which a shared list wouldn't change.
+- **Open question 3: leaves in the stream's columns.** They compose. A graph
+  leaf is a `CheckValue`, as a stream's value is, and the stream (#628) keeps
+  its values as 14 bytes of columns (type, flags, object, category and
+  constant kind) and a 96-byte payload row only for the 12% of nodes that need
+  more. Of `sqlite3.c`'s leaves, the identifiers (93,450) need the columns
+  alone, but the enumerators, and the literals (43,898) a payload row: about
+  6 MB against the 13 MB those leaves take as `CheckValue`s, about 4 fewer huge
+  pages to clear.
+  The graph run, which now copies each leaf into the stream's columns, could
+  then take them as they are. It isn't done here: 46 places read leaves as
+  whole `CheckValue`s through `check_graph_leaf_of`, most in the graph run and
+  the reader's later passes, outside the walk.
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
@@ -4485,7 +4920,8 @@ so shadows an outer one and the function's label of the same name, and a goto
 from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
 name in the list, reported as the block ends; a second definition in the scope
-is "redefinition of label" at its name; and a name that a block's lists declare
+is "redefinition of label" at its name, with clang's "previous definition is
+here" at the first (a local label's at its name in the list); and a name that a block's lists declare
 twice is ambiguous where it is defined or used, and undeclared at both of its
 declarations. Clang reports that last one's ambiguity first, the driver in
 source order. A unit without a list builds none of it; the vector path's mask
@@ -4634,6 +5070,141 @@ region reader takes a musttail return for a return, inside a statement expressio
 frame is where its first was; `musttail-external-callees`, tail calls of the harness's clang functions and of the C
 library's `isatty`; and `musttail-vectors`, for x86-64-v4. `test-checker-driver` compares every error's place and
 message and the exit status with clang's on 41 fixtures (`c_check_musttail_driver_test.c`).
+
+## Attributes clang doesn't know (#147)
+
+Clang ignores an attribute it doesn't know, with `-Wunknown-attributes`'
+warning (on by default; `-Werror=unknown-attributes` makes it an error, and
+`-Wno-unknown-attributes` and `-w` silence it). The checker does too: it keeps
+nothing of such an attribute and warns where clang warns. Before this
+change, it refused such a declaration by name.
+
+- **What clang knows.** `c_check_attribute_clang.inc` lists clang's
+  vocabulary for C on x86-64 Linux: the GNU names whose `__has_attribute` is
+  nonzero (a keyword's surrounding underscores removed) and the C23 spellings
+  whose `__has_c_attribute` is nonzero under `-std=gnu23`, plain or scoped.
+  `check_input_attribute_clang_knows` looks a name up by binary search: a GNU
+  one as written without its underscores, and a C23 one with its scope
+  normalized (`gnu`, and `clang` for `clang` or `_Clang`). An attribute clang
+  knows is applied by the checker's rule where it has one; where it has none
+  it is still refused by name, as before. An attribute clang doesn't know
+  gives the warning event `CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE` and isn't
+  appended, whatever the checker's rules say of its name. GCC's own
+  `externally_visible`, `optimize` and `access`, C23's `unsequenced` (which
+  clang 23 doesn't take) and WebAssembly's `export_name` (which clang knows
+  only for that target) are among them.
+- **The warning.** It is at the attribute's first token, a C23 one's scope,
+  and names it as clang does: `unknown attribute 'X' ignored`, a GNU name as
+  written, a C23 one normalized (`'gnu::invented'` for
+  `[[__gnu__::__invented__]]`; a name's underscores stay under another scope,
+  `'msvc::__y__'`) (`c_check_warning_render.c`). Its group is
+  `-Wunknown-attributes`, under `-Wattributes` (`c_check_diagnostic.c`).
+- **The suggestion.** Clang's `; did you mean 'Y'?`, as its
+  `DiagnoseUnknownAttribute` makes it (`check_warning_attribute_suggestion`):
+  a C23 scope that isn't one of its 9 is corrected to the closest of them,
+  then a name that isn't one of its 539 spellings (normalized for that scope)
+  to the closest of those, where clang knows that one in the attribute's
+  syntax and scope. The closest is the first of the fewest edits (insertions,
+  deletions, replacements) within a third of the name's length, rounded up,
+  a candidate skipped whose length differs by more than a third of the name's
+  (`SimpleTypoCorrection`); only that one is tried, so `alignd`'s closest,
+  `align` (a declspec's), gives no suggestion. The lists are clang's
+  `AttributeSpellingList.inc` (the end of `c_check_attribute_clang.inc`).
+- **`__clang__`.** Where a C23 attribute's scope goes (before `::`), or its
+  name right after `[[`, the number the predefined `__clang__` expands to is
+  clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
+  predefined macro name, not an attribute scope specifier; did you mean
+  '_Clang' instead?" (clang's `TryParseCXX11AttributeIdentifier`). The parser
+  makes such a number the identifier `_Clang` before it reads the unit
+  (`parse_clang_scope_numbers`, which asks the expansion history only where a
+  number stands there); the checker warns at a `_Clang` whose source is a
+  number (`check_input_attribute_clang_macro`).
+- **Statements.** C23 attributes alone before a statement are the
+  statement's where the next token starts no declaration, as clang's
+  `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
+  (`parse_scalar_attributed_statement`), and the checker's statement
+  attributes too. With GNU ones among them it is a declaration unless each
+  attribute, C23's too, is one of clang's statement attributes
+  (`parse_scalar_standard_statement_attribute`: `fallthrough`, and
+  `clang::`'s `always_inline`, `assume`, `atomic`, `code_align`, `likely`,
+  `musttail`, `no_outline`, `noinline`, `nomerge`, `suppress` and
+  `unlikely`, `gnu::`'s `always_inline`, `fallthrough` and `noinline`, and
+  `msvc::`'s `forceinline`, `forceinline_calls` and `noinline`). A C23
+  attribute refused on a statement is named as clang normalizes it, at its
+  first token (`'gnu::aligned' attribute cannot be applied to a statement`).
+  Before a label's name a statement's attributes are the label's
+  (`[[x]] l:`), read as GNU ones after its colon are
+  (`check_input_label_attributes`); their closer is the name's parent in the
+  tree, so a label's name is the token before its colon there
+  (`check_input_label_name`). The parser reports clang's errors for C23
+  attributes after GNU ones and before a block's `}`. Specifiers of
+  attributes alone have no type: an implicit int's error at the declarator's
+  name, but a member's "type name requires a specifier or qualifier" after
+  C23 ones, which clang's specifiers don't hold (GNU ones count as
+  specifiers there).
+- **Differences left.**
+  - Several `__clang__` scopes in one declaration's attributes: clang gives
+    its parser's warnings first, then its unknown-attribute ones; the
+    driver orders them by place. A `__clang__` after a comma in a list
+    (`[[x, __clang__]]`) stays a number, a parse error.
+  - The note "expanded from macro '__clang__'" is at the predefines' own
+    line of it, not clang's (line 2 of its `<built-in>`), as every note at a
+    predefined macro is.
+  - An error of an attribute at `__clang__`'s scope that the checker
+    refuses comes before clang's warning at the same token, where clang
+    gives the warning first.
+  - An ordinary identifier the unit declares, after specifiers of
+    attributes alone (`int x; ... __attribute__(()) x = 1;`), is clang's
+    "expected identifier or '('" at it, which needs a lookup the parser
+    doesn't make: ours is the implicit int's error or "unknown type name".
+- **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
+  order and lookups and what each kind of name keeps
+  (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
+  lines with clang's for a source of every kind of unknown attribute
+  (declarations, members, labels and statements, beside known ones, with
+  suggestions and `__clang__`), on both paths, with no option,
+  `-Wno-unknown-attributes`, `-Werror=unknown-attributes` and `-w`; the
+  whole output of attributed statements and labels; and clang's lines for
+  misspellings of every spelling, made by a fixed generator
+  (`check_test_driver_attribute_typos`). It also asks clang every listed
+  spelling again (`check_test_driver_unknown_attributes`). `test-parser`'s
+  snippets cover the statement and declaration forms against clang.
+
+The vocabulary is regenerated where clang's changes, from the installed
+`clang` and its `libclang-cpp`, in a scratch directory:
+
+```sh
+export LC_ALL=C
+LIB=$(ldd "$(readlink -f "$(command -v clang)")" | awk '/libclang-cpp/{print $3}')
+strings -n 3 "$LIB" | tr -c 'A-Za-z0-9_\n' '\n' | grep -E '^[A-Za-z_][A-Za-z0-9_]{1,60}$' | sed 's/^__\(.*\)__$/\1/' | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u > candidates.txt
+clang -dM -E -x c /dev/null | awk '{print $2}' | grep '(' | sed 's/(.*//' > function-macros.txt
+grep -vE '^(__has_|__building_module$|_Pragma$|__is_target_|__is_identifier$|__identifier$|defined$|__pragma$|__embed|__assume$)' candidates.txt | grep -vxF -f function-macros.txt > names.txt
+awk '{print NR " __has_attribute(" $1 ")"}' names.txt > gnu-query.c
+clang -E -P -ferror-limit=0 -std=gnu17 -x c gnu-query.c 2>/dev/null | awk 'NF==2 && $2!=0 {print $1}' > gnu-lines.txt
+awk 'NR==FNR{k[$1]=1;next} (FNR in k){print}' gnu-lines.txt names.txt > gnu.txt
+{ awk '{print $1; print "gnu::" $1; print "clang::" $1; print "msvc::" $1}' gnu.txt; awk '{print "gnu::" $1; print "clang::" $1; print "msvc::" $1; print $1}' names.txt; } | sort -u > c23-candidates.txt
+awk '{print NR " __has_c_attribute(" $1 ")"}' c23-candidates.txt > c23-query.c
+clang -E -P -ferror-limit=0 -std=gnu23 -x c c23-query.c 2>/dev/null | awk 'NF==2 && $2!=0 {print $1}' > c23-lines.txt
+awk 'NR==FNR{k[$1]=1;next} (FNR in k){print}' c23-lines.txt c23-candidates.txt > c23.txt
+```
+
+Each query is numbered by its line, so an answer is matched with its name
+even where a name is a macro or clang reports an error for it. The spelling
+list is clang-tblgen's, from `Attr.td` and the files it includes at the
+installed clang's tag (`AttrDocs.td`, `ASTNode.td`, `DeclNodes.td`,
+`StmtNodes.td`, in a `clang/Basic` directory):
+
+```sh
+clang-tblgen --gen-attribute-spelling-list -I . clang/Basic/Attr.td -o spelling.inc
+```
+
+Its `ATTR_NAME` and `ATTR_SCOPE_NAME` lines, in order, are the file's
+`BUSTER_CHECK_CLANG_SPELLING` and `BUSTER_CHECK_CLANG_SCOPE` lines. `gnu.txt` and
+`c23.txt` are the two lists, in the file's macros
+(`BUSTER_CHECK_CLANG_GNU_ATTRIBUTE("name")` and
+`BUSTER_CHECK_CLANG_C23_ATTRIBUTE("spelling")`), under its header; update
+THIRD_PARTY_NOTICES.md's record, the counts `test-checker` checks, and
+compare the lists with `Attr.td` before taking them.
 
 ## Ignorable and unsupported pragmas
 

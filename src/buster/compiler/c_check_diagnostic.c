@@ -41,7 +41,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wenum-too-large", NULL, "enumeration values exceed the available integer range" },
     { "-Winteger-overflow", NULL, "integer constant expression overflows its type" },
     { "-Wshift-count-negative", NULL, "shift count is negative" },
-    { "-Wshift-count-overflow", NULL, "shift count is not smaller than the width of the type" },
+    { "-Wshift-count-overflow", NULL, "shift count >= width of type" },
     { "-Wshift-negative-value", NULL, "left shift of a negative value" },
     { "-Wshift-overflow", NULL, "left shift exceeds the range of the type" },
     { "-Wexcess-initializers", NULL, "excess elements in initializer" },
@@ -77,6 +77,32 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wsource-uses-openmp", "-Wopenmp", "unexpected OpenMP directive; OpenMP is not enabled" },
     { "-Wincompatible-library-redeclaration", NULL, "incompatible redeclaration of library function" },
     { "-Wbuiltin-requires-header", NULL, "declaration of built-in function requires inclusion of its header" },
+    { "-Wunknown-attributes", "-Wattributes", "unknown attribute ignored" },
+    { "-Wdivision-by-zero", NULL, "division by zero is undefined" },
+    { "-Wconstant-conversion", NULL, "implicit conversion changes value" },
+    { "-Warray-bounds", NULL, "array index is past the end of the array" },
+    { "-Wsign-compare", NULL, "comparison of integers of different signs" },
+    { "-Wunused-comparison", "-Wunused-value", "comparison result unused" },
+    { "-Wunused-value", NULL, "expression result unused" },
+    { "-Wlogical-not-parentheses", NULL, "logical not is only applied to the left hand side of this comparison" },
+    { "-Wparentheses", NULL, "using the result of an assignment as a condition without parentheses" },
+    { "-Wempty-body", NULL, "empty body" },
+    { "-Wself-assign", NULL, "explicitly assigning value of variable to itself" },
+    { "-Wreturn-stack-address", NULL, "address of stack memory associated with local variable returned" },
+    { "-Wformat", NULL, "format string does not match the arguments" },
+    { "-Wformat-security", "-Wformat", "format string is not a string literal (potentially insecure)" },
+    { "-Wunused-variable", NULL, "unused variable" },
+    { "-Wunused-function", NULL, "unused function" },
+    { "-Wunused-parameter", NULL, "unused parameter" },
+    { "-Wuninitialized", NULL, "variable is used uninitialized" },
+    { "-Wswitch", NULL, "enumeration value not handled in switch" },
+    { "-Wdangling-else", NULL, "add explicit braces to avoid dangling else" },
+    { "-Wunused-but-set-parameter", NULL, "parameter set but not used" },
+    { "-Wunused-const-variable", "-Wunused-variable", "unused variable" },
+    { "-Wformat-extra-args", "-Wformat", "data argument not used by format string" },
+    { "-Wformat-insufficient-args", "-Wformat", "more '%' conversions than data arguments" },
+    { "-Wformat-invalid-specifier", "-Wformat", "invalid conversion specifier" },
+    { NULL, NULL, "empty case range specified" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -241,7 +267,7 @@ static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input
 
 static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
 {
-    const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
+    const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) && token < input->token_count ? check_input_attributes_at(input, token) : NULL;
     uint32_t warnings = 0;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
@@ -357,7 +383,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
             first = member->token;
         }
     }
-    for (uint32_t at = 0; policies && input->attributes != NULL && at < input->token_count && at < first; at += 1)
+    for (uint32_t at = 0; policies && check_sparse_wide_present(input->attributes) && at < input->token_count && at < first; at += 1)
     {
         const uint32_t warnings = check_diagnostic_attribute_warnings(input, at);
         if (warnings != 0 && check_diagnostic_severity(input, at, warnings) >= CHECK_WARNING_ERROR)

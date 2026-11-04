@@ -93,9 +93,9 @@ the former 65,536-local cap. Available arena memory and representable frame disp
 Per-entry instruction counts use 32 bits, including a call's complete aggregate copies. Both paths accumulate the
 prologue/body/epilogue total in 64 bits and refuse output before allocation when its record identities, including
 emission padding, cannot fit 32 bits. Available arena memory remains a separate bound.
-Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), within the 240-depth storage bound. An indirect
-call also holds its callee, so 238 simple arguments fit that bound; expressions inside arguments can need additional
-live values. Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
+Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), independently of evaluation depth. Indirect
+calls may also use all 239 arguments: the callee and values live across nested argument expressions occupy dynamically
+sized deep slots (#1106). Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
 Clang cross-checks. Beyond the argument bound, the C driver names the 239-argument limit.
 The C driver names an exhausted entry or local limit separately from insufficient lowering storage. Its
 `test-checker-driver` regression compiles 32,768 blocks with 65,537 locals through both paths, compares the objects,
@@ -168,6 +168,40 @@ table. The kinds are:
   the scalar validator, as it does a tail call's; the C producer gives a fence of a constant order one
   (`check_program_direct_fence`, [the builtin integration guide](c-builtins-integration.md)'s "Helper contracts and
   direct forms").
+- An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
+  `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
+  bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
+  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
+  the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
+  shape.
+- `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and
+  pushes the object's old value of `class`: `value` its operation (`BUSTER_TYPED_RMW_ADD` for an addition, an exchange
+  without it) and a C memory order, any of the six. Tier 0 defers it and emits `xchg` (an exchange) or `lock xadd` (an
+  addition) of the operand's register with the object, the class's bytes, a full barrier on x86-64 that every order
+  takes, then the old value into the address's register, extended as the class's load extends it. No consumer moves an
+  access across it or drops it; `ir_lower` makes it the IR's `rmw` with its class's natural alignment. The typed
+  interpreter runs it as one thread does, refusing a misaligned object and checking it as a load's (undefined bytes are
+  reported) before a store's. The C producer
+  gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
+  `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
+  guide](c-builtins-integration.md)'s "Direct read/modify/writes").
+- `ATOMIC_CAS` (#1059), an atomic compare-exchange, pops the expected value and the desired one, both of an integer
+  `class`, and pushes the object's old value of `class`: `value` a C memory order and, from
+  `BUSTER_TYPED_CAS_LOCAL_SHIFT`, the local (of U64) that holds the object's address, since three operands and a scratch
+  register would take a fourth depth. Tier 0 defers it: the expected value swapped into rax where it isn't there (rax's
+  own value, a deeper one's, kept in its register), the address loaded from the local's home into the stack's first
+  free register (which the entry so claims, as a copy's scratch), `lock cmpxchg` of the desired value's register with
+  the object, the class's bytes, a full barrier on x86-64 that every order takes, which leaves the old value in rax, the
+  swap undone, and the old value extended as the class's load extends it. The producer compares it with the expected
+  value for the success (in `I32` for a narrow class, which Tier 0's compares take). Its local counts as a use of it
+  where Tier 0 gives locals their homes (`tier0_count_references` and its vector twin), so that a pointer parameter
+  whose only use is a compare-exchange's address keeps its incoming value (`test-ir-lowering` runs such functions
+  natively against both interpreters). No consumer moves an access across it or drops it; `ir_lower` makes it a load of
+  the local and the IR's `rmw ... cas`. The typed interpreter runs it as one thread does, as an `ATOMIC_RMW`. The C
+  producer gives a compare-exchange of a constant order one (`check_program_direct_cas`), and so does every plan's (an
+  implicit `_Atomic` update's loop, a generic form's), and a bitwise, minimum or maximum read/modify/write a loop of
+  them (`check_program_direct_fetch`): [the builtin integration guide](c-builtins-integration.md)'s "Direct
+  compare-exchanges" and "Direct fetch loops".
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
@@ -299,7 +333,13 @@ without aggregates:
 `BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
 register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A result whose
 `part_bytes` is its size, fewer than 8 bytes, alone in one register (an `_Atomic` vector of 4 bytes, which LLVM returns
-as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). A STACK location with
+as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). So is each of a
+vector's that LLVM splits over two to four of the target's widest vector registers (`tier0_vector_result_parts`, #137: a
+32- or 64-byte vector without AVX, in xmm0 to xmm3, or a 64-byte one with AVX alone, in ymm0 and ymm1), each register
+`part_bytes` of it whole, one after another, which the epilogue loads and a call's object stores. So are the elements of
+an extended vector of three doubles or three longs, which LLVM returns one per register at the baseline (#137): in xmm0,
+xmm1 and st0, and in rax, rdx and rcx, 8 bytes each from the object's first (`tier0_element_parts`; st0's an `fld` and an
+`fstp` of 8 bytes, `tier0_element_x87`, so that a call leaves the x87 stack as it found it). A STACK location with
 `BUSTER_ABI_FLAG_HIGH` or `BUSTER_ABI_FLAG_LOW` is one part too, the high or the low eightbyte alone, in its 8-byte
 slot: a copy of the aggregate's bytes would run into the next argument's slot (#137). A part loads only the
 aggregate's own bytes, which may end at a page's end:
@@ -454,6 +494,16 @@ left below the vector path's 16: the masks took the last one): each entry that m
 `tier0_validate` follows each depth's width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than
 an entry's is refused, not miscompiled.
 
+A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of more than 64 (AMX's 1024-byte tile among
+them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
+its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
+does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
+and an element of one whose elements are bytes is read and written through that address. What would compute with one
+(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
+builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
+builtins on vectors, as on structs, call libatomic's generic functions.
+
 - **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
   `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,
   `STORE_LOCAL` and `SET_LOCAL` (of an object of the vector's bytes, all of which they read or write), `DISCARD` and
@@ -470,11 +520,19 @@ an entry's is refused, not miscompiled.
   object's address (`result_size`), each in one vector register whole as the convention places it (an XMM, YMM or ZMM
   register: `tier0_parts_of`'s parts of 16, 32 and 64 bytes, which a struct of one vector takes too; one of 4 or 8 bytes
   an SSE eightbyte's part in an XMM register's first bytes, as a struct of floats is), or on the stack. A parameter is
-  an object the prologue stores its register in.
+  an object the prologue stores its register in. A vector wider than the target's registers (a baseline target's,
+  `vector_bytes` 16 or 32) is returned split across them, as LLVM returns it (#1193): 32 bytes in xmm0 and xmm1 and 64
+  in xmm0 to xmm3 without AVX, 64 in ymm0 and ymm1 with AVX but not AVX-512F; part k at byte 16k or 32k of the object,
+  each register loaded and stored whole (`tier0_vector_result_parts`, which `tier0_aggregate_result_valid` takes only
+  in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
+  memory, on the stack whole.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
-  the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
-  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
-  end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
+  the copies of selection, measuring and the deferred entries' emitter that look for their entries
+  (`tier0_memory_function`), as `x87` and `int128` do, and the vectors' slots where an entry is of class VECTOR
+  (`tier0_vector_slots`, 64 entries' classes at a time on the vector path): a function whose rows are scalar alone (an
+  asm statement's placed in its caller, #1059, an x86 builtin's of general registers or masks) reserves none. On the
+  EVEX path (`vector_bytes` 0) Tier 0's own records for them are EVEX ones, for a unit whose target has AVX-512 (F, VL,
+  BW and DQ); elsewhere they are SSE's or AVX's ("Targets without AVX-512", below).
 
 **Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
 up to 8 records each with their operands' classes (integers, floating values and VECTORs, each VECTOR one's bytes) and
@@ -509,7 +567,11 @@ VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the
 non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
 values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are, and the
 extensions' system instructions: RAO-INT's atomic operations, `cldemote`, `serialize`, UINTR's, `ptwrite`, `umonitor`,
-MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); a VEX form without
+MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); any general-purpose legacy
+form of the same rule (#1059, for an asm statement placed in its caller: `tier0_operation_general_effects`), covered and of
+named operands, whose control goes on and that changes no flag but the status ones (not the direction flag) and touches
+none of the x87's state (`add`, `bswap`, `lock xadd`, `lea`, `setcc`, `mfence`, `lfence`, `sfence`, `pause`, the
+prefetches; not `cpuid`, `push`, `jmp r/m`, `cld` or `fld`); a VEX form without
 operands only where its effects name no register either (`tilerelease`, not `vzeroupper` or `vzeroall`); no branch,
 symbol or RIP-relative address, each field's role of its class (an integer operand's no narrower than its field, the
 integer result's in a field of 32 or 64 bits), and each record `x86_validate` takes with its roles placed. So a row
@@ -524,6 +586,29 @@ the operations, of another class than its row's result or of an operand of anoth
 `?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a
 vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
 conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
+
+**Targets without AVX-512 (#775).** At `x86-64`, `x86-64-v2` and `x86-64-v3` a function's vector transport is 16 bytes
+of SSE2 or 32 of AVX (`vector_bytes`, #955), through the first free floating register, and its rows are the front end's
+at the target's forms, by both of the checker's paths:
+
+- The rows the operators, the generic builtins and the x86 builtins build in EVEX forms take their reviewed SSE or VEX
+  equivalents (`check_vector_baseline_form`, `c_check_program_vector_forms.c`): the same operation unmasked, a legacy
+  form's destination tied to its first source by a copy, each form allowed by the target's features
+  (`x86_target_requirement`), and legacy compares only of predicates 0 to 7. What SSE has no one instruction for is a
+  sequence: an SSE2 element's extraction (`pshufd` and `movd`), SSE4.1's blends without AVX (their legacy forms read
+  xmm0: the mask's signs, `andps`, `andnps` and `orps`), and the shuffles (`check_vector_baseline_shuffle_row`,
+  `c_check_program_vectors_baseline.c`), planned at the widest element their pairs allow: `pshufd` and `shufpd` of
+  qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
+  words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
+  a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+- What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
+  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
+  integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The sign masks and
+  the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
+  several registers and operators on vectors wider than the registers are #1193's.
+- `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
+  intrinsics, shuffles of every element size, SSE4.1's and AVX2's) at the three levels natively against clang -O0's build
+  at the same `-march`, and checks each refusal by name.
 
 ## Masks (#179)
 
@@ -540,7 +625,7 @@ opmask registers an EVEX form may take as a write mask) and whose deeper ones li
   (`tier0_mask_effect`), their exclusive prefix sums 64 entries at a time (`tier0_vector_mask_depths`, an `X86` entry's
   effect from its row, as the calls' are) with the scalar twin `tier0_mask_depths_scalar`, made only for a function
   that says it has masks. No mask entry absorbs or is absorbed: no template of the class has a fused variant. The stack
-  is bounded as the others are (`BUSTER_TIER0_MAX_DEPTH`): both paths refuse a function an entry of which finds 240
+  retains its own byte-depth bound (`BUSTER_TIER0_MAX_MASK_DEPTH`): both paths refuse a function an entry of which finds 240
   masks or more on it (`TIER0_ERROR_DEPTH`, which the C driver reports as more values live at once than Tier 0's deep
   slots take), since the column is of bytes. The vector path's sums are bytes too, the depths modulo 256 (a block's own
   sum among them, which rows of many mask operands take past an int8's range), exact below 256; and as an entry pushes
@@ -727,10 +812,18 @@ depth's slot; the 128-bit integers and vectors pass as aggregates, their address
 entry of theirs whose own registers would still pass the tables at its window's depths is refused
 (`TIER0_ERROR_DEPTH`) rather than placed past them.
 
-**Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a stack deeper than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth
-columns' bytes would wrap past (a stack rises by one entry at a time at most, so it shows there first). Before #780, a
-function with values of the memory classes or vectors whose stacks passed the tables was refused too: stb_image's
-`_mm_set1_epi8`, whose call of `_mm_set_epi8` has 16 arguments and returns a vector, among them.
+**Full-width deep values (#1106).** The ordinary byte-depth scan and compact selection remain unchanged. Once a
+function needs deep selection, two cold 32-bit columns reconstruct the folded effects' full prefix sums, including the
+linear exit after the last entry. A call's positive signed-byte effect greater than one is its wrapped negative pop,
+not a push; scalar and sixteen-lane AVX-512 scans correct it before accumulating. Taken `JUMP_VALUE` exits restore
+one value separately. Integer, floating, long-double, 128-bit and vector values no longer have a fixed 240-slot cap:
+the stream bound, available arena memory and checked signed frame displacements bound them instead. Memory-only
+operations past byte depth 255 rebase their slot areas even when they use no depth registers. Ordinary call-save
+storage is recomputed from full depths; deep calls already preserve their live values in deep slots.
+
+`TIER0_ERROR_DEPTH` remains for a mask stack at `BUSTER_TIER0_MAX_MASK_DEPTH` (240), or a deferred operation whose
+operand window itself cannot fit its register tables. The mask representation and per-call 239-argument bound are
+unchanged. No source-expression reassociation or evaluation-order change is involved.
 
 **Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
 crosses the line. `test-tier0`'s deep shape (below) has about 2% of its entries deep, and its cross-check's code is 1.33
@@ -1241,8 +1334,8 @@ Before the programs, checks of their own:
   `X86_FORM_NONE` (which keeps the record) and a random value.
 - **errors:** both paths must refuse the same streams alike: an entry without a template (`NOT` of a double, which
   `tier0_validate` refuses too) at 200 places among 64-entry blocks, before another (the first entry reported), and
-  14 to 17, 32, 239 and 240 values on the integer stack at once, past the 15 depths from 17 on (the last constant is
-  the first add's immediate), which must compile alike, and 241 and 250, past `BUSTER_TIER0_MAX_DEPTH`. And both must
+  integer stacks at the register boundary, the former 240-slot bound, both sides of byte wraps and 1000 values,
+  all of which must compile alike (the last constant is the first add's immediate). And both must
   compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
   homes, and an absorbed lane mustn't look its value up as a local's.
 - **objects:**
@@ -1319,25 +1412,27 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
-- **aggregates** (#137), at locations written by hand: 14 fixtures of what `abi_assign` makes rarely or never on its
+- **aggregates** (#137), at locations written by hand: 16 fixtures of what `abi_assign` makes rarely or never on its
   own and of the parts' edges (each kind of general and XMM part, both kinds in one aggregate, the high eightbyte alone
   in each kind of register and on the stack, the low eightbyte alone of a larger aggregate on the stack (`LOW`) before
   a value in the next slot, SPLIT both ways in both kinds, an ignored aggregate, aggregates on the stack
   whole, in place and in a slot misaligned for them, and results in rax and rdx, xmm0 and xmm1, both mixed orders, the
-  high eightbyte alone in each kind, a vector, 5 and 6 bytes, and through a hidden pointer), each run natively both
-  ways:
+  high eightbyte alone in each kind, a vector, 5 and 6 bytes, through a hidden pointer, and a vector split across
+  xmm0 and xmm1 and across xmm0 to xmm3, #1193's), each run natively both ways:
   - **aggregate calls:** Tier 0's caller, by both paths, passes the aggregates' bytes from pages that end or start at a
     `PROT_NONE` page to a probe, records of the test's own, which records every argument register and its stack slots:
     each value and part must be where its location says, and a result the probe returns must land in its object;
   - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
     copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
     the result in its registers or through the hidden pointer, which must come back in rax;
-  - **aggregate errors:** 61 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+  - **aggregate errors:** 67 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
     malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
     falling off it, by a jump and by a branch, a jump that takes a value to the end, a function with a hidden result
     that returns nothing or falls off its end, an aggregate's two parts in one register, a register two parameters
     take, a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
-    as a parameter, and a low eightbyte alone of 8 bytes, with `HIGH`, in registers and past the call's area.
+    as a parameter, a low eightbyte alone of 8 bytes, with `HIGH`, in registers and past the call's area, and a split
+    vector's registers out of order, in three of them, of 64-byte parts, its size unlike theirs, with `HIGH`, and a
+    call's split vector object too small for them.
 - **tail calls** (#147, `tier0_tail_test.c`): a tail-calling function per aggregate fixture in five frames, run from a
   driver, whose probe must find the arguments, the stack and the callee-saved registers as "Tail calls" (above) says,
   the saved registers' frame first calling a function that clobbers every register a call may; and **tail errors**,
@@ -1400,9 +1495,8 @@ Before the programs, checks of their own:
   C (clang's code of `__int128`) is the oracle of their values and of the convention for them:
   - **rules:** each break of the classes' rules (above) refused at its entry by `tier0_validate`;
   - **slots:** for the 128-bit integers and for long double, stacks of a memory class's values to the integer table's
-    last slot, one and two past it and 40, each of which both paths compile to the same code and runs (past the table
-    through the deep slots, #780); of 238, which both compile; and of 239, whose stack with the output's address below
-    it reaches `BUSTER_TIER0_MAX_DEPTH`, which both refuse;
+    last slot, one and two past it, 40, the former 240-slot bound, byte wraps and 1000 values, each compiled by both
+    paths to the same code, encoded by both encoders and executed to check its sum;
   - **boundaries:** for each class, its six compares, `SHR` by 0, 1, 63, 64, 65 and 127, and `SHR` and `SHL` by variable
     counts, on every pair of ten boundary values (0, 1, -1, the extremes, 2^63, 2^64 and their neighbours), against the
     check's stack machine and against C's own operators;
@@ -1881,3 +1975,12 @@ sum its rows into a claimed measured total. [#136](https://github.com/buster14a/
 small/large full path measurements, ABI/initialization/copy/arena costs,
 partial-batch/fallback counts and generated code quality. Shared IR/SSA and
 Tier 1 remain [separately tracked branch integrations](simd-boundary-audit.md#pending-stage-integration).
+
+### Deep C driver regression (#1106)
+
+`test-checker-driver` generates right-nested expressions at depths 239, 240, 255, 256, 257, 300 and 1000 for integers,
+doubles, long doubles, 128-bit integers and 16-byte vectors. It also executes 1000 nested direct, indirect and floating
+calls, side-effecting argument calls, a conditional under a deep live prefix, and a 239-argument call under 300 live
+values. Clang, default Tier 0, scalar Tier 0 and both `--tier1` routes compile and run the same source. The Clang oracle
+raises its parser bracket-depth limit and, in its child only, its host stack limit. Buster keeps the original stack
+limit. Every binary must satisfy independent arithmetic and side-effect checks.

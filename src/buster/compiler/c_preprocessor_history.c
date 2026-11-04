@@ -848,10 +848,19 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
     }
 }
 
+static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
+                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments);
+
 static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase, const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
+    pp_diagnose_output_location(pp, severity, token, token < pp->output.count ? pp->output.locations[token] : 0, position, phase, notes, note_count, format, arguments);
+}
+
+// pp_diagnose_output_arguments at `location`, a place in the spelling of output token `token` (with its history).
+static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
+                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
+{
     pp_history_ensure(pp);
-    const uint32_t location = token < pp->output.count ? pp->output.locations[token] : 0;
     const uint32_t origin = pp_history_at(pp, token);
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
@@ -867,12 +876,11 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
     {
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + phase, token < pp->output.count ? pp->output.locations[token] : 0,
-                                  pp_history_at(pp, token), NULL, notes, note_count, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + phase, location, pp_history_at(pp, token), NULL, notes, note_count, format, arguments);
         }
         else
         {
-            pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), NULL, format, arguments);
+            pp_render_diagnostic(pp, severity, location, pp_history_at(pp, token), NULL, format, arguments);
             for (uint32_t i = 0; notes != NULL && i < note_count; i += 1)
             {
                 const uint32_t at = notes[i].token;
@@ -903,11 +911,61 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 5, 6))) void pp_
     va_end(arguments);
 }
 
+// pp_diagnose_output_at at the `offset`th character of the token's spelling after translation phases 1 and 2 (as
+// pp_spelling gives it), as clang's AdvanceToTokenCharacter places a diagnostic inside a numeric constant: a line splice
+// in the spelling moves the place past it.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
+                                                                                                           uint32_t position, const char* format, ...)
+{
+    uint32_t location = token < pp->output.count ? pp->output.locations[token] : 0;
+    const uint32_t range = token < pp->output.count ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    if (range != BUSTER_PP_NONE)
+    {
+        const PPRange* bytes = &pp->ranges[range];
+        uint32_t at = location - bytes->base;
+        for (uint32_t left = offset; left != 0 && at < bytes->length; left -= 1)
+        {
+            // Past the character, then past any splices after it: a backslash, perhaps spaces, and a line break.
+            at += 1;
+            bool spliced = true;
+            while (spliced)
+            {
+                uint32_t after = at;
+                spliced = at < bytes->length && bytes->bytes[at] == '\\';
+                after += spliced;
+                while (spliced && after < bytes->length && (bytes->bytes[after] == ' ' || bytes->bytes[after] == '\t'))
+                {
+                    after += 1;
+                }
+                const uint32_t line = after < bytes->length && bytes->bytes[after] == '\r' ? 1 : 0;
+                spliced &= after + line < bytes->length && bytes->bytes[after + line] == '\n';
+                at = spliced ? after + line + 1 : at;
+            }
+        }
+        location = bytes->base + (at < bytes->length ? at : bytes->length);
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_location(pp, severity, token, location, position, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);
+    va_end(arguments);
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
 {
     va_list arguments;
     va_start(arguments, format);
     pp_diagnose_output_arguments(pp, severity, token, token, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);
+    va_end(arguments);
+}
+
+// `pp_diagnose_output_location` for callers holding a phase and a varargs-free message: a source location inside a
+// token's spelling (not its start) publishes where `position` sorts it, keeping the token's own origin history.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_diagnose_output_location_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location,
+                                                                                                          uint32_t position, PPDiagnosticPhase phase, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_location(pp, severity, token, location, position, phase, NULL, 0, format, arguments);
     va_end(arguments);
 }
 
@@ -919,5 +977,14 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_
     va_list arguments;
     va_start(arguments, format);
     pp_diagnose_output_arguments(pp, severity, token, position, PP_DIAGNOSTIC_SEMANTIC, notes, note_count, format, arguments);
+    va_end(arguments);
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_diagnose_output_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase,
+                                                                                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_arguments(pp, severity, token, position, phase, notes, note_count, format, arguments);
     va_end(arguments);
 }

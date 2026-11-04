@@ -44,7 +44,6 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_NOCOMMON,
     CHECK_ATTRIBUTE_TLS_MODEL,
     CHECK_ATTRIBUTE_ASM_LABEL,
-    CHECK_ATTRIBUTE_EXPORT_NAME,
     CHECK_ATTRIBUTE_CALLING_CONVENTION,
     CHECK_ATTRIBUTE_NORETURN,
     CHECK_ATTRIBUTE_RETURNS_TWICE,
@@ -104,6 +103,8 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_ALIGN_VALUE,
     CHECK_ATTRIBUTE_NO_BUILTIN,
     CHECK_ATTRIBUTE_MUSTTAIL,
+    CHECK_ATTRIBUTE_NOMERGE,
+    CHECK_ATTRIBUTE_SUPPRESS,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -242,7 +243,6 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "alias", CHECK_ATTRIBUTE_ALIAS, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "ifunc", CHECK_ATTRIBUTE_IFUNC, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "section", CHECK_ATTRIBUTE_SECTION, CHECK_ATTRIBUTE_STRING, 1, 1 },
-    { "export_name", CHECK_ATTRIBUTE_EXPORT_NAME, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "weak", CHECK_ATTRIBUTE_WEAK, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "weakref", CHECK_ATTRIBUTE_WEAKREF, CHECK_ATTRIBUTE_STRING, 0, 1 },
     { "common", CHECK_ATTRIBUTE_COMMON, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -327,6 +327,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
     // clang::'s scope.
     { "musttail", CHECK_ATTRIBUTE_MUSTTAIL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // clang's too, which a statement's attributes take and ignore (check_input_statement_attribute_kinds): nomerge, which
+    // only keeps calls from merging, and suppress, the static analyzer's, of string literals. A declaration's are refused.
+    { "nomerge", CHECK_ATTRIBUTE_NOMERGE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "suppress", CHECK_ATTRIBUTE_SUPPRESS, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
     { "unsequenced", CHECK_ATTRIBUTE_UNSEQUENCED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "reproducible", CHECK_ATTRIBUTE_REPRODUCIBLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
 };
@@ -804,12 +808,6 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 check_input_attribute_equal(attribute->text, "initial-exec") || check_input_attribute_equal(attribute->text, "local-exec");
         error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
     }
-    if (valid && attribute->kind == CHECK_ATTRIBUTE_EXPORT_NAME)
-    {
-        // export_name selects a WebAssembly export. The supported x86-64 output has no such namespace; retain
-        // the decoded name and its source range, with the same deliberate no-effect disposition as native Clang.
-        attribute->ignored = true;
-    }
     if (!valid)
     {
         check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
@@ -885,6 +883,210 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
     return valid;
 }
 
+// The GNU attributes clang 23's Sema refuses on a label (#147), each with the end of its message, "'name' attribute ...":
+// those whose subjects clang lists without a label among them, and fallthrough, which can't be applied to a declaration.
+// clang takes the others there: unused, the ones it ignores without a word (aligned, deprecated, vector_size and the
+// like), and those it ignores with a warning that they apply to other subjects (hot, cold, noreturn and the like), which
+// the checker doesn't model. musttail's error is its own (check_input_attribute_musttail).
+typedef struct CheckInputLabelRefusal CheckInputLabelRefusal;
+struct CheckInputLabelRefusal
+{
+    const char* name;
+    const char* message;
+};
+
+static const CheckInputLabelRefusal check_input_label_refusals[] = {
+    { "alias", "only applies to functions and global variables" },
+    { "assume", "cannot be applied to a declaration" },
+    { "btf_decl_tag", "only applies to variables, functions, structs, unions, classes, non-static data members, and typedefs" },
+    { "counted_by", "only applies to non-static data members" },
+    { "error", "only applies to functions" },
+    { "fallthrough", "cannot be applied to a declaration" },
+    { "flatten", "only applies to functions" },
+    { "lifetimebound", "only applies to parameters and implicit object parameters" },
+    { "min_vector_width", "only applies to functions" },
+    { "minsize", "only applies to functions and Objective-C methods" },
+    { "mode", "only applies to variables, enums, typedefs, and non-static data members" },
+    { "no_address_safety_analysis", "only applies to functions and global variables" },
+    { "no_sanitize", "only applies to functions, Objective-C methods, and global variables" },
+    { "no_sanitize_address", "only applies to functions and global variables" },
+    { "no_sanitize_memory", "only applies to functions" },
+    { "no_sanitize_thread", "only applies to functions" },
+    { "no_split_stack", "only applies to functions" },
+    { "nomerge", "only applies to functions, statements and variables" },
+    { "overloadable", "only applies to functions" },
+    { "preferred_type", "only applies to bit-field data members" },
+    { "section", "only applies to functions, global variables, Objective-C methods, and Objective-C properties" },
+    { "suppress", "only applies to variables, functions, structs, interfaces, and namespaces" },
+    { "target", "only applies to functions" },
+    { "target_clones", "only applies to functions" },
+    { "tls_model", "only applies to thread-local variables" },
+    { "warning", "only applies to functions" },
+    { "weakref", "only applies to variables and functions" },
+    { "zero_call_used_regs", "only applies to functions" },
+};
+
+// The end of clang's error for attribute `name` (its spelling without a GNU keyword's underscores) on a label, or null for
+// an attribute clang takes there.
+static const char* check_input_label_refusal(String8 name)
+{
+    const char* result = NULL;
+    for (uint32_t i = 0; result == NULL && i < sizeof(check_input_label_refusals) / sizeof(check_input_label_refusals[0]); i += 1)
+    {
+        result = check_input_attribute_equal(name, check_input_label_refusals[i].name) ? check_input_label_refusals[i].message : NULL;
+    }
+    return result;
+}
+
+// clang 23's attribute vocabulary for C on x86-64 Linux (#147, c_check_attribute_clang.inc): the names of its GNU spellings,
+// and its C23 spellings (`name`, `scope::name`), each in byte order.
+typedef struct CheckInputClangAttribute CheckInputClangAttribute;
+struct CheckInputClangAttribute
+{
+    const char* name;
+    uint32_t length;
+};
+
+#define BUSTER_CHECK_CLANG_ENTRY(text) { text, sizeof(text) - 1 },
+#define BUSTER_CHECK_CLANG_NONE(text)
+
+static const CheckInputClangAttribute check_input_clang_gnu_attributes[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_ENTRY
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_NONE
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+static const CheckInputClangAttribute check_input_clang_c23_attributes[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_ENTRY
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_NONE
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+// clang's attribute spellings and scopes (AttributeSpellingList.inc), every syntax's, which its suggestion for an unknown
+// attribute's name or scope searches in this order.
+static const CheckInputClangAttribute check_input_clang_spellings[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_ENTRY
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_NONE
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+static const CheckInputClangAttribute check_input_clang_scopes[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_ENTRY
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+#undef BUSTER_CHECK_CLANG_NONE
+#undef BUSTER_CHECK_CLANG_ENTRY
+
+// Whether `text` is one of the `count` names of `list`, in byte order: a binary search.
+static bool check_input_attribute_listed(const CheckInputClangAttribute* list, uint32_t count, String8 text)
+{
+    bool result = false;
+    uint32_t lower = 0;
+    uint32_t upper = count;
+    while (lower < upper)
+    {
+        const uint32_t middle = lower + (upper - lower) / 2;
+        const uint32_t length = list[middle].length;
+        const uint64_t common = text.length < length ? text.length : length;
+        int order = common != 0 ? memcmp(text.pointer, list[middle].name, common) : 0;
+        order = order != 0 ? order : (text.length > length) - (text.length < length);
+        result |= order == 0;
+        upper = order <= 0 ? middle : upper;
+        lower = order > 0 ? middle + 1 : lower;
+    }
+    return result;
+}
+
+// Whether clang knows an attribute the checker has no rule for (#147): a GNU spelling's `name` (its surrounding underscores
+// gone, as check_input_attribute_name reads it) in its GNU vocabulary, and a C23 one's in its C23 vocabulary, its scope
+// normalized as clang's: gnu's and __gnu__'s as gnu, clang's, _Clang's and __clang__'s as clang. Such an attribute is
+// refused by name, as one clang applies; one clang doesn't know it ignores, with its warning (check_input_attribute_read_item).
+static bool check_input_attribute_clang_knows(String8 scope, String8 name, bool scoped, bool standard)
+{
+    bool result = false;
+    if (!standard)
+    {
+        result = check_input_attribute_listed(check_input_clang_gnu_attributes, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes), name);
+    }
+    else
+    {
+        // A spelling of at most 64 bytes: clang's longest is 53 (c_check_attribute_clang.inc).
+        char spelling[64];
+        const bool gnu = check_input_attribute_equal(scope, "gnu");
+        const bool clang = check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
+        const String8 normalized = gnu ? (String8){ "gnu", 3 } : clang ? (String8){ "clang", 5 } : scope;
+        const uint64_t length = scoped ? normalized.length + 2 + name.length : name.length;
+        if (length < sizeof(spelling))
+        {
+            uint64_t at = 0;
+            if (scoped)
+            {
+                memcpy(spelling, normalized.pointer, normalized.length);
+                memcpy(spelling + normalized.length, "::", 2);
+                at = normalized.length + 2;
+            }
+            memcpy(spelling + at, name.pointer, name.length);
+            result = check_input_attribute_listed(check_input_clang_c23_attributes, BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes),
+                                                  (String8){ spelling, length });
+        }
+    }
+    return result;
+}
+
+// clang's warning at `__clang__`'s expansion where a C23 attribute's scope or name goes (#147), which the parser made the
+// identifier `_Clang` (parse_clang_scope_numbers): a token of that name whose source is a number.
+static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const PPTokens* output = &reader->pp->output;
+    const uint32_t source = parser->tokens.sources[token];
+    const bool rewritten = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && source < output->count && output->kinds[source] == C_TOKEN_NUMERIC_CONSTANT;
+    if (rewritten)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;
@@ -894,10 +1096,19 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     bool namespace_known = true;
     bool scoped = false;
     bool clang_scope = false;
+    bool unknown = false;
+    String8 scope = { 0 };
+    uint32_t scope_name = 0;
+    if (valid && standard)
+    {
+        check_input_attribute_clang_macro(reader, i);
+    }
     if (valid && standard && i + 2 < end && parser->tokens.kinds[i + 1] == PARSE_KIND_COLON && parser->tokens.kinds[i + 2] == PARSE_KIND_COLON)
     {
-        const String8 scope = check_input_attribute_name(reader, parser->tokens.names[i]);
-        clang_scope = check_input_attribute_equal(scope, "clang");
+        scope_name = parser->tokens.names[i];
+        scope = check_input_attribute_name(reader, scope_name);
+        // clang's scope is spelled `clang` or `_Clang` (`__clang__`'s expansion's too, parse_clang_scope_numbers).
+        clang_scope = check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
         namespace_known = check_input_attribute_equal(scope, "gnu") || clang_scope;
         scoped = true;
         i += 3;
@@ -927,6 +1138,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // musttail is clang's own: GNU's spelling and clang::'s, but no gnu::musttail, which clang ignores as an unknown
         // attribute and this refuses as one.
         rule = rule != 0 && rule->kind == CHECK_ATTRIBUTE_MUSTTAIL && scoped && !clang_scope ? 0 : rule;
+        // So are nomerge and suppress, which a statement's attributes alone take.
+        const bool statement_only = rule != 0 && (rule->kind == CHECK_ATTRIBUTE_NOMERGE || rule->kind == CHECK_ATTRIBUTE_SUPPRESS);
+        rule = statement_only && ((scoped && !clang_scope) || !reader->statement_attributes) ? 0 : rule;
         attribute.argument_first = i;
         attribute.argument_end = i;
         if (i < end && parser->tokens.kinds[i] == PARSE_KIND_L_PAREN)
@@ -939,7 +1153,15 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         attribute.end = i;
         valid &= i == end || parser->tokens.kinds[i] == PARSE_KIND_COMMA;
-        if (valid && rule != 0)
+        // An attribute clang doesn't know it ignores with a warning, whatever this checker's rules say of the name (GNU's
+        // externally_visible and access, C23's unsequenced). Its vocabulary is of spellings, a keyword's underscores
+        // stripped from `__x__` alone: a calling convention's keyword in a list (`__vectorcall`) is none, though
+        // check_input_attribute_name reads it as its convention's name for the keyword's own use.
+        const String8 written = check_input_attribute_name(reader, attribute.name);
+        const bool keyword = attribute.name >= C_NAME_CDECL && attribute.name <= C_NAME_VECTORCALL && written.length + 2 == reader->pp->table->spans[attribute.name].length;
+        const String8 spelled = keyword ? (String8){ written.pointer - 2, written.length + 2 } : written;
+        const bool known = valid && check_input_attribute_clang_knows(scope, spelled, scoped, standard);
+        if (valid && rule != 0 && known)
         {
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
@@ -958,12 +1180,31 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
             }
         }
-        else if (valid)
+        else if (valid && known)
         {
+            // One clang applies that this checker doesn't take: refused by name.
             check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }
-        if (valid)
+        else if (valid)
+        {
+            // One clang doesn't know (#147), which it ignores with -Wunknown-attributes' warning at the attribute's first
+            // token (its scope's), as the C23 one's spelling normalized: none of it is kept.
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE,
+                .kind = CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE,
+                .token = attribute.first,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = attribute.first + 1,
+                .payload = { .name = attribute.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = scope_name | (standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+            unknown = true;
+        }
+        if (valid && !unknown)
         {
             const bool numeric = attribute.schema == CHECK_ATTRIBUTE_INTEGER || attribute.schema == CHECK_ATTRIBUTE_INTEGER_LIST ||
                                  attribute.schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
@@ -1849,8 +2090,8 @@ static bool check_input_attribute_alias_definition(const CheckInputAttributes* a
 // A specifier's list is each declarator's: one declarator's is copied before its records are marked.
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
-    const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
-    const bool after = attributes != 0 && reader->definition_origins[previous] && !reader->defined[token];
+    const CheckInputAttributes* attributes = reader->late_attributes ? check_input_attributes_at(reader->output, token) : 0;
+    const bool after = attributes != 0 && reader->definition_origins[previous] && !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
     {
@@ -1873,18 +2114,18 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         if (reader->late_attribute_masks != NULL)
         {
             memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
-            for (uint32_t first = 0; first < token; first += 8)
+            const bool scalar = reader->parser->options.scalar;
+            const CheckSparseWide attributes = reader->output->attributes;
+            for (uint32_t first = check_input_attributed_next(attributes, 0, token, scalar); first < token; first = check_input_attributed_next(attributes, first + 16, token, scalar))
             {
-                const uint32_t lanes = BUSTER_SCALAR_PATH(reader->parser->options.scalar) ?
-                    (uint32_t)check_input_scan_all(first, token) & 0xff :
-                    check_input_scan_pointers((const void* const*)reader->output->attributes, first, token);
+                const uint32_t lanes = check_input_attributed_group(attributes, first, token, scalar);
                 for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                     const uint32_t object = reader->objects[d];
                     if (object != 0 && object <= count)
                     {
-                        reader->late_attribute_masks[object] |= check_input_attribute_late_mask(reader->output->attributes[d], reader->output->function_flags[d]);
+                        reader->late_attribute_masks[object] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, d), reader->output->function_flags[d]);
                     }
                 }
             }
@@ -1922,7 +2163,7 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     }
     if (copied)
     {
-        reader->output->attributes[token] = copy;
+        check_input_set_attributes_at(reader->output, token, copy);
     }
 }
 

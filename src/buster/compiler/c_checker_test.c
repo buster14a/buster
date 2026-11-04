@@ -1643,39 +1643,39 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     if (scalar_valid && recorded_room)
     {
         check_graph_record_finish(&recorded);
-        for (uint32_t path = 0; path < 6; path += 1)
+        for (uint32_t path = 0; path < 8; path += 1)
         {
-            const CheckOptions options = { .scalar = path % 3 == 0, .verify = path >= 3, .level_order = path % 3 == 2 };
+            const CheckOptions options = { .scalar = path % 4 == 0, .verify = path >= 4, .level_order = path % 4 == 2, .regions = path % 4 == 3 };
             CheckStream stream;
             const uint64_t recorded_mark = scratch->length;
             const bool checked = check_graph_run(table, &recorded, output, scratch, &options, &stream);
             check_test_expect(test, checked && check_test_stream_equal(&scalar, &stream, graph->argument_count),
-                              "recorded graph facts agree with both validators and all three schedules");
+                              "recorded graph facts agree with both validators and all four schedules");
             check_test_expect(test, scratch->length == recorded_mark, "recorded graph run releases only its own scratch");
             arena_pop_to(output, scalar_end);
         }
     }
     arena_pop_to(scratch, scratch_mark);
-    // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
-    // (CheckOptions.level_order), and its memoized transitions (#1050) in node order and in windows, every hit verified
-    // against its action.
-    for (uint32_t run = partitions ? 4 : 4 * BUSTER_CHECK_BATCH; scalar_valid && run < 4 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    // Each batch size by each of the vector path's orders but node order, which takes none: its regions in postorder
+    // batches (CheckOptions.regions), its regions by level (CheckOptions.level_order), and its memoized transitions (#1050),
+    // every hit verified against its action.
+    for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
-        const uint32_t batch = run / 4;
-        const uint32_t order = run % 4;
+        const uint32_t batch = run / 3;
+        const uint32_t order = run % 3;
         const CheckOptions vector_options = {
             .batch_size = batch,
+            .regions = order == 0,
             .level_order = order == 1,
-            .transitions = order >= 2,
-            .transition_windows = order == 3,
+            .transitions = order == 2,
             .verify_transitions = true,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
+                                vector.statistics.transition_verified == vector.statistics.transition_hits,
                           order == 1 ? "graph paths or level-order batch partitions differ" :
-                          order == 2 ? "graph paths or the transitions differ" :
-                          order == 3 ? "graph paths or the transitions' windows differ" : "graph paths or batch partitions differ");
+                          order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {
@@ -1933,17 +1933,18 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
 
 static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* test, Arena* storage, Arena* output, Arena* scratch)
 {
-    CheckTestTypes types[3] = { 0 };
-    const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]) && check_test_types_open(&types[2]);
+    CheckTestTypes types[4] = { 0 };
+    const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]) && check_test_types_open(&types[2]) &&
+                             check_test_types_open(&types[3]);
     check_test_expect(test, initialized, "independent type tables for scheduling-order test");
     const uint64_t mark = storage->length;
     const uint64_t output_mark = output->length;
     if (initialized)
     {
-        TypeId array_int[3];
-        TypeId pointer_array_int[3];
-        TypeId array_short[3];
-        for (uint32_t path = 0; path < 3; path += 1)
+        TypeId array_int[4];
+        TypeId pointer_array_int[4];
+        TypeId array_short[4];
+        for (uint32_t path = 0; path < 4; path += 1)
         {
             array_int[path] = type_array(&types[path].table, BUSTER_TYPE_INT, 3);
             pointer_array_int[path] = type_pointer(&types[path].table, array_int[path]);
@@ -1953,6 +1954,8 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                           "type-order fixture input identities");
         check_test_expect(test, array_int[0] == array_int[2] && pointer_array_int[0] == pointer_array_int[2] && array_short[0] == array_short[2],
                           "level-order fixture input identities");
+        check_test_expect(test, array_int[0] == array_int[3] && pointer_array_int[0] == pointer_array_int[3] && array_short[0] == array_short[3],
+                          "region fixture input identities");
         CheckGraph graph;
         const bool allocated = check_graph_initialize(&graph, storage, 8, 0);
         check_test_expect(test, allocated, "type-order graph allocation");
@@ -1972,7 +1975,7 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                 .category = CHECK_LVALUE
             });
             check_graph_add(&graph, CHECK_OP_ADD, 5, second_array, one, BUSTER_CHECK_NONE);
-            const CheckOptions options[3] = {
+            const CheckOptions options[4] = {
                 {
                     .scalar = true
                 },
@@ -1982,10 +1985,13 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                 {
                     .level_order = true
                 },
+                {
+                    .regions = true
+                },
             };
-            CheckStream streams[3];
+            CheckStream streams[4];
             const bool first = check_graph_run(&types[0].table, &graph, output, scratch, &options[0], &streams[0]);
-            for (uint32_t path = 1; path < 3; path += 1)
+            for (uint32_t path = 1; path < 4; path += 1)
             {
                 const bool checked = check_graph_run(&types[path].table, &graph, output, scratch, &options[path], &streams[path]);
                 check_test_expect(test, first && checked && check_test_stream_equal(&streams[0], &streams[path], 0), "scheduler changed newly interned TypeIds");
@@ -1995,6 +2001,7 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
     }
     arena_pop_to(output, output_mark);
     arena_pop_to(storage, mark);
+    check_test_types_close(&types[3]);
     check_test_types_close(&types[2]);
     check_test_types_close(&types[1]);
     check_test_types_close(&types[0]);
@@ -2231,27 +2238,7 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
 // each class's counts, among them the tokens no class's action takes.
 static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* test)
 {
-    static const char* const names[BUSTER_CHECK_EXPRESSION_CODES] = {
-        [CHECK_INPUT_CODE_SCALAR] = "scalar",
-        [CHECK_INPUT_CODE_LIST] = "list",
-        [CHECK_INPUT_CODE_DROP] = "drop",
-        [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
-        [CHECK_INPUT_CODE_LITERAL] = "literal",
-        [CHECK_INPUT_CODE_PREFIX] = "prefix",
-        [CHECK_INPUT_CODE_BINARY] = "binary",
-        [CHECK_INPUT_CODE_SEPARATOR] = "separator",
-        [CHECK_INPUT_CODE_GROUP] = "group",
-        [CHECK_INPUT_CODE_CAST] = "cast",
-        [CHECK_INPUT_CODE_TERNARY] = "ternary",
-        [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
-        [CHECK_INPUT_CODE_MEMBER] = "member",
-        [CHECK_INPUT_CODE_POSTFIX] = "postfix",
-        [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
-        [CHECK_INPUT_CODE_CONDITION] = "condition",
-        [CHECK_INPUT_CODE_CALL] = "call",
-        [CHECK_INPUT_CODE_STRING] = "string",
-        [CHECK_INPUT_CODE_RETURN] = "return",
-    };
+    const char* const* names = check_input_expression_code_names;
     printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
     for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
     {
@@ -2323,6 +2310,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];
+    // The oracle's -w (parse_test_clang's): clang then skips its analysis of each function's CFG, and so its misplaced
+    // fallthrough's error (check_input_fallthrough_analyzed), which test-checker-driver compares without -w.
     const PPOptions pp_options = {
         .language = {
             .standard = fixture->standard != 0 ? fixture->standard : 2017,
@@ -2330,6 +2319,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         },
         .no_standard_includes = true,
         .semantic_pragmas = true,
+        .suppress_warnings = true,
         .predefines.char_unsigned = fixture->char_unsigned,
     };
     const ParseOptions parser_options[2] = {
@@ -2512,6 +2502,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             CheckStream stream;
             const bool rechecked = check_graph_run(&types[1].table, &input[1].graph, &output_storage[1], &scratch[1], &memoized, &stream);
             check_test_expect(test, rechecked && stream.statistics.transition_mismatches == 0 &&
+                                   stream.statistics.transition_verified == stream.statistics.transition_hits &&
                                    check_test_stream_equal(&streams[0], &stream, input[0].graph.argument_count), "source paths' transitions produce another typed stream");
             arena_pop_to(&output_storage[1], mark);
         }
@@ -6002,6 +5993,22 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
     check_test_expect(test, !check_input_target_supported(&options), "assembly input is outside the C semantic adapter");
 }
 
+// A column of `count` tokens with `attributes`' entries, for tokens 0 to `count` - 1, in its own pool in `arena`: for the
+// tests that build a CheckInput's attributes from a pointer a token. Returns a null column where the arena has no room.
+static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttributes* const* attributes, uint32_t count)
+{
+    CheckSparsePool* pool = NULL;
+    CheckSparseWide column = { 0 };
+    if (attributes != NULL && check_sparse_reserve_wide(arena, &pool, NULL, 0, &column, 1, count, false, false))
+    {
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            check_sparse_wide_set(pool, column, token, ~(uint64_t)(uintptr_t)attributes[token]);
+        }
+    }
+    return column;
+}
+
 #include "c_check_graph_test.c"
 #include "c_check_stream_columns_test.c"
 #include "c_check_builtin_graph_test.c"
@@ -6150,6 +6157,7 @@ static int run_checker_tests(int argc, char** argv)
     };
     const char* clang = "clang";
     bool program_initializers = false;
+    bool program_selection = false;
     bool const_values = false;
     bool program_vectors = false;
     bool program_amx = false;
@@ -6177,6 +6185,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--program-initializers") == 0)
         {
             program_initializers = true;
+        }
+        else if (strcmp(argv[i], "--program-selection") == 0)
+        {
+            program_selection = true;
         }
         else if (strcmp(argv[i], "--const-values") == 0)
         {
@@ -6255,9 +6267,9 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -6295,6 +6307,10 @@ static int run_checker_tests(int argc, char** argv)
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
             check_test_check_lanes_benchmark(&test);
+        }
+        else if (initialized && program_selection)
+        {
+            check_test_program_selection(&test, clang);
         }
         else if (initialized && program_initializers)
         {
@@ -6574,6 +6590,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_identifier_leaves(&test);
+                check_test_literal_values(&test);
             }
             if (check_test_takes())
             {

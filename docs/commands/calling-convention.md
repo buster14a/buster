@@ -88,15 +88,20 @@ its compiled runs) checks
   register sums count (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a
   call to its twin.
 
-With `--cross-check`, which needs clang 23 and GCC 16 on `PATH` (or `--clang
-PATH` and `--gcc PATH`) and libatomic: for each compiler and vector width (the
-C built with `-march=x86-64`, `x86-64-v3` and `x86-64-v4`), a world and
+With `--cross-check`, which needs clang 23 and GCC 15 or later on `PATH` (or
+`--clang PATH` and `--gcc PATH`; 16.2.1 is the qualified 9700X version) and
+libatomic: for each compiler and vector width (the C built with `-march=x86-64`,
+`x86-64-v3` and `x86-64-v4`), a world and
 `--signatures` signatures (400) over its passable types, random but for
 clang's first five, which pass runs of bit-fields where its count of registers
 runs ahead of LLVM's, are written as C (the types, every argument's and
 result's bytes, a C callee and a C caller of ours) and as our side, a caller
 and a callee per signature as `X86Instruction` records through `x86_encode`,
-`link_add_code_fixups` and the object writer. The compiler's driver links them
+`link_add_code_fixups` and the object writer. GCC is probed once before the
+runs; when it is missing or older than 15, the command prints
+`cross-check gcc: skipped: needs gcc >= 15, found 13.3.0` (or `not found on
+PATH`) and skips GCC's runs, while clang's runs still run and fail on wrong
+output. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Four compiled runs
 (#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
@@ -109,9 +114,10 @@ make, and `_Complex __float128` in clang's),
 GNU's complex integer types (of `__int128` too) and in clang's complex
 `_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of every type C
 makes atomic, but `_BitInt`s (themselves, records holding them and aligned
-typedefs of them, as in the record runs), at 64 bytes the vectors of 4, 8, 16,
-32 and 64 bytes the producer lowers with AVX-512 (no vector of 1 or 2 bytes or
-of `bool`, which it refuses by name), and the
+typedefs of them, as in the record runs), the vectors of 4, 8, 16, 32 and 64
+bytes the producer lowers (with SSE's registers at 16 bytes, AVX-512's at 64),
+and those of 1 and 2 bytes and of `bool`, which it passes by their bytes (#137:
+`check_lower_transport_type`, nothing that computes with them), and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a

@@ -92,10 +92,6 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
         check = ir_check_graph(function, &candidate.cfg, scratch, 0, !BUSTER_SCALAR_PATH(scalar));
     }
     arena_pop_to(scratch, scratch_mark);
-    if (check.error == IR_OK && ir_function_has_vectors(function))
-    {
-        check.error = IR_ERROR_UNSUPPORTED;
-    }
     if (check.error == IR_OK)
     {
         const DominatorCfg graph = {

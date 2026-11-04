@@ -23,7 +23,9 @@ int main(void)
     result = lane_run(1, test_entry, &calls, 0) && calls == 2 && result;
     lane_test_resources.no_threads = false;
     lane_test_resources.arena_limited = true;
-    lane_test_resources.arena_limit = BUSTER_ARENA_PAGE_BYTES;
+    // The admission check runs on the request's mapping, which holds a guard page on each side of a small arena's
+    // base pages (#652): a one-page reservation maps three pages, and the bigger one's four stays past the limit.
+    lane_test_resources.arena_limit = arena_mapping_bytes(BUSTER_ARENA_PAGE_BYTES);
     Arena small = arena_reserve(BUSTER_ARENA_PAGE_BYTES);
     Arena large = arena_reserve(BUSTER_ARENA_PAGE_BYTES + 1);
     result = small.base != 0 && large.base == 0 && errno == ENOMEM && result;

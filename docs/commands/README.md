@@ -21,7 +21,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-bindings, test-parser-bindings` | `c_bindings.c` | [bindings](bindings.md) |
 | `test-branch-sizing, benchmark-branch-sizing` | `branch_sizing.c` | [branch-sizing](branch-sizing.md) |
 | `./build.sh, bake-tables, test-baked-tables` | `baked.c` | [build](build.md) |
-| `test-builtins, test-check-builtins, test-builtin-lowering` | `c_builtin.c` | [builtins](builtins.md) |
+| `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` | `c_builtin.c`, `helpers_measure.c` | [builtins](builtins.md) |
 | `check-call-graph, test-call-graph` | `call_graph.c` | [call-graph](call-graph.md) |
 | `test-calling-convention, benchmark-calling-convention` | `calling_convention.c` | [calling-convention](calling-convention.md) |
 | `check, test-checker, test-checker-driver` | `c_checker.c` | [checker](checker.md) |
@@ -41,6 +41,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-dominators, benchmark-dominators` | `dominators.c` | [dominators](dominators.md) |
 | `test-emission-metadata` | `emission_metadata.c` | [emission-metadata](emission-metadata.md) |
 | `-E, parse, -fsyntax-only, -c` | `main.c` | [driver](driver.md) |
+| `test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
 | `test-executable, test-dynamic, test-static` | `executable.c` | [executable](executable.md) |
 | `test-files, benchmark-files` | `c_files.c` | [files](files.md) |
 | `benchmark-floors` | `link_benchmark.c` | [floors](floors.md) |
@@ -67,7 +68,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
-| `parallel, test-parallel` | `parallel.c` | [parallel](parallel.md) |
+| `parallel, test-parallel, test-tool` | `parallel.c`, `test_tool.c` | [parallel](parallel.md) |
 | `test-parser, benchmark-parser` | `c_parser.c` | [parser](parser.md) |
 | `test-preprocessor, benchmark-preprocessor` | `c_preprocessor.c` | [preprocessor](preprocessor.md) |
 | `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` | `preprocessor_fuzz.c` | [preprocessor-fuzz](preprocessor-fuzz.md) |
@@ -77,13 +78,13 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |
 | `test-streaming, benchmark-streaming` | `streaming.c` | [streaming](streaming.md) |
 | `test-tier0, benchmark-backend, benchmark-backend-source` | `tier0.c` | [tier0](tier0.md) |
-| `test-tier1-select, test-tier1-pipeline, test-tier1-masks` | `tier1_select.c` | [tier1](tier1.md) |
+| `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` | `tier1_select.c`, `tier1_programs_measure.c` | [tier1](tier1.md) |
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
-| `benchmark-tier1-certificate`, allocation certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
+| `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
 | `test-tier1-cfg, test-tier1-cfg-source` | `tier1_cfg.c` | [tier1-cfg](tier1-cfg.md) |
 | `test-tier1-frame, test-tier1-frame-execution` | `tier1_frame.c` | [tier1-frame](tier1-frame.md) |
 | `test-tier1-schedule, benchmark-tier1-schedule` | `tier1_schedule.c` | [tier1-schedule](tier1-schedule.md) |
-| `test-check-units` | `c_checker_driver.c` | [translation-units](translation-units.md) |
+| `test-check-units, benchmark-check-units` | `c_checker_units.c` | [translation-units](translation-units.md) |
 | `test-types, benchmark-types` | `c_types.c` | [types](types.md) |
 | `test-unwind, benchmark-unwind` | `unwind_tier0.c` | [unwind](unwind.md) |
 | `disassemble, test-x86-disassembler` | `x86_64_disassembler.c` | [x86-disassembler](x86-disassembler.md) |
@@ -99,11 +100,13 @@ The original section titles are retained in their owning guides.
 
 - [C driver build-system integration](../cc-driver.md).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
+- [Reuse and the nightly backlog](ci.md#reuse-and-the-nightly-backlog).
 - [Call graph check](call-graph.md#call-graph-check).
 - [Lexer tests](lexer.md#lexer-tests).
 - [Lexer benchmarks](lexer.md#lexer-benchmarks).
 - [Profiling tools](profiling.md#profiling-tools).
 - [The parallel runner](parallel.md#the-parallel-runner).
+- [Test tool probing](parallel.md#test-tool-probing).
 - [The oracle cache](oracle-cache.md#the-oracle-cache).
 - [x86-64 disassembler](x86-disassembler.md#x86-64-disassembler).
 - [x86-64 encoder tests](x86-encoder.md#x86-64-encoder-tests).

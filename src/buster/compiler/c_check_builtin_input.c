@@ -51,18 +51,11 @@ static void check_input_builtin_type(CheckInputReader* reader, uint32_t first)
     }
 }
 
+// The builtin an identifier names (check_constant_builtin_name): the catalog's, or one of C23's <stdbit.h> functions,
+// which a call is only where it calls the unit's declaration (check_input_stdc_library_call).
 static uint16_t check_input_builtin_id(CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t identifier = reader->parser->tokens.names[token];
-    uint16_t builtin = reader->builtin_names[identifier];
-    if (builtin == UINT16_MAX)
-    {
-        const InternSpan span = reader->pp->table->spans[identifier];
-        const char* spelling = (const char*)reader->pp->table->records + span.offset;
-        builtin = (uint16_t)cbuiltin_resolve(spelling, span.length);
-        reader->builtin_names[identifier] = builtin;
-    }
-    return builtin;
+    return check_constant_builtin_name(reader, reader->parser->tokens.names[token]);
 }
 
 static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keyword, uint16_t builtin)
@@ -104,7 +97,7 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
             {
                 context.last_parameter = parameter;
                 context.last_parameter_type = reader->declared_types[parameter];
-                context.last_parameter_flags = reader->registers[parameter] ? BUSTER_CHECK_REGISTER : 0;
+                context.last_parameter_flags = check_input_bit(reader->declaration_bits, parameter, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0;
             }
         }
         const uint32_t index = reader->vararg_count++;
@@ -175,6 +168,10 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         evidence->alignment_side_effects = (value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         evidence->alignment_low = (uint64_t)value.integer;
         evidence->alignment_high = (uint64_t)(value.integer >> 64);
+    }
+    if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
+    {
+        check_input_annotation_evidence(reader, end, token, evidence);
     }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)

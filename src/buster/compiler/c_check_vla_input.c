@@ -541,6 +541,8 @@ static uint32_t check_input_vla_size(CheckInputReader* reader, uint32_t token, T
 
 static bool check_input_indirect_goto(const Parser* parser, uint32_t token);
 static bool check_input_label_address(const Parser* parser, uint32_t token);
+static bool check_input_asm_gotos(const CheckInput* input);
+static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_t token, const CheckInputCleanup* innermost);
 
 // The scopes a jump mustn't enter (clang's JumpScopeChecker): a variably modified declaration's, and a cleanup's
 // variable's (check_input_cleanup_declaration), from the declaration to its scope's end (vla_scope_ends).
@@ -607,10 +609,14 @@ static void check_input_vla_finish(CheckInputReader* reader)
     // variable-length array or cleanup such a label is in (clang's JumpScopeChecker), whichever way it leaves its own: the
     // labels' innermost scopes intersect in one interval, [low, high), which holds each goto. Nor may it leave a cleanup's
     // scope: the labels' first and last must be in its innermost, whose records come in source order, as the bodies do.
+    // An asm goto's targets are its own labels alone, as clang's checker takes them (#147, #1126's review): it mustn't
+    // enter a scope any of them is in that it isn't, nor leave its innermost cleanup's for one outside it. Leaving a
+    // variable-length array's scope is allowed, and like clang's callbr it doesn't restore the stack there.
+    const bool asm_gotos = check_input_asm_gotos(reader->output);
     const CheckInputCleanup* cleanups = reader->output->cleanups;
     const uint32_t cleanup_count = reader->output->cleanup_count;
     uint32_t next = 0;
-    for (uint32_t opening = 0; reader->indirect_gotos != 0 && opening < scanned; opening += 1)
+    for (uint32_t opening = 0; (reader->indirect_gotos != 0 || asm_gotos) && opening < scanned; opening += 1)
     {
         const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[opening] != 0;
         const uint32_t closing = parser->tree.parents[opening];
@@ -656,6 +662,10 @@ static void check_input_vla_finish(CheckInputReader* reader)
                 if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token < low || token >= high || leaves))
                 {
                     check_input_report(reader, token, CHECK_INPUT_JUMP_INDIRECT);
+                }
+                if (asm_gotos && check_input_asm_goto_refused(reader, token, innermost))
+                {
+                    check_input_report(reader, token, CHECK_INPUT_JUMP_ASM);
                 }
             }
             arena_pop_to(reader->scratch, mark);

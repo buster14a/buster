@@ -50,6 +50,7 @@ struct String8
 #include "buster/compiler/tier1_cfg.c"
 #include "buster/compiler/tier1_certificate_cfg.c"
 #include "buster/compiler/tier1_liveness.c"
+#include "buster/compiler/emission_metadata.c"
 #include "buster/compiler/tier1_frame.c"
 #include "buster/compiler/tier1_frame_emit.c"
 #include "buster/compiler/tier1_emit.c"

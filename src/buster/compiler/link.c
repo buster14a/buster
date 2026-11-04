@@ -137,6 +137,10 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_NOTYPE 0x00
 #define BUSTER_LINK_SYMBOL_OBJECT 0x01
 #define BUSTER_LINK_SYMBOL_FUNCTION 0x02
+// STT_COMMON's number: a tentative definition of GNU's common attribute (#147), an object defined in its zero-filled BSS
+// atom, which a relocatable object writes as SHN_COMMON (st_value its atom's alignment), the units' merge keeps the
+// largest of (and gives a strong definition's place to), and an executable writes as an object (link_symbol_elf_info).
+#define BUSTER_LINK_SYMBOL_COMMON 0x05
 #define BUSTER_LINK_SYMBOL_TLS 0x06
 // STT_GNU_IFUNC: a function whose address its resolver, the code at the symbol, returns when the program starts (as
 // libc.a's memcpy and strlen are).
@@ -204,8 +208,11 @@ typedef uint32_t FixupId;
 //     data16 mov rax, fs:0 (or with four prefixes), the call's fixup with them.
 //   - DTPOFF32: 32 bits of S's offset in its module's TLS block, after a TLSLD (lea rax, [rax + x@dtpoff]):
 //     R_X86_64_DTPOFF32; that offset + A, which in an executable is TPOFF32's, from the end of the block.
-// Only imported objects have the last three (libgcc.a's decimal floating point and split-stack members, and GCC 16's
-// libgcc_eh.a's heap trampolines): the code generator makes local-exec and initial-exec accesses.
+//   - TPOFF64, DTPOFF64: TPOFF32's and DTPOFF32's values in 8 bytes, a 64-bit immediate (movabs rax, x@tpoff) or data
+//     (DWARF's location of a TLS variable, `.quad x@dtpoff`): R_X86_64_TPOFF64, R_X86_64_DTPOFF64 (#1115).
+// Only imported objects and the assembler have the last five (libgcc.a's decimal floating point and split-stack members,
+// GCC 16's libgcc_eh.a's heap trampolines, and compilers' -S output): the code generator makes local-exec and
+// initial-exec accesses.
 #define BUSTER_LINK_FIXUP_NONE 0
 #define BUSTER_LINK_FIXUP_CALL 1
 #define BUSTER_LINK_FIXUP_CALL_GOT 2
@@ -223,7 +230,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_FIXUP_TLSGD 14
 #define BUSTER_LINK_FIXUP_TLSLD 15
 #define BUSTER_LINK_FIXUP_DTPOFF32 16
-#define BUSTER_LINK_FIXUP_KINDS 17
+#define BUSTER_LINK_FIXUP_TPOFF64 17
+#define BUSTER_LINK_FIXUP_DTPOFF64 18
+#define BUSTER_LINK_FIXUP_KINDS 19
 // A fixup's kind is its BUSTER_LINK_FIXUP_KIND bits, and BUSTER_LINK_FIXUP_WIDE says its addend is in the side table.
 #define BUSTER_LINK_FIXUP_KIND 0x7f
 #define BUSTER_LINK_FIXUP_WIDE 0x80
@@ -361,6 +370,18 @@ static const LinkFixupKind link_fixup_kinds[BUSTER_LINK_FIXUP_KINDS] = {
         .pc_relative = false,
         .fields = BUSTER_LINK_FIELDS_ABSOLUTE32,
     },
+    [BUSTER_LINK_FIXUP_TPOFF64] = {
+        .name = "tpoff64",
+        .width = 8,
+        .pc_relative = false,
+        .fields = BUSTER_LINK_FIELDS_ABSOLUTE64,
+    },
+    [BUSTER_LINK_FIXUP_DTPOFF64] = {
+        .name = "dtpoff64",
+        .width = 8,
+        .pc_relative = false,
+        .fields = BUSTER_LINK_FIELDS_ABSOLUTE64,
+    },
 };
 
 typedef enum LinkError
@@ -401,6 +422,9 @@ struct LinkAtoms
     uint8_t* alignment_log2;
     uint32_t* unit;
     uint64_t* size;
+    // The input section the atom came from (an object's section name, or the name check_program_sections gave its
+    // definition), or none for its class's: what a __start_ or __stop_ reference bounds (link_bound_suffix).
+    String8* section;
     // Mutable, so that an executable's chunks can be patched where they are.
     uint8_t** bytes;
     // The atom's fixups: fixup_count of them from fixup_begin, or none (both 0).
@@ -519,6 +543,14 @@ static __attribute__((unused)) NameId link_add_name_hashed(Link* link, const uin
 // An atom: its id, or 0. Its fixups are added after it, with link_add_fixup or link_add_code_fixups, and its address
 // starts at 0.
 static __attribute__((unused)) AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, uint64_t size, uint8_t* bytes, uint32_t unit);
+// Gives `atom` the input section it came from, as a __start_ and __stop_ reference bounds it: false for an atom that
+// doesn't exist, or section bytes without a pointer or a length.
+static __attribute__((unused)) bool link_set_atom_section(Link* link, AtomId atom, String8 section);
+// The suffix of `name` after __start_ or __stop_, and whether it is __stop_'s: an empty String8 for another name, or
+// one whose suffix isn't a C identifier, which no output section name in C can be.
+static __attribute__((unused)) String8 link_bound_suffix(const Link* link, NameId name, bool* stop);
+// Whether an atom's input section is `name`.
+static __attribute__((unused)) bool link_section_exists(const Link* link, String8 name);
 // A symbol, defined in `atom` at `value` or (atom 0) defined later with link_define_symbol, elsewhere or nowhere: its id,
 // or 0. The linker's columns start at 0.
 static __attribute__((unused)) SymbolId link_add_symbol(Link* link, NameId name, AtomId atom, uint64_t value, uint64_t size, uint8_t flags, uint8_t source);
@@ -748,8 +780,8 @@ static NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t le
 // Each table's bytes per record, over its columns, and its number of columns.
 #define BUSTER_LINK_NAME_BYTES (sizeof(const uint8_t*) + sizeof(uint32_t) + sizeof(uint64_t))
 #define BUSTER_LINK_NAME_COLUMNS 3
-#define BUSTER_LINK_ATOM_BYTES (2 * sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint8_t*) + sizeof(FixupId) + sizeof(uint32_t) + sizeof(uint64_t))
-#define BUSTER_LINK_ATOM_COLUMNS 8
+#define BUSTER_LINK_ATOM_BYTES (2 * sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(String8) + sizeof(uint8_t*) + sizeof(FixupId) + sizeof(uint32_t) + sizeof(uint64_t))
+#define BUSTER_LINK_ATOM_COLUMNS 9
 #define BUSTER_LINK_SYMBOL_BYTES (sizeof(NameId) + sizeof(AtomId) + 2 * sizeof(uint64_t) + 2 * sizeof(uint8_t) + 2 * sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t))
 #define BUSTER_LINK_SYMBOL_COLUMNS 10
 #define BUSTER_LINK_FIXUP_BYTES (sizeof(uint32_t) + sizeof(SymbolId) + sizeof(int32_t) + sizeof(uint8_t))
@@ -809,6 +841,7 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
         result.atoms.alignment_log2 = link_push_column(arena, atoms, sizeof(*result.atoms.alignment_log2), &fits);
         result.atoms.unit = link_push_column(arena, atoms, sizeof(*result.atoms.unit), &fits);
         result.atoms.size = link_push_column(arena, atoms, sizeof(*result.atoms.size), &fits);
+        result.atoms.section = link_push_column(arena, atoms, sizeof(*result.atoms.section), &fits);
         result.atoms.bytes = link_push_column(arena, atoms, sizeof(*result.atoms.bytes), &fits);
         result.atoms.fixup_begin = link_push_column(arena, atoms, sizeof(*result.atoms.fixup_begin), &fits);
         result.atoms.fixup_count = link_push_column(arena, atoms, sizeof(*result.atoms.fixup_count), &fits);
@@ -889,6 +922,7 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
         atoms->alignment_log2[result] = alignment_log2;
         atoms->unit[result] = unit;
         atoms->size[result] = size;
+        atoms->section[result] = (String8){ 0 };
         atoms->bytes[result] = bytes;
         atoms->fixup_begin[result] = 0;
         atoms->fixup_count[result] = 0;
@@ -898,19 +932,83 @@ static AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, u
     return result;
 }
 
+static bool link_set_atom_section(Link* link, AtomId atom, String8 section)
+{
+    const bool result = atom != 0 && atom < link->atoms.count && (section.length == 0 || section.pointer != 0);
+    if (result)
+    {
+        link->atoms.section[atom] = section;
+    }
+    return result;
+}
+
+// Whether `bytes` of `length` are a C identifier: a letter or '_' first, then letters, digits and '_'.
+static bool link_c_identifier(const uint8_t* bytes, uint64_t length)
+{
+    bool result = length != 0 && !(bytes[0] >= '0' && bytes[0] <= '9');
+    for (uint64_t i = 0; result && i < length; i += 1)
+    {
+        const uint8_t c = bytes[i];
+        result = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    }
+    return result;
+}
+
+// The suffix of the `length`-byte name `bytes` after __start_ or __stop_, and whether it is __stop_'s: an empty String8
+// for another name, or one whose suffix isn't a C identifier, which no output section name in C can be.
+static String8 link_bound_suffix_bytes(const uint8_t* bytes, uint32_t length, bool* stop)
+{
+    const bool start_prefix = length > 8 && memcmp(bytes, "__start_", 8) == 0;
+    const bool is_stop = length > 7 && memcmp(bytes, "__stop_", 7) == 0;
+    const uint32_t prefix = start_prefix ? 8 : is_stop ? 7 : length;
+    const String8 suffix = { .pointer = (char*)bytes + prefix, .length = length - prefix };
+    if (stop != 0)
+    {
+        *stop = is_stop;
+    }
+    return link_c_identifier((const uint8_t*)suffix.pointer, suffix.length) ? suffix : (String8){ 0 };
+}
+
+static String8 link_bound_suffix(const Link* link, NameId name, bool* stop)
+{
+    String8 result = { 0 };
+    if (name != 0 && name < link->names.count)
+    {
+        result = link_bound_suffix_bytes(link->names.bytes[name], link->names.length[name], stop);
+    }
+    else if (stop != 0)
+    {
+        *stop = false;
+    }
+    return result;
+}
+
+static bool link_section_exists(const Link* link, String8 name)
+{
+    bool result = false;
+    for (AtomId atom = 1; !result && atom < link->atoms.count; atom += 1)
+    {
+        const String8 section = link->atoms.section[atom];
+        result = section.length == name.length && section.length != 0 && memcmp(section.pointer, name.pointer, name.length) == 0;
+    }
+    return result;
+}
+
 // Flags whose type is one the representation has: each of its bindings exists.
 static bool link_symbol_flags_are_valid(uint8_t flags)
 {
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
     return type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
-           type == BUSTER_LINK_SYMBOL_IFUNC;
+           type == BUSTER_LINK_SYMBOL_IFUNC || type == BUSTER_LINK_SYMBOL_COMMON;
 }
 
-// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10).
+// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10), and
+// a common symbol's STT_OBJECT, as a linker writes the object it allocates for one.
 static __attribute__((unused)) uint8_t link_symbol_elf_info(uint8_t flags)
 {
     const bool unique = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE;
-    return (uint8_t)(unique ? 10u << 4 | (flags & BUSTER_LINK_SYMBOL_TYPE) : flags & BUSTER_LINK_SYMBOL_INFO);
+    const uint8_t type = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON ? BUSTER_LINK_SYMBOL_OBJECT : flags & BUSTER_LINK_SYMBOL_TYPE;
+    return (uint8_t)(unique ? 10u << 4 | type : (flags & BUSTER_LINK_SYMBOL_BINDING) | type);
 }
 
 // Whether a symbol with `flags` can be defined in `atom`, which exists, at `value` with `size`: within the atom, and a
@@ -1152,9 +1250,10 @@ static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86F
     {
         result = result && (form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_ADD_R64_RM64);
     }
-    else if (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32)
+    else if (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 ||
+             kind == BUSTER_LINK_FIXUP_DTPOFF64)
     {
-        // Only imported objects have them (see the kinds above).
+        // Only imported objects and the assembler have them (see the kinds above).
         result = false;
     }
     return result;
@@ -1283,7 +1382,7 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const uint8_t source = link->symbols.source[target];
     const AtomId target_atom = link->symbols.atom[target];
     const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
-                          kind == BUSTER_LINK_FIXUP_DTPOFF32;
+                          kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 || kind == BUSTER_LINK_FIXUP_DTPOFF64;
     const bool size_kind = kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
     const bool tls_target = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     const bool local = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;

@@ -352,7 +352,7 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
     TypeId type = reader->declared_types[declaration];
     const uint32_t kind = type_kind(reader->types, type);
-    bool eligible = !reader->literal_tables_disabled && reader->function_body == BUSTER_CHECK_NONE && !input->compound_objects[declaration] &&
+    bool eligible = !reader->literal_tables_disabled && reader->function_body == BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
                     (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) && begin < end && end <= parser->tokens.count &&
                     end - begin >= 2 * BUSTER_CHECK_LITERAL_TABLE_MINIMUM && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE &&
                     parser->tree.parents[begin] == end - 1 && parser->tokens.kinds[end - 1] == PARSE_KIND_R_BRACE;
@@ -421,7 +421,7 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
         input->literal_table_count += 1;
         reader->declared_types[declaration] = type;
         reader->query_types[assignment] = type;
-        if (reader->linkage[declaration] != 0)
+        if (check_input_linkage(reader->declaration_bits, declaration) != 0)
         {
             reader->linked_types[parser->tokens.names[declaration]] = type;
         }

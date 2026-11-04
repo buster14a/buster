@@ -191,7 +191,9 @@ static bool import_test_same_tables(const Link* a, const Link* b)
     {
         result = a->atoms.class[atom] == b->atoms.class[atom] && a->atoms.alignment_log2[atom] == b->atoms.alignment_log2[atom] && a->atoms.unit[atom] == b->atoms.unit[atom] &&
                  a->atoms.size[atom] == b->atoms.size[atom] && a->atoms.bytes[atom] == b->atoms.bytes[atom] && a->atoms.fixup_begin[atom] == b->atoms.fixup_begin[atom] &&
-                 a->atoms.fixup_count[atom] == b->atoms.fixup_count[atom] && a->atoms.address[atom] == b->atoms.address[atom];
+                 a->atoms.fixup_count[atom] == b->atoms.fixup_count[atom] && a->atoms.address[atom] == b->atoms.address[atom] &&
+                 a->atoms.section[atom].length == b->atoms.section[atom].length &&
+                 (a->atoms.section[atom].length == 0 || memcmp(a->atoms.section[atom].pointer, b->atoms.section[atom].pointer, a->atoms.section[atom].length) == 0);
     }
     for (SymbolId symbol = 1; result && symbol < a->symbols.count; symbol += 1)
     {

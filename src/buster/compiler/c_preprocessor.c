@@ -156,13 +156,15 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_range looks 
 #define BUSTER_PP_MAX_PARAMETERS 4096
 // Token arrays get whole-vector stores past their last token.
 #define BUSTER_PP_TOKEN_SLACK 64
-// The arrays of records, each reserved in an arena of its own.
+// The arenas of arrays of records: the unit's tables, all in one (pp_initialize_once), and the arrays reserved later, an
+// arena each (pp_array_small).
 #define BUSTER_PP_ARRAYS 40
 // The base pages before the huge pages of the tables that a translation unit usually fills to a few hundred kilobytes:
-// the macros and their names' index, the compiled bodies, and the history's substitutions and generated tokens. On
-// sqlite3.c (with glibc's headers) each would otherwise take a huge page the kernel clears whole (2 MB, about 86 us on
-// the 9700X) for 86 to 530 KB, which base pages cover for 0.46 us per 4 KB; on this compiler's main.c, whose tables
-// are larger, the first megabyte in base pages costs about as much as the huge pages it replaces.
+// the history's substitutions and generated tokens, and the arguments' links. On sqlite3.c (with glibc's headers) each
+// of these, and the macros, their names' index and the compiled bodies before they were tables of the unit's in base
+// pages throughout (pp_table), would otherwise take a huge page the kernel clears whole (2 MB, about 86 us on the
+// 9700X) for 86 to 530 KB, which base pages cover for 0.46 us per 4 KB; on this compiler's main.c, whose tables are
+// larger, the first megabyte in base pages costs about as much as the huge pages it replaces.
 #define BUSTER_PP_TABLE_SMALL_BYTES (1ull << 20)
 // Records: location ranges, files, macros, compiled body items and parameters.
 #define BUSTER_PP_MAX_RANGES (1u << 22)
@@ -322,6 +324,14 @@ struct PPOptions
     const char* predefines_path;
     // Measure the phases (PPPhase) in Preprocessor.ticks and lookup intervals/counters in Preprocessor.statistics.
     bool timing;
+    // Time the checker's expressions' walk by class (CheckInput.expression_class_ticks, #1038): three TSC reads a token
+    // the coded walk's classes reach. Off in every compile; benchmark-checker-bindings sets it for runs of its own,
+    // apart from its samples.
+    bool expression_timing;
+    // After the coded walk, number its tokens again as the graph by passes would (CheckInput.expression_numbering_*,
+    // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
+    // expression_timing.
+    bool expression_numbering;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
@@ -411,9 +421,11 @@ struct PPTokens
     uint32_t* locations;
     uint32_t count;
     uint32_t capacity;
-    // A column per arena, so that each one's first pages are base pages (lane.c): a stack that holds a few tokens touches
-    // a few kilobytes, where columns side by side would each start in a 2 MB huge page the kernel clears.
-    Arena arenas[4];
+    // The output's columns, tables of one arena (arena_reserve_tables, #1128) whose first pages are each base pages as an
+    // arena of its own's would be (lane.c): an output of a few tokens touches a few kilobytes, where columns side by side
+    // would each start in a 2 MB huge page the kernel clears. A stack's columns are tables of the unit's (pp_tokens_plan,
+    // #652), and this is empty.
+    Arena columns;
     // Temporary buffers only. The final output has no origin column, just PPHistoryRun records.
     uint32_t* origins;
     uint32_t origin_capacity;
@@ -1321,8 +1333,9 @@ struct Preprocessor
     // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
     uint64_t split_kinds;
     // Memory for files' leading-space words and directive tables, macro bodies' spellings and paths. Files' token
-    // columns (kinds, starts and values) have an arena each, `columns`, and so do the output and the stacks (PPTokens)
-    // and each array of records (`arrays`, whose first pages are then base pages).
+    // columns (kinds, starts and values) have an arena each, `columns`. The output (PPTokens) keeps its columns in an
+    // arena of tables, and the unit's arrays of records, the stacks' columns and its own file cache are the tables of
+    // `arrays`' first (#1128, #652), all of it base pages; an array reserved later has an arena of its own.
     Arena arena;
     Arena columns[3];
     Arena arrays[BUSTER_PP_ARRAYS];
@@ -1559,32 +1572,30 @@ struct Preprocessor
 // ---------------------------------------------------------------------------------------------------------------------
 // Token stacks
 
-// Reserves the columns in turn, until one can't be (pp_tokens_release releases those that were).
+// Reserves the columns, all or none (pp_tokens_release releases them).
 static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
 {
     const uint64_t slots = (uint64_t)capacity + BUSTER_PP_TOKEN_SLACK;
-    bool reserved = true;
-    for (uint32_t i = 0; reserved && i < 4; i += 1)
-    {
-        tokens->arenas[i] = arena_reserve(i < 2 ? slots : slots * sizeof(uint32_t));
-        reserved = tokens->arenas[i].base != 0;
-    }
-    tokens->kinds = arena_push(&tokens->arenas[0], slots, 64);
-    tokens->flags = arena_push(&tokens->arenas[1], slots, 64);
-    tokens->values = arena_push_array(&tokens->arenas[2], slots, sizeof(uint32_t), 64);
-    tokens->locations = arena_push_array(&tokens->arenas[3], slots, sizeof(uint32_t), 64);
+    ArenaTable columns[] = {
+        { .bytes = slots, .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = slots, .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = slots * sizeof(uint32_t), .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = slots * sizeof(uint32_t), .small = BUSTER_ARENA_SMALL_BYTES },
+    };
+    tokens->columns = arena_reserve_tables(columns, BUSTER_ARRAY_LENGTH(columns));
+    tokens->kinds = columns[0].base;
+    tokens->flags = columns[1].base;
+    tokens->values = columns[2].base;
+    tokens->locations = columns[3].base;
     tokens->count = 0;
     tokens->capacity = capacity;
-    return tokens->kinds != 0 && tokens->flags != 0 && tokens->values != 0 && tokens->locations != 0;
+    return tokens->columns.base != 0;
 }
 
 static void pp_tokens_release(PPTokens* tokens)
 {
     arena_release(&tokens->origin_arena);
-    for (uint32_t i = 0; i < 4; i += 1)
-    {
-        arena_release(&tokens->arenas[i]);
-    }
+    arena_release(&tokens->columns);
     *tokens = (PPTokens){ 0 };
 }
 
@@ -1726,10 +1737,8 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 }
 
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
-
-static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
-static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
 
 #include "c_preprocessor_history.c"
 
@@ -1811,6 +1820,15 @@ static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location)
         }
     }
     return pp->range_count != 0 && location >= pp->ranges[low].base && location - pp->ranges[low].base < pp->ranges[low].length ? low : BUSTER_PP_NONE;
+}
+
+// Whether a source location is written in the main file, where Clang gives a file-scope variable's unused warning: it
+// leaves a header's file-scope variables alone, as every unit that includes the header shares them.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location)
+{
+    const uint32_t range = pp_find_range(pp, location);
+    const bool result = range != BUSTER_PP_NONE && pp->ranges[range].file == pp->main_file;
+    return result;
 }
 
 // Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error). A zero byte follows
@@ -11787,6 +11805,62 @@ static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* 
 
 // Expands a builtin macro whose name was just read, from the context it was read in (`expansion_end` from
 // pp_expansion_end, for __LINE__ and __FILE__ in a token a macro made).
+// The last component of presumed file name `path` (`length` bytes), as clang's processPathToFileName takes it for
+// __FILE_NAME__ and __builtin_FILE_NAME (llvm::sys::path::filename, POSIX style): the bytes past its last '/'; "." for a
+// name that ends in '/' past its root directory ("/foo/", "a/"); the root directory for a name that is only that ("/",
+// "//"), and a "//net" root name whole; and the whole name where the component is empty. Its bytes are `*component`.
+static __attribute__((unused)) uint32_t pp_path_file_name(const char* path, uint32_t length, const char** component)
+{
+    // The root directory's position (root_dir_start): a "//net" root name's separator after it, or a leading '/'.
+    uint32_t root = UINT32_MAX;
+    if (length > 3 && path[0] == '/' && path[1] == '/' && path[2] != '/')
+    {
+        for (uint32_t i = length; i-- > 2;)
+        {
+            root = path[i] == '/' ? i : root;
+        }
+    }
+    else if (length > 0 && path[0] == '/')
+    {
+        root = 0;
+    }
+    // The component's end, past trailing separators but the root directory's.
+    uint32_t end = length;
+    while (end > 0 && end - 1 != root && path[end - 1] == '/')
+    {
+        end -= 1;
+    }
+    const char* bytes = path;
+    uint32_t size = 0;
+    if (length != 0 && path[length - 1] == '/' && (root == UINT32_MAX || end == 0 || end - 1 > root))
+    {
+        bytes = ".";
+        size = 1;
+    }
+    else
+    {
+        // The component's start (filename_pos): the separator a name ends in, or past its last one, but a "//net"'s.
+        uint32_t start = 0;
+        if (end > 0 && path[end - 1] == '/')
+        {
+            start = end - 1;
+        }
+        else
+        {
+            uint32_t separator = UINT32_MAX;
+            for (uint32_t i = 0; i + 1 < end; i += 1)
+            {
+                separator = path[i] == '/' ? i : separator;
+            }
+            start = separator == UINT32_MAX || (separator == 1 && path[0] == '/') ? 0 : separator + 1;
+        }
+        bytes = path + start;
+        size = end - start;
+    }
+    *component = size != 0 ? bytes : path;
+    return size != 0 ? size : length;
+}
+
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     const uint32_t saved_history = pp->history_current;
@@ -11809,12 +11883,9 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
         case PP_BUILTIN_FILE_NAME:
         {
             pp_presumed(pp, where, &file_name, &file_name_length);
-            uint32_t skip = 0;
-            for (uint32_t i = 0; builtin == PP_BUILTIN_FILE_NAME && i < file_name_length; i += 1)
-            {
-                skip = file_name[i] == '/' ? i + 1 : skip;
-            }
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)file_name + skip, file_name_length - skip, flags));
+            const char* component = file_name;
+            const uint32_t component_length = builtin == PP_BUILTIN_FILE_NAME ? pp_path_file_name(file_name, file_name_length, &component) : file_name_length;
+            pp_emit(pp, pp_string_token(pp, (const uint8_t*)component, component_length, flags));
             break;
         }
         case PP_BUILTIN_BASE_FILE:
@@ -14900,7 +14971,7 @@ static uint32_t pp_binary_operator(uint8_t kind)
     return result;
 }
 
-// Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix and digit separators, and the suffixes
+// Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
 // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
 static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
 {
@@ -14914,6 +14985,11 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     else if (length >= 2 && spelling[0] == '0' && (spelling[1] == 'b' || spelling[1] == 'B'))
     {
         radix = 2;
+        i = 2;
+    }
+    else if (length >= 3 && spelling[0] == '0' && (spelling[1] | 0x20) == 'o' && spelling[2] >= '0' && spelling[2] <= '7')
+    {
+        radix = 8;
         i = 2;
     }
     else if (spelling[0] == '0')
@@ -16337,7 +16413,7 @@ static const PPFeature pp_features_attribute[] = {
     { "mig_server_routine", 1 }, { "minsize", 1 }, { "mode", 1 }, { "ms_abi", 1 }, { "musttail", 1 }, { "naked", 1 }, { "no_builtin", 1 },
     { "no_caller_saved_registers", 1 }, { "no_instrument_function", 1 }, { "no_profile_instrument_function", 1 }, { "no_sanitize", 1 },
     { "no_sanitize_address", 1 }, { "no_sanitize_thread", 1 }, { "no_specializations", 1 }, { "no_split_stack", 1 }, { "no_stack_protector", 1 },
-    { "nocf_check", 1 }, { "nodebug", 1 }, { "noderef", 1 }, { "noescape", 1 }, { "noinline", 1 }, { "nomerge", 1 }, { "nonallocating", 1 },
+    { "nocf_check", 1 }, { "nocommon", 1 }, { "nodebug", 1 }, { "noderef", 1 }, { "noescape", 1 }, { "noinline", 1 }, { "nomerge", 1 }, { "nonallocating", 1 },
     { "nonblocking", 1 }, { "nonnull", 1 }, { "nonstring", 1 }, { "noreturn", 1 }, { "not_tail_called", 1 }, { "nothrow", 1 }, { "nouwtable", 1 },
     { "ns_consumed", 1 }, { "ns_returns_retained", 1 }, { "objc_boxable", 1 }, { "objc_designated_initializer", 1 }, { "objc_independent_class", 1 },
     { "objc_root_class", 1 }, { "objc_runtime_visible", 1 }, { "optnone", 1 }, { "overloadable", 1 }, { "packed", 1 },
@@ -16424,7 +16500,7 @@ static const PPFeature pp_features_c_attribute[] = {
     { "gnu::malloc", 1 }, { "gnu::may_alias", 1 }, { "gnu::mode", 1 }, { "gnu::ms_abi", 1 }, { "gnu::naked", 1 },
     { "gnu::no_caller_saved_registers", 1 }, { "gnu::no_instrument_function", 1 }, { "gnu::no_profile_instrument_function", 1 },
     { "gnu::no_sanitize", 1 }, { "gnu::no_sanitize_address", 1 }, { "gnu::no_split_stack", 1 }, { "gnu::no_stack_protector", 1 },
-    { "gnu::nocf_check", 1 }, { "gnu::noinline", 1 }, { "gnu::nonnull", 1 }, { "gnu::nonstring", 1 }, { "gnu::noreturn", 1 }, { "gnu::nothrow", 1 },
+    { "gnu::nocf_check", 1 }, { "gnu::nocommon", 1 }, { "gnu::noinline", 1 }, { "gnu::nonnull", 1 }, { "gnu::nonstring", 1 }, { "gnu::noreturn", 1 }, { "gnu::nothrow", 1 },
     { "gnu::packed", 1 }, { "gnu::patchable_function_entry", 1 }, { "gnu::pure", 1 }, { "gnu::regcall", 1 }, { "gnu::retain", 1 },
     { "gnu::returns_nonnull", 1 }, { "gnu::returns_twice", 1 }, { "gnu::section", 1 }, { "gnu::sentinel", 1 }, { "gnu::sysv_abi", 1 },
     { "gnu::target", 1 }, { "gnu::target_clones", 1 }, { "gnu::tls_model", 1 }, { "gnu::transparent_union", 1 }, { "gnu::unused", 1 },
@@ -16761,6 +16837,7 @@ static const PPFeature pp_implemented_attribute[] = {
     { "alias", 1 },
     { "aligned", 1 },
     { "cleanup", 1 },
+    { "common", 1 },
     { "constructor", 1 },
     { "destructor", 1 },
     { "ext_vector_type", 1 },
@@ -16769,6 +16846,7 @@ static const PPFeature pp_implemented_attribute[] = {
     { "ifunc", 1 },
     { "mode", 1 },
     { "naked", 1 },
+    { "nocommon", 1 },
     { "overloadable", 1 },
     { "packed", 1 },
     { "retain", 1 },
@@ -16788,6 +16866,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
     { "gnu::cleanup", 1 },
+    { "gnu::common", 1 },
     { "gnu::constructor", 1 },
     { "gnu::destructor", 1 },
     { "gnu::fallthrough", 1 },
@@ -16795,6 +16874,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::ifunc", 1 },
     { "gnu::mode", 1 },
     { "gnu::naked", 1 },
+    { "gnu::nocommon", 1 },
     { "gnu::packed", 1 },
     { "gnu::retain", 1 },
     { "gnu::section", 1 },
@@ -16816,7 +16896,13 @@ static const PPFeature pp_implemented_feature[] = {
     { "c_thread_local", 1, 2011 },
 };
 static const PPFeature pp_implemented_builtin[] = {
-    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
+    // The keywords of builtins the checker works out where it reads them (#148, c_check_input.c's
+    // check_input_source_builtin), in the table's byte order.
+    { "__builtin_COLUMN", 1 }, { "__builtin_FILE", 1 }, { "__builtin_FILE_NAME", 1 }, { "__builtin_FUNCTION", 1 }, { "__builtin_LINE", 1 },
+    { "__builtin_omp_required_simd_align", 1 }, { "__builtin_ptrauth_type_discriminator", 1 }, { "__builtin_vectorelements", 1 },
+    { "__is_bitwise_cloneable", 1 }, { "__is_destructible", 1 }, { "__is_nothrow_destructible", 1 },
+    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_variant_environment", 1 },
+    { "__is_target_variant_os", 1 }, { "__is_target_vendor", 1 },
 };
 
 static int pp_compare_feature(const uint8_t* name, uint32_t length, const char* entry)
@@ -16922,12 +17008,14 @@ static bool pp_builtin_features(const PPOptions* options, const char* features)
 
 // Whether clang makes a plain library name that buster implements (c_builtin_library.c's plain list: sin, strlen,
 // printf) a builtin of the unit (#148): unless -fno-builtin or -ffreestanding says otherwise (Builtin::Context's
-// builtinIsSupported) or -fno-builtin-NAME names it (its NoBuiltinFuncs), and one of ALL_GNU_LANGUAGES in GNU's modes
-// alone. The checker's implicit library declarations decide the same from the catalog (check_input_library_enabled).
+// builtinIsSupported) or -fno-builtin-NAME names it (its NoBuiltinFuncs), one of ALL_GNU_LANGUAGES in GNU's modes alone,
+// and one of C23_LANG (<stdbit.h>'s) in C23 and later. The checker's implicit library declarations decide the same from
+// the catalog (check_input_library_enabled).
 static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     const CBuiltinLibraryPlain* plain = cbuiltin_library_plain((const char*)name, length);
-    bool result = plain != NULL && !options->no_builtin && !options->freestanding && (!plain->gnu || options->language.gnu);
+    bool result = plain != NULL && !options->no_builtin && !options->freestanding && (plain->modes != BUSTER_CBUILTIN_LIBRARY_GNU || options->language.gnu) &&
+                  (plain->modes != BUSTER_CBUILTIN_LIBRARY_C23 || options->language.standard >= 2023);
     for (uint32_t i = 0; result && i < options->no_builtin_function_count; i += 1)
     {
         const char* excluded = options->no_builtin_functions[i];
@@ -16956,15 +17044,17 @@ static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uin
 
 // buster's __has_constexpr_builtin of a name: 1 for a builtin it folds as clang's constant evaluator does, where it is a
 // builtin of the unit (pp_implemented_builtin_query's conditions): the catalog's constant capability, and the library
-// builtins' folds (#148, c_builtin_library.c: cbuiltin_library_fold's and the plain ones', where pp_library_builtin says
-// the name is a builtin).
+// builtins' folds (#148, c_builtin_library.c: cbuiltin_library_fold's, the plain ones' and C23's <stdbit.h> functions',
+// where pp_library_builtin says the name is a builtin).
 static uint32_t pp_implemented_constexpr_query(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     bool wide = false;
     const CBuiltinLibraryId library = cbuiltin_library_id((const char*)name, length);
     const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) && pp_builtin_language(options, cbuiltin_languages(name, length));
     const bool folded = library != CBUILTIN_LIBRARY_COUNT && cbuiltin_library_fold(library, &wide) != CBUILTIN_LIBRARY_FOLD_NONE;
-    const bool plain = cbuiltin_library_plain_fold((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && pp_library_builtin(options, name, length);
+    const bool plain = (cbuiltin_library_plain_fold((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS ||
+                        cbuiltin_stdc_library_resolve((const char*)name, length) != CBUILTIN_NONE) &&
+                       pp_library_builtin(options, name, length);
     const uint32_t result = catalog | folded | plain;
     return result;
 }
@@ -17096,6 +17186,7 @@ static const char pp_predefines_base[] =
     "#define __FPCLASS_POSZERO 0x0040\n"
     "#define __FPCLASS_QNAN 0x0002\n"
     "#define __FPCLASS_SNAN 0x0001\n"
+    "#define __GCC_ASM_FLAG_OUTPUTS__ 1\n"
     "#define __GCC_CONSTRUCTIVE_SIZE 64\n"
     "#define __GCC_DESTRUCTIVE_SIZE 64\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1\n"
@@ -17535,6 +17626,35 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
     }
 }
 
+// The tree whose build/ holds the executable at `path`, an absolute path, cut in place to it: the parent of the path's
+// last build/ directory, whatever is below it (build/compiler, which build.sh publishes, and
+// build/cmake/VARIANT/CONFIG/compiler, each configuration's own), or, in a path without one, two levels up, as from
+// build/compiler. Returns whether a directory is left.
+static bool pp_buster_tree(char* path)
+{
+    char* build = 0;
+    for (char* found = strstr(path, "/build/"); found != 0; found = strstr(found + 1, "/build/"))
+    {
+        build = found;
+    }
+    bool result = true;
+    if (build != 0)
+    {
+        result = build != path;
+        *build = 0;
+    }
+    for (uint32_t up = 0; build == 0 && result && up < 2; up += 1)
+    {
+        char* slash = strrchr(path, '/');
+        result = slash != 0 && slash != path;
+        if (result)
+        {
+            *slash = 0;
+        }
+    }
+    return result;
+}
+
 // buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
 // resource directory from its executable). Returns whether it exists; optionally counts its stat attempt.
 static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t* stat_count)
@@ -17545,16 +17665,7 @@ static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t*
     if (result)
     {
         executable[length] = 0;
-        // Up from build/compiler to the tree.
-        for (uint32_t up = 0; result && up < 2; up += 1)
-        {
-            char* slash = strrchr(executable, '/');
-            result = slash != 0 && slash != executable;
-            if (result)
-            {
-                *slash = 0;
-            }
-        }
+        result = pp_buster_tree(executable);
         result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
         struct stat stats;
         if (stat_count != 0)
@@ -17697,18 +17808,16 @@ static void pp_dedupe_directories(Preprocessor* pp)
     scratch_end(scratch);
 }
 
-// An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
-// An array of its own of `count` entries of `size` bytes, while `*reserved` (which becomes false if it can't be): the
-// reservations stop at the first that fails.
-// pp_array whose first `small` bytes are base pages (arena_reserve_small): for a table a translation unit usually fills
-// to a few hundred kilobytes, where the first huge page past them would cost more than the base pages it replaces.
-static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact)
+// An array of `count` records of `size` bytes in an arena of its own (address space, touched as it is used), whose first
+// `small` bytes are base pages (arena_reserve_small), while `*reserved` (which becomes false if it can't be): where a
+// history table moves when it outgrows its slice (pp_history_grow).
+static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
 {
     void* result = 0;
     if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
-        *arena = exact ? arena_reserve_exact(count * size + 64, small) : arena_reserve_small(count * size + 64, small);
+        *arena = arena_reserve_small(count * size + 64, small);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
@@ -17716,14 +17825,51 @@ static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uin
     return result;
 }
 
-static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
+// The unit's tables, which pp_initialize_once reserves as one arena of tables (arena_reserve_tables, #1128): each a
+// table of its own of `count` entries of `size` bytes, all of it base pages, that `*field` points to once they are
+// reserved, and stays null if they can't be or it has no entries.
+//
+// Base pages throughout (#652): huge pages past a table's first pages took an advice call for each table and split the
+// mapping around them, 38 of an empty file's 50 madvise calls, and none of these tables grows large enough for base
+// pages to cost much: on sqlite3.c the macros touch the most, 368 KB, and on this compiler's main.c the items 1.9 MB
+// and the macros 1.1 MB, where the first megabyte in base pages costs about as much as the huge pages it replaces
+// (BUSTER_PP_TABLE_SMALL_BYTES).
+typedef struct PPTables PPTables;
+struct PPTables
 {
-    return pp_array_with(pp, reserved, count, size, small, false);
+    uint32_t count;
+    bool full;
+    ArenaTable tables[BUSTER_ARENA_TABLES];
+    void** fields[BUSTER_ARENA_TABLES];
+};
+
+static void pp_table(PPTables* plan, void** field, uint64_t count, uint64_t size)
+{
+    *field = 0;
+    if (count != 0 && plan->count < BUSTER_ARENA_TABLES)
+    {
+        const uint64_t bytes = count * size + 64;
+        plan->tables[plan->count] = (ArenaTable){ .bytes = bytes, .small = bytes };
+        plan->fields[plan->count] = field;
+        plan->count += 1;
+    }
+    else
+    {
+        plan->full = plan->full || count != 0;
+    }
 }
 
-static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
+// A stack of `capacity` tokens (and BUSTER_PP_TOKEN_SLACK), its columns tables of the unit's (pp_table), as
+// pp_tokens_reserve's are of the output's own arena of tables.
+static void pp_tokens_plan(PPTables* plan, PPTokens* tokens, uint32_t capacity)
 {
-    return pp_array_small(pp, reserved, count, size, BUSTER_ARENA_SMALL_BYTES);
+    const uint64_t slots = (uint64_t)capacity + BUSTER_PP_TOKEN_SLACK;
+    pp_table(plan, (void**)&tokens->kinds, slots, 1);
+    pp_table(plan, (void**)&tokens->flags, slots, 1);
+    pp_table(plan, (void**)&tokens->values, slots, sizeof(uint32_t));
+    pp_table(plan, (void**)&tokens->locations, slots, sizeof(uint32_t));
+    tokens->count = 0;
+    tokens->capacity = capacity;
 }
 
 // SOURCE_DATE_EPOCH is a complete, nonnegative decimal integer. strtoll handles overflow; the first-byte and end
@@ -17824,40 +17970,56 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         largest = largest > largest_tables[i] ? largest : largest_tables[i];
     }
     pp->capacity_shift = arena_capacity_shift(largest);
-    result = result && pp_tokens_reserve(&pp->output, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->arguments, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) &&
-             pp_tokens_reserve(&pp->captures, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->expansions, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift));
-    pp->ranges = pp_array(pp, &result, (BUSTER_PP_MAX_RANGES >> pp->capacity_shift), sizeof(PPRange));
-    pp->datas = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFileData));
-    pp->dependencies = options->dependencies.enabled ? pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(DependencyFile)) : NULL;
-    pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
-    pp->files = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFile));
-    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS >> pp->capacity_shift, sizeof(uint32_t));
+    result = result && pp_tokens_reserve(&pp->output, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift));
+    // The unit's tables, in one arena (pp_table), the first of `arrays`: the records', the stacks' columns and the unit's
+    // own file cache (#652), which had four arenas of their own, a mapping and a commit each, though a small unit
+    // touches a page of each or none.
+    const uint32_t shift = pp->capacity_shift;
+    PPTables plan = { 0 };
+    pp_table(&plan, (void**)&pp->ranges, BUSTER_PP_MAX_RANGES >> shift, sizeof(PPRange));
+    pp_table(&plan, (void**)&pp->datas, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFileData));
+    pp_table(&plan, (void**)&pp->dependencies, options->dependencies.enabled ? BUSTER_PP_MAX_FILES >> shift : 0, sizeof(DependencyFile));
+    pp_table(&plan, (void**)&pp->record_data, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
+    pp_table(&plan, (void**)&pp->files, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFile));
+    pp_table(&plan, (void**)&pp->file_slots, BUSTER_PP_FILE_SLOTS >> shift, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp->directories = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(char*));
-    pp->directory_lengths = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(uint8_t));
-    pp->line_directives = pp_array(pp, &result, (BUSTER_PP_MAX_LINE_DIRECTIVES >> pp->capacity_shift), sizeof(PPLineDirective));
-    pp->expansion_starts = pp_array(pp, &result, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift) + 1, sizeof(PPExpansionStart));
-    pp->silent_pragmas = pp_array(pp, &result, (BUSTER_PP_MAX_SILENT_PRAGMAS >> pp->capacity_shift), sizeof(PPExpansionStart));
-    pp->embeds = pp_array(pp, &result, (BUSTER_PP_MAX_EMBEDS >> pp->capacity_shift), sizeof(PPEmbed));
-    pp->macro_of = pp_array_with(pp, &result, intern_id_limit(table), sizeof(PPMacroId), BUSTER_PP_TABLE_SMALL_BYTES, true);
-    pp->is_macro = pp_array_with(pp, &result, intern_id_limit(table) / 64, sizeof(uint64_t), BUSTER_ARENA_SMALL_BYTES, true);
-    pp->poisoned = pp_array_with(pp, &result, intern_id_limit(table) / 64, sizeof(uint64_t), BUSTER_ARENA_SMALL_BYTES, true);
-    pp->macros = pp_array_small(pp, &result, (BUSTER_PP_MAX_MACROS >> pp->capacity_shift), sizeof(PPMacro), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->items = pp_array_small(pp, &result, (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift), sizeof(PPItem), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->parameters = pp_array(pp, &result, (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift), sizeof(IdentId));
-    // About 250 templates of 260 bytes on sqlite3.c and on this compiler's main.c: past pp_array's 64 KB of base
-    // pages, the first huge page cost them 2 MB of clearing.
-    pp->templates = BUSTER_VECTOR_PATH(pp->vectorized) && pp->options.no_history
-                        ? pp_array_small(pp, &result, (BUSTER_PP_MAX_TEMPLATES >> pp->capacity_shift), sizeof(PPTemplate), BUSTER_PP_TABLE_SMALL_BYTES)
-                        : 0;
-    pp->pushed_names = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(IdentId));
-    pp->pushed_macros = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(PPMacroId));
-    pp->contexts = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPContext));
-    pp->conditionals = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPConditional));
-    pp->invocations = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPInvocation));
-    pp->argument_records = pp_array(pp, &result, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift), sizeof(PPArgument));
-    pp->capture_frames = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPCapture));
+    pp_table(&plan, (void**)&pp->directories, BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
+    pp_table(&plan, (void**)&pp->directory_lengths, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
+    pp_table(&plan, (void**)&pp->directory_system, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
+    pp_table(&plan, (void**)&pp->line_directives, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, sizeof(PPLineDirective));
+    pp_table(&plan, (void**)&pp->expansion_starts, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, sizeof(PPExpansionStart));
+    pp_table(&plan, (void**)&pp->silent_pragmas, BUSTER_PP_MAX_SILENT_PRAGMAS >> shift, sizeof(PPExpansionStart));
+    pp_table(&plan, (void**)&pp->embeds, BUSTER_PP_MAX_EMBEDS >> shift, sizeof(PPEmbed));
+    pp_table(&plan, (void**)&pp->macro_of, intern_id_limit(table), sizeof(PPMacroId));
+    pp_table(&plan, (void**)&pp->is_macro, intern_id_limit(table) / 64, sizeof(uint64_t));
+    pp_table(&plan, (void**)&pp->poisoned, intern_id_limit(table) / 64, sizeof(uint64_t));
+    pp_table(&plan, (void**)&pp->macros, BUSTER_PP_MAX_MACROS >> shift, sizeof(PPMacro));
+    pp_table(&plan, (void**)&pp->items, BUSTER_PP_MAX_ITEMS >> shift, sizeof(PPItem));
+    pp_table(&plan, (void**)&pp->parameters, BUSTER_PP_MAX_ITEMS >> shift, sizeof(IdentId));
+    // The vectorized path's compiled bodies, which a unit with history doesn't use.
+    pp_table(&plan, (void**)&pp->templates, BUSTER_VECTOR_PATH(pp->vectorized) && pp->options.no_history ? BUSTER_PP_MAX_TEMPLATES >> shift : 0, sizeof(PPTemplate));
+    pp_table(&plan, (void**)&pp->pushed_names, BUSTER_PP_MAX_PUSHED >> shift, sizeof(IdentId));
+    pp_table(&plan, (void**)&pp->pushed_macros, BUSTER_PP_MAX_PUSHED >> shift, sizeof(PPMacroId));
+    pp_table(&plan, (void**)&pp->contexts, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPContext));
+    pp_table(&plan, (void**)&pp->conditionals, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPConditional));
+    pp_table(&plan, (void**)&pp->invocations, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPInvocation));
+    pp_table(&plan, (void**)&pp->argument_records, BUSTER_PP_MAX_STACK_TOKENS >> shift, sizeof(PPArgument));
+    pp_table(&plan, (void**)&pp->capture_frames, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPCapture));
+    pp_tokens_plan(&plan, &pp->arguments, BUSTER_PP_MAX_STACK_TOKENS >> shift);
+    pp_tokens_plan(&plan, &pp->captures, BUSTER_PP_MAX_STACK_TOKENS >> shift);
+    pp_tokens_plan(&plan, &pp->expansions, BUSTER_PP_MAX_STACK_TOKENS >> shift);
+    // 131 KB, most of it the lanes' arenas, that file_cache_initialize writes whole.
+    pp_table(&plan, (void**)&pp->cache, options->files == 0, sizeof(FileCache));
+    if (result && !plan.full)
+    {
+        pp->arrays[0] = arena_reserve_tables(plan.tables, plan.count);
+        pp->array_count = 1;
+    }
+    result = result && !plan.full && pp->arrays[0].base != 0;
+    for (uint32_t i = 0; i < plan.count; i += 1)
+    {
+        *plan.fields[i] = plan.tables[i].base;
+    }
     if (result && !pp->options.no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
@@ -17877,15 +18039,13 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         }
         result = result && pp->history != 0 && pp->substitutions != 0 && pp->generated != 0 && pp->history_sources != 0 && pp->history_runs != 0;
     }
-    // The file cache: the options', made for the same language mode and intern table, or one of the unit's own.
-    pp->cache = options->files;
-    if (pp->cache == 0)
+    // The file cache: the options', made for the same language mode and intern table, or one of the unit's own, in its
+    // tables.
+    pp->cache = options->files != 0 ? options->files : pp->cache;
+    if (options->files == 0)
     {
-        // A reservation of its own: its 41 KB (with every lane's arenas) would take the arena past its first 64 KB, and
-        // its later pushes into a huge page the kernel clears whole.
-        pp->cache = result ? pp_array(pp, &result, 1, sizeof(FileCache)) : 0;
-        pp->owns_cache = pp->cache != 0;
-        result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
+        pp->owns_cache = result;
+        result = result && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
              pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
@@ -18549,6 +18709,41 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
 {
     const bool valid = token < pp->output.count && pp->output.locations != 0;
     return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
+}
+
+// The end of output token `token`'s outermost expansion, as clang's SourceManager::getExpansionRange(...).getEnd()
+// resolves it (#148's source-location builtins, #1126's review): a function-like invocation's closing parenthesis, an
+// object-like macro's name, followed while that end was itself made by an expansion (PPExpansion.end_origin); an
+// argument's or a generated token's is the end of the expansion that substituted or made it; a file token's is its own
+// location. `origin` is the token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
+static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    bool valid = token < pp->output.count && pp->output.locations != 0;
+    uint32_t location = valid ? pp->output.locations[token] : 0;
+    const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+        {
+            valid = index < pp->substitution_count;
+            origin = valid ? pp->substitutions[index].expansion : 0;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED)
+        {
+            valid = index < pp->generated_count;
+            origin = valid ? pp->generated[index].expansion : 0;
+        }
+        else
+        {
+            valid = kind == 0 && index < pp->history_count;
+            location = valid ? pp->history[index].end : location;
+            origin = valid ? pp->history[index].end_origin : 0;
+        }
+    }
+    valid &= origin == 0;
+    return valid ? location : 0;
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current

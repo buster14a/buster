@@ -845,6 +845,10 @@ static ExecutableTestField executable_test_expected(const Link* link, const Exec
             *value = size + addend;
             range = 2;
             break;
+        case BUSTER_LINK_FIXUP_TPOFF64:
+            *value = symbol + addend;
+            range = 2;
+            break;
         default:
             range = 3;
             break;
@@ -4062,6 +4066,154 @@ static bool executable_test_parse_u64(const char* text, uint64_t* value)
     return result;
 }
 
+// The image offsets of the atoms of `section`: the lowest and the highest end, or false for a section without atoms.
+static bool executable_test_section_span(const Link* link, String8 section, uint64_t* start, uint64_t* end)
+{
+    *start = UINT64_MAX;
+    *end = 0;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        const String8 own = link->atoms.section[atom];
+        const bool in_section = own.length == section.length && memcmp(own.pointer, section.pointer, section.length) == 0;
+        *start = in_section && link->atoms.address[atom] < *start ? link->atoms.address[atom] : *start;
+        *end = in_section && link->atoms.address[atom] + link->atoms.size[atom] > *end ? link->atoms.address[atom] + link->atoms.size[atom] : *end;
+    }
+    return *start != UINT64_MAX;
+}
+
+// #1122: a static executable of hand-made atoms, whose atoms refer to __start_ and __stop_ of three sections and to a
+// weak __start_ of a missing one. `bst_sec`'s three atoms and `bst_two`'s two share a bucket with the two plain atoms
+// between them; `bst_wide`'s two have different alignments, which the section takes the largest of. The linker's names
+// must bracket exactly each section's run, whatever the atoms' ids, and every lane count must write the same file.
+static bool executable_test_bound_sections(const ExecutableTestDirectory* directory)
+{
+    ExecutableTestTally tally = {
+        .check = "section bounds",
+    };
+    ExecutableTestLink test;
+    bool built = executable_test_link_begin(&test, BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test.link;
+    const uint8_t object = BUSTER_LINK_SYMBOL_OBJECT;
+    static const char* const bound_names[] = { "bst_sec", "bst_two", "bst_wide", "bst_missing" };
+    String8 sections[BUSTER_ARRAY_LENGTH(bound_names)] = { 0 };
+    SymbolId starts[BUSTER_ARRAY_LENGTH(bound_names)] = { 0 };
+    SymbolId stops[BUSTER_ARRAY_LENGTH(bound_names)] = { 0 };
+    for (uint32_t s = 0; built && s < BUSTER_ARRAY_LENGTH(bound_names); s += 1)
+    {
+        char start_name_text[32];
+        char stop_name_text[32];
+        const int start_length = snprintf(start_name_text, sizeof(start_name_text), "__start_%s", bound_names[s]);
+        const int stop_length = snprintf(stop_name_text, sizeof(stop_name_text), "__stop_%s", bound_names[s]);
+        const NameId start_name = link_add_name(link, (const uint8_t*)start_name_text, (uint32_t)start_length);
+        const NameId stop_name = link_add_name(link, (const uint8_t*)stop_name_text, (uint32_t)stop_length);
+        const bool weak = s + 1 == BUSTER_ARRAY_LENGTH(bound_names);
+        const uint8_t binding = weak ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL;
+        starts[s] = start_name != 0 ? link_add_symbol(link, start_name, 0, 0, 0, (uint8_t)(object | binding), weak ? BUSTER_LINK_SOURCE_NONE : BUSTER_LINK_SOURCE_LINKER) : 0;
+        stops[s] = stop_name != 0 && !weak ? link_add_symbol(link, stop_name, 0, 0, 0, (uint8_t)(object | BUSTER_LINK_SYMBOL_GLOBAL), BUSTER_LINK_SOURCE_LINKER) : 0;
+        sections[s] = (String8){ .pointer = (char*)bound_names[s], .length = strlen(bound_names[s]) };
+        built = built && starts[s] != 0 && (s + 1 == BUSTER_ARRAY_LENGTH(bound_names) || stops[s] != 0);
+    }
+    const SymbolId entry = built ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    built = built && entry != 0;
+    const String8 section = sections[0];
+    const String8 two = sections[1];
+    const String8 wide = sections[2];
+    const AtomId sec0 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    const AtomId between = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    const AtomId two0 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    const AtomId sec1 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    const AtomId two1 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    const AtomId after = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    // bst_wide's members keep their own alignments, packed pre-alignment as GNU ld packs a section's: the first at the
+    // run's start (which its 32-byte alignment takes), the second at the next 16-byte boundary, 20 bytes in all — not
+    // the 36 that padding each member to the section's largest alignment would write between the bounds.
+    const AtomId wide0 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 5, 8, 0, 0) : 0;
+    // sec2's 4 bytes leave bst_sec's end short of 16, so bst_two's run — the same bucket's, of the same largest
+    // alignment — starts only at the next 16: a run's start is its section's alignment's, not its first member's.
+    const AtomId sec2 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 4, 0, 0) : 0;
+    const AtomId wide1 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 4, 0, 0) : 0;
+    built = built && sec0 != 0 && between != 0 && two0 != 0 && sec1 != 0 && two1 != 0 && after != 0 && wide0 != 0 && sec2 != 0 && wide1 != 0 &&
+            link_set_atom_section(link, sec0, section) && link_set_atom_section(link, sec1, section) && link_set_atom_section(link, sec2, section) &&
+            link_set_atom_section(link, two0, two) && link_set_atom_section(link, two1, two) && link_set_atom_section(link, wide0, wide) &&
+            link_set_atom_section(link, wide1, wide);
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    built = built && executable_test_code(&test, 16, &code, 1, entry) != 0 && link_check(link) == LINK_ERROR_NONE;
+    executable_test_expect(&tally, built, "the fixture's link", 0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "bound-sections", path_bytes);
+    Scratch scratch = scratch_begin(0);
+    String8 first = { 0 };
+    for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+    {
+        ExecutableResult result = { 0 };
+        const uint32_t lanes = executable_test_lane_counts[l];
+        const bool written = executable_test_write(link, entry, path, lanes, &result, 0, 0);
+        const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+        executable_test_expect(&tally, written && file.pointer != 0 && (first.pointer == 0 || (file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0)),
+                               "every lane count writes the same file", lanes);
+        first = first.pointer == 0 ? file : first;
+        static const uint64_t spans[] = { 68, 64, 20 };
+        static const uint64_t aligns[] = { 16, 16, 32 };
+        for (uint32_t s = 0; s < 3; s += 1)
+        {
+            uint64_t start = UINT64_MAX;
+            uint64_t end = 0;
+            const bool found = executable_test_section_span(link, sections[s], &start, &end);
+            executable_test_expect(&tally, written && found && link->symbols.reference[starts[s]] == (uint32_t)start,
+                                   "__start at the section's first atom", lanes * 10 + s);
+            executable_test_expect(&tally, written && found && link->symbols.reference[stops[s]] == (uint32_t)end, "__stop at the section's last end", lanes * 10 + s);
+            executable_test_expect(&tally, written && found && end - start == spans[s], "the section's run", lanes * 10 + s);
+            executable_test_expect(&tally, written && found && start % aligns[s] == 0, "the run starts at its section's alignment", lanes * 10 + s);
+        }
+        executable_test_expect(&tally, written && link->symbols.reference[starts[3]] == (uint32_t)(0 - BUSTER_EXECUTABLE_BASE) &&
+                                           link->symbols.source[starts[3]] == BUSTER_LINK_SOURCE_NONE,
+                               "a weak reference to a missing section is 0", lanes);
+        executable_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "the executable runs", lanes);
+    }
+    scratch_end(scratch);
+    unlink(path.pointer);
+    executable_test_link_end(&test);
+    return executable_test_report(&tally);
+}
+
+// #1122: a thread-local atom and an ordinary one can't be one section's run in one output section, so a __start_/__stop_
+// bound of their name's is refused EXECUTABLE_ERROR_UNSUPPORTED with the bound symbol, not written wrong and not
+// mistaken for an allocation failure.
+static bool executable_test_bound_conflict(const ExecutableTestDirectory* directory)
+{
+    ExecutableTestTally tally = {
+        .check = "bound section conflict",
+    };
+    ExecutableTestLink test;
+    bool built = executable_test_link_begin(&test, BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test.link;
+    const String8 tls_section = { .pointer = (char*)"bst_tls", .length = 7 };
+    const NameId start_name = built ? link_add_name(link, (const uint8_t*)"__start_bst_tls", 15) : 0;
+    const NameId stop_name = start_name != 0 ? link_add_name(link, (const uint8_t*)"__stop_bst_tls", 14) : 0;
+    const SymbolId start = stop_name != 0 ? link_add_symbol(link, start_name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_LINKER) : 0;
+    const SymbolId stop = start != 0 ? link_add_symbol(link, stop_name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_LINKER) : 0;
+    const AtomId tls_atom = stop != 0 ? executable_test_data(&test, BUSTER_LINK_CLASS_TDATA, 3, 8, 0, 0) : 0;
+    const AtomId data_atom = tls_atom != 0 ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    built = built && start != 0 && stop != 0 && tls_atom != 0 && data_atom != 0 &&
+            link_set_atom_section(link, tls_atom, tls_section) && link_set_atom_section(link, data_atom, tls_section);
+    const SymbolId entry = built ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    built = built && entry != 0 && executable_test_code(&test, 16, &code, 1, entry) != 0 && link_check(link) == LINK_ERROR_NONE;
+    executable_test_expect(&tally, built, "the fixture's link", 0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "bound-conflict", path_bytes);
+    ExecutableResult result = { 0 };
+    const bool written = built && executable_test_write(link, entry, path, 1, &result, 0, 0);
+    executable_test_expect(&tally, !written && result.error == EXECUTABLE_ERROR_UNSUPPORTED && result.cause == EXECUTABLE_CAUSE_UNSUPPORTED_BOUND &&
+                                   (result.symbol == start || result.symbol == stop),
+                           "a TLS and an ordinary atom's bound section is unsupported", 0);
+    unlink(path.pointer);
+    executable_test_link_end(&test);
+    return executable_test_report(&tally);
+}
+
 static int run_executable_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -4123,6 +4275,8 @@ static int run_executable_tests(int argc, char** argv)
         bool passed = executable_test_section_names();
         passed = executable_test_hash(seed) && passed;
         passed = executable_test_programs(&directory, seed, id_order, (uint32_t)functions) && passed;
+        passed = executable_test_bound_sections(&directory) && passed;
+        passed = executable_test_bound_conflict(&directory) && passed;
         passed = executable_test_chunks(&directory) && passed;
         passed = executable_test_files(&directory, seed) && passed;
         passed = executable_test_limits(&directory, seed) && passed;

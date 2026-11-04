@@ -164,7 +164,7 @@ static uint32_t check_lazy_header(const Parser* parser, const Preprocessor* pp, 
                 const uint32_t id = parser->tokens.names[attribute];
                 const bool retained = check_lazy_name(pp->table, id, "used") || check_lazy_name(pp->table, id, "retain") ||
                                       check_lazy_name(pp->table, id, "constructor") || check_lazy_name(pp->table, id, "destructor") ||
-                                      check_lazy_name(pp->table, id, "export_name") || check_lazy_name(pp->table, id, "gnu_inline");
+                                      check_lazy_name(pp->table, id, "gnu_inline");
                 flags |= retained ? BUSTER_CHECK_LAZY_RETAIN : 0;
             }
         }

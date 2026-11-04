@@ -143,7 +143,10 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
     return valid;
 }
 
-static bool ir_simd_value_valid(const IrSimdValue* value, IrSimdShape shape)
+// Inlined, as ir.c's ir_constant_fits is, into the verifier's per-instruction oracle: there as a call, it cost --tier1 -c of
+// sqlite3.c 0.24% more instructions in ir_check_rows' loop, which has no vector constant (#141's intrinsics,
+// buster-performance's tier1-intrinsics-141-2026-11-03).
+static inline __attribute__((always_inline)) bool ir_simd_value_valid(const IrSimdValue* value, IrSimdShape shape)
 {
     const uint32_t bits = ir_simd_bits(shape);
     bool valid = value != NULL && bits != 0;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
 //
-// #148's library builtins (c_builtin_library.c, c_check_builtin_library.c): the lists against clang 23.1.1's table, the
+// #148's library builtins (c_builtin_library.c, c_check_builtin_library.c): the lists against the pinned clang 23.1.4's table, the
 // folds' constant contexts against clang's acceptance, and programs of each family against clang -O0's build, run
 // natively by the harness (check_test_program_source), by both paths. c_checker_test.c includes it after the program
 // harness's sections; test-checker runs it, and `test-checker --program-library` alone. test-checker-driver has the
@@ -28,9 +28,9 @@ static void check_test_library_note(char* list, size_t capacity, uint32_t* count
 // where the list says, without custom checking; every fold's prototype its row's encoding, of a row with attribute E;
 // each list in its names' order, within its bound, and each lookup finding exactly the listed names, at an unreadable
 // page too. Then every row of C's languages: an F row of all languages without features is one __has_builtin advertises
-// (the catalog's, the fortified builtins', the list's, powi's), one the lowering refuses by name
-// (cbuiltin_library_refusal), or one whose prototype the checker doesn't decode (__fp16's, custom checking's, FILE's);
-// and an f row is listed, or has no prototype to check (attribute T, or none), or needs FILE or va_list's reference.
+// (the catalog's, the fortified builtins', the list's, powi's), or one whose prototype the checker doesn't decode
+// (custom checking's);
+// and an f row is listed.
 static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
 {
     bool ordered = true;
@@ -43,7 +43,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         rows &= info != NULL && memchr(info->attributes, 'F', info->attributes_length) != NULL && strcmp(info->language_token, "ALL_LANGUAGES") == 0 &&
                 info->features_length == 0 && !info->custom_typechecking && cbuiltin_library_lengths[l] == strlen(cbuiltin_library_names[l]);
         rows &= (uint32_t)length <= BUSTER_CBUILTIN_LIBRARY_MAX_NAME && cbuiltin_library_id(name, (uint32_t)length) == (CBuiltinLibraryId)l &&
-                cbuiltin_library_source((const uint8_t*)name, (uint32_t)length) && cbuiltin_library_refusal(name, (uint32_t)length) == NULL;
+                cbuiltin_library_source((const uint8_t*)name, (uint32_t)length);
         ordered &= l == 0 || strcmp(cbuiltin_library_names[l - 1], cbuiltin_library_names[l]) < 0;
     }
     check_test_expect(test, rows && ordered, "library builtins: each listed call is clang's F row of its name, in order and within the bound");
@@ -52,11 +52,9 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
     {
         const CBuiltinLibraryPlain* plain = cbuiltin_library_plains + p;
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(plain->name, plain->length);
-        plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && memchr(info->attributes, 'T', info->attributes_length) == NULL &&
-                  !info->custom_typechecking && info->encoding_length != 0 && memchr(info->encoding, 'P', info->encoding_length) == NULL &&
-                  memchr(info->encoding, 'J', info->encoding_length) == NULL && memchr(info->encoding, 'K', info->encoding_length) == NULL &&
-                  memchr(info->encoding, 'A', info->encoding_length) == NULL && info->features_length == 0 &&
-                  strcmp(info->language_token, plain->gnu ? "ALL_GNU_LANGUAGES" : "ALL_LANGUAGES") == 0;
+        plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && !info->custom_typechecking &&
+                  info->features_length == 0 &&
+                  strcmp(info->language_token, cbuiltin_library_plain_languages(plain)) == 0;
         plains &= plain->length == strlen(plain->name) && plain->length <= BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME &&
                   cbuiltin_library_plain(plain->name, plain->length) == plain && (p == 0 || strcmp(cbuiltin_library_plains[p - 1].name, plain->name) < 0);
     }
@@ -89,10 +87,8 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         },
     };
     uint32_t advertised = 0;
-    uint32_t refused = 0;
     uint32_t undecoded = 0;
     uint32_t unaccounted = 0;
-    uint32_t refused_advertised = 0;
     uint32_t unlisted = 0;
     uint32_t plain_unaccounted = 0;
     char missing[160] = { 0 };
@@ -105,49 +101,41 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         if (all && info->features_length == 0 && memchr(info->attributes, 'F', info->attributes_length) != NULL)
         {
             const bool query = pp_implemented_builtin_query(&gnu, (const uint8_t*)info->name, info->name_length) != 0;
-            const bool named = cbuiltin_library_refusal(info->name, info->name_length) != NULL;
             const bool half = memchr(info->encoding, 'h', info->encoding_length) != NULL;
             const bool file = memchr(info->encoding, 'P', info->encoding_length) != NULL;
             advertised += query;
-            refused += !query && named;
-            undecoded += !query && !named && (half || file || info->custom_typechecking);
-            refused_advertised += query && named;
-            if (!query && !named && !half && !file && !info->custom_typechecking)
+            undecoded += !query && (half || file || info->custom_typechecking);
+            if (!query && !half && !file && !info->custom_typechecking)
             {
                 check_test_library_note(missing, sizeof(missing), &unaccounted, info->name);
             }
         }
-        if (c && memchr(info->attributes, 'f', info->attributes_length) != NULL && cbuiltin_library_plain(info->name, info->name_length) == NULL)
+        if ((c || strcmp(info->language_token, "C23_LANG") == 0) && memchr(info->attributes, 'f', info->attributes_length) != NULL &&
+            cbuiltin_library_plain(info->name, info->name_length) == NULL)
         {
-            const bool unchecked = memchr(info->attributes, 'T', info->attributes_length) != NULL || info->encoding_length == 0;
-            const bool reference = memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'A', info->encoding_length) != NULL;
             unlisted += 1;
-            if (!unchecked && !reference)
-            {
-                check_test_library_note(missing_plain, sizeof(missing_plain), &plain_unaccounted, info->name);
-            }
+            check_test_library_note(missing_plain, sizeof(missing_plain), &plain_unaccounted, info->name);
         }
     }
     char description[384];
     snprintf(description, sizeof(description),
-             "library builtins: clang's F rows are %u advertised, %u refused by name and %u of prototypes that don't decode, with %u left (%s) and %u "
-             "refused but advertised",
-             advertised, refused, undecoded, unaccounted, missing, refused_advertised);
-    check_test_expect(test, unaccounted == 0 && refused_advertised == 0 && refused != 0 && undecoded != 0, description);
+             "library builtins: clang's F rows are %u advertised and %u of prototypes that don't decode, with %u left (%s)",
+             advertised, undecoded, unaccounted, missing);
+    check_test_expect(test, unaccounted == 0, description);
     snprintf(description, sizeof(description), "library builtins: clang's f rows of C are %u listed and %u not, %u of them without a reason (%s)",
              BUSTER_CBUILTIN_LIBRARY_PLAIN_COUNT, unlisted, plain_unaccounted, missing_plain);
     check_test_expect(test, plain_unaccounted == 0, description);
     // Lookups of near misses and of bounded names at an unreadable page find nothing and read nothing past their slices.
     static const char* const misses[] = { "", "__builtin_", "__builtin_si", "__builtin_sinx", "__builtin_SIN", "_builtin_sin", "sin", "__builtin_powix", "__builtin_alloca" };
     bool missed = cbuiltin_library_id(NULL, 4) == CBUILTIN_LIBRARY_COUNT && !cbuiltin_library_source(NULL, 4) && cbuiltin_library_plain(NULL, 3) == NULL &&
-                  cbuiltin_library_plain_fold(NULL, 6) == BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && cbuiltin_library_refusal(NULL, 4) == NULL;
+                  cbuiltin_library_plain_fold(NULL, 6) == BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(misses); i += 1)
     {
         const uint32_t length = (uint32_t)strlen(misses[i]);
         missed &= cbuiltin_library_id(misses[i], length) == CBUILTIN_LIBRARY_COUNT && !cbuiltin_library_source((const uint8_t*)misses[i], length) &&
                   cbuiltin_library_libgcc(misses[i], length) == BUSTER_CBUILTIN_LIBRARY_LIBGCC;
     }
-    missed &= cbuiltin_library_plain("sinx", 4) == NULL && cbuiltin_library_plain("si", 2) == NULL && cbuiltin_library_plain("setjmp", 6) == NULL &&
+    missed &= cbuiltin_library_plain("sinx", 4) == NULL && cbuiltin_library_plain("si", 2) == NULL && cbuiltin_library_plain("va_starts", 9) == NULL && cbuiltin_library_plain("va_arg", 6) == NULL &&
               cbuiltin_library_plain("", 0) == NULL;
     const long page = sysconf(_SC_PAGESIZE);
     uint8_t* mapping = page > 0 ? mmap(NULL, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
@@ -194,6 +182,8 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         { "strtod", true, "double (const char *, char **)", "double (const char *, char **)" },
         { "wcslen", true, "__size_t (const int *)", "unsigned long (const int *)" },
         { "_Block_object_dispose", true, "void (const void *, const int)", "void (const void *, const int)" },
+        { "stdc_leading_zeros_us", true, "unsigned int (unsigned short)", "unsigned int (unsigned short)" },
+        { "stdc_has_single_bit_ull", true, "bool (unsigned long long)", "bool (unsigned long long)" },
     };
     bool spelled = true;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
@@ -206,12 +196,12 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         bool unsized = false;
         bool small = false;
         spelled &= info != NULL &&
-                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, spellings[i].c99, sugared,
+                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, spellings[i].c99, NULL, sugared,
                                           sizeof(sugared), &sized) &&
-                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, spellings[i].c99, plain,
+                   cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, spellings[i].c99, NULL, plain,
                                           sizeof(plain), &unsized) &&
                    strcmp(sugared, spellings[i].sugared) == 0 && strcmp(plain, spellings[i].plain) == 0 && sized == (strstr(sugared, "__size_t") != NULL);
-        small = info != NULL && !cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, true, tiny,
+        small = info != NULL && !cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, true, NULL, tiny,
                                                         sizeof(tiny), &sized);
         spelled &= small;
     }
@@ -277,6 +267,37 @@ static const CheckSourceFixture check_library_source_fixtures[] =
     {
         .name = "library folds: a static declaration isn't the builtin",
         .source = "static unsigned long strlen(const char* s){return 0;}static const unsigned long n = strlen(\"abcd\");\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: the unit's FILE at file scope",
+        .source = "typedef struct F FILE;\nint f(FILE* p, __builtin_va_list a){return __builtin_fprintf(p, \"%d\", 1) + __builtin_vfscanf(p, \"x\", a) + "
+                  "__builtin___fprintf_chk(p, 1, \"x\") + __builtin___vfprintf_chk(p, 1, \"x\", a);}\n",
+        .rejected = false,
+    },
+    {
+        .name = "FILE builtins: a local object named FILE leaves the file scope's",
+        .source = "typedef int FILE;\nint f(FILE* p){int FILE = 3;return __builtin_fprintf(p, \"%d\", FILE);}\n",
+        .rejected = false,
+    },
+    {
+        .name = "FILE builtins: no FILE",
+        .source = "int f(void* p){return __builtin_fprintf(p, \"x\");}\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: a FILE of block scope alone",
+        .source = "void g(void){typedef int FILE;}\nint f(void* p){return __builtin_fscanf(p, \"x\");}\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: FILE declared after the call",
+        .source = "int f(void* p){return __builtin_vfprintf(p, \"x\", 0);}\ntypedef struct F FILE;\n",
+        .rejected = true,
+    },
+    {
+        .name = "FILE builtins: a FILE of the wrong type",
+        .source = "typedef int FILE;\nint f(long* p){return __builtin_fprintf(p, \"x\");}\n",
         .rejected = true,
     },
 };
@@ -368,6 +389,37 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "h=hq(h,__builtin_fmaf128(q,q,q));int e;h=hq(h,__builtin_frexpf128(q,&e));h=hq(h,__builtin_ldexpf128(q,n));h=hq(h,__builtin_logbf128(q+5));"
         "return out(h)+e*3+__builtin_ilogbf128(q+5);}",
         "library-math-float128", clang);
+    // The __fp16 forms (#148): their arguments convert to __fp16 and their values are __fp16's; clang's code calls
+    // sinf16 and its kin by name, which the unit defines here (of _Float16, whose values pass as __fp16's do), and
+    // computes the others in float (ceilf16's ceilf), fma's in double, fabsf16's and copysignf16's bits.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_LIBRARY_FOLD
+        "_Float16 sinf16(_Float16 x){return (_Float16)__builtin_sinf((float)x);}_Float16 sqrtf16(_Float16 x){return (_Float16)__builtin_sqrtf((float)x);}"
+        "_Float16 powf16(_Float16 x,_Float16 y){return (_Float16)__builtin_powf((float)x,(float)y);}"
+        "_Float16 ldexpf16(_Float16 x,int e){return (_Float16)__builtin_ldexpf((float)x,e);}"
+        "void sincosf16(_Float16 x,_Float16*s,_Float16*c){*s=(_Float16)__builtin_sinf((float)x);*c=(_Float16)__builtin_cosf((float)x);}"
+        "static unsigned long hh(unsigned long h,const __fp16*p){return hash(h,p,2);}\n"
+        "#define H(e) ({__fp16 t_=(e);h=hh(h,&t_);})\n"
+        "int tested(int n){_Float16 x=(_Float16)(n*0.4375f-1.25f);float y=n*0.37f+0.11f;double z=-0.5-n*1.75;unsigned long h=14695981039346656037UL;int e=0;__fp16 s,c;"
+        "H(__builtin_sinf16(x));H(__builtin_sqrtf16(y));H(__builtin_powf16(y,x));H(__builtin_ldexpf16(x,n));__builtin_sincosf16(x,&s,&c);H(s);H(c);"
+        "H(__builtin_ceilf16(z));H(__builtin_floorf16(y));H(__builtin_truncf16(z));H(__builtin_rintf16(y*3));H(__builtin_roundevenf16(x));H(__builtin_roundf16(z));"
+        "H(__builtin_fabsf16(z));H(__builtin_copysignf16(y,z));H(__builtin_fmaxf16(x,y));H(__builtin_fminf16(x,z));H(__builtin_fmaximum_numf16(z,y));"
+        "H(__builtin_fminimum_numf16(z,y));H(__builtin_fmaf16(x,y,z));H(__builtin_frexpf16(y,&e));H(__builtin_canonicalizef16(x));"
+        "float sum=__builtin_fmaxf16(x,y)+__builtin_fabsf16(z);h=hash(h,&sum,4);"
+        "static const float folded=__builtin_fmaxf16(1.5f,2.5f)+__builtin_fminimum_numf16(-0.0f,0.0f);h=hash(h,&folded,4);return out(h)+e*3+(int)sizeof(__builtin_fabsf16(x));}",
+        "library-math-half", clang);
+    // The FILE builtins (#148), whose prototypes take the unit's FILE: fprintf, the fortified __fprintf_chk and vfprintf and
+    // __vfprintf_chk through variadic helpers write a temporary file, which fscanf and vfscanf read back.
+    check_test_program_source(test,
+        "typedef struct _IO_FILE FILE;FILE* tmpfile(void);int fclose(FILE*);void rewind(FILE*);"
+        "static int vp(FILE* f,const char* m,...){__builtin_va_list a;__builtin_va_start(a,m);int r=__builtin_vfprintf(f,m,a);__builtin_va_end(a);return r;}"
+        "static int vs(FILE* f,const char* m,...){__builtin_va_list a;__builtin_va_start(a,m);int r=__builtin_vfscanf(f,m,a);__builtin_va_end(a);return r;}"
+        "static int vc(FILE* f,const char* m,...){__builtin_va_list a;__builtin_va_start(a,m);int r=__builtin___vfprintf_chk(f,1,m,a);__builtin_va_end(a);return r;}"
+        "int tested(int n){FILE* f=tmpfile();if(!f)return -1;int w=__builtin_fprintf(f,\"%d %s \",n,\"ab\");w+=vp(f,\"%x %c \",n*7,'q');"
+        "w+=__builtin___fprintf_chk(f,1,\"%ld \",(long)n*1000);w+=vc(f,\"%u\\n\",n+3u);rewind(f);int a=0;char s[8]={0};unsigned x=0;char q=0;long l=0;unsigned u=0;"
+        "int r=__builtin_fscanf(f,\"%d %7s\",&a,s);r+=vs(f,\"%x %c\",&x,&q);r+=__builtin_fscanf(f,\"%ld %u\",&l,&u);fclose(f);"
+        "return w*1000003+r*10007+a+s[0]+s[1]*3+(int)x*5+q*7+(int)l*11+(int)u*13;}",
+        "library-file", clang);
     check_test_program_source(test,
         BUSTER_CHECK_TEST_LIBRARY_FOLD
         "int tested(int n){_Complex double c;__real__ c=n*0.37+0.11;__imag__ c=1.5-n*0.25;_Complex float g;__real__ g=n*0.5f;__imag__ g=0.75f;"

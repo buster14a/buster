@@ -13,12 +13,18 @@ requirements. [Command index](README.md).
   `CheckOptions.level_order`, in stable dependency levels), with scalar
   barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
+  `c_check_declspec.c` and `c_check_literal_diagnostic.c` word its refusals of
+  declaration specifiers that don't combine and of numeric constants as clang
+  does, at clang's places (#1127), and only a refusal runs them; a constant
+  before a unit's first syntax error, which only the parse reached, is checked
+  first, so that its error is clang's first (`c_checker_driver.c`);
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
   "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
   an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
-  "The sparse output columns", #628); `c_check_binding.c` publishes each use's retained answer from those events
+  "The sparse output columns", #628), and `attributes` as a wide one, of 64-bit
+  values ("The attributes column", #1167); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
@@ -32,18 +38,27 @@ requirements. [Command index](README.md).
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`); `test-checker-corpus`
+  `CheckDriverPart`). Its library-builtin comparisons are pinned to Clang
+  23.1.4, CI's reference: it compares `clang --version` with the release,
+  prints `expected clang 23.1.4, found …` when another release is found, and
+  skips only the plain names that release's table is known to classify
+  differently (the named list `cbuiltin_library_table_differences`: 23.1.5's
+  `strlcat` and `strlcpy`), still comparing every other name and every
+  version-independent check, and reruns them under a fake clang 23.1.5 so the
+  skip path is exercised under the reference too; the fake reaches `--clang`'s
+  executable through a path with a space, quotes and `$;*`
+  (`clang_release_wrapper`), so an awkward `--clang` path stays one word. `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
   `benchmark-checker-source` measures checking of real
-  source bodies by the scalar schedule, the vector path's postorder batches (`vector`), its level order
-  (`levels`, `CheckOptions.level_order`), its memoized transitions in node order (`transitions`,
-  `CheckOptions.transitions`, #1050, `c_check_transitions.c`) and its transitions keyed in 16-lane windows
-  (`windows`, `CheckOptions.transition_windows`): #133's question of which order wins, which the postorder
-  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder"), and #1050's ("Memoized
-  transitions"), opt-in (the driver's `--check-transitions`) since they saved 4% of `sqlite3.c`'s graph run
-  there. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
+  source bodies by the scalar schedule, the vector path in node order (`vector`, its default), its regions in
+  postorder batches (`regions`, `CheckOptions.regions`) and by level (`levels`, `CheckOptions.level_order`), and its
+  memoized transitions in node order (`transitions`, `CheckOptions.transitions`, #1050, `c_check_transitions.c`,
+  keyed by interned value classes): #133's question of which order the regions take, which the postorder batches
+  won on the 9700X (`docs/c-checker.md`, "Level order or postorder"), #1050's of what the regions do ("Node order or
+  regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
+  don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
   `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
@@ -52,6 +67,9 @@ requirements. [Command index](README.md).
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
+  `--program-selection` selects the emission-selection and constant-if regressions alone, including #1194's
+  statement-expression paths: scalar/vector and eager/lazy objects must agree byte for byte and match Clang's
+  symbols and execution. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
@@ -61,7 +79,7 @@ requirements. [Command index](README.md).
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
-  `--transitions` selects the memoized transitions' fixtures, keys and table limits alone (`c_check_transitions_test.c`).
+  `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
@@ -91,7 +109,7 @@ requirements. [Command index](README.md).
 
 ## Object and linkage options (#1124)
 
-The C driver refuses an effective `-fcommon`, `-ffunction-sections`,
+The C driver refuses an effective `-ffunction-sections`,
 `-fdata-sections`, non-default `-fvisibility=hidden|protected|internal`, or
 `-fvisibility-ms-compat` when writing an object (`-c`, including `check -c`)
 or linking an executable. The diagnostic names the option:
@@ -100,15 +118,19 @@ unsupported boundary, not implementation of these features. The refusal
 precedes input processing and output creation, including multi-file commands,
 and preserves an existing destination in both Tier 0 and Tier 1.
 
-Each family has independent last-option-wins state. `-fno-common`,
+`-fcommon` is implemented (#147). When it comes after any `-fno-common`,
+every tentative definition of external linkage is an `SHN_COMMON` symbol,
+and a multi-unit link merges the units' commons as GNU ld does.
+
+Each family has independent last-option-wins state.
 `-fno-function-sections`, `-fno-data-sections` and `-fvisibility=default`
 retain the current output and cancel an earlier request in their own family.
 For visibility, the last of `-fvisibility=…` and `-fvisibility-ms-compat`
 decides, as clang's driver reads them: an earlier malformed value is ignored,
 a malformed last value keeps clang's `invalid value` diagnostic, and an
 effective `-fvisibility-ms-compat` (clang's hidden default) is refused by name.
-Option values consumed by another option (such as `-include -fcommon`) are
-filenames, not code-generation requests.
+Option values consumed by another option (such as `-include -fvisibility=hidden`)
+are filenames, not code-generation requests.
 
 Valid requests remain accepted for preprocessing, syntax checking, `check`,
 and typed/static dumps, which emit neither an object nor an executable.

@@ -61,7 +61,7 @@ implements this interface;
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
-[options] [file...]`, or `test-preprocessor --tables path...`:
+[--part K/N] [options] [file...]`, or `test-preprocessor --tables path...`:
 
 - without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They run in 32 parts, the
@@ -245,6 +245,19 @@ features:
   `-std=` alone, or no options), and each taken one must give clang's tokens;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, including 45 sanitizer option sets and target queries;
+- each of clang's 3,775 builtin names in 17 target, language and `-f` option
+  configurations must give clang's `__has_builtin`, and `__has_constexpr_builtin`
+  wherever its constant evaluator folds, and buster's table's gates must match
+  clang's (the builtin targets check). Its plain library names are pinned to
+  Clang 23.1.4, CI's reference: a different release prints
+  `expected clang 23.1.4, found …`, and only the plain names that release's
+  table is known to classify differently (the named list
+  `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`) are
+  skipped, so every version-independent answer and every difference no named
+  release explains is still checked, and a fixture reruns the check under a
+  fake clang 23.1.5 so the skip path is exercised under the reference too,
+  reaching the real clang through a path with a space, quotes and `$;*`
+  (`clang_release_wrapper`);
 - buster's own headers (`src/buster/include`) against clang's, for each header,
   8 modes, hosted and freestanding (176 sets): with each set, clang's run must
   define the same macros (but the guards and helpers each names its own way),
@@ -289,6 +302,23 @@ features:
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job's test step runs the cases
 and the repository's translation units with `--clang`, and `--tables src`.
+
+`--part K/N` (without files) runs the checks above that the deal gives part K of
+N (`pp_test_sections`), so that the correctness list runs them as 4 commands of
+one CPU, which its runner packs beside the others: whole, on 2 CPUs, they took
+295 s on a hosted runner and 44 s on the 9700X, the list's longest command. Each
+check weighs about its time on one CPU (the cases' parts and the fuzz batch's
+workers counted whole; the option sets' check against `clang -dM` runs as 4
+slices of its sets, and the fuzz batch as its own checks and each mode), and the
+deal gives each, the heaviest first, to the part that weighs the least so far,
+as the runner deals its shards. The N parts together run every check once; the
+weights only balance them. A part fails if its pass that runs the checks meets
+another sequence of them than the pass that weighed them (a check at another
+place or past them), so that a check whose guard came to depend on another
+check's work can't move between the parts unseen. The first line names the part
+and its checks (`test-preprocessor: part K of N: C of T checks`). K and N are
+digits alone, 1 ≤ K ≤ N ≤ 128; anything else, a missing value or a second
+`--part` prints the usage before any check runs, which the list's part 1 checks.
 
 The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
 the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,

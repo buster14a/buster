@@ -68,6 +68,7 @@ struct CheckWarningSpelling
     uint32_t count;
     String8* anonymous;
     uint32_t anonymous_count;
+    bool built;
 };
 
 // Each unnamed tag's diagnostic name (#992): the first typedef naming it, as clang's `T`/`T *` and `T2 *`'s
@@ -154,6 +155,40 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
     return valid;
 }
 
+// One pass's spelling rows, built on its first rendered type (#992): a pass that renders none never scans the
+// token columns. A built pass keeps its rows until it ends, above every per-event mark.
+static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                        CheckWarningSpelling* spell, Arena* scratch)
+{
+    if (!spell->built)
+    {
+        spell->built = true;
+        spell->count = pp->table->count;
+        spell->bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell->count);
+        spell->lengths = spell->bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell->count) : NULL;
+        bool valid = spell->count == 0 || spell->lengths != NULL;
+        for (uint32_t i = 0; valid && i < spell->count; i += 1)
+        {
+            spell->bytes[i] = intern_bytes(pp->table, i);
+            spell->lengths[i] = intern_length(pp->table, i);
+        }
+        bool unnamed = false;
+        for (uint32_t tag = 1; valid && types != NULL && tag < types->tags.count; tag += 1)
+        {
+            unnamed |= types->tags.name[tag] == 0;
+        }
+        if (valid && unnamed)
+        {
+            valid = check_driver_spelling_build(parser, pp, input, types, spell, scratch);
+        }
+        if (!valid)
+        {
+            spell->bytes = NULL;
+        }
+    }
+    return spell->count == 0 || spell->bytes != NULL;
+}
+
 static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* input, const CheckWarningEvents* view, const CheckRepair* repair)
 {
     bool promoted = false;
@@ -177,8 +212,8 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
     if (type != 0 && type_is_valid(types, type))
     {
         // Only diagnostic rendering needs these spelling arrays; clean checking retains no identifier-sized view.
-        // The pass's columns live in `spell`, built before the events' marks (#992).
-        if (spell->bytes != NULL)
+        // The pass's columns live in `spell`, built on the pass's first rendered type below its marks (#992).
+        if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
         {
             TypeNames names = {
                 .bytes = spell->bytes,
@@ -239,6 +274,114 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
         }
     }
     return result;
+}
+
+// An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
+static String8 check_warning_attribute_normalized(String8 name)
+{
+    const bool surrounded = name.length >= 4 && name.pointer[0] == '_' && name.pointer[1] == '_' && name.pointer[name.length - 1] == '_' &&
+                            name.pointer[name.length - 2] == '_';
+    return surrounded ? (String8){ name.pointer + 2, name.length - 4 } : name;
+}
+
+static bool check_warning_text_equal(String8 text, const char* expected)
+{
+    const uint64_t length = strlen(expected);
+    return text.length == length && memcmp(text.pointer, expected, length) == 0;
+}
+
+// A C23 attribute's scope as clang normalizes it (canonicalizeScopeName): __gnu__'s as gnu, _Clang's as clang, another as
+// written.
+static String8 check_warning_attribute_scope(String8 scope)
+{
+    const bool gnu = check_warning_text_equal(scope, "__gnu__");
+    const bool clang = check_warning_text_equal(scope, "_Clang");
+    return gnu ? (String8){ "gnu", 3 } : clang ? (String8){ "clang", 5 } : scope;
+}
+
+// An attribute's name as clang normalizes it (normalizeAttrName): a GNU one's, and a C23 one's of no scope, gnu's or
+// clang's, without a keyword's surrounding underscores; another scope's as written.
+static String8 check_warning_attribute_name(String8 name, String8 scope, bool standard)
+{
+    const bool strip = !standard || scope.length == 0 || check_warning_text_equal(scope, "gnu") || check_warning_text_equal(scope, "clang");
+    return strip ? check_warning_attribute_normalized(name) : name;
+}
+
+// The edit distance of `typo` to `candidate`, insertions, deletions and replacements counted (llvm's
+// StringRef::edit_distance), by rows over the candidate's bytes: a candidate is one of clang's spellings, of at most 63.
+static uint32_t check_warning_edit_distance(String8 typo, String8 candidate)
+{
+    uint32_t row[64];
+    const uint32_t width = candidate.length < 63 ? (uint32_t)candidate.length : 63;
+    for (uint32_t j = 0; j <= width; j += 1)
+    {
+        row[j] = j;
+    }
+    for (uint64_t i = 1; i <= typo.length; i += 1)
+    {
+        uint32_t diagonal = row[0];
+        row[0] = (uint32_t)i;
+        for (uint32_t j = 1; j <= width; j += 1)
+        {
+            const uint32_t above = row[j];
+            const uint32_t replace = diagonal + (typo.pointer[i - 1] != candidate.pointer[j - 1] ? 1u : 0u);
+            const uint32_t insert = row[j - 1] + 1;
+            const uint32_t remove = above + 1;
+            const uint32_t least = insert < remove ? insert : remove;
+            row[j] = replace < least ? replace : least;
+            diagonal = above;
+        }
+    }
+    return row[width];
+}
+
+// clang's correction of a misspelled name (SimpleTypoCorrection): of `list`'s `count` names in order, the first of the fewest
+// edits from `typo`, within (its length + 2) / 3 edits, a candidate skipped whose length differs from the typo's by more than
+// a third of the typo's; its index, or `count` for none.
+static uint32_t check_warning_attribute_closest(const CheckInputClangAttribute* list, uint32_t count, String8 typo)
+{
+    const uint32_t most = (uint32_t)((typo.length + 2) / 3);
+    uint32_t best = most + 1;
+    uint32_t result = count;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const String8 candidate = { (char*)list[i].name, list[i].length };
+        const uint64_t difference = candidate.length > typo.length ? candidate.length - typo.length : typo.length - candidate.length;
+        const bool skipped = candidate.length == 0 || (difference != 0 && typo.length / difference < 3);
+        const uint32_t distance = skipped ? best : check_warning_edit_distance(typo, candidate);
+        result = distance < best ? i : result;
+        best = distance < best ? distance : best;
+    }
+    return best <= most ? result : count;
+}
+
+// clang's suggestion for an attribute it doesn't know (Sema::DiagnoseUnknownAttribute): a C23 attribute's scope that isn't
+// one of its spellings' (`*scope`, normalized) corrected to the closest of them, then its name, normalized for that scope, that
+// isn't one of its spellings' corrected to the closest, where clang knows that one in the attribute's syntax and scope
+// (check_input_attribute_clang_knows). `*scope` and `*name` are the suggestion's; whether there is one.
+static bool check_warning_attribute_suggestion(String8 written, bool standard, String8* scope, String8* name)
+{
+    bool corrected = false;
+    if (standard && scope->length != 0 &&
+        !check_input_attribute_listed(check_input_clang_scopes, BUSTER_ARRAY_LENGTH(check_input_clang_scopes), *scope))
+    {
+        const uint32_t index = check_warning_attribute_closest(check_input_clang_scopes, BUSTER_ARRAY_LENGTH(check_input_clang_scopes), *scope);
+        corrected = index < BUSTER_ARRAY_LENGTH(check_input_clang_scopes);
+        *scope = corrected ? (String8){ (char*)check_input_clang_scopes[index].name, check_input_clang_scopes[index].length } : *scope;
+    }
+    *name = check_warning_attribute_name(written, *scope, standard);
+    if (!check_input_attribute_listed(check_input_clang_spellings, BUSTER_ARRAY_LENGTH(check_input_clang_spellings), *name))
+    {
+        const uint32_t index = check_warning_attribute_closest(check_input_clang_spellings, BUSTER_ARRAY_LENGTH(check_input_clang_spellings), *name);
+        const String8 candidate = index < BUSTER_ARRAY_LENGTH(check_input_clang_spellings) ?
+                                  (String8){ (char*)check_input_clang_spellings[index].name, check_input_clang_spellings[index].length } : (String8){ "", 0 };
+        // clang's hasAttribute normalizes the candidate as it does the attribute's name (`__device__` is device).
+        const bool known = candidate.length != 0 &&
+                           check_input_attribute_clang_knows(*scope, check_warning_attribute_name(candidate, *scope, standard), scope->length != 0, standard);
+        *name = known ? candidate : *name;
+        corrected |= known;
+    }
+    return corrected;
 }
 
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -303,6 +446,31 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_BUILTIN_HEADER:
             result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of its header", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE:
+        {
+            // clang spells a GNU attribute's name as written, and a C23 attribute's normalized: its scope's __gnu__ as gnu and
+            // _Clang as clang, and its name without a keyword's surrounding underscores where its scope is none, gnu or clang
+            // (another scope's as written). Its suggestion (check_warning_attribute_suggestion) follows.
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            String8 suggestion_scope = scope;
+            String8 suggestion_name = attribute;
+            const bool suggested = check_warning_attribute_suggestion(name, standard, &suggestion_scope, &suggestion_name);
+            char suggestion[160] = { 0 };
+            if (suggested)
+            {
+                snprintf(suggestion, sizeof(suggestion), "; did you mean '%.*s%s%.*s'?", (int)suggestion_scope.length, suggestion_scope.pointer,
+                         suggestion_scope.length != 0 ? "::" : "", (int)suggestion_name.length, suggestion_name.pointer);
+            }
+            result = check_warning_text(scratch, "unknown attribute '%.*s%s%.*s' ignored%s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                        (int)attribute.length, attribute.pointer, suggestion);
+            break;
+        }
+        case CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE:
+            result = "'__clang__' is a predefined macro name, not an attribute scope specifier; did you mean '_Clang' instead?";
+            break;
         case CHECK_WARNING_EVENT_UNDEFINED_INTERNAL:
             result = check_warning_text(scratch, "function '%.*s' has internal linkage but is not defined", (int)name.length, name.pointer);
             break;
@@ -315,6 +483,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_STANDALONE_SPECIFIER:
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_VARIABLE:
+            result = check_warning_text(scratch, "unused variable '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_FUNCTION:
+            result = check_warning_text(scratch, "unused function '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_PARAMETER:
+            result = check_warning_text(scratch, "unused parameter '%.*s'", (int)name.length, name.pointer);
             break;
         default: break;
     }
@@ -368,29 +545,10 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     // rendered type pays nothing for what the pass already scanned. A unit with no unnamed tag skips the
     // spelling rows entirely.
     const uint64_t spelling_mark = scratch->length;
-    CheckWarningSpelling spell = { .count = pp->table->count };
+    CheckWarningSpelling spell = { 0 };
     if (renders)
     {
-        spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
-        spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
-        if (spell.count != 0)
-        {
-            valid = spell.lengths != NULL;
-        }
-        for (uint32_t i = 0; valid && i < spell.count; i += 1)
-        {
-            spell.bytes[i] = intern_bytes(pp->table, i);
-            spell.lengths[i] = intern_length(pp->table, i);
-        }
-        bool unnamed = false;
-        for (uint32_t t = 1; types != NULL && t < types->tags.count; t += 1)
-        {
-            unnamed |= types->tags.name[t] == 0;
-        }
-        if (valid && unnamed)
-        {
-            valid = check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
-        }
+        valid = check_driver_spelling_ready(parser, pp, input, types, &spell, scratch);
     }
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
@@ -439,6 +597,15 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                    }
+                    else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER) &&
+                             event->completion_kind != CHECK_WARNING_COMPLETE_TU_END)
+                    {
+                        // Scope-pop warnings: clang pops a scope's unused declarations before replaying the
+                        // body's deferred diagnostics at that boundary. At the translation unit's end the
+                        // scope rule no longer applies — every unused warning shares one boundary, and a
+                        // lexical phase would order file-scope objects ahead of earlier declarations.
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else
                     {

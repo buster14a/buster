@@ -18,9 +18,9 @@
 //
 //   build/compiler test-tier1-cfg-source [--simd] [--print NAME] [preprocessor options] file...
 //
-// --print NAME prints that function's allocation problem's sizes and each path's counts. --simd allocates a function
-// with vectors, which the SSA promoter refuses (test-ir-source --simd checks that it does), in its lowered form, which is
-// SSA too (its locals in slots), so that #732's vector and mask values reach the vector and opmask classes (#179): the
+// --print NAME prints that function's allocation problem's sizes and each path's counts. --simd counts the functions
+// with vectors, which the SSA promoter takes as any other (#141), so that #732's vector and mask values reach the vector
+// and opmask classes (#179): the
 // report then counts its masks, which must be some. A function whose only SIMD values are masks the promoter takes, and
 // it is promoted and allocated as any other: refused, it fails the run. This is a test outside the compile path, with
 // no vector path of its own.
@@ -79,7 +79,7 @@ struct Tier1CfgSourceTotals
     uint64_t blocks;
     uint64_t edges;
     uint64_t phis;
-    // With --simd: the functions allocated in their lowered form, and their problems' mask values.
+    // With --simd: the functions with vectors, and the problems' mask values.
     uint64_t simd;
     uint64_t mask_values;
     // The promoted IR's loads and stores of its slots, beside each path's stores and reloads: the frame's traffic.
@@ -166,13 +166,10 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
         IrFunction lowered = { 0 };
         IrFunction promoted = { 0 };
         const IrCheck lowering = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, lowered_output, scratch, &lowered);
-        const IrCheck refused = lowering.error == IR_OK ? ssa_ir_promote(&lowered, promoted_output, scratch, &promoted) : lowering;
-        // With --simd, a function the promoter refuses for its vectors is allocated as lowered; one of masks alone, which
-        // the promoter takes (#179), must promote.
-        const bool lowered_form = simd && lowering.error == IR_OK && refused.error == IR_ERROR_UNSUPPORTED && ir_function_has_vectors(&lowered);
-        const IrCheck promotion = lowered_form ? lowering : refused;
-        const IrFunction* allocated = lowered_form ? &lowered : &promoted;
-        totals->simd += lowered_form;
+        // A function with vectors promotes as any other (#141), and with --simd is counted.
+        const IrCheck promotion = lowering.error == IR_OK ? ssa_ir_promote(&lowered, promoted_output, scratch, &promoted) : lowering;
+        const IrFunction* allocated = &promoted;
+        totals->simd += simd && promotion.error == IR_OK && ir_function_has_vectors(&promoted);
         Tier1CfgIrProblem problem = { 0 };
         const Tier1CfgIrStatus adapted = promotion.error == IR_OK ? tier1_cfg_from_ir(allocated, problem_arena, scratch, &problem) : TIER1_CFG_IR_INVALID;
         totals->unpromoted += promotion.error != IR_OK;
@@ -349,7 +346,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     const uint64_t refused = totals.paths[0].failed + totals.paths[0].rejected + totals.paths[1].failed + totals.paths[1].rejected + totals.paths[0].uncertified + totals.paths[1].uncertified;
     if (valid)
     {
-        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_lowered=%" PRIu64 " masks=%" PRIu64 "\n",
+        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_vectors=%" PRIu64 " masks=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.malformed, totals.disagreed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis, totals.simd, totals.mask_values);
         tier1_cfg_source_print_path("vector", &totals.paths[0], totals.instructions);
         tier1_cfg_source_print_path("scalar", &totals.paths[1], totals.instructions);

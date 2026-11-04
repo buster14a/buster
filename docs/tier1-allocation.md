@@ -321,7 +321,15 @@ edge. Without it, the one `undef` per local that promotion puts in the entry
 block was live from there to every join that read it: around a loop, everywhere.
 Promotion makes such operands where a block's lifetime start kills a local
 ([the SSA guide](ssa.md)'s adapter), and Lua's `luaV_execute` had hundreds of
-them. Each value then gets an interval per block it is
+them.
+
+An edge can carry copies the allocation doesn't see: a long double phi's
+(#141), whose values live in frame objects, which the CFG consumer copies on the
+x87 stack (`tier1_emit_cfg_x87_phis`). Its optional per-edge column
+(`Tier1CfgInput.edge_copies`) places such an edge as one with moves, at its
+predecessor's end, its successor's start or a split's, though it has none of the
+allocation's; `tier1_cfg_verify` and the certificate's shape check take that
+placement. Each value then gets an interval per block it is
 defined in or live into, from its definition or the block's start to its last
 use there, or to the block's end where it stays live. A value's blocks come
 block by block from the live-in rows, counted and then filled, so building the
@@ -485,6 +493,16 @@ rather than through fixed ranges. No floating value is rematerializable: a
 constant's recipe would need its bits in a general register first, which the
 recipes don't make.
 
+The IR's vectors (#141), `v4i32`, `v8i32` and `v16i32`, are the class's values
+too, at their widths, 16, 32 and 64 bytes: a vector's slot is its bytes, aligned
+to 16 at most, which `vmovdqu32` of its width spills and reloads, and a move
+between two registers is a `vmovdqa64` of its ymm or zmm register (a 16-byte
+one's a `movaps`). In a function with vectors, the class's call-save rows and
+its temporary slot take the widest vector's bytes: the saves around a call move
+a register's whole widest vector (`Tier1EmitPrepared.vector_bytes`), and the
+temporary slot fits any value a cycle stages there; without one they stay 8 bytes
+and `movsd`'s. No vector is rematerializable either.
+
 A floating parameter arrives in xmm0 to xmm7 by its place among the function's
 floating parameters (`tier1_select_parameter_place`), its definition bound to
 that register (`Tier1CfgInput.definition_registers`) as a general parameter's
@@ -509,11 +527,10 @@ and counted.
 function `-c` compiles as `test-ir-source` does, lowers and promotes it, adapts
 it, allocates it by both paths and checks both with `tier1_cfg_verify`; any
 refusal but the model's, a rejection or paths that disagree fail it. With
-`--simd`, a function the SSA promoter refuses for its vectors (as
-`test-ir-source --simd` requires it to) is allocated as lowered, all its locals
-in slots, which is SSA too, and one whose only SIMD values are masks, which the
-promoter takes (#179), is promoted and allocated as any other: #732's `vcmp`
-results reach the opmask class from real C, and the run fails unless some do. On
+`--simd`, a function with vectors, which the SSA promoter takes (#141), and one
+whose only SIMD values are masks (#179) are promoted and allocated as any
+other: #732's `vcmp` results reach the opmask class from real C, and the run
+fails unless some do. On
 `tests/ir/vector-i32.c` with `-march=x86-64-v4`, its three functions' 3 masks
 allocate on both paths and pass the checker, and on `tests/ir/mask-builtins.c`
 its four functions of the `_k*` builtins, promoted, allocate their 76 masks on
@@ -556,6 +573,93 @@ guide](tier1-pipeline.md)): each edge's moves before the predecessor's jump, at
 the successor's start, or in a stub for a split critical edge. The plan's
 definitions are its uses there, required, since an instruction writes its
 destination's register.
+
+### Values live across calls (#1116)
+
+A call saves each value that lives past it in a caller-saved register: the
+value goes to its register's call-save row, a frame row of that register's for
+the whole function. Where the allocation puts it in a callee-saved register,
+the prologue saves that register once instead (`tier1_emit_cfg_callee`). `rbp`
+is the sixth callee-saved register where the frame keeps no frame pointer in it.
+The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
+`reserved_registers`).
+
+A parameter keeps its incoming register over its definition's interval, so a
+parameter live across a run of calls in its entry block, as in Lua's
+`luac.c:PrintCode` and its runs of `printf`, stays in a caller-saved register.
+Saving it call by call was most of such functions' `call_stores` and
+`call_loads`. Both consumers now save less often within straight-line code: a
+chain, or a block of a CFG (`Tier1EmitSaves`).
+
+- **Loads wait until a read.** A call doesn't load its saved registers back.
+  It owes those loads until a node reads the register, or does anything that
+  would move or replace its value: its transitions at either phase, its
+  definition, or a fixed registers' sequence. The straight-line code's last
+  node, which jumps, also takes them all back (`tier1_emit_owed`). At a return
+  or a trap the owed values are dead, so they are dropped. A value read by none
+  of the calls stays in its row across the run.
+- **A row isn't stored again while it holds the value.** For each general
+  register, the code keeps the owner its row was stored or kept for. A call
+  stores a register only where its owner is now another value. A fixed
+  registers' sequence, which stores those rows, forgets them. The rows are one
+  vector of the 16 general registers' lanes, as the owners' first 16 locations
+  are, so a call's kept registers are one compare and its rows one blend
+  (`tier1_emit_kept`, `tier1_emit_saved`), each with a scalar twin that
+  `test-tier1-emit` checks it against on random rows. A row stays its owner's
+  while that SSA value's bits don't change, and they change only where the
+  value is defined again, an iteration later.
+- **Every CFG block starts with no rows.** A row that a block's one
+  predecessor stored would still hold its value where that predecessor comes
+  first in layout. But the code's certificate (#939,
+  `tier1_certificate_emitted.c`) proves each block from its entry facts, which
+  hold each value in one place, the allocation's, so it can't know the row's.
+  The first call of a block stores again what it saves. On Lua 5.4.8, carrying
+  rows into such blocks stored 3,163 values where this stores 4,253, in 255,363
+  bytes of `.text` against 260,821.
+
+`test-tier1-emit`'s call fixtures check this natively, against hostile helpers
+that poison every caller-saved register (`tier1_call_test.c`):
+
+- **A run of calls in one block**, where the second call stores none of the
+  values live past both, and **two blocks**: the second call stores them again
+  in a block whose one predecessor comes first, at a join and past a later
+  predecessor.
+- **Values live past a call** take the callee-saved registers the frame
+  leaves. Six take all six, `rbp` among them, without a frame pointer. With
+  one, five take exactly `rbx` and `r12` to `r15`, the frame pushing them and
+  `rbp` as its pointer. (Six would split one there, which discards the
+  preference whole, so they only run.) In
+  `test-check-debug --cross-check`'s Tier 1 fixture, `six` is such a function,
+  with a branch and a join that keep it on the CFG consumer, since the
+  straight-line consumer takes no callee-saved register. Its FDE must save
+  `rbp` in a frame without a frame pointer, `backtrace()` walks through it to
+  `main`, and gdb steps every instruction of it.
+- **Every fixture's records**, and every caller of the pipeline test's, show
+  each call-save store loaded back before the code branches, returns or traps
+  (`tier1_emit_test_saves_loaded`). That covers a general register's row, a
+  floating value's xmm row (#141) and a mask's opmask row (#179), and the
+  float, stack-argument and mask tests check it too.
+
+Measured with #1116's 32-bit moves, after #1117, at `6e1e6121` against main `b70deb47`
+([the record](https://github.com/buster14a/buster-performance/tree/b3b04fb39b07a267e9d5e0aba0346b739148a7fb/docs/measurements/tier1-code-quality-1116-2026-11-03)):
+
+- **Lua 5.4.8 by `--tier1 -c`**, all 1,104 functions Tier 1's: `call_stores` go from 5,956 to 3,165, `call_loads` from
+  5,956 to 5,207, and `.text` from 289,580 to 260,789 bytes, against clang -O0's 273,461.
+- **The frozen `sqlite3.c`**, 2,666 of 2,668 functions Tier 1's: `call_stores` go from 28,027 to 15,079.
+- **speedtest1 by `--tier1`, on the 9700X:** 3.2% fewer instructions and 1.3% less time. Lua's interpreter runs 3.0%
+  and 3.8% fewer instructions on its tables and strings scripts, and as many on the other three.
+- **Compile time:** `--tier1 -c` of `sqlite3.c`, at `3b195d57` against main `703ae9f5`, each built at six placements of
+  the backend's code and timed over them and fresh copies, takes 0.10% more instructions and 0.33% more user cycles
+  (main against itself: −0.05%). Before the definition's interval was looked up once and the rows kept in a vector,
+  it was 0.17% and 0.50%. Throwaway builds price the instructions: the scan for owed loads, run twice, adds 3.09 M
+  (0.053%), and `rbp` out of the callee-saved registers takes 3.72 M away, with 5,046 more records and 3,165 more
+  spills in `sqlite3.c`. A bound at each call, skipping the scan before the first node that can need a load back,
+  would spend a good part of the scan's cost on its own searches, so the scan stays.
+
+An owed register's owner never changes while the load is owed: whatever would
+change it takes the value back first. So the emitter's view of where each value
+is stays the allocation's, which `tier1_cfg_verify` checks unchanged. The cost is a scan of each node's uses and transitions while some
+load is owed, scalar work bounded by the node's own uses.
 
 ## Rematerialization
 

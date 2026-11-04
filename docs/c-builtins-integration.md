@@ -160,9 +160,11 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
 but refused names would remain zero (none is now), and the vector builtins
-the checker checks but no lowering takes (`__builtin_elementwise_clmul`, the
-masked memory builtins and the matrix ones) have `BUSTER_CBUILTIN_CAP_CHECKER`
-alone, so `__has_builtin` answers 0 for them. clang's sized legacy atomics
+the checker checks but no lowering takes (`__builtin_elementwise_clmul` and the
+masked memory builtins) have `BUSTER_CBUILTIN_CAP_CHECKER` alone, so
+`__has_builtin` answers 0 for them. The matrix builtins are an error at every
+call, as clang's are without `-fenable-matrix`, so they have the source
+capability and `__has_builtin` answers 1 for them, as clang's does. clang's sized legacy atomics
 (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog
 resolves each to its family's builtin, with its capabilities
 (`cbuiltin_sized_entry`).
@@ -171,7 +173,10 @@ raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
 `__has_builtin` has them: its row's language modes and required target
 features (the preprocessor guide's "feature queries"; `CBuiltinSourceScope`
-keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's).
+keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's). The
+preprocessor's own builtins it answers 1 for are clang's: the target queries,
+`__is_target_variant_os` and `__is_target_variant_environment` among them,
+which it evaluates as clang's do (0 on Linux).
 
 ## Varargs contracts
 
@@ -660,14 +665,14 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 
 | Family | Effects | Requirements | Direct form |
 | --- | --- | --- | --- |
-| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | none yet |
-| `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | none yet |
+| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`); an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
+| `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | an aligned integer's or enumeration's exchange, or addition or subtraction returning the old or the new value (a pointer's exchange and a test-and-set's too), of a constant order: the typed stream's `ATOMIC_RMW` (`xchg` or `lock xadd`); an implicit `_Atomic` integer's increment, decrement, `+=` or `-=` |
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
 | `flt-rounds` | floating environment, barrier | none | none |
 | `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
 | `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
-| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | none |
+| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | a statement of register, memory and constant operands whose records name no register but its operands' and whose forms a Tier 0 row takes: an `X86` entry in its caller (`check_asm_row`, [the inline assembly guide](c-inline-assembly.md)'s "Placed in the caller") |
 | `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
 
 A helper's physical effects are `x86_semantics.c`'s, read from its records
@@ -725,21 +730,154 @@ effect or the floating environment's, or of a scoped family keeps its helper. On
 one helper fewer; c-testsuite's subset, which has no fence, compiles to the
 same bytes as before.
 
+**Direct atomic loads and stores.** `check_program_direct_access` admits
+`__atomic_load_n`, `__atomic_store_n`, `__c11_atomic_load` and
+`__c11_atomic_store`, unscoped, of an integer's, an enumeration's or a pointer's
+object of 1, 2, 4 or 8 bytes, its value's size, known aligned to it (a native
+one, for C11's), of an order the checker knows that its kind takes (a load's
+relaxed, consume, acquire or seq_cst; a store's relaxed, release or seq_cst) and
+whose argument evaluates for no effect, as a direct fence's. The lowering
+(`check_lower_atomic_direct`) evaluates the pointer and, for a store, the value
+converted to the object's type, and writes the typed stream's `LOAD` or `SET` of
+that type's class with the atomic marker (`BUSTER_TYPED_ACCESS_ATOMIC` and the
+order), and after a seq_cst store the `FENCE` of seq_cst. An implicit `_Atomic`
+object's load and store, and an update's first load, are direct too
+(`check_lower_atomic_direct_plan`): its plan's address and buffers stay, and its
+leaf's call becomes the marked access of its bits' class, of seq_cst. Tier 0
+compiles a marked access as any other (`mov`, `movzx`; atomic when naturally
+aligned on x86-64, whose total store order gives a load's and a release store's
+orders), the store's `FENCE` its `mfence`; the IR keeps it as an atomic access
+([the IR guide](ir.md)'s "Atomic accesses") that no pass splits, merges,
+eliminates or moves past another access, a call or a fence, and Tier 1 selects
+it as an ordinary access it never folds. clang's code is the same but for a
+seq_cst store, its `xchg` where this is `mov` and `mfence`, the helpers' and
+GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for the
+9700X's measurements. A dynamic or invalid order (which the helper strengthens
+to seq_cst), a scoped family's, a floating object's and an unaligned or wider
+one keep their helper or libatomic's call. The planner reserves no leaf for an
+implicit object's access or update (its update loop's compare-exchange is
+direct: "Direct compare-exchanges", below), and a width's load, store and
+exchange leaves only where a C11 or generic load, store or exchange of a native
+object takes its plan (a generic form's, or a representation's: a floating or
+another object's builtin, that keeps one). The compiler's own `main.c`, every function lowered
+(`--lower-all`), takes 91 atomic accesses directly and keeps 8 helper calls of
+them (its tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the
+unit plans no helper.
+
+**Direct read/modify/writes.** `check_program_direct_rmw` admits an exchange
+(`__atomic_exchange_n`, `__sync_lock_test_and_set`, `__sync_swap`,
+`__c11_atomic_exchange`, and `__atomic_test_and_set` of its byte with 1) and an
+addition or a subtraction returning the old value or the new one
+(`__atomic_fetch_add` and `_sub`, `__atomic_add_fetch` and `_sub_fetch`, the
+`__sync` ones, `__c11_atomic_fetch_add` and `_sub`), unscoped, of an integer's
+or an enumeration's object (an exchange's of a pointer's or a bool's too) of 1,
+2, 4 or 8 bytes, its value's size, known aligned to it (a native one, for C11's),
+of an order the checker knows (any of C's: the locked access is a full barrier,
+which every order takes; a `__sync` builtin's is seq_cst) whose argument evaluates
+for no effect, its effect's shape its rule's. The planner and the lowering ask it
+alike; the lowering (`check_lower_atomic_rmw_direct`) evaluates the pointer and
+the operand converted to the object's type (negated for a subtraction), writes the
+typed stream's `ATOMIC_RMW` of the object's class (`BUSTER_TYPED_RMW_ADD` for an
+addition, and the order), and for a new value adds the operand to the old one in
+`int` (a narrow object's) and converts it back. An implicit `_Atomic` integer's
+or enumeration's increment, decrement, `+=` or `-=` whose operands are computed as
+integers is one too (`check_program_atomic_update_direct`): its update's
+compare-exchange loop becomes one `ATOMIC_RMW` addition of the operand narrowed to
+the object's width, and its plan reserves no compare-exchange leaf. Tier 0 emits
+`xchg` or `lock xadd` of the object's width with the operand in its register,
+the old value extended as the class's load extends it ([the Tier 0
+guide](tier0.md)); the IR keeps it as `rmw` ([the IR guide](ir.md)'s "Atomic
+read/modify/writes"), an atomic access no pass moves, merges or drops, and Tier 1
+selects the same instructions, the object's width and never its narrow value's
+32-bit register's, as a barrier no load folds past. clang -O0's code is the same
+(`xchg`, `lock xadd`); -O2's has a `lock add` where an addition's result is unused.
+The bitwise, minimum and maximum operations are loops of compare-exchanges
+("Direct fetch loops", below); the floating operations, a dynamic order and a
+scoped family's keep their helper; an implicit update of another operation keeps
+its loop, whose compare-exchange is direct. The compiler's own `main.c` calls 3
+read/modify/write helpers where it called 19 (16 direct; 2 helpers planned where
+7 were), and with every function lowered 305 where it called 403 (102 direct; 152
+planned where 176 were); SQLite 3.50.4 has none, and its object is unchanged.
+
+**Direct compare-exchanges.** `check_program_direct_cas` admits
+`__atomic_compare_exchange_n`, `__c11_atomic_compare_exchange_strong` and
+`_weak`, `__sync_bool_compare_and_swap` and `__sync_val_compare_and_swap`,
+unscoped, without a `__sync` builtin's protected variables, of an integer's, an
+enumeration's or a pointer's object of 1, 2, 4 or 8 bytes, its value's size,
+known aligned to it (a native one, for C11's), of orders the checker knows (any
+of C's for either, `lock cmpxchg` being a full barrier; a `__sync` builtin's is
+seq_cst) whose arguments, and GNU's weak flag, evaluate for no effect. The
+lowering (`check_lower_atomic_cas_direct`) puts the pointer in a temporary, which
+the typed stream's `ATOMIC_CAS` names, and pushes the expected value and the
+desired one, converted to the object's type; `ATOMIC_CAS` of the object's class
+leaves the old value, which is the val form's result and whose equality with the
+expected one (in `int`, for a narrow object's) is the others'. GNU's and C11's
+expected value is where their second argument points: the lowering reads it
+there after evaluating the desired value, as clang does, and writes the old
+value back there only where the exchange failed, as their leaf does. Every
+plan's compare-exchange is direct too (`check_lower_atomic_direct_plan`): a
+generic `__atomic_compare_exchange`'s, a C11 one's of a representation, and the
+loop of an implicit `_Atomic` update that isn't an integer's addition or
+subtraction (`*=`, `<<=`, a floating object's `+=`, a bool's), which so calls
+nothing; its expected buffer takes the old bits whether or not it succeeded, as
+the leaf leaves it. Tier 0 swaps the expected value into `rax` where it isn't
+there, loads the address from its local's home into the stack's first free
+register, and emits `lock cmpxchg` of the object's width, swapping back and
+extending the old value as the class's load does ([the Tier 0
+guide](tier0.md)); the IR keeps it as `rmw ... cas` ([the IR guide](ir.md)'s
+"Atomic read/modify/writes"), and Tier 1 selects `lock cmpxchg` around `rax` the
+same way. A C11 compare-exchange of a floating object (whose bits its leaf
+compares), a dynamic order and a scoped family's keep their helper. The
+compiler's own `main.c` calls 1 read/modify/write helper where it called 3 (18
+direct; 1 helper planned where 2 were), and with every function lowered 281
+where it called 305 (126 direct; 144 planned where 152 were); SQLite 3.50.4 has
+none, and its object is unchanged.
+
+**Direct fetch loops.** `check_program_direct_fetch` admits the bitwise, minimum
+and maximum read/modify/writes, returning the old value or the new one: GNU's
+`__atomic_fetch_and`, `_or`, `_xor`, `_nand`, `_min` and `_max` and their
+`_fetch` forms, the `__sync` ones (clang's `__sync_fetch_and_min`, `_max`,
+`_umin` and `_umax` too) and C11's `__c11_atomic_fetch_and`, `_or`, `_xor`,
+`_nand`, `_min` and `_max`, unscoped, of an integer's or an enumeration's object
+(a bool's for and, or and xor alone, whose bits stay 0 or 1) of 1, 2, 4 or 8
+bytes, its value's size, known aligned to it (a native one, for C11's), of an
+order the checker knows (any of C's; a `__sync` builtin's is seq_cst) whose
+argument evaluates for no effect, its effect's shape its rule's. x86 has no
+instruction that leaves such an operation's old value, so that clang's code is
+a `lock cmpxchg` loop, and so is this one (`check_lower_atomic_fetch_direct`):
+the pointer and the operand converted to the object's type into temporaries, the
+object read by a relaxed atomic `LOAD`, and a loop that computes the new value
+from the old one (in `int` for a narrow object, converted back; nand's and
+complemented; the minimum or the maximum by the value type's ordering, an arm
+of each), runs `ATOMIC_CAS` of the old value and the new one, and goes round
+again, the old value its result, until that result is the old value. Its result
+is the old value or the kept new one. No helper is planned for one, and no new
+typed kind or IR operation is needed. clang's wrapping increment and decrement,
+the floating minimums and maximums, a pointer's, a dynamic order and a scoped
+family's keep their helper. The compiler's own `main.c` calls no
+read/modify/write helper where it called 1 (19 direct; none planned where 1
+was), and with every function lowered 194 where it called 281 (213 direct; 112
+planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
+
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
-lowering refused an operation of by name, `direct`: builtin uses lowered
-directly, `helper`: the lowered code's call sites of a helper, an explicit
-builtin's, an implicit `_Atomic` access's, a generic form's and an asm
-statement's alike, and `planned`: helpers emitted) and a line per family
+lowering refused an operation by name, `direct`: the lowered code's direct
+forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
+`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
+asm statement's `X86` entry in its caller, `helper`: the
+lowered code's call sites of a helper,
+an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
+asm statement's alike, and `planned`: helpers emitted) and a line per family
 (`helpers.fence`, `direct=`, `helper=`, `planned=`). A family without a direct
-form counts no direct use, which the fence test checks of every family.
+form counts none: the report reads only the entries of the families that have
+one. The planner keeps no count of its own: its helper uses are its `uses`.
 
 **Tests.** `test-checker`'s fence section (`c_check_program_fence_test.c`)
 lowers fences of every order and scope and the helper's cases by both paths,
 checks each function's `FENCE` entries and values, its calls, and Tier 0's
 records by both twins as `x86_semantics.c` reads them (an `mfence` between a
 store and a load where the source has a `seq_cst` fence there, none for the
-other orders), and the plan's counts, then runs them natively against clang -O0's
+other orders), the lowered code's direct fences and the plan's helper uses, then runs them natively against clang -O0's
 build. A function with a statement expression has fences over a live value: its
 lowering tracks its stack (`check_lower_track`, as every function of a program
 with a terminal helper does), where a `FENCE` neither pops nor pushes; the
@@ -756,13 +894,112 @@ program: 53,347), and the fenced litmus in none. The control may show none on a
 run whose threads never overlap, which leaves the fenced run's check weaker,
 not wrong; the test prints both counts. It also reads each build's
 `--helper-report` and its objects' fenced threads (one `mfence` each, the
-control's none).
+control's none). The same litmus runs twice more with atomic accesses: a
+seq_cst store and a seq_cst load (the direct marked `SET`, its `FENCE` and the
+marked `LOAD`), which must never show both loads reading 0, and relaxed ones, the
+second control; a seq_cst thread's object has one `mfence`, a relaxed one's
+none. On the same container, the relaxed control showed both loads reading 0 in
+50 to 18,745 of 100,000 iterations, and the seq_cst runs in none.
+`test-checker`'s atomic-access section (`c_check_program_atomic_access_test.c`)
+lowers loads and stores of each width and order, C11's, a pointer's and an
+implicit object's by both paths, checks each function's marked entries, its
+fences, its calls and Tier 0's records by both twins, the lowered code's marked accesses and the plan's helper uses,
+then runs every width and order, the implicit object's loads, stores and
+updates and the helpers' cases natively against clang. Its read/modify/write
+section (`c_check_program_atomic_rmw_test.c`) lowers exchanges, additions and
+subtractions of each width, the `__sync`, C11, pointer and test-and-set forms
+and an implicit object's increment by both paths, checks each function's
+`ATOMIC_RMW` entries and values, its calls and Tier 0's one locked access by both
+twins, the helpers' cases (a compare-exchange, a bitwise operation, a dynamic
+order, an implicit multiplication's loop), the lowered code's read/modify/writes and the plan's helper uses, then runs every
+width, operation and form natively against clang. `test-checker-driver`'s counter
+unit is the read/modify/writes' concurrent control: four threads add to shared
+counters by every direct form (two of them a short's and a byte's, which wrap)
+and take a spin lock by an exchange around a plain increment, by both paths, by
+Tier 0 and by `--tier1`; every count must be exact, and a volatile counter's
+increments, the control, show the threads overlap (on the 4-CPU container under
+the other parts' load, 1,000,000 and 3,225,039 of 4,000,000 kept in two of the
+four builds; a run whose threads take turns on one CPU keeps them all, which
+leaves the exact counts weaker, not wrong). It found Tier 1 selecting a byte's
+and a short's `xchg` and `lock xadd` at 32 bits, writing past the object, which
+`test-tier1-select` now runs on guard bytes. `test-checker-driver`'s report unit
+pins `--helper-report`'s direct forms and calls of a unit with every kind of
+each, and Tier 1's selection tests keep a load from folding past a fence of any
+order, an atomic load or a read/modify/write, and an atomic load from folding at
+all.
 
-**Pending** (#1059): the atomic loads and stores (direct `mov`s with an `xchg`
-or `mfence` for a `seq_cst` store, which need the IR to carry an atomic access
-and Tier 1 to select it), the read/modify/writes, the asm statements' operations
-placed in their callers (slice 4), and the paired 9700X measurements of helper
-calls, save and reload traffic, code size, compile time and runtime.
+**Paired measurements** (#1059). `--helper-forms=LIST` gives every operation
+of the listed families (`fence`, `atomic-access`, `atomic-rmw`, `asm`, or
+`all`) its helper's call where it has a direct form
+(`CheckProgramOptions.helper_forms`, read by the `check_program_direct_*`
+predicates the planner and the lowering ask alike, and by the asm planner): the
+code the compiler made before #1059, of the same compiler, for paired runs. An
+implicit `_Atomic` object's accesses have no helper to take and stay the typed
+stream's. `measure-helpers` (`helpers_measure.c`) builds each program four
+ways, by Tier 0 and by `--tier1`, each as it lowers it and with
+`--helper-forms=all`. Its programs are the primitives' kernels, single-threaded
+loops of a concurrent program's operations (reference counts by `lock xadd`, an
+uncontended spin lock's acquire exchange and release store, a sequence lock's
+acquire and release accesses and fences, flags by `fetch_or`, `fetch_and` and
+`xor_fetch`, a running maximum by a weak compare-exchange, and inline asm's
+`bswap`, `roll` and `leaq`), and speedtest1, whose SQLite's relaxed
+`AtomicLoad` and `AtomicStore` (38 of them, its VDBE loop's interrupt test among
+them) are its direct forms. For each object it reports the families' direct
+forms and helper calls, its executable bytes, and Tier 1's spill and call stores
+and loads (the save and reload traffic: Tier 0 saves the values live across
+every call); every build's output must be the first's; then it times each
+source's `-c` compile and each program's run in rotating rounds, as
+`measure-tier1-programs` times its programs. The 9700X job runs it where the
+direct forms' admission, the helpers' planning or the measurement changes (the
+`helpers` gate), and on the daily and dispatched runs.
+
+On the 9700X ([buster-performance's
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/helpers-direct-1059-2026-11-04),
+#1264's run 41764205497, `znver5`, medians of 11 runs and 5 compiles), every
+direct form is faster than its helper by both tiers. Run time, helpers / direct:
+
+| Program | Tier 0 | `--tier1` |
+| --- | ---: | ---: |
+| `sequence` (fences, acquire and release accesses) | 46.8 | 101.6 |
+| `lock` (acquire exchange, release store) | 4.37 | 4.84 |
+| `swaps` (inline asm) | 3.06 | 1.00 (helpers either way) |
+| `counts` (`lock xadd`) | 1.12 | 1.12 |
+| `maximum` (weak compare-exchange) | 1.07 | 1.65 |
+| `flags` (compare-exchange fetch loops) | 1.03 | 1.05 |
+| speedtest1 (38 relaxed accesses) | 1.00 | 1.02 |
+
+A helper strengthens every order to `seq_cst`, so the runs measure that as well
+as the call: a release or acquire fence is no instruction where its helper is an
+`mfence`, and a release store is a `mov` where its helper is an `xchg`. The
+fetch loops gain least, since each iteration is a `lock cmpxchg` either way:
+Tier 0's direct loop runs more instructions than the helper's leaf (510 M against
+465 M) but takes 3% fewer cycles. So no family keeps its helper for want of a
+gain. Every range of 11 runs is apart from its pair's, except two: speedtest1 by
+Tier 0, and `swaps` by `--tier1`, which runs the same code either way.
+
+The objects' facts:
+- **Helper calls.** The primitives' helpers builds make 25 calls where the
+  direct ones make none (Tier 1's make 4: the asm statements keep their helpers
+  under `--tier1`). speedtest1's make 38 where the direct ones make none.
+- **Code size.** The primitives' text is 2,275 bytes against 2,947 by Tier 0,
+  and 1,875 against 2,579 by `--tier1`. speedtest1's is 687 bytes smaller by
+  Tier 0 and 2,346 by `--tier1` (1,415,994).
+- **Save and reload traffic.** The primitives' Tier 1 code has 5 call stores
+  and 5 loads, where the helpers' has 27 of each. speedtest1's has 47 fewer of
+  each, and 14 fewer spill stores and 16 fewer spill loads.
+- **Run time.** speedtest1 by `--tier1` runs 1.6% faster, in time and in
+  cycles (203.5 against 206.9 ms), and by Tier 0 the same.
+- **Compile time.** speedtest1's `-c` is unchanged: 112.4 against 113.7 ms by
+  Tier 0, and 464.7 against 464.8 by `--tier1`. Instructions are equal to
+  within 0.03%.
+- **The primitives' compile.** At 2 ms its times follow the rotation's order,
+  not the compile's cost: a helpers build runs right after its direct build in
+  4 of the 5 rounds, and takes the same time in the round where it runs first.
+
+**Pending** (#1059): C's volatile accesses carried to the IR as such
+([the IR's guide](ir.md)'s "Effects through the consumers"), asm statements of
+fixed registers, labels, the x87's operands or flag outputs in their callers
+(each keeps its helper), and Tier 1's IR for an asm statement's row.
 
 ## Atomic and terminal helper calls
 
@@ -1260,7 +1497,121 @@ evaluator (`check_builtin_misc_generic`):
   address constant stays one (`int* p = __builtin_launder(&g);` at file scope),
   so `__has_constexpr_builtin` answers 1 for it, as clang's does.
 
-Eleven others are leaves, per-unit helpers of clang -O0's instructions
+Eight more are miscellaneous builtins of clang's Sema too, catalog codes 0x3f4
+to 0x3fb (`check_builtin_misc_more`):
+
+- `alloca_uninitialized(n)` is `alloca(n)`, whose bytes clang never
+  initializes anyway;
+- `alloca_with_align(n, a)` and `alloca_with_align_uninitialized(n, a)` take n
+  bytes at an alignment of a bits, which must be an integer constant expression,
+  a power of 2, 8 or more and at most `INT32_MAX`, as clang's Sema checks it.
+  The alignment never runs. Past 16 bytes the size grows by the alignment less
+  16 and the address is rounded up after Tier 0's `ALLOCA`, as an over-aligned
+  variable-length array's is; clang -O0's code rounds rsp down instead, and
+  makes a constant size in the entry block a frame object, which only moves the
+  bytes;
+- `allow_runtime_check(s)` is true and `allow_sanitize_check(s)` false, as
+  clang -O0's code has them with no sanitizer on, of a string literal (the
+  call's evidence, `CheckBuiltinCall.nan_payload`, as `nan`'s payload is read),
+  parenthesized at most: as clang's, an explicit cast of it is refused
+  (`CheckBuiltinCall.nan_payload_cast`), where annotation's string takes one;
+  `allow_sanitize_check`'s must name one of the seven sanitizers clang takes
+  there (`address`, `thread`, `memory`, `hwaddress` and the kernel's three). The
+  string never runs, and neither call is a constant expression;
+- `annotation(x, s)` is x, of its integer type, s a narrow string literal (the
+  second argument's evidence); no constant expression;
+- `addressof(e)` is `&e`, as the operator takes it: an lvalue or a function
+  designator, not a bit-field, a register variable or a vector's element, an
+  address constant where e has one (`int* p = __builtin_addressof(g);`). The
+  lowering takes the operand's address, which makes a local addressed;
+- `function_start(f)` is f's address, a `void*`, an address constant, of an
+  operand that evaluates to a function at offset 0, as clang's
+  `getAsBuiltinConstantDeclRef` reads it: a function designator that names a
+  function, or an address constant at offset 0 of one of the functions the
+  operand names (`&f`, `(void*)&f`, `(void (*)(int))f`, `1 ? f : g`, `f + 0`;
+  `CheckBuiltinCall.function_objects`). A pointer variable, a conditional that
+  doesn't fold, an object's or a string's address, a null pointer and an offset
+  are refused.
+
+`__builtin_complex(re, im)`, catalog code 0x3fc (`check_builtin_misc_complex`),
+is the complex number re + im·i, of type `_Complex T`, where re and im are of
+one real floating type T once lvalue-converted (`float` to `long double`, and
+`_Float16`, `__bf16` and `__float128`, as clang 23 takes them), and neither is
+converted otherwise. As clang's Sema, it checks each argument's type before its
+conversion first, so that an `_Atomic double` is refused, and an integer or a
+complex value, then the two types against each other; the checker's errors are
+its own generic ones at the call's `)`, where clang's are "argument type ... is
+not a real floating point type" at the argument and "arguments are of different
+types" at re (pending, as for the other miscellaneous builtins). It folds where both are
+floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
+static data and an enumerator's `__imag__` an integer constant: the folds keep
+signed zeros, infinities and NaNs, a `static const` object's value, and long
+double's and `_Float16`'s parts. `__float128`'s constants aren't folded
+(`check_action_float_supported`), so a `_Complex __float128` of constants is
+computed at run time and refused in static data, where clang takes it. At run
+time the lowering evaluates both arguments in order into temporaries and stores
+them into a frame object of the two parts, whose address is its value, as every
+complex value's is (`check_lower_complex_builtin`: a `__float128` part's 16
+bytes copied 8 at a time).
+
+The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
+(`check_builtin_misc_last`):
+
+- `__arithmetic_fence(x)` is x, lvalue-converted, of a floating type, a complex
+  one or a vector of either, by its type before the conversion (an `_Atomic
+  double` is refused, and a complex integer); a constant where x is, as clang's
+  evaluator folds it. At -O0 clang's code computes x as it is, which the
+  lowering does;
+- `__xray_customevent(p, n)` and `__xray_typedevent(t, p, n)` are nothing, their
+  arguments converted to `const char *` and `size_t` as a call's and never
+  evaluated, as clang's code has them without `-fxray-instrument`, and
+  `__warn_memset_zero_len()` is nothing;
+- `__builtin_trivially_relocate(d, s, n)` is `memmove(d, s, n * sizeof *d)`,
+  whose value is d (the miscellaneous builtins' memmove recipe, its size
+  multiplied), where d is a pointer, as written, to a type C's relocation takes
+  (an element, through arrays, of a scalar, complex or vector type: no struct,
+  union, `_Atomic` or function), not const, s has d's type as written (an array
+  isn't its pointer), and n converts to `size_t`;
+- `__builtin_operator_new` and `__builtin_operator_delete` are C++'s alone, and
+  the ten pointer authentication builtins (`__builtin_ptrauth_auth` to
+  `__builtin_ptrauth_strip`) need a target x86 isn't: every call is an error, as
+  clang's is ("is only available in C++", "this target does not support pointer
+  authentication"), the latter's after their arity. `__has_builtin` answers 1
+  for them, as clang's does, and `__has_constexpr_builtin` as clang's.
+
+`__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
+to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
+calls `__cpu_indicator_init`, which is also the model's constructor;
+`cpu_supports(s)`, a `bool`, tests the bit of the feature the string literal s
+(parenthesized at most, never cast, as `allow_runtime_check`'s)
+names in its word (`__cpu_model.features[0]` at 12, or `__cpu_features2`'s),
+and is false for a feature clang doesn't know, where clang also warns
+(pending here); `cpu_is(s)` compares the model's vendor, type or subtype with
+the value of the name s, which clang must know (an error otherwise). The names
+and their words, bits, fields and values are `c_builtin_cpu.inc`, derived
+LLVM data that `tools/generate_x86_cpu_model.c` generates: the strings and ABI
+values of LLVM 23.1.5's `X86TargetParser.def` rows that clang's
+`validateCpuSupports` and `validateCpuIs` take. `THIRD_PARTY_NOTICES.md`
+records the input, its digest and the command. The lowering reads
+the model through the runtime's symbols `__cpu_model` and `__cpu_features2`
+(`check_lower_runtime`, data symbols: `check_lower_runtime_object`), which
+libgcc.a's `cpuinfo.o` defines, and calls `__cpu_indicator_init` as a runtime
+function. `test-checker-driver` builds a program that defines the model itself
+and tests every name over each bit of each word and each value from 0 to 63 of
+each field, by clang and by both paths, which must print the same
+(`check_test_cpu_model_runs`), and `test-checker` runs `cpu_init` and some
+tests of this host's model against clang's build.
+
+`__builtin_infer_alloc_token` stays out: clang's value is a hash of the type it
+infers from a `sizeof` among its arguments (0 without one), which its front end
+folds.
+
+`__builtin_stdarg_start` is the old name of `__builtin_va_start`, which clang's
+Sema checks as that: the catalogue resolves it to `va_start`'s entry
+(`cbuiltin_alias_entry`). In C23 it takes its second argument still, where
+`va_start` takes one alone; that difference is pending.
+
+Sixteen others are leaves, per-unit helpers of clang -O0's instructions
 (`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
 features. Their prototypes are clang's metadata's:
 
@@ -1276,13 +1627,57 @@ features. Their prototypes are clang's metadata's:
   call evaluates as clang's does;
 - `__builtin_memcpy_inline` and `__builtin_memset_inline`: their constant
   size's bytes, by `rep movsb` and `rep stosb`, where clang's code stores them
-  itself.
+  itself;
+- `__builtin_unwind_init`: a leaf that does nothing, whose caller's frame
+  saves every callee-saved register (rbx, r12 to r15, and rbp where it isn't the
+  frame pointer) and restores it, with its unwind information, as LLVM's
+  `llvm.eh.unwind.init` makes it (`Tier0Function.unwind_init`, #1126's review);
+  ordinary Tier 1 leaves such a function to Tier 0;
+- `__builtin_init_dwarf_reg_size_table(p)`: 8 in each of the 17 bytes at p, the
+  sizes of the DWARF registers rax to rip, as clang's code stores them;
+- `__builtin_set_flt_rounds(v)`: the rounding mode `FLT_ROUNDS`'s value v names,
+  in the x87's control word and in MXCSR, by LLVM's mapping (0xc9 shifted by
+  2v + 4, whose bits 10 and 11 are the control word's and, 3 places up,
+  MXCSR's 13 and 14). Both go through the red zone below the leaf's return
+  address;
+- `__builtin_extend_pointer(p)`: p as an `unsigned long long`;
+- `__builtin_verbose_trap(category, message)`: `ud2`, as `__builtin_trap`'s;
+- `__builtin_setjmp(buf)` and `__builtin_longjmp(buf, 1)`: LLVM's SjLj lowering
+  (X86's `emitEHSjLjSetJmp` and `emitEHSjLjLongJmp`) as leaves. setjmp stores
+  the caller's frame pointer (rbp, its frame's address where it has one, as
+  clang's `llvm.frameaddress`), the resume address (the leaf's own return
+  address, after the caller's call) and the caller's stack pointer (clang's
+  `llvm.stacksave`) in the buffer's words 0 to 2, and returns 0. longjmp loads
+  rbp and rsp back, sets eax to 1 and jumps to the resume address, where the
+  call of setjmp returns again with 1; a `ud2` ends it, which no path reaches.
+  Since a longjmp from a deeper frame leaves every other register as that frame
+  left it, the function that calls setjmp has the frame LLVM's setjmp, which
+  clobbers every register, gives it (`Tier0Function.returns_twice`): it saves
+  every callee-saved register and restores it, as `unwind_init`'s does, keeps no
+  local in one and no value of its stacks either (its integer depths are the
+  nine caller-saved registers'), and a realigned frame whose base is r15 (an
+  over-aligned object beside `alloca` or a VLA) is refused. A value of an
+  enclosing expression pending across the call is reloaded from its call save
+  slot after the second return, which a later call with values pending at that
+  depth may have reused; C's contexts for setjmp (a condition, compared with a
+  constant) have none. Ordinary Tier 1 leaves such a function to Tier 0.
+  longjmp's second argument must be a constant 1, wherever the call is, with
+  clang's two errors at the call (`check_input_longjmp_argument`).
 
 A call's size of `memcpy_inline` and `memset_inline` must be an integer
 constant expression (the prototype's `I`). A non-constant one is refused at the
 argument, as the x86 builtins' are; clang's message ("argument to ... must be
-a constant integer", at the call) is pending for both. `__builtin_verbose_trap`,
-whose two arguments clang requires to be string literals, is pending too.
+a constant integer", at the call) is pending for both.
+
+`verbose_trap`'s two arguments must each be a constant string without a `$`,
+as clang's Sema reads them (`check_input_verbose_trap_arguments`, in the source
+adapter), each error at the argument's first token with clang's message. A
+narrow string literal or `__func__`'s name, under parentheses and casts, is read
+whole; an argument that is no address constant of an object (an automatic
+variable's value, an integer, a null pointer) is no constant string. Another
+address constant, a `static const char[]`'s or a literal's past its start, clang
+reads through its constant evaluator, whose reading of an object's bytes the
+adapter doesn't model: it is refused by name, where clang takes it.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
@@ -1298,8 +1693,89 @@ registers, types and refusals by both paths against clang, and runs programs
 natively against clang -O0's build: the folds, launder's pointers, a callee's
 CFA against its caller's stack address, debugtrap's trap counted by a SIGTRAP
 handler, the counters, the thread and stack pointers, the no-ops' arguments
-evaluated once in order, and the inline copy's and fill's bytes
-(`c_check_program_generic_builtins_test.c`).
+evaluated once in order, the inline copy's and fill's bytes, the unwinder's
+table of register sizes, each rounding mode in the control word and MXCSR and a
+division rounded by it, the extended pointer, the values `unwind_init` leaves,
+`verbose_trap`'s SIGILL in a child process, and the alloca variants' bytes and
+alignments in a loop whose allocations stay apart, the checks' values, the
+annotation's integer evaluated once, `addressof`'s and `function_start`'s
+addresses of a local, a member, an array, a function and in static data, and
+`complex`'s folds in static data and an enumerator and its values at run time of
+every real floating type, from qualified, aligned and volatile operands, each
+evaluated once in order, `__arithmetic_fence`'s values of each floating type, a
+complex one and a vector, the xray events' arguments, which never run, and
+`trivially_relocate`'s moves of ints, doubles and arrays of ints, overlapping
+ones among them (`c_check_program_generic_builtins_test.c`). `test-checker-driver` compares
+`verbose_trap`'s errors, their places and messages, with clang's by both paths
+(`c_check_generic_builtin_driver_test.c`).
+
+## The builtins of a place and of a type's shape (#148)
+
+`__builtin_LINE`, `__builtin_COLUMN`, `__builtin_FILE`, `__builtin_FILE_NAME`,
+`__builtin_FUNCTION`, `__builtin_vectorelements` and
+`__builtin_omp_required_simd_align` are keywords, as in clang, and the parser
+reads them so. The checker's walk in source order works each one out where it
+reads it (`check_input_source_builtin`, `check_input_builtin_constant_prepare`,
+`c_check_constant.c`'s `check_constant_source_builtin`), as it does
+`__builtin_offsetof`: a constant cached at the call's `)`, which every context
+takes, code, static initializers, enumerators and `_Static_assert` alike.
+
+- `__builtin_LINE()` and `__builtin_COLUMN()` are `unsigned int` constants of the
+  call's place as clang's `SourceLocExpr` gives it. That place is the end of its
+  outermost macro expansion, as `getExpansionRange(...).getEnd()` resolves it:
+  a function-like invocation's closing parenthesis, an object-like macro's
+  name, and for a macro argument the end of the invocation it was passed to.
+  A call written outside any macro is placed where it was written. The line is
+  presumed after `#line`, and the column counts from 1
+  (`check_input_source_place`: `pp_output_expansion_end` over the expansion
+  history, which a unit that deferred it records then, `pp_presumed` and
+  `pp_line_of`).
+- `__builtin_FILE()`, `__builtin_FILE_NAME()` and `__builtin_FUNCTION()` are
+  `char *` constants, the addresses of strings the walk makes
+  (`check_input_source_string`): the presumed file's name as written (after
+  `#line`), its last component as clang's `llvm::sys::path::filename` takes it
+  (`pp_path_file_name`, which `__FILE_NAME__` shares: `"/"` for a root, `"."`
+  for a name that ends in `/`, a `//net` root name whole, the whole name where
+  that is empty), and the enclosing function's name, `""` outside
+  one. Each is a private string object of its keyword's token, as `__func__`'s
+  array is, which the emission names `.Lbuster_string_N`.
+- `__builtin_vectorelements(T)`, of a vector type or of an expression of one,
+  which isn't evaluated, is its elements' count. Its parentheses are read as
+  `sizeof`'s, so a comma expression is an operand, of its last operand's type.
+- `__builtin_omp_required_simd_align(T)` is the unit's target's SIMD alignment
+  in bytes whatever the type (16, 32 with AVX, 64 with AVX-512F, as clang's
+  `getOpenMPDefaultSimdAlign` gives it). Its operand is `alignof`'s: an array's
+  base element type, which must be a complete object type, not `void`, an
+  incomplete record or a function type.
+- Each is an `unsigned long`. An operand that isn't what clang takes is an
+  error, as clang's is.
+
+clang's type traits of C, `__is_destructible(T)`, `__is_nothrow_destructible(T)`
+and `__is_bitwise_cloneable(T)`, are keywords of the same span and constants
+of the same walk, each an `int` (Sema's `getLogicalOperationType`), as
+`EvaluateUnaryTypeTrait` gives them where no type has a destructor:
+
+- the destructible ones are 1 for every complete type, a variably modified one
+  among them, and 0 for `void`, an array of no bound and a function type;
+- `__is_bitwise_cloneable` is its base element type's (`isBitwiseCloneableType`):
+  1 for a complete one and a function type, 0 for `void`;
+- `CheckUnaryTypeTraitTypeCompleteness` first requires the destructible ones'
+  base element type to be `void` or complete, and `__is_bitwise_cloneable`'s
+  type to be `void`, an array of no bound or complete: an incomplete record or
+  enumeration is an error at the keyword.
+
+`__builtin_ptrauth_type_discriminator(T)`, of the same span, is no constant:
+every use is an error at its keyword, where clang says "this target does not
+support pointer authentication".
+
+A deferred body's lane refuses a body that uses one of the first five (the
+preprocessor's places change as they are read), which source order then reads.
+`__has_builtin` answers 1 for all eleven (`pp_implemented_builtin`), and
+`__has_constexpr_builtin` 0, as clang's. `test-checker`'s
+`generic-source-places-and-type-queries` runs them natively against clang -O0's
+build by both paths, after a `#line` that names the file, and `generic-type-traits`
+the traits of complete, incomplete and variably modified types; their source
+fixtures compare every kind of type and context, and the errors, with clang.
 
 ## Intrinsic checking contracts
 
@@ -1343,11 +1819,12 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 558 audited SemaX86 constraint facts for 530
+`c_check_builtin_x86.c` adds 559 audited SemaX86 constraint facts for 531
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
 rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 276 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 277 direct ranges,
+`_mm_prefetch`'s hint (0 to 7) the last of them.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -1407,6 +1884,24 @@ under each of MXCSR's four rounding modes, set and restored around it, and throu
 znver5. The program that includes the header lowers only what its roots reach,
 as `-c` does (`check_test_program_includes`), since the header's MMX functions
 call builtins no row takes.
+
+#799's report and its follow-up name the immediate intrinsics that stb_image,
+xxHash and zstd call through `<immintrin.h>`: `_mm_shuffle_epi32`, the word
+shuffles, the byte shifts, `_mm_shuffle_ps` and `_mm_shuffle_pd`, the word
+insert and extract, `_mm_alignr_epi8` and `_mm_blend_epi16`, and AVX2's
+`_mm256_permute4x64_epi64`, `_mm256_shuffle_epi32`,
+`_mm256_permute2x128_si256`, `_mm256_alignr_epi8`, `_mm256_blend_epi32`, the
+byte shifts, `_mm256_extracti128_si256`, the word shuffles,
+`_mm256_permute_ps` and `_mm256_permute4x64_pd`. Each has its builtin's row
+and its SemaX86 range. The x86 programs' `x86-immediate-header-intrinsics` runs
+every one of them through the header at znver5, at its immediate's edges (0,
+the fields' widths and one past them, the lanes' and elements' counts, 255) and
+with its operands both ways, against clang -O0's build.
+`check_test_x86_header_ranges` gives each one past its range, below it or not a
+constant, and all of them at their ranges' tops. It requires clang's lines from
+both of the driver's paths: each error at the macro's use in the source, and the
+note that names the macro. At targets without AVX-512F and AVX-512VL, these
+intrinsics stop at #775's limits.
 
 #148's rest of clang's x86 builtins, which no build of this compiler calls, join
 the supplementary scope by family, each with its SemaX86 facts and the rows of
@@ -1531,8 +2026,13 @@ the existing families or of new ones:
   takes as the builtin; and the builtins of the dedicated paths
   (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
   declaration too, become calls of their names here.
-  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
-  modes, and stays out of the scope.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` where
+  the header is included, and without it clang's builtin (a
+  `TARGET_HEADER_BUILTIN` of no features), which is a leaf too: its hint a
+  constant of 0 to 7, SemaX86's range (`c_check_builtin_x86.c`'s last rule,
+  whose error clang defers to reachability), and its code no prefetch, as
+  `__builtin_prefetch`'s has none: a prefetch has no effect a program sees,
+  past its address's evaluation.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's
@@ -1684,7 +2184,9 @@ other generic vector builtins of clang 23 (#148), at catalog identities from
   functions and void here are refused as unsupported, the type table having
   none;
 - the matrix builtins are an error at every call, as clang's are without
-  `-fenable-matrix`, which buster hasn't: no unit has a matrix type.
+  `-fenable-matrix`, which buster hasn't: no unit has a matrix type. Since
+  nothing more could compile, they are implemented as clang's are, and
+  `__has_builtin` answers 1 for them.
 
 `test-checker` compares each family's valid calls and one error each with
 clang's acceptance and first error line (`c_check_builtin_vector_graph_test.c`),
@@ -1718,10 +2220,10 @@ for a C library function X, and its rows with attribute `f`, X itself where
 clang makes the name a builtin of the unit. `c_builtin_library.c` holds both
 lists, `c_check_builtin_library.c` their folds.
 
-**Calls.** `c_builtin_library_calls.inc` lists the 352 `F` rows that compile as
+**Calls.** `c_builtin_library_calls.inc` lists the 393 `F` rows that compile as
 calls of their functions: the math library's (`sin` to `tgammaf128`, the complex
-functions, `powi`'s aside), the string and memory functions, the formatted
-input and output that takes no `FILE` (`printf`, `snprintf`, `vsscanf`), the
+functions, `powi`'s aside, and the `__fp16` forms below), the string and memory functions, the formatted
+input and output (`printf`, `snprintf`, `vsscanf`, and the `FILE` builtins below), the
 allocation functions, `abort`, the wide-character functions and
 `__get_unsafe_stack_*`. The checker gives each call its row's ordinary
 prototype (`c_builtin_intrinsic_types.c` decodes it) and checks it as a call
@@ -1738,6 +2240,36 @@ unit has one symbol of each name. `__builtin_powi`, `powif` and `powil` are
 `llvm.powi`'s, whose code calls libgcc's `__powidf2`, `__powisf2` and
 `__powixf2` (x raised to an `int` by repeated squaring, not `pow`'s value), and
 so do theirs.
+
+**The `__fp16` forms** (`__builtin_sinf16` and 34 others, #148). Their rows'
+prototypes take and return `__fp16`, which no function type may (clang's Sema
+refuses such a declaration, and so does `type_function`), so
+`c_builtin_intrinsic_types.c` decodes them with `_Float16` in its place
+(`BuiltinIntrinsicTypeInput.half_prototypes`, for the rows
+`cbuiltin_library_half` names): binary16's values pass alike, and pointers keep
+their `__fp16` (`sincosf16`'s `__fp16 *`). `check_x86_action` then gives the
+call's arguments `__fp16` conversions (the rounding is the same) and its value
+`__fp16`'s type, which C promotes to `float` where it computes:
+`__builtin_fmaxf16(x, y) + 1` is a `float`. clang -O0 calls 21 of them by their
+own names, as this does: `sinf16`, `acosf16`, `sqrtf16`, `powf16`, `ldexpf16`,
+`sincosf16` and their kin, which glibc doesn't define, so that a program links
+them from elsewhere. It computes the other 14 in `float`, which the lowering
+does too (`check_lower_library_promoted`): `ceilf16`, `floorf16`, `truncf16`,
+`rintf16`, `roundevenf16`, `roundf16`, `fmaxf16`, `fminf16`,
+`fmaximum_numf16`, `fminimum_numf16` and `frexpf16` call the `float` function
+of their arguments converted to `float` (clang's baseline code calls the same;
+its `roundss` and `maxss` at znver5 give the same values), `fmaf16` calls `fma`
+of them converted to `double`, its result rounded once to `__fp16` as clang's
+`__truncdfhf2` rounds it, and `fabsf16` and `copysignf16` are their 16 bits'
+sign cleared or copied. `fmaxf16`, `fminf16` and their `_num` kin fold, as
+clang's `E` rows do. `__builtin_canonicalizef16`, no `F` row, is the floating
+builtins' (0x3da): its `__fp16` argument converted to `float` and back, which
+quiets a signaling NaN as clang's code does.
+
+**`__builtin_char_memchr`**, no `F` row either, is `memchr`'s call under its
+own prototype (`char *(const char *, int, size_t)`), as clang's code calls it
+(`cbuiltin_library_alias`): its arguments convert to that prototype and its
+value is a `char *`.
 
 **Where clang's code is no call.** clang -O0 compiles many of these rows to
 LLVM intrinsics rather than calls: `llvm.maxnum` and `llvm.minnum` for `fmax`
@@ -1775,16 +2307,25 @@ folding, for which its `-pedantic` warns; this doesn't). Pointer results
 (`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
-**Plain names.** `c_builtin_library_plain.inc` lists the 354 `f` rows of C's
-modes but those whose prototypes need the unit's `FILE`, `jmp_buf` or
-`ucontext_t`, or that have none to check (`setjmp` and its kin, `vfork`,
-`umask`, `pthread_create`), and `<stdarg.h>`'s `va_start`, `va_end` and
-`va_copy`. Each is a builtin of the unit unless `-fno-builtin`,
-`-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
-`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
+**Plain names.** `c_builtin_library_plain.inc` lists the 446 `f` rows of C's
+modes, `<stdarg.h>`'s `va_start`, `va_end` and `va_copy` among them, whose
+prototypes take a `va_list` by reference (`A`, spelled as its decayed
+`struct __va_list_tag *`): clang's code calls functions of those names, which
+no C library has. Each is a builtin of the unit unless `-fno-builtin`,
+`-ffreestanding` or `-fno-builtin-NAME` says otherwise, one of
+`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone,
+and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. A declaration of such a name is the library's function, which calls
+answers by. The list is pinned to Clang 23.1.4, CI's reference: its GNU rows
+include `strlcat` and `strlcpy`, which 23.1.5's table drops. The oracles compare
+`clang --version` with the release, print `expected clang 23.1.4, found …`
+when another release is found, and skip only the plain names the found release
+is known to classify differently (`cbuiltin_library_table_differences`: 23.1.5's
+`strlcat` and `strlcpy`), a difference no named release explains still failing.
+Neither `strlcat` nor `strlcpy` is folded: a call
+of either stays a call of the library's function in every mode. A declaration
+of such a name is the library's function, which calls
 reach as any function's; where it has external linkage and the row's
 prototype, its calls fold as `__builtin_X`'s do (Sema's `BuiltinAttr`:
 `check_input_library_call` marks them, `check_builtin_library_fold_plain` folds
@@ -1801,23 +2342,75 @@ for 'sin'`, both under `-Wimplicit-function-declaration`, and a prototype with
 (const char *)')`). The call then converts its arguments to the prototype's
 parameters (`sin(1)` passes 1.0), in C89 as clang's does.
 
+A prototype that names the unit's types takes them from its file-scope
+typedefs at the call, as clang's `ASTContext` keeps them (`check_input_file_type`):
+`FILE` (`P`), `jmp_buf` and `sigjmp_buf` (`J` and `SJ`, decayed as parameters)
+and `ucontext_t` (`K`); `pid_t` (`p`) is clang's `int`. The diagnostics spell
+them as clang does (`CheckInput.implicit_library_types`, `CBuiltinLibraryNamed`:
+`'int (ucontext_t *)' (aka 'int (struct U *)')`, `'int (long *)'`). Without the
+type, the use declares the function as any undeclared one, with clang's
+warning that it needs its header, but for the rows clang declares without
+checking their prototypes (attribute `T`: `setjmp` and its kin, `getcontext`,
+`savectx`, `vfork`, Sema's `allowTypeMismatch`), which warn of nothing. `umask`
+and `pthread_create` have no prototype: their uses are any undeclared
+function's, as clang's are.
+
+**C23's `<stdbit.h>` functions.** `stdc_leading_zeros_uc` to
+`stdc_bit_ceil_ull`, the 14 operations of `__builtin_stdc_leading_zeros` to
+`__builtin_stdc_bit_ceil` (clang's `BIstdc_*`) of a parameter of `unsigned
+char`, `short`, `int`, `long` or `long long` each, are computed inline, as
+clang's code computes them: a call of the unit's declaration of one, where
+the name is a builtin of the unit (C23's, `pp_library_builtin`), the
+declaration has external linkage and the row's prototype (`unsigned int`,
+`bool` for `has_single_bit` or the parameter's type for `bit_floor` and
+`bit_ceil`, of the parameter's type), and the call has one argument, is the
+builtin (`check_input_stdc_library_call`, in the walk and in the reader's
+constant evaluator for an enumerator's value). It has an identity of its own
+(`CBUILTIN_STDC_LIBRARY_FIRST` + the operation × 5 + the type), which the bit
+builtins check as a fixed prototype's (`check_builtin_bits_parameter`: the
+argument converted as by assignment, a pointer's or a record's refused) and
+fold, and lower, as their generic builtin's of the parameter's type. So
+`stdc_leading_zeros_ui(1)` is 31 in an `_Static_assert`, and a call computes it
+even where the unit defines the function itself, whose address the name still
+is. A call of another count is the declaration's, with its count's error; a
+declaration of another prototype or of internal linkage, and every other mode,
+make the call the function's. `__has_constexpr_builtin` answers 1 for them in
+C23. Their implicit declarations' diagnostics spell `unsigned short` and C23's
+`bool`.
+
 **Refused.** The classification builtins of custom checking
 (`__builtin_isnormal` and its kin) and `__builtin_signbitf` and `signbitl`,
 which clang tests inline, are the floating builtins' ("Floating checking"),
-not calls. The table's other `F` rows stay refused, and `__has_builtin`
-answers 0 for them. The lowering refuses by name those the checker can type:
-`__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
-Tier 0's allocation doesn't take). The signaling NaNs and the `_Float128` and
+not calls. The alloca variants are the catalogue's miscellaneous builtins
+("Generic builtins of clang's own checks and of an instruction or two"). The
+table's other `F` rows stay refused, and `__has_builtin` answers 0 for them.
+The signaling NaNs and the `_Float128` and
 `_Float16` NaNs, which clang folds, are the floating builtins' constants
-("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the 35 `__fp16` builtins (no C
-function takes or returns `__fp16`), the matrix builtins, and the `FILE`
-builtins (`fprintf` and its kin).
+("Signaling NaNs and the `_Float16` and `__float128` constants"). The prototypes of the rest don't decode: the matrix builtins.
+
+**The `FILE` builtins.** `__builtin_fprintf`, `__builtin_fscanf`,
+`__builtin_vfprintf`, `__builtin_vfscanf` and the fortified
+`__builtin___fprintf_chk` and `__builtin___vfprintf_chk` are calls of their
+functions too, whose prototypes take the unit's `FILE` (clang's prototype code
+`P`): the type of the last typedef named `FILE` at file scope before the call,
+as clang's `ASTContext` keeps it (`setFILEDecl`), whatever its type
+(`check_input_file_type`, `BuiltinIntrinsicTypeInput.file_type`). A local
+object named `FILE` doesn't hide it, and a block-scope typedef of the name is
+none; a unit without one refuses the call, as clang does ("use of unknown
+builtin"). A deferred body's lane leaves a call of one to source order, as its
+bindings hold only the names the body spells. Their plain names (`fopen`,
+`fprintf`, `fread`, `fscanf`, `fwrite`, `vfprintf` and `vfscanf`) are plain
+library builtins too, of the implicit declarations' rules: undeclared, a call
+declares the function with its row's prototype where the unit has a `FILE`
+(C99's error, C89's warning), and warns that it needs `<stdio.h>` where it
+hasn't, as clang does. `test-checker-driver` compares the errors of calls
+without a `FILE` with clang's (`c_check_generic_builtin_driver_test.c`).
 
 `test-checker` (`c_check_program_library_test.c`, alone with
 `--program-library`) checks the lists against clang's table and accounts for
 every `F` and `f` row of C's modes; checks the folds' constant contexts by both
 paths against clang's acceptance; and runs programs of each family (`double`,
-`float`, `long double` and `_Float128` math, `powi`, complex, strings, wide
+`float`, `long double`, `_Float128` and `__fp16` math, `powi`, complex, strings, wide
 characters, formatted output and input, allocation, the folds in code, special
 values and `errno`) by both paths against clang -O0's builds.
 `test-checker-driver` (`c_check_library_driver_test.c`) compares the implicit

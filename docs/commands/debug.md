@@ -16,8 +16,12 @@ requirements. [Command index](README.md).
   layout decides as columns the writer patches on its lanes.
   `test-debug --cross-check` checks original fixtures, as one unit and as two,
   with readelf, GDB and perf, linked by GNU ld, by the native writer and from
-  the object writer's objects (`ObjectOptions.debug`) by GNU ld and lld;
-  `benchmark-debug` measures validation through address finalization. [The
-  debug guide](../../docs/debug.md) records the contract and a function's body's row
+  the object writer's objects (`ObjectOptions.debug`) by GNU ld and lld; a
+  missing perf, or one whose `perf --version` fails, is probed once and each
+  sampled section prints
+  `skipped: needs perf, not found on PATH` (or
+  `--version exited with status N`), while a present perf's wrong
+  samples still fail. `benchmark-debug` measures validation through address
+  finalization. [The debug guide](../../docs/debug.md) records the contract and a function's body's row
   (`DebugFunction.prologue_end`); `streaming.c` makes a unit per 256 functions
   as they compile.

@@ -42,7 +42,11 @@ The outcome retains the stage, category, disposition, cause domain, original
 32-bit error, instruction and detail. IR boundaries preserve the complete
 `IrCheck`, including `dominance_checked`. The optional `--tier1-gvn` pass retains its
 check under the distinct `gvn` stage and follows the same failure policy; it
-remains off by default. A lowering instruction is a typed
+remains off by default. The 128-bit integers' split into halves (`ir_wide.c`,
+#141), after promotion and before the optimizer, has the `wide` stage: an
+operation of them it doesn't take (a division, a conversion to or from a
+floating value, a switch, one in a signature) is unsupported, and Tier 0
+compiles the body. A lowering instruction is a typed
 entry; later IR checks use their API's IR instruction. `UINT32_MAX` means the
 API supplied no instruction. These are not source tokens: diagnostics also
 retain the body's source declaration, rather than pretending to map an IR
@@ -53,15 +57,21 @@ Selection keeps its refused operation separately. The emitter's optional
 allocation-certificate errors before its public error wraps them; the outcome
 keeps both codes. The certificate checker runs only where `--verify` asks for
 it (`Tier1EmitOptions.certify`, #939). Its refusal (`TIER1_EMIT_CERTIFICATE`,
-cause `certificate`) is an allocation the allocator got wrong, so it is
-internal; its capacity is a resource failure.
+cause `certificate`) is an allocation the allocator got wrong, or code the
+emitter got wrong (the error is the code certificate's `Tier1CertEmittedReason`
+plus `BUSTER_TIER1_EMIT_CODE_CERTIFICATE`), so it is internal; either
+checker's capacity (`TIER1_CERT_CAPACITY`, or the code certificate's
+`TIER1_CERT_EMITTED_CAPACITY` so encoded) is a resource failure.
 Neither the diagnostic nor the refused result borrows an arena pointer.
 
 Failure restores the publication arena, clears code/count outputs, and
 rewinds the lane's intermediate arenas. An incomplete reservation is released.
 The lane can then compile another function. Publication/frame-adapter
 inconsistency is internal; it is not reported as an unsupported emitter.
-The existing frame representation and production probe policy are unchanged.
+The published frame is the frame emitter's own events (#1056, `EmittedCode`):
+a frame whose epilogue brackets aren't its exits' is that internal publication
+failure (`BUSTER_CHECK_TIER1_FRAME_PUBLICATION`). The production probe policy
+is unchanged.
 
 ## Reports and ordering
 
@@ -79,7 +89,31 @@ body never contributes success counters. The source-order failure selection
 and lane-completion protocol remain the emission's existing ones.
 
 `--tier1-refusals` gives each permitted fallback's category, cause, original
-error/location, operation and disposition. Multi-unit refusals use each unit's
+error/location, operation and disposition. Where selection refused a call, a
+last field, `call=`, lists the call's kinds (#1116). Apart from `indirect` and
+`variadic`, which the selector takes, they are its shapes that the selector's
+call boundary doesn't take, by the selector's own predicates
+(`check_tier1_call_kinds`), so the report follows the boundary as it grows:
+
+- `indirect` and `variadic`;
+- `abi-record`: an ABI record the boundary refuses, the call's (its result,
+  its outgoing area) or an argument's, or aggregates' parts in registers past
+  the red zone's 14 staging slots (a 64-byte part waits in zmm16 and on and
+  takes none);
+- `stack-arguments`: arguments past the boundary's limit
+  (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
+  the stack, which Tier 1 takes below it;
+- `narrow-` and `other-argument`: any argument's, one past the limit too;
+- `other-result`;
+- `argument-count`: arguments that don't match the parameters.
+
+Floating and `long double` arguments and results are the boundary's (#141),
+with a record or without, so no kind names them: one whose record the
+boundary refuses is an `abi-record`.
+
+`--tier1-report` counts the refused calls by kind as `selection.call.KIND`. A
+call counts under every kind it has, so the kinds' counts can sum past
+`selection.call`. They say which shape to take first. Multi-unit refusals use each unit's
 buffered diagnostic stream, so concurrent units cannot interleave them.
 Fatal failures go through the normal source diagnostic. Histogram bounds
 never truncate the complete per-body outcome or alias unknown errors modulo

@@ -102,7 +102,7 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
 {
     const CheckInput* input = program->input;
     const uint8_t definition = input->function_flags != 0 ? input->function_flags[body->declaration] : 0;
-    const bool external = input->linkage[body->declaration] == 2;
+    const bool external = check_input_linkage(input->declaration_bits, body->declaration) == 2;
     bool eager = external && (definition & CHECK_INPUT_FUNCTION_INLINE) == 0;
     if (!eager)
     {
@@ -129,14 +129,14 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
             {
                 const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
                 const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
-                gnu_inline |= check_program_attribute_gnu_inline(input->attributes[token]);
+                gnu_inline |= check_program_attribute_gnu_inline(check_input_attributes_at(input, token));
                 plain_inline |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE;
                 c99_inline_only &= !(function && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE &&
                                      ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0));
             }
             else
             {
-                attribute |= check_program_attribute_eager(input->attributes[token]);
+                attribute |= check_program_attribute_eager(check_input_attributes_at(input, token));
             }
         }
         // The language mode's rules of inline functions matter to an external definition alone.
@@ -363,7 +363,7 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
 }
 
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
-                                      bool scalar, Arena* output, Arena* scratch)
+                                      bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -442,9 +442,9 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             bool gnu_inline = false;
             // A block-scope static that no emitted code declares is no root, `used` as it may be: clang emits it only
             // where it emits its declaration's statement (#1108).
-            const bool dropped = !function && input->linkage[token] == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
+            const bool dropped = !function && check_input_linkage(input->declaration_bits, token) == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
                                  !check_program_token_emitted(full, token);
-            const uint32_t attribute_roots = check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
+            const uint32_t attribute_roots = check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
             roots[group] |= dropped ? 0 : attribute_roots;
             inline_rules[group] |= gnu_inline ? 2 : 0;
             const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
@@ -481,7 +481,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 const uint32_t declared = check_data_declared_index(data, object);
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
                 const uint32_t declaration = full->object_declarations[object];
-                if (declaration != BUSTER_CHECK_NONE && input->linkage[declaration] == 2)
+                if (declaration != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2)
                 {
                     bool inline_only = false;
                     if (function)
@@ -585,7 +585,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
             const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
-                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] && check_program_token_emitted(full, declaration) ?
+                                  check_input_linkage(input->declaration_bits, declaration) == 0 &&
+                                  !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && check_program_token_emitted(full, declaration) ?
                                   check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {
@@ -604,6 +605,85 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
         valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+        // An input section a __start_ or __stop_ reference bounds needs all of its members (#1122): the reference
+        // names the section, not a member, so no edge reaches the members nothing else does, as GNU ld's and lld's
+        // still place them. After each reachability pass the needed objects' bound names root their sections'
+        // members, to a fixpoint; a kept unit's placements are all rooted instead, since a bound of another unit's
+        // may name them. An object's bound name is its linkage name: an asm label from any of its declarations, as
+        // check_program_emit names its symbol, or else its identifier. Each object's section is found once, before the
+        // fixpoint; each pass lists the needed objects' sections, few, which each placement compares.
+        const CheckInputSections* sections = input->sections;
+        const Preprocessor* pp = full->parser->preprocessor;
+        const Parser* parser = full->parser;
+        bool grow = valid && mode == C_LOWERING_REACHABLE && pp != 0 && sections != 0 && sections->placement_count != 0;
+        String8* object_bounds = grow && !keep_sectioned ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
+        String8* needed_bounds = object_bounds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
+        valid = valid && (!grow || keep_sectioned || needed_bounds != 0);
+        if (needed_bounds != 0)
+        {
+            memset(object_bounds, 0, (uint64_t)objects * sizeof(String8));
+            for (uint32_t token = 0; token < input->token_count; token += 1)
+            {
+                const uint32_t object = input->objects[token];
+                const CheckInputAttributes* attributes = object != 0 && object < objects && input->declarations[token] == token &&
+                                                         !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
+                for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + i;
+                    object_bounds[object] = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && object_bounds[object].length == 0 ? attribute->text : object_bounds[object];
+                }
+            }
+            for (uint32_t object = 1; object < objects; object += 1)
+            {
+                const uint32_t declaration = full->object_declarations[object];
+                const IdentId name = declaration != BUSTER_CHECK_NONE ? parser->tokens.names[declaration] : 0;
+                const String8 label = object_bounds[object];
+                object_bounds[object] = label.length != 0 ? link_bound_suffix_bytes((const uint8_t*)label.pointer, (uint32_t)label.length, 0) :
+                                        name != 0 ? link_bound_suffix_bytes(intern_bytes(pp->table, name), intern_length(pp->table, name), 0) : (String8){ 0 };
+            }
+        }
+        while (valid && grow)
+        {
+            grow = false;
+            memset(needed, 0, objects);
+            for (uint32_t selected = 0; selected < plan.selected_count; selected += 1)
+            {
+                const uint32_t definition = plan.selected[selected];
+                const uint32_t raw = (uint32_t)order[definition];
+                needed[definition_objects[definition]] = 1;
+                const uint32_t first = raw < full->body_count ? full->bodies[raw].reference_first : data->reference_offsets[raw - full->body_count];
+                const uint32_t count = raw < full->body_count ? full->bodies[raw].reference_count : data->reference_counts[raw - full->body_count];
+                const uint32_t* references = raw < full->body_count ? full->references : data->references;
+                for (uint32_t reference = 0; reference < count; reference += 1)
+                {
+                    needed[references[first + reference]] = 1;
+                }
+            }
+            uint32_t bound_count = 0;
+            for (uint32_t object = 1; needed_bounds != 0 && object < objects; object += 1)
+            {
+                needed_bounds[bound_count] = object_bounds[object];
+                bound_count += needed[object] != 0 && object_bounds[object].length != 0;
+            }
+            for (uint32_t p = 0; p < sections->placement_count; p += 1)
+            {
+                const String8 section = sections->placements[p].name;
+                bool bound = keep_sectioned;
+                for (uint32_t b = 0; !bound && b < bound_count; b += 1)
+                {
+                    const String8 suffix = needed_bounds[b];
+                    bound = suffix.length == section.length && memcmp(suffix.pointer, section.pointer, section.length) == 0;
+                }
+                const uint32_t member = bound ? input->objects[sections->placements[p].token] : 0;
+                const uint32_t definition = member < objects ? object_definitions[member] : 0;
+                if (definition != 0 && (plan.definition_flags[definition - 1] & BUSTER_C_LOWERING_USED) == 0)
+                {
+                    plan.definition_flags[definition - 1] |= BUSTER_C_LOWERING_USED;
+                    grow = true;
+                }
+            }
+            valid = !grow || (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+        }
         if (valid)
         {
             for (uint32_t selected = 0; selected < plan.selected_count; selected += 1)
@@ -768,7 +848,7 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
 {
     (void)scalar;
 
-    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, BUSTER_SCALAR_PATH(scalar), output, scratch);
+    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, BUSTER_SCALAR_PATH(scalar), false, output, scratch);
 }
 
 #endif

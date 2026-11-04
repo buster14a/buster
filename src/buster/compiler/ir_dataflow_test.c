@@ -10,8 +10,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-// IR_FENCE (#1059), the last added, uses no value: the default case's.
-_Static_assert(IR_OP_COUNT == 62, "audit the independent dataflow operand oracle for a new IR operation");
+// IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC (#141) uses two, as IR_MUL does. IR_ATOMIC_RMW (#1059),
+// the last added, uses its address and its operand, as a store does, and a compare-exchange's desired value too.
+_Static_assert(IR_OP_COUNT == 64, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests
@@ -47,12 +48,21 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
         {
             values[count++] = f->a[node];
         } break;
-        case IR_ADD: case IR_SUB: case IR_MUL: case IR_SDIV: case IR_UDIV: case IR_SREM: case IR_UREM:
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_INTRINSIC: case IR_SDIV: case IR_UDIV: case IR_SREM: case IR_UREM:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_LSHR: case IR_ASHR:
         case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_VCMP:
         {
             values[count++] = f->a[node];
             values[count++] = f->b[node];
+        } break;
+        case IR_ATOMIC_RMW:
+        {
+            values[count++] = f->a[node];
+            values[count++] = f->b[node];
+            if (f->c[node] != BUSTER_IR_NONE)
+            {
+                values[count++] = f->c[node];
+            }
         } break;
         case IR_SELECT: case IR_VSELECT:
         {
