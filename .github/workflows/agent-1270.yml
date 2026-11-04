@@ -66,14 +66,14 @@ jobs:
           printf '%s  %s\n' 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua.tar.gz" | sha256sum --check
           tar -xzf "$inputs/lua.tar.gz" -C "$inputs"
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$corpus/sqlite/sqlite3.c" | sha256sum --check
-          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           count=0
           failed=0
           for source in "$inputs/lua-5.4.8/src/"*.c; do name=$(basename "$source" .c); ./build/compiler -c --tier1 --verify --tier1-report "${options[@]}" "$source" -o "$RUNNER_TEMP/qualification/objects/$name.o" > "$RUNNER_TEMP/qualification/lua-$name.log" 2>&1 || failed=1; count=$((count + 1)); done
           printf 'Lua translation units: %s; failures: %s\n' "$count" "$failed" | tee "$RUNNER_TEMP/qualification/corpus-summary.log"
-          size -A "$RUNNER_TEMP/qualification/objects/"*.o > "$RUNNER_TEMP/qualification/lua-sizes.log"
+          size -A "$RUNNER_TEMP/qualification/objects/"*.o > "$RUNNER_TEMP/qualification/lua-sizes.log" || failed=1
           ./build/compiler -c --tier1 --verify --tier1-report "${options[@]}" "$corpus/sqlite/sqlite3.c" -o "$RUNNER_TEMP/sqlite3.o" 2>&1 | tee "$RUNNER_TEMP/qualification/sqlite.log" || failed=1
-          ./build/compiler benchmark-tier1-code-certificate --only check "${options[@]}" "$corpus/sqlite/sqlite3.c" > "$RUNNER_TEMP/qualification/sqlite-certificate.log" 2>&1 || failed=1
+          ./build/compiler benchmark-tier1-code-certificate --only check --no-default-config "${options[@]}" "$corpus/sqlite/sqlite3.c" > "$RUNNER_TEMP/qualification/sqlite-certificate.log" 2>&1 || failed=1
           # This hosted run qualifies correctness only. Its timings are not performance evidence.
           rm -rf "$RUNNER_TEMP/qualification/objects"
           test "$count" -eq 34
