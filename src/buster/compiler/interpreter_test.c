@@ -1496,6 +1496,7 @@ static void interpreter_test_text_native(InterpreterTestTally* tally, Arena* scr
 
 #include "interpreter_copy_test.c"
 #include "interpreter_object_test.c"
+#include "interpreter_wide_test.c"
 
 static int run_interpreter_tests(int argc, char** argv)
 {
@@ -1543,6 +1544,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_lookup(&tally);
         interpreter_test_copy(&tally, &scratch);
         interpreter_test_objects(&tally, &scratch);
+        interpreter_test_wide(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);

@@ -63,130 +63,6 @@ struct IrInterpreterFrame
 
 #include "ir_interpreter_simd.c"
 
-static unsigned __int128 ir_interpreter_integer(InterpreterValue value)
-{
-    return ((unsigned __int128)value.high << 64) | value.low;
-}
-
-static unsigned __int128 ir_interpreter_mask(uint8_t type)
-{
-    const uint32_t bits = ir_type_bits[type];
-    return bits == 128 ? ~(unsigned __int128)0 : (((unsigned __int128)1 << bits) - 1);
-}
-
-static InterpreterValue ir_interpreter_value(unsigned __int128 bits, uint8_t type)
-{
-    bits &= ir_interpreter_mask(type);
-    const InterpreterValue result = {
-        .low = (uint64_t)bits,
-        .high = (uint64_t)(bits >> 64),
-    };
-    return result;
-}
-
-static __int128 ir_interpreter_signed(InterpreterValue value, uint8_t type)
-{
-    const uint32_t bits = ir_type_bits[type];
-    unsigned __int128 raw = ir_interpreter_integer(value) & ir_interpreter_mask(type);
-    if (bits < 128 && (raw & ((unsigned __int128)1 << (bits - 1))) != 0)
-    {
-        raw |= ~ir_interpreter_mask(type);
-    }
-    __int128 result = 0;
-    memcpy(&result, &raw, sizeof(result));
-    return result;
-}
-
-static long double ir_interpreter_float(InterpreterValue value, uint8_t type)
-{
-    long double result = 0;
-    if (type == IR_F32)
-    {
-        const uint32_t raw = (uint32_t)value.low;
-        float number = 0;
-        memcpy(&number, &raw, sizeof(number));
-        result = number;
-    }
-    else if (type == IR_F64)
-    {
-        double number = 0;
-        memcpy(&number, &value.low, sizeof(number));
-        result = number;
-    }
-    else
-    {
-        // x86-64 long double is the x87 80-bit format plus six padding bytes.
-        uint8_t raw[sizeof(long double)] = { 0 };
-        memcpy(raw, &value.low, 8);
-        memcpy(raw + 8, &value.high, 2);
-        memcpy(&result, raw, sizeof(result));
-    }
-    return result;
-}
-
-static InterpreterValue ir_interpreter_float_value(long double number, uint8_t type)
-{
-    InterpreterValue result = { 0 };
-    if (type == IR_F32)
-    {
-        const float narrowed = (float)number;
-        uint32_t raw = 0;
-        memcpy(&raw, &narrowed, sizeof(raw));
-        result.low = raw;
-    }
-    else if (type == IR_F64)
-    {
-        const double narrowed = (double)number;
-        memcpy(&result.low, &narrowed, sizeof(narrowed));
-    }
-    else
-    {
-        uint8_t raw[sizeof(long double)];
-        memcpy(raw, &number, sizeof(raw));
-        memcpy(&result.low, raw, 8);
-        memcpy(&result.high, raw + 8, 2);
-    }
-    return result;
-}
-
-// Decode a finite x87 value after exact F32/F64 extension. Its explicit significand permits truncation and
-// range checks entirely in unsigned integers, including i128 boundaries, without a host out-of-range cast.
-static InterpreterStatus ir_interpreter_float_integer(InterpreterValue value, uint8_t source_type, uint8_t result_type, bool is_signed, unsigned __int128* result)
-{
-    const InterpreterValue extended = ir_interpreter_float_value(ir_interpreter_float(value, source_type), IR_F80);
-    const uint32_t encoded_exponent = (uint32_t)extended.high & 0x7fffu;
-    const bool negative = (extended.high & 0x8000u) != 0;
-    const int32_t exponent = (int32_t)encoded_exponent - 16383;
-    const uint32_t bits = ir_type_bits[result_type];
-    InterpreterStatus status = INTERPRETER_OK;
-    unsigned __int128 magnitude = 0;
-    if (encoded_exponent == 0x7fff || exponent >= 128)
-    {
-        status = INTERPRETER_ARITHMETIC;
-    }
-    else if (exponent >= 63)
-    {
-        magnitude = (unsigned __int128)extended.low << (uint32_t)(exponent - 63);
-    }
-    else if (exponent >= 0)
-    {
-        magnitude = extended.low >> (uint32_t)(63 - exponent);
-    }
-    if (status == INTERPRETER_OK)
-    {
-        const unsigned __int128 signed_limit = (unsigned __int128)1 << (bits - 1);
-        if (is_signed ? (negative ? magnitude > signed_limit : magnitude >= signed_limit) : (negative && magnitude != 0) || (bits < 128 && magnitude > ir_interpreter_mask(result_type)))
-        {
-            status = INTERPRETER_ARITHMETIC;
-        }
-        else
-        {
-            *result = negative ? 0 - magnitude : magnitude;
-        }
-    }
-    return status;
-}
-
 static uint32_t ir_interpreter_find_function(const IrInterpreterProgram* program, SymbolId symbol, uint64_t address, bool indirect)
 {
     uint32_t result = UINT32_MAX;
@@ -412,7 +288,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
             memset(frame->defined, 0, (uint64_t)function->instruction_count + 1);
             for (uint32_t p = 0; p < count; p += 1)
             {
-                frame->arguments[p] = ir_interpreter_value(ir_interpreter_integer(arguments[p]), function->parameter_types[p]);
+                frame->arguments[p] = interpreter_value_value(interpreter_value_integer(arguments[p]), function->parameter_types[p]);
             }
         }
         if (status == INTERPRETER_OK && simd)
@@ -728,8 +604,8 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     const uint8_t type = function->type[instruction];
     const uint8_t at = function->a[instruction] < function->instruction_count ? function->type[function->a[instruction]] : IR_VOID;
     const uint32_t bits = ir_type_bits[type];
-    const unsigned __int128 left = ir_interpreter_integer(av);
-    const unsigned __int128 right = ir_interpreter_integer(bv);
+    const unsigned __int128 left = interpreter_value_integer(av);
+    const unsigned __int128 right = interpreter_value_integer(bv);
     unsigned __int128 result = 0;
     bool raw_result = true;
     InterpreterStatus status = INTERPRETER_OK;
@@ -744,7 +620,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
         result = left;
         break;
     case IR_SEXT:
-        result = (unsigned __int128)ir_interpreter_signed(av, at);
+        result = (unsigned __int128)interpreter_value_signed(av, at);
         break;
     case IR_ADD: result = left + right; break;
     case IR_SUB: result = left - right; break;
@@ -769,8 +645,8 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     case IR_SDIV:
     case IR_SREM:
     {
-        const __int128 signed_left = ir_interpreter_signed(av, type);
-        const __int128 signed_right = ir_interpreter_signed(bv, type);
+        const __int128 signed_left = interpreter_value_signed(av, type);
+        const __int128 signed_right = interpreter_value_signed(bv, type);
         const unsigned __int128 minimum = (unsigned __int128)1 << (bits - 1);
         if (signed_right == 0 || (left == minimum && signed_right == -1))
         {
@@ -799,13 +675,13 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
         }
         else
         {
-            result = (unsigned __int128)(ir_interpreter_signed(av, type) >> (uint32_t)right);
+            result = (unsigned __int128)(interpreter_value_signed(av, type) >> (uint32_t)right);
         }
         break;
     case IR_ICMP:
     {
-        const __int128 signed_left = ir_interpreter_signed(av, at);
-        const __int128 signed_right = ir_interpreter_signed(bv, at);
+        const __int128 signed_left = interpreter_value_signed(av, at);
+        const __int128 signed_right = interpreter_value_signed(bv, at);
         switch (function->c[instruction])
         {
         case IR_EQ: result = left == right; break;
@@ -830,8 +706,8 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     case IR_FMUL:
     case IR_FDIV:
     {
-        const long double a = ir_interpreter_float(av, type);
-        const long double b = ir_interpreter_float(bv, type);
+        const long double a = interpreter_value_float(av, type);
+        const long double b = interpreter_value_float(bv, type);
         long double number = 0;
         if (type == IR_F32)
         {
@@ -871,14 +747,14 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
             default: number = a / b; break;
             }
         }
-        *value = ir_interpreter_float_value(number, type);
+        *value = interpreter_value_float_value(number, type);
         raw_result = false;
         break;
     }
     case IR_FCMP:
     {
-        const long double a = ir_interpreter_float(av, at);
-        const long double b = ir_interpreter_float(bv, at);
+        const long double a = interpreter_value_float(av, at);
+        const long double b = interpreter_value_float(bv, at);
         switch (function->c[instruction])
         {
         case IR_EQ: result = a == b; break;
@@ -893,14 +769,14 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     }
     case IR_FTRUNC:
     case IR_FEXT:
-        *value = ir_interpreter_float_value(ir_interpreter_float(av, at), type);
+        *value = interpreter_value_float_value(interpreter_value_float(av, at), type);
         raw_result = false;
         break;
     case IR_SITOFP:
     case IR_UITOFP:
     {
         // Cast directly to the destination precision: routing i128 through x87 first can double-round.
-        const __int128 signed_value = ir_interpreter_signed(av, at);
+        const __int128 signed_value = interpreter_value_signed(av, at);
         long double number = 0;
         if (type == IR_F32)
         {
@@ -914,14 +790,14 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
         {
             number = op == IR_SITOFP ? (long double)signed_value : (long double)left;
         }
-        *value = ir_interpreter_float_value(number, type);
+        *value = interpreter_value_float_value(number, type);
         raw_result = false;
         break;
     }
     case IR_FPTOSI:
     case IR_FPTOUI:
     {
-        status = ir_interpreter_float_integer(av, at, type, op == IR_FPTOSI, &result);
+        status = interpreter_value_float_integer(av, at, type, op == IR_FPTOSI, &result);
         break;
     }
     default:
@@ -930,7 +806,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     }
     if (status == INTERPRETER_OK && raw_result)
     {
-        *value = ir_interpreter_value(result, type);
+        *value = interpreter_value_value(result, type);
     }
     return status;
 }
@@ -1168,7 +1044,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         {
                             object[byte] = (uint8_t)(written >> (8 * byte));
                         }
-                        value = ir_interpreter_value(old, type);
+                        value = interpreter_value_value(old, type);
                     }
                 } break;
                 case IR_ALLOCA:
@@ -1221,7 +1097,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             }
                             if (!ir_vector_type(type))
                             {
-                                value = ir_interpreter_value(ir_interpreter_integer(value), type);
+                                value = interpreter_value_value(interpreter_value_integer(value), type);
                             }
                         }
                         else
@@ -1468,7 +1344,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 }
                 else
                 {
-                    frame->values[i] = ir_interpreter_value(ir_interpreter_integer(value), type);
+                    frame->values[i] = interpreter_value_value(interpreter_value_integer(value), type);
                 }
                 frame->defined[i] = defined;
             }

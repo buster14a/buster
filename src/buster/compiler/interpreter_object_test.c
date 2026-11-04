@@ -128,7 +128,7 @@ static void interpreter_test_object_storage(InterpreterTestTally* tally, Arena* 
 static void interpreter_test_object_frames(InterpreterTestTally* tally)
 {
     // Two 32KiB objects fit, but retaining a callee's arena storage across 64 sequential calls does not. The caller
-    // passes its object's address; each callee copies it into a private object and writes there, never into its caller.
+    // passes its object's address; each callee copies its prefix into a private object and writes there, never into its caller.
     const uint8_t caller_kinds[] = {
         BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
         BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CALL, BUSTER_TYPED_DISCARD,
@@ -167,7 +167,7 @@ static void interpreter_test_object_frames(InterpreterTestTally* tally)
         BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
     };
-    const uint64_t callee_values[] = { 0, 2, 64, 0, 0, 1, 0, 32768, 0x5678, 1, 2, 0, 1, 0 };
+    const uint64_t callee_values[] = { 0, 2, 64, 0, 0, 1, 0, 256, 0x5678, 1, 2, 0, 1, 0 };
     const uint8_t callee_locals[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_U64 };
     const uint8_t callee_flags[] = { 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, 0 };
     const uint32_t callee_sizes[] = { 0, 32768, 0 };

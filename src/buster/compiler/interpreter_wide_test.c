@@ -1,0 +1,240 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// The typed front's two-word values (#176), independently of IR lowering: high-word arithmetic, local storage,
+// constants, checked conversions, control flow, nested interpreted calls and the native SysV boundary.
+
+static InterpreterValue interpreter_test_wide_bits(unsigned __int128 bits)
+{
+    const InterpreterValue result = {
+        .low = (uint64_t)bits,
+        .high = (uint64_t)(bits >> 64),
+    };
+    return result;
+}
+
+static InterpreterValue interpreter_test_extended_bits(long double number)
+{
+    InterpreterValue result = { 0 };
+    memcpy(&result, &number, 10);
+    return result;
+}
+
+static void interpreter_test_wide_integer(InterpreterTestTally* tally, Arena* scratch)
+{
+    uint8_t kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN };
+    uint8_t classes[] = { BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128 };
+    uint8_t locals[] = { BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128 };
+    uint64_t values[] = { 0, 1, 0, 2, 2, 0 };
+    Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = locals,
+        .local_count = BUSTER_ARRAY_LENGTH(locals),
+        .parameter_count = 2,
+    };
+    const SymbolId symbol = 1;
+    const InterpreterProgram program = {
+        .functions = &function,
+        .function_symbols = &symbol,
+        .function_count = 1,
+    };
+    const unsigned __int128 left = ((unsigned __int128)UINT64_C(0xf123456789abcdef) << 64) | UINT64_C(0xfedcba9876543210);
+    const unsigned __int128 right = ((unsigned __int128)UINT64_C(0x123456789abc) << 64) | UINT64_C(0x13579bdf);
+    const uint8_t operations[] = { BUSTER_TYPED_ADD, BUSTER_TYPED_SUB, BUSTER_TYPED_MUL, BUSTER_TYPED_DIV, BUSTER_TYPED_MOD, BUSTER_TYPED_AND, BUSTER_TYPED_OR, BUSTER_TYPED_XOR };
+    const unsigned __int128 expected[] = { left + right, left - right, left * right, left / right, left % right, left & right, left | right, left ^ right };
+    InterpreterValue arguments[] = { interpreter_test_wide_bits(left), interpreter_test_wide_bits(right) };
+    InterpreterResult result;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operations); i += 1)
+    {
+        kinds[2] = operations[i];
+        const bool ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+        const InterpreterValue want = interpreter_test_wide_bits(expected[i]);
+        interpreter_test_expect(tally, ran && result.value.low == want.low && result.value.high == want.high && scratch->length == 0, "wide: unsigned arithmetic and local round trip preserve both words");
+    }
+    kinds[2] = BUSTER_TYPED_SHL;
+    const uint32_t shifts[] = { 0, 1, 63, 64, 65, 127 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(shifts); i += 1)
+    {
+        arguments[1] = (InterpreterValue){ .low = shifts[i] };
+        bool ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+        InterpreterValue want = interpreter_test_wide_bits(left << shifts[i]);
+        interpreter_test_expect(tally, ran && result.value.low == want.low && result.value.high == want.high, "wide: left shifts cross the word boundary");
+        kinds[2] = BUSTER_TYPED_SHR;
+        ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+        want = interpreter_test_wide_bits(left >> shifts[i]);
+        interpreter_test_expect(tally, ran && result.value.low == want.low && result.value.high == want.high, "wide: logical right shifts cross the word boundary");
+        kinds[2] = BUSTER_TYPED_SHL;
+    }
+    arguments[1].low = 128;
+    bool ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_ARITHMETIC, "wide: invalid shift count is diagnosed without a host invalid shift");
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(classes); i += 1)
+    {
+        classes[i] = BUSTER_TYPED_CLASS_I128;
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(locals); i += 1)
+    {
+        locals[i] = BUSTER_TYPED_CLASS_I128;
+    }
+    const __int128 negative = -((__int128)1 << 100) - 19;
+    arguments[0] = interpreter_test_wide_bits((unsigned __int128)negative);
+    arguments[1] = (InterpreterValue){ .low = 7 };
+    const __int128 signed_expected[] = { negative / 7, negative % 7, negative >> 7 };
+    const uint8_t signed_operations[] = { BUSTER_TYPED_DIV, BUSTER_TYPED_MOD, BUSTER_TYPED_SHR };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(signed_operations); i += 1)
+    {
+        kinds[2] = signed_operations[i];
+        ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+        const InterpreterValue want = interpreter_test_wide_bits((unsigned __int128)signed_expected[i]);
+        interpreter_test_expect(tally, ran && result.value.low == want.low && result.value.high == want.high, "wide: signed division, remainder and arithmetic shift");
+    }
+    kinds[2] = BUSTER_TYPED_DIV;
+    arguments[0] = (InterpreterValue){ .high = UINT64_C(1) << 63 };
+    arguments[1] = (InterpreterValue){ .low = UINT64_MAX, .high = UINT64_MAX };
+    ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_ARITHMETIC, "wide: signed minimum divided by minus one is diagnosed");
+    arguments[1] = (InterpreterValue){ 0 };
+    ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_ARITHMETIC, "wide: division by zero is diagnosed");
+    // Comparison produces a narrow value; a high word alone makes an integer condition true.
+    kinds[2] = BUSTER_TYPED_LT;
+    classes[2] = BUSTER_TYPED_CLASS_I32;
+    classes[3] = BUSTER_TYPED_CLASS_I32;
+    classes[4] = BUSTER_TYPED_CLASS_I32;
+    classes[5] = BUSTER_TYPED_CLASS_I32;
+    locals[2] = BUSTER_TYPED_CLASS_I32;
+    ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == 1 && result.value.high == 0, "wide: signed comparison reads the high word and yields a narrow value");
+    const uint8_t branch_kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN, BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN };
+    const uint8_t branch_classes[] = { BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32 };
+    const uint64_t branch_values[] = { 0, 4, 0, 0, 1, 0 };
+    function.kinds = branch_kinds;
+    function.classes = branch_classes;
+    function.values = branch_values;
+    ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == 1, "wide: high-word-only condition takes the branch");
+}
+
+static void interpreter_test_wide_conversions(InterpreterTestTally* tally, Arena* scratch)
+{
+    uint8_t kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_CONVERT, BUSTER_TYPED_RETURN };
+    uint8_t classes[] = { BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128 };
+    uint64_t values[] = { UINT64_MAX, 0, 0 };
+    Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+    };
+    InterpreterResult result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == UINT64_MAX && result.value.high == UINT64_MAX, "wide: signed inline constant sign-extends to two words");
+    classes[0] = BUSTER_TYPED_CLASS_U128;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == UINT64_MAX && result.value.high == 0, "wide: unsigned inline constant zero-extends to two words");
+    const long double floating[] = { -0x1p127L, 0x1p126L, 0x1p127L, 0x1p128L, -0.75L, __builtin_infl(), __builtin_nanl("") };
+    uint64_t pool[2] = { 0 };
+    function.x87_constants = pool;
+    function.x87_constant_count = 1;
+    classes[0] = BUSTER_TYPED_CLASS_F80;
+    classes[1] = BUSTER_TYPED_CLASS_I128;
+    classes[2] = BUSTER_TYPED_CLASS_I128;
+    values[0] = 0;
+    const InterpreterStatus statuses[] = { INTERPRETER_OK, INTERPRETER_OK, INTERPRETER_ARITHMETIC, INTERPRETER_ARITHMETIC, INTERPRETER_OK, INTERPRETER_ARITHMETIC, INTERPRETER_ARITHMETIC };
+    const InterpreterValue expected[] = { { .high = UINT64_C(1) << 63 }, { .high = UINT64_C(1) << 62 }, { 0 }, { 0 }, { 0 }, { 0 }, { 0 } };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(floating); i += 1)
+    {
+        memset(pool, 0, sizeof(pool));
+        memcpy(pool, &floating[i], 10);
+        result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == statuses[i] && (statuses[i] != INTERPRETER_OK || (result.value.low == expected[i].low && result.value.high == expected[i].high)), "wide: checked long-double conversion handles integer boundaries, fractions, infinities and NaNs");
+    }
+    classes[1] = BUSTER_TYPED_CLASS_U128;
+    classes[2] = BUSTER_TYPED_CLASS_U128;
+    memcpy(pool, &floating[2], 10);
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 0 && result.value.high == (UINT64_C(1) << 63), "wide: unsigned conversion accepts the positive high bit");
+    values[0] = 1;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "wide: long-double constant pool bounds checked before reading");
+    values[0] = 0;
+    function.x87_constants = 0;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "wide: missing long-double constant pool refused");
+}
+
+static __attribute__((noinline)) long double interpreter_test_wide_native(__int128 a, long double b)
+{
+    const long double result = (long double)a + b;
+    return result;
+}
+
+static void interpreter_test_wide_calls(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t caller_kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN };
+    const uint8_t caller_classes[] = { BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80 };
+    const uint64_t caller_values[] = { 0, 1, 0, 0 };
+    const uint8_t callee_kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONVERT, BUSTER_TYPED_LOCAL, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN };
+    const uint8_t callee_classes[] = { BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80 };
+    const uint64_t callee_values[] = { 0, 0, 1, 0, 2, 2, 0 };
+    const uint8_t locals[] = { BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80 };
+    SymbolId target = 2;
+    const uint32_t first = 0;
+    const uint32_t count = 2;
+    const uint8_t variadic = 0;
+    Tier0Function functions[] = {
+        {
+            .kinds = caller_kinds,
+            .classes = caller_classes,
+            .values = caller_values,
+            .count = BUSTER_ARRAY_LENGTH(caller_kinds),
+            .local_classes = locals,
+            .local_count = 2,
+            .parameter_count = 2,
+            .call_targets = &target,
+            .call_first = &first,
+            .call_argument_counts = &count,
+            .call_variadic = &variadic,
+            .argument_classes = locals,
+            .call_count = 1,
+            .argument_count = 2,
+        },
+        {
+            .kinds = callee_kinds,
+            .classes = callee_classes,
+            .values = callee_values,
+            .count = BUSTER_ARRAY_LENGTH(callee_kinds),
+            .local_classes = locals,
+            .local_count = 3,
+            .parameter_count = 2,
+        },
+    };
+    const SymbolId symbols[] = { 1, 2 };
+    const InterpreterNativeBinding native = { .symbol = 3, .address = (void*)interpreter_test_wide_native };
+    const InterpreterProgram program = {
+        .functions = functions,
+        .function_symbols = symbols,
+        .function_count = 2,
+        .natives = &native,
+        .native_count = 1,
+    };
+    const __int128 integer = -((__int128)1 << 70) - 2048;
+    const long double extended = 0x1.123456789abcdefp+60L;
+    const InterpreterValue arguments[] = { interpreter_test_wide_bits((unsigned __int128)integer), interpreter_test_extended_bits(extended) };
+    const InterpreterValue expected = interpreter_test_extended_bits(interpreter_test_wide_native(integer, extended));
+    InterpreterResult result;
+    bool ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: nested interpreted calls transport both words and exact x87 precision");
+    target = 3;
+    ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: typed native calls marshal i128 and f80 and capture st0");
+}
+
+static void interpreter_test_wide(InterpreterTestTally* tally, Arena* scratch)
+{
+    interpreter_test_wide_integer(tally, scratch);
+    interpreter_test_wide_conversions(tally, scratch);
+    interpreter_test_wide_calls(tally, scratch);
+}
