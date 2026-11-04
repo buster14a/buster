@@ -166,6 +166,27 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AVAILABILITY_REPEATED,
     CHECK_INPUT_AVAILABILITY_STAR,
     CHECK_INPUT_AVAILABILITY_WILDCARD,
+    // The counted_by family's errors (#148, c_check_counted_by_input.c), clang's CheckCountedByAttrOnField's, `detail` the
+    // attribute's kind less one, with 0x100 for an array member and the pointee's fault in bits 16 to 23: on a union's
+    // member; on a member of neither pointer nor flexible array type (or an array, of a sized_by or an _or_null one); on
+    // an array of a constant bound; of a pointee or an element of unknown size (the report's type); and of its count, of
+    // no integer type, no plain name, no member (a note at its declaration), a union's member, another struct's member
+    // (a note at it); and of the argument's syntax, clang's parser's: none in the parentheses, more than one.
+    CHECK_INPUT_COUNTED_UNION,
+    CHECK_INPUT_COUNTED_SUBJECT,
+    CHECK_INPUT_COUNTED_ARRAY,
+    CHECK_INPUT_COUNTED_POINTEE,
+    CHECK_INPUT_COUNTED_INTEGER,
+    CHECK_INPUT_COUNTED_REFERENCE,
+    CHECK_INPUT_COUNTED_OUTSIDE,
+    CHECK_INPUT_COUNTED_UNION_FIELD,
+    CHECK_INPUT_COUNTED_STRUCT,
+    CHECK_INPUT_COUNTED_REQUIRED,
+    CHECK_INPUT_COUNTED_PAREN,
+    // __builtin_counted_by_ref's value where clang's CheckInvalidBuiltinCountedByRef refuses it (#148), at the call: `detail`
+    // 0 assigned, 1 passed, 2 returned; and 0 in a subscript's base, 1 a binary operator's operand.
+    CHECK_INPUT_COUNTED_REF_LEAK,
+    CHECK_INPUT_COUNTED_REF_USE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -256,6 +277,19 @@ static const char* const check_input_messages[] =
     "version for the platform already specified",
     "'*' query has already been specified",
     "must handle potential future platforms with '*'",
+    "'counted_by' cannot be applied to a union member",
+    "'counted_by' only applies to pointers or C99 flexible array members",
+    "'counted_by' on arrays only applies to C99 flexible array members",
+    "'counted_by' cannot be applied to a pointer with pointee of unknown size",
+    "'counted_by' requires a non-boolean integer type argument",
+    "'counted_by' argument must be a simple declaration reference",
+    "field in 'counted_by' not inside structure",
+    "'counted_by' argument cannot refer to a union member",
+    "'counted_by' field isn't within the same struct as the annotated flexible array",
+    "argument required after attribute",
+    "expected ')'",
+    "value returned by '__builtin_counted_by_ref' cannot be assigned to a variable",
+    "value returned by '__builtin_counted_by_ref' cannot be used in a binary expression",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -287,6 +321,10 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_ATTRIBUTE_HERE,
     CHECK_INPUT_NOTE_PREVIOUS_DEFINITION,
     CHECK_INPUT_NOTE_UNAVAILABLE_HERE,
+    // The declaration of a counted_by family attribute's count (#148): "field 'n' declared here".
+    CHECK_INPUT_NOTE_COUNTED_FIELD,
+    // The attribute's `(`, which a second argument's `,` doesn't match (#148): "to match this '('".
+    CHECK_INPUT_NOTE_MATCH_PAREN,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -4743,10 +4781,14 @@ struct CheckTagMember
     uint32_t token;
     uint32_t next;
     uint32_t previous;
+    // The record that declares it, and its declaration's first token (#148's counted_by checks).
+    TypeId record;
+    uint32_t begin;
 };
 
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
+#include "c_check_counted_by_input.c"
 
 // The first of the function specifier inline's tokens in [first, end), a declaration's specifiers, or BUSTER_CHECK_NONE.
 static uint32_t check_input_inline_token(const Parser* parser, uint32_t first, uint32_t end)
@@ -5122,7 +5164,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     if (valid && !tag_only)
                     {
                         const uint32_t identifier = name != BUSTER_CHECK_NONE ? parser->tokens.names[name] : 0;
-                        const TypeMember member =
+                        TypeMember member =
                         {
                             .name = identifier,
                             .type = type,
@@ -5130,8 +5172,12 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .packed = attributes != 0 && attributes->packed,
                             .alignment_log2 = attributes != 0 ? attributes->alignment_log2 : 0,
                         };
+                        // clang's counted_by family (#148), on this member, among the record's members declared before it.
+                        const uint32_t counted_begin = check_input_attribute_begin(parser, frame->member_begin, frame->close);
+                        valid = attributes == 0 || !attributes->counted ||
+                                check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
                         bool flexible = false;
-                        valid = type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
+                        valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
                         if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
                             type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
                         {
@@ -5154,6 +5200,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                                 .token = failed_token,
                                 .next = BUSTER_CHECK_NONE,
                                 .previous = reader->member_seen[identifier],
+                                .record = frame->type,
+                                .begin = counted_begin,
                             };
                             if (identifier != 0)
                             {

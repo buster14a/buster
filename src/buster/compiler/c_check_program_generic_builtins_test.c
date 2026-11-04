@@ -375,6 +375,26 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: dump_struct of a wrong context", .source = "int pf(int* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s, long* l)\n{\n__builtin_dump_struct(s, pf, l);\n}\n", .rejected = true },
         { .name = "generic: dump_struct of an int format", .source = "int pf(void* ctx, int f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf, s);\n}\n", .rejected = true },
         { .name = "generic: dump_struct's value", .source = "int printf(const char*, ...);\nstruct S { int a; };\nint f(struct S* s)\n{\nreturn __builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        // clang's counted_by family (#148): on flexible array members and pointers, wherever written, its count a member
+        // declared before it (an enclosing record's through an anonymous one); __builtin_counted_by_ref a pointer to it,
+        // or a void * of a member of none, in sizeof, typeof and _Generic too, and its value stored through.
+        { .name = "generic: counted_by", .source =
+          "struct S { long n; int fam[] __attribute__((counted_by(n))); };\n"
+          "struct P { int k; char *p __attribute__((sized_by(k))); int * __attribute__((counted_by(k))) q; void *v __attribute__((counted_by_or_null(k))); };\n"
+          "struct N { int k; struct { int x; char fam[] __attribute__((counted_by(k))); }; };\n"
+          "struct Q { int n; int fam[]; };\n"
+          "_Static_assert(_Generic(__builtin_counted_by_ref(((struct S *)0)->fam), long *: 1, default: 0), \"\");\n"
+          "int f(struct S *s, struct P *p, struct N *m, struct Q *q)\n{\n"
+          "*__builtin_counted_by_ref(s->fam) = 3;\n*__builtin_counted_by_ref(p->q) = 4;\n*__builtin_counted_by_ref(m->fam) = 5;\n"
+          "typeof(__builtin_counted_by_ref(p->p)) v = (void *)__builtin_counted_by_ref(q->fam);\n(void)v;\n"
+          "return (int)sizeof(*__builtin_counted_by_ref((s)->fam)) + (int)__builtin_dynamic_object_size(s->fam, 0);\n}\n" },
+        { .name = "generic: counted_by of a later member", .source = "struct S { int fam[] __attribute__((counted_by(n))); int n; };\n", .rejected = true },
+        { .name = "generic: counted_by of a bool", .source = "struct S { _Bool n; int fam[] __attribute__((counted_by(n))); };\n", .rejected = true },
+        { .name = "generic: counted_by on an int", .source = "struct S { int n; int x __attribute__((counted_by(n))); };\n", .rejected = true },
+        { .name = "generic: counted_by in a union", .source = "union U { int n; int *p __attribute__((counted_by(n))); };\n", .rejected = true },
+        { .name = "generic: sized_by on an array", .source = "struct S { int n; char fam[] __attribute__((sized_by(n))); };\n", .rejected = true },
+        { .name = "generic: counted_by_ref returned", .source = "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nint *f(struct S *s)\n{\nreturn __builtin_counted_by_ref(s->fam);\n}\n", .rejected = true },
+        { .name = "generic: counted_by_ref of no member", .source = "void f(int *p)\n{\n(void)__builtin_counted_by_ref(p);\n}\n", .rejected = true },
         // __builtin_available (#148): a _Bool of no constant expression, its specs names and numbers of nothing of the
         // unit's, a typedef's name among them; a spec's error and the list's, at file scope and in a function.
         { .name = "generic: available", .source =
@@ -565,6 +585,39 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "return (int)((pushed((const unsigned char*)saver)&callee)*4+(pushed((const unsigned char*)kept)&callee)*2+"
         "((pushed((const unsigned char*)plain)&callee)!=0))+plain(n)*7+kept(n);}",
         "generic-unwind-init-saves", clang);
+    // __builtin_counted_by_ref (#148): stores through the count's address, of an `->`'s and a `.`'s access, of a count in an
+    // anonymous struct's enclosing record, and a null void * of a flexible array member of no count; and
+    // __builtin_dynamic_object_size of clang's counted_by forms, at counts below zero and above: a flexible array member,
+    // its element's address (and through a char *), another member's (an array's element too), a counted pointer and a
+    // sized_by one, a count in the enclosing record, mode 3's 0, and __builtin_object_size, which ignores the count.
+    check_test_program_source(test,
+        "typedef unsigned long size_t;void* malloc(size_t);"
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+        "struct S{char tag;long n;int fam[] __attribute__((counted_by(n)));};"
+        "struct U{unsigned char n;short arr[3];char c;long fam[] __attribute__((counted_by(n)));};"
+        "struct P{int x;unsigned short m;double* p __attribute__((counted_by(m)));char* q __attribute__((sized_by(x)));};"
+        "struct N{int k;struct{int x;char fam[] __attribute__((counted_by(k)));};};"
+        "struct Q{int n;int fam[];};"
+        "__attribute__((noinline)) static unsigned long f0(struct S* s){return __builtin_dynamic_object_size(s->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f1(struct S* s,int i){return __builtin_dynamic_object_size(&s->fam[i],1);}"
+        "__attribute__((noinline)) static unsigned long f2(struct S* s){return __builtin_dynamic_object_size(&s->tag,0);}"
+        "__attribute__((noinline)) static unsigned long f3(struct U* u,int i){return __builtin_dynamic_object_size(&u->arr[i],2);}"
+        "__attribute__((noinline)) static unsigned long f4(struct P* p,int i){return __builtin_dynamic_object_size(&p->p[i],0)+1000*__builtin_dynamic_object_size(p->q,1);}"
+        "__attribute__((noinline)) static unsigned long f5(struct N* n){return __builtin_dynamic_object_size(n->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f6(struct S* s){return __builtin_dynamic_object_size(s->fam,3);}"
+        "__attribute__((noinline)) static unsigned long f7(struct Q* q){return __builtin_dynamic_object_size(q->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f8(struct S* s,int i){return __builtin_dynamic_object_size(&((char*)s->fam)[i],0);}"
+        "__attribute__((noinline)) static unsigned long f9(struct U* u){return __builtin_dynamic_object_size(u->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f10(struct S* s){return __builtin_object_size(s->fam,0);}"
+        "int tested(int n){h=(unsigned)n;struct S* s=malloc(sizeof(struct S)+64);struct U* u=malloc(sizeof(struct U)+64);"
+        "struct P p={5,3,0,0};struct N* m=malloc(sizeof(struct N)+8);struct Q* q=malloc(sizeof(struct Q)+8);"
+        "for(long c=-2;c<=6+n;c+=4){*__builtin_counted_by_ref(s->fam)=c;u->n=(unsigned char)c;*__builtin_counted_by_ref(m->fam)=(int)c;"
+        "*__builtin_counted_by_ref(p.p)=(unsigned short)(c+3);"
+        "mix(f0(s));mix(f1(s,2));mix(f1(s,-1));mix(f1(s,9));mix(f2(s));mix(f3(u,1));mix(f4(&p,1));mix(f4(&p,5));mix(f5(m));mix(f6(s));"
+        "mix(f7(q));mix(f8(s,3));mix(f9(u));mix(f10(s));mix((unsigned long)s->n);mix(m->k);mix(p.m);}"
+        "mix((void*)__builtin_counted_by_ref(q->fam)==0);"
+        "return (int)(h^(h>>32));}",
+        "generic-counted-by", clang);
     // __builtin_available (#148): 1 for every platform's spec on Linux, in conditions, negated, as a value, through its
     // type's queries, which never run it, and in a loop's condition.
     check_test_program_source(test,

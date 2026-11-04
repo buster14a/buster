@@ -26,6 +26,25 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     {
         check_input_annotation_evidence(reader, end, closing, &evidence);
     }
+    // __builtin_counted_by_ref's argument's member (#148), past parentheses: an access whose operator the bound evaluator
+    // read, with its base's type at the operator (input->queries).
+    CheckCountedMember counted = { .base = BUSTER_CHECK_NONE };
+    if (builtin == CBUILTIN_COUNTED_BY_REF && count == 1 && !input->raw)
+    {
+        const Parser* parser = reader->parser;
+        uint32_t inner = first;
+        uint32_t outer = end;
+        while (inner + 2 < outer && parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN && parser->tree.parents[inner] == outer - 1)
+        {
+            inner += 1;
+            outer -= 1;
+        }
+        const uint32_t root = check_input_range_root(reader, inner, outer);
+        const bool access = root >= input->first && root + 1 < input->end && parser->tree.roles[root] == PARSE_ROLE_MEMBER_OPERATOR;
+        counted = access ? check_counted_lookup(reader->types, input->queries[root - input->first], parser->tokens.kinds[root] == PARSE_KIND_ARROW,
+                                                parser->tokens.names[root + 1]) :
+                           counted;
+    }
     CheckActionResult result = { 0 };
     const CheckOp family = check_graph_builtin_op(builtin);
     if (builtin == CBUILTIN_BIT_CAST)
@@ -72,6 +91,9 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .os_log_items = evidence.os_log_items, .os_log_count = evidence.os_log_count, .os_log_known = evidence.os_log_known,
             .os_log_invalid_mask = evidence.os_log_invalid_mask,
             .os_log_taken = { evidence.os_log_taken[0], evidence.os_log_taken[1], evidence.os_log_taken[2], evidence.os_log_taken[3] },
+            .counted_member = !counted.member ? BUSTER_CHECK_COUNTED_NONE :
+                              counted.kind == BUSTER_TYPE_COUNTED_BY && counted.count_found ? BUSTER_CHECK_COUNTED_COUNTED : BUSTER_CHECK_COUNTED_MEMBER,
+            .counted_type = counted.count_type,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

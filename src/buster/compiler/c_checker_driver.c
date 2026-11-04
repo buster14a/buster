@@ -156,6 +156,19 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AVAILABILITY_REPEATED: result = "version for the platform already specified"; break;
         case CHECK_INPUT_AVAILABILITY_STAR: result = "'*' query has already been specified"; break;
         case CHECK_INPUT_AVAILABILITY_WILDCARD: result = "must handle potential future platforms with '*'"; break;
+        case CHECK_INPUT_COUNTED_UNION: result = "'counted_by' cannot be applied to a union member"; break;
+        case CHECK_INPUT_COUNTED_SUBJECT: result = "'counted_by' only applies to pointers or C99 flexible array members"; break;
+        case CHECK_INPUT_COUNTED_ARRAY: result = "'counted_by' on arrays only applies to C99 flexible array members"; break;
+        case CHECK_INPUT_COUNTED_POINTEE: result = "'counted_by' cannot be applied to a pointer with pointee of unknown size"; break;
+        case CHECK_INPUT_COUNTED_INTEGER: result = "'counted_by' requires a non-boolean integer type argument"; break;
+        case CHECK_INPUT_COUNTED_REFERENCE: result = "'counted_by' argument must be a simple declaration reference"; break;
+        case CHECK_INPUT_COUNTED_OUTSIDE: result = "field in 'counted_by' not inside structure"; break;
+        case CHECK_INPUT_COUNTED_UNION_FIELD: result = "'counted_by' argument cannot refer to a union member"; break;
+        case CHECK_INPUT_COUNTED_STRUCT: result = "'counted_by' field isn't within the same struct as the annotated flexible array"; break;
+        case CHECK_INPUT_COUNTED_REQUIRED: result = "argument required after attribute"; break;
+        case CHECK_INPUT_COUNTED_PAREN: result = "expected ')'"; break;
+        case CHECK_INPUT_COUNTED_REF_LEAK: result = "value returned by '__builtin_counted_by_ref' cannot be assigned to a variable"; break;
+        case CHECK_INPUT_COUNTED_REF_USE: result = "value returned by '__builtin_counted_by_ref' cannot be used in a binary expression"; break;
     }
     return result;
 }
@@ -1243,6 +1256,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     {
                         x86_message = check_diagnostic_varargs(input, parser, types, stream->reports + index, &x86_location);
                     }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
                     if (source != BUSTER_CHECK_NONE)
                     {
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
@@ -1398,6 +1415,95 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint32_t length = buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at], buffer, &bytes) : 0;
                             pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, length, publication, "must handle potential future platforms with '*'");
                             arena_pop_to(scratch, spelling_mark);
+                        }
+                        else if (phase == 0 && (kind == CHECK_INPUT_COUNTED_REF_LEAK || kind == CHECK_INPUT_COUNTED_REF_USE))
+                        {
+                            // __builtin_counted_by_ref's value where clang refuses it (#148).
+                            const uint32_t detail = input->reports[index].detail;
+                            static const char* const leaks[] = { "assigned to a variable", "passed into a function", "returned from a function" };
+                            if (kind == CHECK_INPUT_COUNTED_REF_LEAK)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "value returned by '__builtin_counted_by_ref' cannot be %s",
+                                                      leaks[detail < 3 ? detail : 0]);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "value returned by '__builtin_counted_by_ref' cannot be used in %s expression",
+                                                      detail == 0 ? "an array subscript" : "a binary");
+                            }
+                        }
+                        else if (phase == 0 && kind >= CHECK_INPUT_COUNTED_UNION && kind <= CHECK_INPUT_COUNTED_PAREN)
+                        {
+                            // The counted_by family's errors (#148), worded as clang's, by the attribute's kind; the count's
+                            // name is the report's token's, and its notes at the count's declaration or the attribute's `(`.
+                            const CheckInputReport* report = input->reports + index;
+                            const char* attribute = check_input_counted_names[(report->detail & 0xffu) < 4 ? (report->detail & 0xffu) + 1 : 1];
+                            const bool array = (report->detail & 0x100u) != 0;
+                            const uint32_t fault = report->detail >> 16;
+                            const uint32_t name = token < count ? parser->tokens.names[token] : 0;
+                            const int name_length = name != 0 ? (int)intern_length(pp->table, name) : 0;
+                            const char* name_bytes = name != 0 ? (const char*)intern_bytes(pp->table, name) : "";
+                            char noted[192];
+                            snprintf(noted, sizeof(noted), kind == CHECK_INPUT_COUNTED_PAREN ? "to match this '('" : "field '%.*s' declared here", name_length, name_bytes);
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = noted,
+                            };
+                            const uint32_t notes = report->note_token < count && report->note_kind != CHECK_INPUT_NOTE_NONE ? 1u : 0u;
+                            const uint64_t type_mark = scratch->length;
+                            String8 type = { 0 };
+                            if (kind == CHECK_INPUT_COUNTED_POINTEE)
+                            {
+                                CheckWarningSpelling spell = { .count = pp->table->count };
+                                spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                                spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                                for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                                {
+                                    spell.bytes[s] = intern_bytes(pp->table, s);
+                                    spell.lengths[s] = intern_length(pp->table, s);
+                                }
+                                const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                                type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, 0) : (String8){ 0 };
+                            }
+                            static const char* const faults[] = { "", "an incomplete type", "a sizeless type", "a function type", "a struct type with a flexible array member" };
+                            switch (kind)
+                            {
+                                case CHECK_INPUT_COUNTED_UNION:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' cannot be applied to a union member", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_SUBJECT:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' only applies to pointers%s%s", attribute,
+                                                          (report->detail & 0xffu) == 0 ? " or C99 flexible array members" : "", array ? "; did you mean to use 'counted_by'?" : "");
+                                    break;
+                                case CHECK_INPUT_COUNTED_POINTEE:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' cannot be applied to %s of unknown size because %.*s is %s", attribute,
+                                                          array ? "an array with element" : "a pointer with pointee", (int)type.length, type.pointer, faults[fault < 5 ? fault : 0]);
+                                    break;
+                                case CHECK_INPUT_COUNTED_INTEGER:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' requires a non-boolean integer type argument", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_REFERENCE:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' argument must be a simple declaration reference", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_OUTSIDE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "field '%.*s' in '%s' not inside structure", name_length,
+                                                                name_bytes, attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_UNION_FIELD:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' argument cannot refer to a union member", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_STRUCT:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "'%s' field '%.*s' isn't within the same struct as the annotated %s",
+                                                                attribute, name_length, name_bytes, array ? "flexible array" : "pointer");
+                                    break;
+                                case CHECK_INPUT_COUNTED_PAREN:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "expected ')'");
+                                    break;
+                                default:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
+                                    break;
+                            }
+                            arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
                         {

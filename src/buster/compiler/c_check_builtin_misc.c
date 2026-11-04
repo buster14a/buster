@@ -13,6 +13,10 @@
 
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS 0x01u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_POINTER_SIGN 0x02u
+// CheckBuiltinMiscAction.counted_member's answers (#148).
+#define BUSTER_CHECK_COUNTED_NONE 0u
+#define BUSTER_CHECK_COUNTED_MEMBER 1u
+#define BUSTER_CHECK_COUNTED_COUNTED 2u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_FUNCTION_POINTER 0x04u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNMENT 0x08u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_FRAME_LEVEL 0x10u
@@ -96,6 +100,11 @@ struct CheckBuiltinMiscAction
     bool os_log_known;
     bool os_log_invalid_mask;
     uint64_t os_log_taken[4];
+    // __builtin_counted_by_ref's argument (#148, check_graph_counted_member): BUSTER_CHECK_COUNTED_NONE when it is no
+    // member access as written (past parentheses), _MEMBER for one of no counted_by count, _COUNTED for one with it, and
+    // then the count's member's type.
+    uint8_t counted_member;
+    TypeId counted_type;
     // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and the objects of
     // the functions the first argument names (CheckBuiltinCall's, #1126's review).
     bool string_cast;
@@ -1133,6 +1142,34 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_COUNTED_BY_REF)
+    {
+        // clang's BuiltinCountedByRef (#148): its argument, past parentheses, a pointer or an array without side effects,
+        // and a member access, whose member's counted_by count (not sized_by's, nor an _or_null one's) makes the value a
+        // pointer to the count's member, of its type as declared; any other such member's, a void *. Its argument never
+        // runs: its code is the count's address (or a null pointer).
+        const CheckValue* argument = &input->arguments[0];
+        const uint8_t kind = type_kind(table, type_strip_aligned(table, argument->type));
+        const bool addressable = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ||
+                                 kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+        const TypeId pointee = input->counted_member == BUSTER_CHECK_COUNTED_COUNTED ? input->counted_type : BUSTER_TYPE_VOID;
+        const TypeId pointer = type_pointer(table, pointee);
+        if (!addressable || input->counted_member == BUSTER_CHECK_COUNTED_NONE)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+        }
+        else if ((argument->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (pointer == 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
+        }
+        output->action.value = (CheckValue){ .type = pointer, .category = CHECK_RVALUE };
+        // A count's address reads the access's base, which this references; a null pointer reads nothing.
+        output->evaluated_operands = input->counted_member == BUSTER_CHECK_COUNTED_COUNTED ? 1 : 0;
+    }
     else if (id == CBUILTIN_AVAILABLE)
     {
         // clang's ObjCAvailabilityCheckExpr (#148): a _Bool, of no constant expression, which its code makes 1 for this
@@ -1517,6 +1554,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 31; break;
         // A record's pointer, a printing function, and that function's leading arguments.
         case CBUILTIN_DUMP_STRUCT: minimum = 2; maximum = 31; break;
+        case CBUILTIN_COUNTED_BY_REF: minimum = maximum = 1; break;
         // Its specs are no operands (c_check_availability_input.c).
         case CBUILTIN_AVAILABLE: minimum = maximum = 0; break;
         case CBUILTIN_OPERATOR_NEW:
@@ -1567,7 +1605,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                               input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || input->id == CBUILTIN_CPU_IS ||
                               input->id == CBUILTIN_CPU_SUPPORTS || input->id == CBUILTIN_INFER_ALLOC_TOKEN || input->id == CBUILTIN_CALL_WITH_STATIC_CHAIN ||
                               input->id == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || input->id == CBUILTIN_OS_LOG_FORMAT || input->id == CBUILTIN_DUMP_STRUCT ||
-                              refused;
+                              input->id == CBUILTIN_COUNTED_BY_REF || refused;
         if (classify && !refused && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);

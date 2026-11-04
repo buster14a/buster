@@ -7764,6 +7764,135 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// __builtin_dynamic_object_size of clang's counted_by forms (#148, emitCountedBySize): the count's member loaded through
+// the access's record (an `->`'s pointer, a `.`'s object's address) and converted to the size's width by its signedness,
+// times the counted member's element's bytes; less the index times the subscript's element's bytes, or for another
+// member the record's size less the member's offset (and its index's bytes) added; and 0 where that is negative, or the
+// index is. Where it applies (no side effects in the argument, a mode other than 3, a count of 64 bits at most), whether
+// it wrote the code: the steps in their order (the index's and the base's trees among them, each into a temporary),
+// pushed last first, as the writer's tasks run.
+typedef struct CheckLowerStep CheckLowerStep;
+struct CheckLowerStep
+{
+    uint8_t kind;
+    uint8_t class;
+    uint64_t value;
+    // An operand's tree instead of an entry (BUSTER_CHECK_NONE for an entry): the node, its address or its value.
+    uint32_t node;
+    bool address;
+    TypeId target;
+};
+
+static bool check_lower_counted_size(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinQueryEffect* effect)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const uint32_t argument = graph->argument_counts[node] == 2 ? graph->argument_nodes[graph->argument_offsets[node]] : BUSTER_CHECK_NONE;
+    const CheckCountedSize size = argument != BUSTER_CHECK_NONE ? check_graph_counted_size(types, graph, stream, argument) :
+                                                                 (CheckCountedSize){ .shape = CHECK_COUNTED_SIZE_NONE };
+    const uint8_t count_class = size.shape != CHECK_COUNTED_SIZE_NONE ? check_lower_value_class(writer, size.counted.count_type) : BUSTER_TYPED_CLASS_VOID;
+    const bool integer = count_class == BUSTER_TYPED_CLASS_I8 || count_class == BUSTER_TYPED_CLASS_U8 || count_class == BUSTER_TYPED_CLASS_I16 ||
+                         count_class == BUSTER_TYPED_CLASS_U16 || count_class == BUSTER_TYPED_CLASS_I32 || count_class == BUSTER_TYPED_CLASS_U32 ||
+                         count_class == BUSTER_TYPED_CLASS_I64 || count_class == BUSTER_TYPED_CLASS_U64;
+    // A bound the object gives folds first, as clang's tryEvaluateObjectSize does, but where its evaluator defers a counted
+    // member to the code (check_graph_counted_size's veto, which leaves no bound known).
+    const bool applies = size.shape != CHECK_COUNTED_SIZE_NONE && effect->mode != 3 && integer && !effect->known &&
+                         (check_stream_flags(stream, argument) & BUSTER_CHECK_SIDE_EFFECT) == 0;
+    if (applies)
+    {
+        const bool indexed = size.index != BUSTER_CHECK_NONE;
+        const TypeId index_base = type_strip_aligned(types, size.index_base_type);
+        const uint64_t cast_bytes = indexed && type_kind(types, index_base) == BUSTER_TYPE_KIND_POINTER ?
+                                    type_size(types, type_strip_aligned(types, type_element(types, index_base))) : 0;
+        const uint64_t index_bytes = size.shape == CHECK_COUNTED_SIZE_FIELD ? (cast_bytes != 0 ? cast_bytes : size.field_element_bytes) :
+                                     cast_bytes != 0 ? cast_bytes : size.element_bytes;
+        const uint32_t base = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t count = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I64);
+        const uint32_t index = indexed ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_I64) : 0;
+        const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I64);
+        CheckLowerStep steps[48];
+        uint32_t n = 0;
+#define BUSTER_CHECK_LOWER_STEP(k, c, v) steps[n++] = (CheckLowerStep){ .kind = (k), .class = (c), .value = (v), .node = BUSTER_CHECK_NONE }
+        if (indexed)
+        {
+            // The index, as the size's width by its signedness.
+            steps[n++] = (CheckLowerStep){ .node = size.index, .target = check_stream_type(stream, size.index) };
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, index);
+        }
+        // The access's record's address: an `->`'s pointer, a `.`'s object's.
+        steps[n++] = (CheckLowerStep){ .node = size.counted.base, .address = !size.counted.arrow,
+                                       .target = size.counted.arrow ? check_stream_type(stream, size.counted.base) : BUSTER_TYPE_ULONG };
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, base);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, base);
+        if (size.counted.count_offset != 0)
+        {
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size.counted.count_offset);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        }
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOAD, count_class, 0);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, count);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, count);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size.element_bytes);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
+        if (size.shape == CHECK_COUNTED_SIZE_FIELD)
+        {
+            // offset_diff = sizeof_struct - field_offset (plus the index's bytes), added.
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size.record_bytes);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size.field_offset);
+            if (indexed)
+            {
+                BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, index);
+                BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, index_bytes);
+                BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
+                BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0);
+            }
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_I64, 0);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        else if (indexed)
+        {
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, index);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, index_bytes);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, result);
+        // result & -(result >= 0 && index >= 0): clang's select of 0.
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, result);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_GE, BUSTER_TYPED_CLASS_I32, 0);
+        if (indexed)
+        {
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, index);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_GE, BUSTER_TYPED_CLASS_I32, 0);
+            BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, result);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I64, 0);
+        BUSTER_CHECK_LOWER_STEP(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+#undef BUSTER_CHECK_LOWER_STEP
+        for (uint32_t i = n; i-- > 0;)
+        {
+            if (steps[i].node != BUSTER_CHECK_NONE)
+            {
+                check_lower_expression(writer, steps[i].node, steps[i].address, steps[i].target);
+            }
+            else
+            {
+                check_lower_instruction(writer, steps[i].kind, steps[i].class, steps[i].value);
+            }
+        }
+    }
+    return applies;
+}
+
 static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -7788,6 +7917,30 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     else if (runtime == CBUILTIN_DUMP_STRUCT)
     {
         check_lower_unsupported(writer, "__builtin_dump_struct, whose calls of its printing function this compiler doesn't make");
+    }
+    else if (runtime == CBUILTIN_COUNTED_BY_REF)
+    {
+        // The count's address (#148), as clang's GetCountedByFieldExprGEP computes it: the access's record's address (an
+        // `->`'s pointer, a `.`'s object's address) plus the count's offset there; a member of no counted_by count's, a null
+        // pointer. Nothing else of the argument runs.
+        const CheckCountedMember counted = check_graph_counted_member(program->types, graph, stream, graph->argument_nodes[first]);
+        if (counted.member && counted.kind == BUSTER_TYPE_COUNTED_BY && counted.count_found && !counted.count_bit_field)
+        {
+            if (counted.count_offset != 0)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, counted.count_offset);
+            }
+            check_lower_expression(writer, counted.base, !counted.arrow, counted.arrow ? check_stream_type(stream, counted.base) : BUSTER_TYPE_ULONG);
+        }
+        else if (counted.member && counted.kind == BUSTER_TYPE_COUNTED_BY && counted.count_found)
+        {
+            check_lower_unsupported(writer, "__builtin_counted_by_ref of a bit-field count, which clang doesn't compile either");
+        }
+        else
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        }
     }
     else if (runtime == CBUILTIN_AVAILABLE)
     {
@@ -10398,6 +10551,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         if (selected == BUSTER_CHECK_NONE)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        else if (graph->members[node] == CBUILTIN_DYNAMIC_OBJECT_SIZE && check_lower_counted_size(writer, node, stream->queries + selected))
+        {
+            // clang's counted_by forms' code (#148).
         }
         else if (!check_program_query_known(program, node, stream->queries + selected))
         {

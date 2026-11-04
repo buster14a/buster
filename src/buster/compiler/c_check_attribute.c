@@ -105,6 +105,8 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_MUSTTAIL,
     CHECK_ATTRIBUTE_NOMERGE,
     CHECK_ATTRIBUTE_SUPPRESS,
+    // clang's counted_by, sized_by, counted_by_or_null and sized_by_or_null (#148, c_check_counted_by_input.c).
+    CHECK_ATTRIBUTE_COUNTED_BY,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -153,6 +155,8 @@ typedef enum CheckInputAttributeSchema
     CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS,
     CHECK_ATTRIBUTE_STRING_LIST,
     CHECK_ATTRIBUTE_IDENTIFIER_LIST,
+    // One expression, read where the declaration is (the counted_by family's, #148), never evaluated as a constant.
+    CHECK_ATTRIBUTE_EXPRESSION,
 } CheckInputAttributeSchema;
 
 typedef enum CheckInputCallingConvention
@@ -228,6 +232,8 @@ struct CheckInputAttributes
     CheckInputCallingConvention calling_convention;
     bool packed;
     bool has_alignas;
+    // A counted_by family attribute among the records (#148), which a member's declaration checks.
+    bool counted;
 };
 
 typedef struct CheckInputAttributeRule CheckInputAttributeRule;
@@ -328,6 +334,11 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "cpu_specific", CHECK_ATTRIBUTE_CPU_SPECIFIC, CHECK_ATTRIBUTE_IDENTIFIER_LIST, 1, 255 },
     { "cpu_dispatch", CHECK_ATTRIBUTE_CPU_DISPATCH, CHECK_ATTRIBUTE_IDENTIFIER_LIST, 1, 255 },
     { "min_vector_width", CHECK_ATTRIBUTE_MIN_VECTOR_WIDTH, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    // An expression each, which the member's declaration reads (check_input_counted_by_member).
+    { "counted_by", CHECK_ATTRIBUTE_COUNTED_BY, CHECK_ATTRIBUTE_EXPRESSION, 1, 1 },
+    { "counted_by_or_null", CHECK_ATTRIBUTE_COUNTED_BY, CHECK_ATTRIBUTE_EXPRESSION, 1, 1 },
+    { "sized_by", CHECK_ATTRIBUTE_COUNTED_BY, CHECK_ATTRIBUTE_EXPRESSION, 1, 1 },
+    { "sized_by_or_null", CHECK_ATTRIBUTE_COUNTED_BY, CHECK_ATTRIBUTE_EXPRESSION, 1, 1 },
     { "no_sanitize", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_STRING_LIST, 1, 255 },
     { "no_sanitize_address", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_address_safety_analysis", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -423,6 +434,7 @@ static bool check_input_attribute_append(CheckInputReader* reader, CheckInputAtt
     if (valid)
     {
         attributes->records[attributes->count++] = attribute;
+        attributes->counted |= attribute.kind == CHECK_ATTRIBUTE_COUNTED_BY;
     }
     return valid;
 }
@@ -915,6 +927,51 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
             attributes->error_end = attribute->end;
         }
     }
+    return valid;
+}
+
+// The counted_by family's argument as clang's parser reads it (#148, ParseBoundsAttribute): one expression in
+// parentheses. Without them, its count's error ("takes at least 1 argument"), at the name; with nothing in them, "argument
+// required after attribute" at the `)`; with a second argument, "expected ')'" at the `,` (a note at the `(`). The
+// expression itself the member's declaration checks (check_input_counted_by_member).
+static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t first = attribute->argument_first;
+    const uint32_t end = attribute->argument_end;
+    const bool parenthesized = first > 0 && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN && end < parser->tokens.count &&
+                               parser->tokens.kinds[end] == PARSE_KIND_R_PAREN;
+    uint32_t comma = BUSTER_CHECK_NONE;
+    for (uint32_t i = first; comma == BUSTER_CHECK_NONE && i < end; i = check_input_attribute_after_group(parser, i, end))
+    {
+        comma = parser->tokens.kinds[i] == PARSE_KIND_COMMA ? i : BUSTER_CHECK_NONE;
+    }
+    const bool valid = parenthesized && first < end && comma == BUSTER_CHECK_NONE;
+    if (!parenthesized)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_LEAST | 1u << 8);
+    }
+    else if (first == end)
+    {
+        check_input_report(reader, end, CHECK_INPUT_COUNTED_REQUIRED);
+    }
+    else if (comma != BUSTER_CHECK_NONE)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, comma, CHECK_INPUT_COUNTED_PAREN);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = first - 1;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
+        }
+    }
+    if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+    }
+    attribute->argument_count = valid ? 1 : 0;
     return valid;
 }
 
@@ -1739,7 +1796,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             uint32_t bound = 0;
             const CheckInputFactRow* counted = standard ? fact : check_input_fact_row((String8){ "", 0 }, name, false, false);
             const uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
-                                        rule->kind == CHECK_ATTRIBUTE_CLEANUP ? BUSTER_CHECK_COUNT_NONE :
+                                        rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
                                         check_input_attribute_count_check(counted, check_input_attribute_count(parser, &attribute), &bound);
             if (count_check != BUSTER_CHECK_COUNT_NONE)
             {
@@ -1752,6 +1809,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             else if (rule->kind == CHECK_ATTRIBUTE_MUSTTAIL)
             {
                 valid = check_input_attribute_musttail(reader, attributes, &attribute);
+            }
+            else if (rule->kind == CHECK_ATTRIBUTE_COUNTED_BY)
+            {
+                valid = check_input_attribute_counted_shape(reader, attributes, &attribute);
             }
             else
             {
@@ -2800,7 +2861,17 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
         attribute->subject_ignored = false;
-        if (row != NULL && (row->subjects & subjects) == 0 && row->error)
+        // A counted_by family attribute's name off a member (#148): clang's parser looks it up first, in the ordinary
+        // scopes, the members being none's here; one that names nothing is its error, which ends the attribute.
+        const uint32_t counted = attribute->kind == CHECK_ATTRIBUTE_COUNTED_BY && attribute->argument_first + 1 == attribute->argument_end &&
+                                         parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_IDENTIFIER ? attribute->argument_first : BUSTER_CHECK_NONE;
+        const bool undeclared = counted != BUSTER_CHECK_NONE && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[counted]) == 0;
+        if (row != NULL && (row->subjects & subjects) == 0 && row->error && undeclared)
+        {
+            check_input_report(reader, counted, CHECK_INPUT_UNDECLARED);
+            valid = false;
+        }
+        else if (row != NULL && (row->subjects & subjects) == 0 && row->error)
         {
             check_input_report(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_SUBJECT);
             valid = false;

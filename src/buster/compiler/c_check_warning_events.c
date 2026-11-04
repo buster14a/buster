@@ -37,6 +37,7 @@ enum
     CHECK_WARNING_ID_CFSTRING_LITERAL = 45,
     CHECK_WARNING_ID_UNSUPPORTED_AVAILABILITY_GUARD = 46,
     CHECK_WARNING_ID_AVAILABILITY = 47,
+    CHECK_WARNING_ID_COUNTED_BY_ELEMENT = 48,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -112,6 +113,10 @@ typedef enum CheckWarningEventKind
     // whose separators differ (`1.2_3`), at its number.
     CHECK_WARNING_EVENT_UNGUARDED_AVAILABILITY,
     CHECK_WARNING_EVENT_VERSION_SEPARATORS,
+    // A counted_by family attribute on a flexible array member of structs with flexible array members (#148,
+    // check_input_counted_by_member), which clang drops: payload.first_type the element's type, payload.name the
+    // attribute's kind less one.
+    CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

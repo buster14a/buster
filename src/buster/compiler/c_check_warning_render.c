@@ -585,6 +585,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "use same version number separators '_' or '.'; as in 'major[.minor[.subminor]]'";
             break;
         }
+        case CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0);
+            result = type.length != 0 ? check_warning_text(scratch, "'%s' should not be applied to an array with element of unknown size because %.*s is a struct type "
+                                                           "with a flexible array member. This will be an error in a future compiler version",
+                                                           check_input_counted_names[payload->name < 4 ? payload->name + 1 : 1], (int)type.length, type.pointer) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE:
         {
             result = check_warning_text(scratch, "'%.*s' attribute ignored when parsing type", (int)name.length, name.pointer);
@@ -684,7 +692,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                   (repair == NULL || check_repair_warning_token(repair, event->token)) &&
                   (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
                    event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
-                   event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION);
+                   event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
+                   event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT);
     }
     // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks when some
     // event renders a type: every event's mark then sits above them, so per-event release keeps them, and each

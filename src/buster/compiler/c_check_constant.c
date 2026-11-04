@@ -2868,6 +2868,9 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             valid = count == 1 && token + 1 < input->end && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
             action.op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
             action.member = valid ? parser->tokens.names[token + 1] : 0;
+            // The access's base type, which __builtin_counted_by_ref's check reads at its operator (#148); queries are a
+            // type query's, which no operator token has.
+            input->queries[index] = valid ? action.operands[0].type : 0;
         }
         else if (role == PARSE_ROLE_POSTFIX)
         {

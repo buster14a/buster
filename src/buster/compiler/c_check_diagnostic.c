@@ -84,6 +84,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-WCFString-literal", NULL, "input conversion stopped due to an input byte that does not belong to the input codeset UTF-8" },
     { "-Wunsupported-availability-guard", NULL, "__builtin_available does not guard availability here; use if (__builtin_available) instead" },
     { "-Wavailability", NULL, "use same version number separators '_' or '.'; as in 'major[.minor[.subminor]]'" },
+    { "-Wbounds-safety-counted-by-elt-type-unknown-size", NULL, "'counted_by' should not be applied to an array with element of unknown size" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -349,6 +350,32 @@ static const char* check_diagnostic_varargs(const CheckInput* input, const Parse
             opening -= 1;
         }
         *location = opening > 0 ? opening - 1 : report->token;
+    }
+    return result;
+}
+
+// __builtin_counted_by_ref's argument refused (#148, clang's BuiltinCountedByRef): no member access of a pointer or an
+// array, or one with side effects, worded as clang's, at the argument's first token past its parentheses.
+static const char* check_diagnostic_counted_ref(const CheckInput* input, const Parser* parser, const CheckReport* report, uint32_t* location)
+{
+    const CheckGraph* graph = &input->graph;
+    const char* result = NULL;
+    *location = report->token;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->node < graph->count && graph->ops[report->node] == CHECK_OP_BUILTIN_MISC &&
+                           graph->members[report->node] == CBUILTIN_COUNTED_BY_REF && graph->argument_counts[report->node] == 1 &&
+                           (report->diagnostic == CHECK_DIAG_INVALID_TYPE || report->diagnostic == CHECK_DIAG_INCOMPATIBLE);
+    if (candidate)
+    {
+        result = report->diagnostic == CHECK_DIAG_INVALID_TYPE ? "'__builtin_counted_by_ref' argument must reference a member with the 'counted_by' attribute" :
+                                                                 "'__builtin_counted_by_ref' argument cannot have side-effects";
+        uint32_t first = graph->argument_tokens[graph->argument_offsets[report->node]];
+        uint32_t end = graph->tokens[report->node];
+        while (first + 1 < end && end < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == end - 1)
+        {
+            first += 1;
+            end -= 1;
+        }
+        *location = first;
     }
     return result;
 }

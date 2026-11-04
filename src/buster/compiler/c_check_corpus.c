@@ -1641,7 +1641,7 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
     {
         equal = x->members.name[i] == y->members.name[i] && x->members.type[i] == y->members.type[i] &&
                 x->members.bit_width[i] == y->members.bit_width[i] && x->members.alignment_log2[i] == y->members.alignment_log2[i] &&
-                x->members.flags[i] == y->members.flags[i] && x->members.offset[i] == y->members.offset[i];
+                x->members.flags[i] == y->members.flags[i] && x->members.offset[i] == y->members.offset[i] && x->members.count_name[i] == y->members.count_name[i];
     }
     equal = equal && (x->lookup.count <= 1 || memcmp(x->lookup.buckets + 1, y->lookup.buckets + 1, (uint64_t)(x->lookup.count - 1) * sizeof(TypeLookupBucket)) == 0);
     return equal;

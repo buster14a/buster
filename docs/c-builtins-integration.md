@@ -1708,7 +1708,8 @@ compile, and this compiler doesn't yet:
 - `__builtin_dump_struct`, whose generated calls.
 
 `__builtin_available` with an empty version (`0.0.0`) is refused too, as
-clang's code generation refuses it.
+clang's code generation refuses it, and so is `__builtin_counted_by_ref` of a
+bit-field count, which crashes clang's.
 
 A unit that only checks them (`-fsyntax-only`) gets clang's answers. A unit
 that compiles one gets the refusal's message, at the call.
@@ -1881,7 +1882,42 @@ expression. On an x86-64 Linux target, whose platform name is empty, the
   element is not a compile-time constant", and a static assertion's message
   at the call's `)`.
 
-`__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
+`__builtin_counted_by_ref(member)` (0x4b5, #148) is clang's address of a
+counted_by count, as `BuiltinCountedByRef` checks it and `GetCountedByFieldExprGEP`
+computes it.
+
+- **Sema.** Its argument, past parentheses, is a pointer or an array without side
+  effects and a member access (`.` or `->`), else clang's errors at it ("argument
+  must reference a member with the 'counted_by' attribute", "cannot have
+  side-effects"). A member of a `counted_by` count (not `sized_by`'s or an
+  `_or_null` one's) makes it a pointer to the count's member, of its declared type,
+  found by its name in the access's record (`check_graph_counted_member` in the
+  walk, `check_counted_lookup` in the constant evaluator, which keeps an access's
+  base type at its operator); any other such member a `void *`.
+- **Its value's uses.** clang's `CheckInvalidBuiltinCountedByRef` refuses it where it
+  would leak the count's address, by where the call stands as written, past
+  parentheses (`check_input_counted_ref_context`): an assignment's operand or a
+  declaration's initializer (not an initializer list's element), a call's argument,
+  a return's value, a subscript's base and a binary operator's operand, the comma
+  operator's too, each with clang's message at the call.
+- **Code.** The access's record's address (an `->`'s pointer, a `.`'s object's)
+  plus the count's offset; a null pointer for a `void *` one. Its argument doesn't
+  run otherwise. A bit-field count, which crashes clang's code generation, is
+  refused by name.
+
+`__builtin_dynamic_object_size` of clang's counted_by forms (#148,
+`emitCountedBySize` and `findStructFieldAccess`) counts at run time
+(`check_graph_counted_size`, `check_lower_counted_size`): past casts, `&`, `*`, a
+comma's right operand and one subscript, to a member access. A counted flexible array
+member (or its element's address) is the count times its element's bytes, less the
+index's bytes; a counted pointer read as a value the same, by its pointee's bytes (1
+for `void`); another member's address, through a pointer, the record's size less the
+member's offset (and its index's bytes) plus the flexible array member's bytes.
+The count converts to the size's width by its signedness, and a negative result, or
+a negative index, is 0. clang's evaluator leaves a counted flexible array member to
+the code, so no bound of the object folds it here either; mode 3, an argument with
+side effects and a bound the object gives (another member of a named object) keep the
+ordinary query's answer. `__builtin_object_size` ignores the count, as clang's does.
 
 `__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
 arguments never run. It is clang 23's allocation token: the reader works it

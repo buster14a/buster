@@ -145,3 +145,122 @@ static void check_test_driver_availability(CheckTest* test, const char* clang, c
     free(expected_lines);
     free(actual_lines);
 }
+
+// clang's counted_by family (#148, c_check_counted_by_input.c) and __builtin_counted_by_ref, by the driver against clang:
+// the whole output, line for line, with the exit status, by both paths of -fsyntax-only, a unit each (the checker stops a
+// unit at its first error): the attribute's places and argument forms, valid and not, with clang's errors of its member,
+// its pointee and its count, the struct-with-flexible-member element warning, and the attribute off a member; the
+// builtin's types (with _Generic), its arguments' errors, and the uses of its value clang refuses (assigned, passed,
+// returned, subscripted, in a binary expression) beside those it takes.
+static void check_test_driver_counted_by(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const units[] = {
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\n",
+        "struct S { int n; int *p __attribute__((counted_by(n))); };\n",
+        "struct S { long n; char *p __attribute__((sized_by(n))); };\n",
+        "struct S { int n; int *p __attribute__((counted_by_or_null(n))); };\n",
+        "struct S { int n; void *p __attribute__((sized_by_or_null(n))); };\n",
+        "struct B { int *p __attribute__((counted_by(n))); int n; };\n",
+        "struct C { int n; struct { int x; int fam[] __attribute__((counted_by(n))); }; };\n",
+        "struct D { int n; int m[2] __attribute__((counted_by(n))); };\n",
+        "struct E { long n; char fam[] __attribute__((sized_by(n))); };\n",
+        "struct F { _Bool n; int fam[] __attribute__((counted_by(n))); };\n",
+        "int g;\nstruct G { int n; int fam[] __attribute__((counted_by(g))); };\n",
+        "struct H { int n; int fam[] __attribute__((counted_by(n + 1))); };\n",
+        "struct I { int n; void *p __attribute__((counted_by(n))); };\n",
+        "struct J { int n; int x __attribute__((counted_by(n))); };\n",
+        "union K { int n; int *p __attribute__((counted_by(n))); };\n",
+        "struct L { int n; int (*fp)(void) __attribute__((counted_by(n))); };\n",
+        "struct A1 { int n; int fam[] __attribute__((counted_by(n, 1))); };\n",
+        "struct A2 { int n; int fam[] __attribute__((counted_by())); };\n",
+        "struct A3 { int n; int fam[] __attribute__((counted_by)); };\n",
+        "struct A4 { int n; int * __attribute__((counted_by(n))) p; };\n",
+        "struct A5 { int n; int *p __attribute__((counted_by(n))), *q __attribute__((counted_by(n))); };\n",
+        "struct A6 { int n; int __attribute__((counted_by(n))) *p; };\n",
+        "struct A7 { int n; [[clang::counted_by(n)]] int *p; };\n",
+        "struct A8 { int n; int *p [[clang::counted_by(n)]]; };\n",
+        "int *g __attribute__((counted_by(x)));\n",
+        "int x; int *g __attribute__((counted_by(x)));\n",
+        "void f(int n, int *p __attribute__((counted_by(n))));\n",
+        "struct A9 { int n; int fam[] __attribute__((counted_by(n))) __attribute__((counted_by(n))); };\n",
+        "struct A10 { int n; int m; int fam[] __attribute__((counted_by(n))) __attribute__((sized_by(m))); };\n",
+        "struct A11 { int n; int fam[] __attribute__((counted_by((n)))); };\n",
+        "struct A12 { char n; unsigned long m; struct { int fam[] __attribute__((counted_by(m))); }; };\n",
+        "struct A13 { int n; struct { int x; } s; int fam[] __attribute__((counted_by(s))); };\n",
+        "struct A14 { int n : 3; int fam[] __attribute__((counted_by(n))); };\n",
+        "enum { EN = 3 };\nstruct A15 { int n; int fam[] __attribute__((counted_by(EN))); };\n",
+        "struct A16 { int n; int fam[] __attribute__((counted_by(fam))); };\n",
+        "int n;\nstruct B1 { char n; int a[sizeof(n)]; int fam[] __attribute__((counted_by(n))); };\n",
+        "int n;\nstruct B2 { int z; int fam[] __attribute__((counted_by(n))); };\n",
+        "struct B4 { int x; int * __attribute__((counted_by(x))) *pp; };\n",
+        "struct B5 { int x; int *__attribute__((counted_by(x))) arr[3]; };\n",
+        "struct B6 { int x; struct B6 *__attribute__((counted_by(x))) self; };\n",
+        "struct Inc;\nstruct B7 { int x; struct Inc *__attribute__((counted_by(x))) p; };\n",
+        "struct B9 { int x; int (*__attribute__((counted_by(x))) pa)[]; };\n",
+        "struct B1 { int n; int fam[]; };\nstruct B10 { int x; struct B1 *__attribute__((counted_by(x))) p; };\n",
+        "struct B1 { int n; int fam[]; };\nstruct B11 { int x; struct B1 fam[] __attribute__((counted_by(x))); };\n",
+        "struct B12 { union { int c; }; int fam[] __attribute__((counted_by(c))); };\n",
+        "struct B13 { struct { int c; }; int fam[] __attribute__((counted_by(c))); };\n",
+        "struct B14 { int n; struct In { int fam[] __attribute__((counted_by(n))); } in; };\n",
+        "struct B15 { int n; int fam[] __attribute__((counted_by(1))); };\n",
+        "struct B16 { int n; int fam[] __attribute__((counted_by(1.5))); };\n",
+        "int f(void);\nstruct B17 { int n; int fam[] __attribute__((counted_by(f))); };\n",
+        "struct B18 { struct { int n; } s; int fam[] __attribute__((counted_by(n))); };\n",
+        "union U { int n; struct { int m; int fam[] __attribute__((counted_by(m))); } s; };\n",
+        "struct B19 { int n; int *p __attribute__((sized_by(n))); int fam[] __attribute__((sized_by_or_null(n))); };\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint *f(struct S *s) { return __builtin_counted_by_ref(s->fam); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { int *p = __builtin_counted_by_ref(s->fam); (void)p; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { int *p; p = __builtin_counted_by_ref(s->fam); (void)p; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint f(struct S *s) { return g(__builtin_counted_by_ref(s->fam)); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint f(struct S *s) { return __builtin_counted_by_ref(s->fam)[0]; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint f(struct S *s) { return __builtin_counted_by_ref(s->fam) != 0; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint f(struct S *s) { return (__builtin_counted_by_ref(s->fam), 1); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint f(struct S *s) { return 0[__builtin_counted_by_ref(s->fam)]; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { *__builtin_counted_by_ref(s->fam) = 3; (void)__builtin_counted_by_ref(s->fam); int *p = (int *)__builtin_counted_by_ref(s->fam); (void)p; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { int *a[1] = { __builtin_counted_by_ref(s->fam) }; (void)a; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint f(struct S *s, int c) { return *(c ? __builtin_counted_by_ref(s->fam) : 0); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { typeof(__builtin_counted_by_ref(s->fam)) p = 0; (void)p; }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct P *p) { _Static_assert(_Generic(__builtin_counted_by_ref(p->p), void *: 1, default: 0), \"\"); _Static_assert(_Generic(__builtin_counted_by_ref(p->q), int *: 1, default: 0), \"\"); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { (void)__builtin_counted_by_ref(s->n); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { (void)__builtin_counted_by_ref(s); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { (void)__builtin_counted_by_ref(s++->fam); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { (void)__builtin_counted_by_ref((int *)s->fam); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S *s) { (void)__builtin_counted_by_ref(((s)->fam)); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(int *x) { (void)__builtin_counted_by_ref(x); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nstruct S *h(void);\nvoid f(void) { (void)__builtin_counted_by_ref(h()->fam); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nvoid f(struct S s[2]) { (void)__builtin_counted_by_ref(s[1].fam); }\n",
+        "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nint g(int *, int);\nstruct T { int *p; };\nvoid f(struct S *s, int c) {\n    int x = g(0, (__builtin_counted_by_ref(s->fam), 1));\n    struct T t = { .p = __builtin_counted_by_ref(s->fam) };\n    struct T u = { __builtin_counted_by_ref(s->fam) };\n    int *a = c ? __builtin_counted_by_ref(s->fam) : 0;\n    (void)x; (void)t; (void)u; (void)a;\n}\n",
+    };
+    enum { LINES = 16384 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/counted-by.c", directory);
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    {
+        const bool made = parse_test_write(source, units[unit], strlen(units[unit]));
+        char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        char* expected = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "counted_by %u: clang's lines read", unit);
+        check_test_expect(test, made && lines, description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[5] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "counted_by %u, %s: status %d (clang %d), lines\n%s(clang\n%s)", unit, scalar != 0 ? "scalar" : "vector",
+                     status, oracle, actual_lines, expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+        unlink(source);
+    }
+    free(expected_lines);
+    free(actual_lines);
+}
