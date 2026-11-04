@@ -1716,6 +1716,34 @@ static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
     return graph->ops[node] == CHECK_OP_VALUE && (graph->overload_candidate_count == 0 || check_graph_leaf_of(graph, node)->overload_head == 0);
 }
 
+// The end of the run of marked nodes from `node`, a region of check_graph_run's main loop: the first node from `node`
+// without a mark, or `count`. The vector path tests 64 marks at a time, masked to the graph's end, and takes the first
+// that is zero; the scalar path, and the vector path after it as a check that ends at once, take each node. Scanned a
+// node at a time, its exit, at a data-dependent length, was the main loop's most sampled branch on the 9700X (#1050).
+static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(const uint8_t* marks, uint32_t node, uint32_t count, bool scalar)
+{
+    (void)scalar;
+
+    uint32_t end = node;
+#if BUSTER_HOST_VECTOR
+    bool open = !BUSTER_SCALAR_PATH(scalar);
+    while (open && end < count)
+    {
+        const uint32_t live = count - end < 64 ? count - end : 64;
+        const __mmask64 lanes = (__mmask64)_bzhi_u64(~(uint64_t)0, live);
+        const __m512i block = _mm512_maskz_loadu_epi8(lanes, marks + end);
+        const uint64_t unmarked = (uint64_t)_mm512_mask_testn_epi8_mask(lanes, block, block);
+        open = unmarked == 0;
+        end += open ? live : (uint32_t)_tzcnt_u64(unmarked);
+    }
+#endif
+    while (end < count && marks[end] != 0)
+    {
+        end += 1;
+    }
+    return end;
+}
+
 // Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
 // VALUE action reads no operand and interns no type. That is the leaf with its type as operand 0's conversion, or for an
 // invalid type, that type's diagnostic and a zero value (check_action_compute skips the operator then); its diagnostic
@@ -3384,10 +3412,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             else
             {
                 const uint32_t begin = node;
-                while (node < count && pure[node] != 0)
-                {
-                    node += 1;
-                }
+                node = check_graph_marked_end(pure, node, count, BUSTER_SCALAR_PATH(options->scalar));
                 if (options->level_order)
                 {
                     check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
