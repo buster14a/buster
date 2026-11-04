@@ -39,6 +39,11 @@
 #include <unistd.h>
 
 #define BUSTER_TIER1_MASKS_TEST_BUFFER 256
+// The native entry's xmm0 and xmm1 (#1280, tier1_masks_test_call): a double's and a float's bits, signaling NaNs past
+// them.
+#define BUSTER_TIER1_MASKS_TEST_DOUBLE UINT64_C(0x400921fb54442d18)
+#define BUSTER_TIER1_MASKS_TEST_FLOAT UINT32_C(0x3fc00000)
+#define BUSTER_TIER1_MASKS_TEST_DIRTY UINT64_C(0x7f8000017f800001)
 #define BUSTER_TIER1_MASKS_TEST_INPUTS 16
 #define BUSTER_TIER1_MASKS_TEST_HELPER 9u
 #define BUSTER_TIER1_MASKS_TEST_ENTRY 1u
@@ -190,6 +195,22 @@ static void tier1_masks_test_floating_model(const uint8_t* input, uint64_t count
     memcpy(&b, input + 4, 4);
     const uint32_t sum = a + b;
     memcpy(output + 128, &sum, 4);
+}
+
+// The SSE carriers' buffer (#1280): rows of no records, each its 4- or 8-byte vector operand's register whole as a
+// 16-byte result, at 128 the double parameter's (its bits, then zeros), at 144 the float parameter's (its bits, then
+// zeros) and at 160 the helper's double result's (count + 1, then zeros): each operand zero-extended into its role,
+// though its register's bytes past it aren't zero.
+static void tier1_masks_test_carriers_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    const uint64_t parameter = BUSTER_TIER1_MASKS_TEST_DOUBLE;
+    const uint32_t single = BUSTER_TIER1_MASKS_TEST_FLOAT;
+    const uint64_t result = count + 1;
+    memset(output + 128, 0, 48);
+    memcpy(output + 128, &parameter, 8);
+    memcpy(output + 144, &single, 4);
+    memcpy(output + 160, &result, 8);
 }
 
 // The vector rows' buffer (#1283), of a and b, 16 doublewords at 0 and 64, and k, the word at 0: at 128, w ^ z ^ m, where
@@ -1124,6 +1145,33 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .model = tier1_masks_test_floating_model,
     },
     {
+        // #1280: SSE carriers from a double and a float parameter and a call's double result, whose registers' bytes
+        // past them aren't zero, read whole by rows of no records: each zero-extended into its role.
+        .name = "SSE carriers with dirty upper lanes",
+        .text = "function (ptr, i64, f64, f32) -> void {\n"
+                "  row #0 (vector8) -> vector16\n"
+                "  row #1 (vector4) -> vector16\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = param.i64 1\n"
+                "  %2 = param.f64 2\n"
+                "  %3 = param.f32 3\n"
+                "  %4 = call.v4i32 row #0(%2) fixed=(f64) variadic=0\n"
+                "  %5 = call.v4i32 row #1(%3) fixed=(f32) variadic=0\n"
+                "  %6 = call.f64 @9(%1) fixed=(i64) variadic=0\n"
+                "  %7 = call.v4i32 row #0(%6) fixed=(f64) variadic=0\n"
+                "  %8 = address.ptr %0 offset=128\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %0 offset=144\n"
+                "  %11 = store.void %10, %5 align=1\n"
+                "  %12 = address.ptr %0 offset=160\n"
+                "  %13 = store.void %12, %7 align=1\n"
+                "  %14 = ret.void\n"
+                "}\n",
+        .count = 1000,
+        .model = tier1_masks_test_carriers_model,
+    },
+    {
         // #1283: vector rows placed one role at a time: a two-operand form's (its first operand read in its own register
         // up to the result's first write, which the destination takes), a tied operand's (copied into the destination),
         // a merging opmask's, an operand written and dying at the node (kept in its own register) under an integer
@@ -1346,7 +1394,9 @@ static bool tier1_masks_test_dominance(Tier1MasksTest* test, const IrFunction* f
     return ok;
 }
 
-// The helper's records: kxnorq into every opmask register, then rdi + 1 into rax, and ret.
+// The helper's records: kxnorq into every opmask register, then rdi + 1 into rax, and ret. Its result is also xmm0's,
+// in both of its quadwords (vpbroadcastq), so that a call of it as a double's (#1280) returns one whose upper lanes,
+// which the convention leaves undefined, aren't zero.
 static uint32_t tier1_masks_test_helper(X86Instruction* records)
 {
     uint32_t count = 0;
@@ -1355,17 +1405,23 @@ static uint32_t tier1_masks_test_helper(X86Instruction* records)
         records[count++] = (X86Instruction){ .form = X86_FORM_KXNORQ_K_K_K, .reg = k, .vvvv = k, .rm = k };
     }
     records[count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 1 };
+    records[count++] = (X86Instruction){ .form = X86_FORM_VPBROADCASTQ_X_R64, .reg = 0, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_REGISTER_DIRECT };
     records[count++] = (X86Instruction){ .form = X86_FORM_RET };
     return count;
 }
 
-typedef void (*Tier1MasksTestEntry)(uint8_t*, uint64_t);
+// The entry takes xmm0 and xmm1 too (#1280), which a fixture of a double and a float parameter reads as them: their low
+// bytes the parameters, and past them signaling NaNs, the bytes the convention leaves undefined.
+typedef long long Tier1MasksTestXmm __attribute__((vector_size(16)));
+typedef void (*Tier1MasksTestEntry)(uint8_t*, uint64_t, Tier1MasksTestXmm, Tier1MasksTestXmm);
 
 static __attribute__((no_sanitize("function"))) void tier1_masks_test_call(const uint8_t* code, uint8_t* buffer, uint64_t count)
 {
     Tier1MasksTestEntry entry;
     memcpy(&entry, &code, sizeof(entry));
-    entry(buffer, count);
+    const Tier1MasksTestXmm xmm0 = { (long long)BUSTER_TIER1_MASKS_TEST_DOUBLE, (long long)BUSTER_TIER1_MASKS_TEST_DIRTY };
+    const Tier1MasksTestXmm xmm1 = { (long long)((BUSTER_TIER1_MASKS_TEST_DIRTY & ~UINT64_C(0xffffffff)) | BUSTER_TIER1_MASKS_TEST_FLOAT), (long long)BUSTER_TIER1_MASKS_TEST_DIRTY };
+    entry(buffer, count, xmm0, xmm1);
 }
 
 // The emitted function's records, sized, encoded by both encoders (which must agree) with the helper after them, its

@@ -40,11 +40,12 @@ static void ir_test_simd_bitcasts(IrTestTally* test, Arena* output, Arena* scrat
     }
 }
 
-// A row call (#141, IrCall.row): a masked byte addition's row of two vectors and a mask, its result a vector, and a masked
-// store's of an address, a vector and a mask, of no result, each a call of no symbol whose types are its row's classes'
-// (ir_row_type). Both verify, both scans find SIMD values, and the interpreter refuses them. Then each changed one way,
-// each refused: a symbol, a row past the column, an argument or the result of another type, an argument too few, a
-// variadic call, an indirect one, and a row's operand of a class no row call takes (a vector of 8 bytes).
+// A row call (#141, IrCall.row): a masked byte addition's row of two vectors and a mask, its result a vector, and a
+// masked store's of an address, a vector and a mask, of no result, each a call of no symbol whose types are its row's
+// classes' (ir_row_type). Both verify, both scans find SIMD values, and the interpreter refuses them. Then each changed
+// one way, each refused: a symbol, a row past the column, an argument or the result of another type, an argument too
+// few, a variadic call, an indirect one, an SSE carrier's operand (#1280) of a vector's type, and a row's operand of a
+// class no row call takes (a vector of 12 bytes); an SSE carrier's of an f64 or an f32 verifies.
 static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -125,8 +126,25 @@ static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
         function.op[4] = IR_CALL_INDIRECT;
         ir_test_pair(test, &function, scratch, NULL, false, "a row call is a direct call's");
         function.op[4] = IR_CALL;
+        // An SSE carrier (#1280): a vector operand of 8 bytes is an f64 argument, of 4 an f32, and not a v16i32; one
+        // of 12 bytes is no row call's.
         add->operand_bytes[0] = 8;
-        ir_test_pair(test, &function, scratch, NULL, false, "a vector of 8 bytes is no row call's operand");
+        ir_test_pair(test, &function, scratch, NULL, false, "an 8-byte vector's operand is no v16i32");
+        function.parameter_types[0] = IR_F64;
+        function.type[0] = IR_F64;
+        function.call_types[0] = IR_F64;
+        ir_test_pair(test, &function, scratch, NULL, true, "an 8-byte vector's operand is an f64");
+        add->operand_bytes[0] = 4;
+        ir_test_pair(test, &function, scratch, NULL, false, "a 4-byte vector's operand is no f64");
+        function.parameter_types[0] = IR_F32;
+        function.type[0] = IR_F32;
+        function.call_types[0] = IR_F32;
+        ir_test_pair(test, &function, scratch, NULL, true, "a 4-byte vector's operand is an f32");
+        add->operand_bytes[0] = 12;
+        ir_test_pair(test, &function, scratch, NULL, false, "a vector of 12 bytes is no row call's operand");
+        function.parameter_types[0] = IR_V16I32;
+        function.type[0] = IR_V16I32;
+        function.call_types[0] = IR_V16I32;
         add->operand_bytes[0] = 64;
         ir_test_pair(test, &function, scratch, NULL, true, "the row calls verify again once restored");
     }

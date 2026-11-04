@@ -836,6 +836,24 @@ static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t sourc
     return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width)->move, destination, source);
 }
 
+// A copy of an SSE carrier (#1280), a vector of 4 or 8 bytes, between two of the 32 vector registers, zeros past its
+// bytes in the destination whatever the source has there: vmovq's of 8 bytes, and for 4 vinsertps's of the source's
+// element 0 into element 0 with elements 1 to 3 zeroed (immediate 0x0e), a shuffle that raises no floating exception.
+// EVEX forms, as the vector class's moves (an SSE carrier is admitted with AVX512F and VL, as any narrower vector).
+static X86Instruction tier1_select_carrier_move(uint8_t destination, uint8_t source, uint32_t bytes)
+{
+    const X86Instruction result = bytes == 8 ? tier1_select_register_record(X86_FORM_VMOVQ_X_XM64_EVEX, destination, source) :
+                                               (X86Instruction){
+                                                   .form = X86_FORM_VINSERTPS_X_X_XM32_IMM8_EVEX,
+                                                   .reg = destination,
+                                                   .vvvv = source,
+                                                   .rm = source,
+                                                   .mode = BUSTER_X86_REGISTER_DIRECT,
+                                                   .immediate = 0x0e,
+                                               };
+    return result;
+}
+
 // TIER1_RULE_INTRINSIC's record: pdep and pext read their source from vvvv and their mask from rm, bzhi and bextr their
 // source from rm and their index or control from vvvv (the IR's a is the source, b the other).
 static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)

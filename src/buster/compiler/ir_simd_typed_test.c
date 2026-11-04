@@ -325,11 +325,12 @@ static void ir_simd_typed_test_intrinsics(IrTestTally* tally)
 }
 
 // The machine rows (#141, ir_simd_typed_machine_row): rows the IR's own operations don't take decode as the row itself,
-// with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and of
-// their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a quadword
-// one), and nothing else: a byte addition's of two vectors, a masked store's of an address, a vector and a mask of no
-// result, and a shift's of a count from a general register. Without each feature, TARGET with the result untouched. A
-// row of a class no row call takes (a vector of 8 bytes, a long double, a 128-bit integer) is UNSUPPORTED.
+// with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and
+// of their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a
+// quadword one), and nothing else: a byte addition's of two vectors, a masked store's of an address, a vector and a
+// mask of no result, and a shift's of a count from a general register. Without each feature, TARGET with the result
+// untouched. An SSE carrier's (#1280: a vector of 8 or 4 bytes) row decodes with VL's moves. A row of a class no row
+// call takes (a vector of 2 or 12 bytes, a long double, a 128-bit integer) is UNSUPPORTED.
 static void ir_simd_typed_test_machine(IrTestTally* tally)
 {
     const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
@@ -391,10 +392,33 @@ static void ir_simd_typed_test_machine(IrTestTally* tally)
             ir_test_expect(tally, needed ? refused == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0 : refused == IR_SIMD_TYPED_OK, description);
         }
     }
-    Tier0Operation narrow = rows[0];
-    narrow.operand_bytes[1] = 8;
+    // An SSE carrier (#1280), an operand of 8 or 4 bytes or a result of 4, is a row call's (an f64 or f32): its moves
+    // are a vector's below 64 bytes, VL's. A vector of 2 or 12 bytes is no width a row call takes.
     IrSimdTypedOperation decoded;
-    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of an 8-byte vector is no row call's");
+    static const uint8_t carriers[3][2] = { { 1, 8 }, { 1, 4 }, { 2, 4 } };
+    for (uint32_t c = 0; c < 3; c += 1)
+    {
+        Tier0Operation narrow = rows[0];
+        if (carriers[c][0] == 2)
+        {
+            narrow.result_bytes = carriers[c][1];
+        }
+        else
+        {
+            narrow.operand_bytes[carriers[c][0]] = carriers[c][1];
+        }
+        memset(&decoded, 0x5a, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&narrow, avx512, &decoded);
+        snprintf(description, sizeof(description), "a machine row of a %u-byte vector %s decodes, needing VL for its move", carriers[c][1], carriers[c][0] == 2 ? "result" : "operand");
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.machine && decoded.required_features == (expected[0] | BUSTER_X86_FEATURE(AVX512VL)) &&
+                              ir_simd_typed_row(&narrow, avx512 & ~BUSTER_X86_FEATURE(AVX512VL), &decoded) == IR_SIMD_TYPED_TARGET,
+                       description);
+    }
+    Tier0Operation narrow = rows[0];
+    narrow.operand_bytes[1] = 2;
+    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 2-byte vector is no row call's");
+    narrow.operand_bytes[1] = 12;
+    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 12-byte vector is no row call's");
     Tier0Operation wide = rows[2];
     wide.operand_classes[1] = BUSTER_TYPED_CLASS_I128;
     ir_test_expect(tally, ir_simd_typed_row(&wide, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 128-bit integer is no row call's");
