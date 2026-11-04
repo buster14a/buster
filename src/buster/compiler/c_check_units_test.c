@@ -1074,10 +1074,10 @@ static void check_units_test_bounds(CheckUnitsTestTally* tally, const char* exec
         written = parse_test_write(path, f == 0 ? b1 : b2, strlen(f == 0 ? b1 : b2));
     }
     check_units_test_expect(tally, written, "write the bounds' units", bounds_directory);
-    static const char* const options[][3] = {
+    static const char* const options[][4] = {
         { "--lanes", "1", NULL },
         { "--lanes", "8", NULL },
-        { "--scalar", "--lanes", "8" },
+        { "--scalar", "--lanes", "8", NULL },
     };
     for (uint32_t o = 0; written && o < BUSTER_ARRAY_LENGTH(options); o += 1)
     {

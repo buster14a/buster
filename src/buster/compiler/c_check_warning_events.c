@@ -30,6 +30,7 @@ enum
     CHECK_WARNING_ID_SOURCE_OPENMP = 38,
     CHECK_WARNING_ID_LIBRARY_REDECLARATION = 39,
     CHECK_WARNING_ID_BUILTIN_HEADER = 40,
+    CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE = 41,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -58,6 +59,12 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_PRAGMA,
     CHECK_WARNING_EVENT_LIBRARY_REDECLARATION,
     CHECK_WARNING_EVENT_BUILTIN_HEADER,
+    // An attribute clang doesn't know, which it ignores (#147): payload.name its name's identifier, payload.data its scope's
+    // (0 for none) with BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE where it is a C23 attribute ([[...]]) rather than GNU's.
+    CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE,
+    // `__clang__`'s expansion where a C23 attribute's scope or name goes, which clang reads as `_Clang` (#147, c_parser.c's
+    // parse_clang_scope_numbers): -Wignored-attributes' warning at it.
+    CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -88,6 +95,8 @@ typedef enum CheckWarningCompletion
 // A semantic proof prevents publication, independently of every requested warning policy (for example sizeof).
 #define BUSTER_CHECK_WARNING_SUPPRESSED 0x02u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
+// CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
+#define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
 
 typedef struct CheckWarningPayload CheckWarningPayload;
 struct CheckWarningPayload

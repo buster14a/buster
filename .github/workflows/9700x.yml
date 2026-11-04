@@ -165,10 +165,9 @@ jobs:
           fi
 
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
-  # "Nightly main measurements"). A pull request: its draft state alone. A push: its pull request's newest run, when it
-  # qualified the identical tree natively, with the nightly mode, which then skips the 9700X job once the host-identity
-  # job finds the host as that run recorded it, and leaves its measurements to the backlog unless that run's (on the
-  # identical first-parent tree) are reusable too. A nightly
+  # "Nightly main measurements"). A pull request: its draft state alone; its 9700X job measures and skips native
+  # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
+  # correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
   # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
@@ -179,7 +178,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      pull-requests: read
     outputs:
       scope: ${{ steps.decide.outputs.scope }}
       hosted: ${{ steps.decide.outputs.hosted }}
@@ -191,8 +189,6 @@ jobs:
       hardware: ${{ steps.decide.outputs.hardware }}
       hardware_reason: ${{ steps.decide.outputs.hardware_reason }}
       retired: ${{ steps.decide.outputs.retired }}
-      # The host identity the reused pull request's run recorded, for the host-identity job to confirm.
-      native_host: ${{ steps.decide.outputs.native_host }}
       # A nightly dispatch's window as instants (the cycle's 04:00 and 07:00 Europe/Madrid), and whether an override
       # admits it anyway: the 9700X job compares them with its clock before any setup.
       window_start: ${{ steps.decide.outputs.window_start }}
@@ -653,154 +649,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # A push's reuse of its pull request's native qualification holds only on the host that run had: this job takes the
-  # 9700X for seconds to read its identity now (the kernel, the microcode, the system GCC that some fixtures use as their
-  # oracle, glibc), with this workflow's own step, which tools/ci/nightly.c's self-test keeps identical to the 9700X
-  # job's. A different identity, or none, runs native correctness after all.
-  host-identity:
-    name: Confirm the 9700X host for a reused qualification
-    needs: evidence
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name == 'push' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware_reason == 'native-reused' }}
-    runs-on:
-      group: buster-9700x-service-dispatch
-      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    outputs:
-      host: ${{ steps.host.outputs.host }}
-    steps:
-      - name: Verify benchmark host
-        # The operating system, the architecture and the CPU model, and nothing more: in the 9700X job the window's
-        # check follows at once, so that a job that took the lock too late refuses before any other work.
-        run: |
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
-          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-
-      - name: Record the host identity
-        id: host
-        run: |
-          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses: the
-          # kernel, the microcode, glibc, and a digest of the software. The digest covers the package database's every
-          # package and version; each external tool the inventory calls (GCC and its cc1, cc1plus and collect2,
-          # binutils, gdb, perf, valgrind, mold, wild, make, file, the shell) and every shared library it loads; the
-          # runtime GCC links a static program with (test-static's cc -static); and every file of the packages that
-          # own any of those, or of the C toolchain's (gcc, gcc-libs, glibc, binutils, linux-api-headers). Those files
-          # are the headers, static libraries, startup objects, linker scripts and configuration, by content. A tool
-          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a
-          # package query that fails or doesn't answer completely, a file that can't be hashed) leaves no identity at
-          # all, never a placeholder that another unread one would match: no reuse holds. tests/ci/nightly.sh runs the
-          # lines from here to the identity's end against stand-in tools.
-          kernel=$(uname -r 2> /dev/null || true)
-          microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
-          gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
-          glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || true)
-          # Each package query must succeed and print nothing on stderr. The ownership query must account for every
-          # file: an owner at the version -Q lists, or pacman's "No package owns" and no other message. The owners'
-          # listing must then contain every file the ownership query attributed to them. Otherwise the database didn't
-          # answer completely, which is not the same as an unowned file: there is no identity.
-          errors=$(mktemp)
-          software=''
-          incomplete=''
-          packages=$(LC_ALL=C pacman -Q 2> "$errors") && [ ! -s "$errors" ] || packages=''
-          if [ -z "$packages" ]; then
-              incomplete='no package database'
-          else
-              tools=(cc gcc g++ as ld ld.bfd readelf objdump objcopy nm ar gdb perf valgrind mold wild make file sh bash env)
-              for program in cc1 cc1plus collect2; do
-                  tools+=("$(gcc -print-prog-name="$program" 2> /dev/null || printf '%s' "$program")")
-              done
-              files=()
-              listing=''
-              for tool in "${tools[@]}"; do
-                  path=$(command -v "$tool" 2> /dev/null || true)
-                  if [ -n "$path" ] && [ -f "$path" ]; then
-                      real=$(readlink -f "$path")
-                      listing+="tool $tool $real"$'\n'
-                      files+=("$real")
-                      while IFS= read -r library; do
-                          files+=("$(readlink -f "$library" 2> /dev/null || printf '%s' "$library")")
-                      done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
-                  else
-                      listing+="tool $tool absent"$'\n'
-                  fi
-              done
-              for runtime in libc.a libm.a libpthread.a crt1.o crti.o crtn.o crtbeginT.o crtend.o libgcc.a libgcc_eh.a; do
-                  path=$(gcc -print-file-name="$runtime" 2> /dev/null || true)
-                  if [ -n "$path" ] && [ -f "$path" ]; then
-                      real=$(readlink -f "$path")
-                      listing+="runtime $runtime $real"$'\n'
-                      files+=("$real")
-                  else
-                      listing+="runtime $runtime absent"$'\n'
-                  fi
-              done
-              ownership=$(LC_ALL=C pacman -Qo --color never "${files[@]}" 2> "$errors") && status=0 || status=$?
-              claims=$(sed -n 's/^\(\/.*\) is owned by \([^ ]*\) [^ ]*$/\2 \1/p' <<< "$ownership" | LC_ALL=C sort -u)
-              versions=$(sed -n 's/^\/.* is owned by \([^ ]*\) \([^ ]*\)$/\1 \2/p' <<< "$ownership" | LC_ALL=C sort -u)
-              answered=$(grep -c . <<< "$ownership" || true)
-              attributed=$(grep -c '^/.* is owned by [^ ]* [^ ]*$' <<< "$ownership" || true)
-              unowned=$(grep -c '^error: No package owns /' "$errors" || true)
-              if grep -qv '^error: No package owns /' "$errors" || [ "$attributed" -ne "$answered" ] || [ $((attributed + unowned)) -ne "${#files[@]}" ] || [ $((status == 0)) -ne $((unowned == 0)) ]; then
-                  incomplete+='the ownership query did not account for every file; '
-              fi
-              if [ -n "$(LC_ALL=C comm -23 <(sed '/^$/d' <<< "$versions") <(LC_ALL=C sort -u <<< "$packages"))" ]; then
-                  incomplete+='an owner at another version than -Q lists; '
-              fi
-              installed=$(cut -d ' ' -f 1 <<< "$packages")
-              owners=$({ for package in gcc gcc-libs glibc binutils linux-api-headers; do
-                      if grep -Fxq -- "$package" <<< "$installed"; then printf '%s\n' "$package"; fi
-                  done
-                  cut -d ' ' -f 1 <<< "$claims"; } | sed '/^$/d' | LC_ALL=C sort -u)
-              listing+="packages $(printf '%s ' $owners)"$'\n'
-              listed=''
-              if [ -n "$owners" ]; then
-                  listed=$(LC_ALL=C pacman -Ql --color never $owners 2> "$errors") && [ ! -s "$errors" ] || incomplete+='the owners file listing failed; '
-              fi
-              if [ -n "$(LC_ALL=C comm -23 <(sed '/^$/d' <<< "$claims") <(LC_ALL=C sort -u <<< "$listed"))" ]; then
-                  incomplete+='the owners file listing omits files attributed to them; '
-              fi
-              while IFS= read -r owned; do
-                  if [ -L "$owned" ]; then
-                      listing+="link $owned $(readlink "$owned")"$'\n'
-                  elif [ -f "$owned" ]; then
-                      files+=("$owned")
-                  fi
-              done < <(sed -n 's/^[^ ]* //p' <<< "$listed")
-              # A file that can't be hashed marks the hashes, whatever the shell's pipefail: then there is no identity.
-              hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | { xargs -0 -r -n 256 -P 8 sha256sum 2> /dev/null || printf 'unhashable\n'; } | LC_ALL=C sort -k 2)
-              if [[ "$hashes" == *unhashable* ]]; then
-                  incomplete+="a file that can't be hashed; "
-              fi
-              if [ -z "$incomplete" ]; then
-                  software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
-              fi
-          fi
-          rm -f "$errors"
-          if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ] && [ -n "$software" ]; then
-              host=$(printf '9700X/%s/%s/gcc-%s/%s/sw-%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" "$software" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
-              printf 'Host identity: %s\n' "$host"
-              printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
-          else
-              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it%s\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}" "${incomplete:+ (software: ${incomplete%; })}"
-          fi
-          # The identity's end.
-
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
-    needs: [changes, evidence, host-identity, test, fuzz]
-    # Both hosted variants must pass before any hardware work, including native
-    # correctness. Drafts keep hosted feedback but cannot occupy the hardware.
-    # This also covers scheduled/manual runs, whose selector is skipped. The
-    # `evidence` job must admit it: a nightly run outside the window or deferred,
-    # and a draft are not admitted, nor a push qualified by reuse once the
-    # host-identity job confirmed its host (unconfirmed, it runs after all). A
-    # nightly run's plain rows (the `plain` scope, without fuzzing) gate it as a
-    # pull request's do, either run here or, by evidence, by its commit's earlier run.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && (needs.evidence.outputs.hardware == 'admit' || (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host))) && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
+    needs: [changes, evidence, test, fuzz]
+    # Both hosted variants must pass before any hardware work. Drafts keep
+    # hosted feedback but cannot occupy the hardware. This also covers
+    # scheduled/manual runs, whose selector is skipped. The `evidence` job must
+    # admit it: a nightly run outside the window or deferred, and a draft, are
+    # not admitted. A nightly run's plain rows (the `plain` scope, without
+    # fuzzing) gate it as a pull request's do, either run here or, by evidence,
+    # by its commit's earlier run. A pull request's run measures but skips the
+    # native correctness step (#1272): its hosted rows cover correctness, and
+    # native correctness runs after the merge, on main's push and the scheduled
+    # and nightly runs.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -1044,6 +906,9 @@ jobs:
 
       - name: Run complete native vector correctness before benchmarks
         id: native
+        # Not on pull requests (#1272): their hosted rows cover correctness, and native correctness runs after the
+        # merge, on main's push and the scheduled and nightly runs, before their measurements.
+        if: github.event_name != 'pull_request'
         run: |
           # The record tells a correctness failure here (started, never passed) from a measurement's after it.
           printf 'native=started\n' >> "$GITHUB_OUTPUT"
@@ -2235,13 +2100,14 @@ jobs:
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated
-    # 9700X native correctness/benchmark job must pass on the same revision, or,
-    # for a push alone, its pull request's newest run must have qualified the
-    # identical tree natively (the evidence job's reuse). A nightly dispatch
-    # reports through its coverage record instead, and a retired scheduled run
-    # (the nightly mode's) runs nothing, so neither has this context.
+    # 9700X job must pass on the same revision. On a ready pull request that job
+    # measures without its native correctness step (#1272), and the context
+    # says so; on a push to main and on the daily and dispatched runs it runs
+    # native correctness before the measurements. A nightly dispatch reports
+    # through its coverage record instead, and a retired scheduled run (the
+    # nightly mode's) runs nothing, so neither has this context.
     name: Build and execute on Ryzen 7 9700X
-    needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, host-identity, benchmarks]
+    needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2260,8 +2126,6 @@ jobs:
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
-          HOST_MATCH: ${{ needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host }}
-          NATIVE_SOURCE: ${{ needs.evidence.outputs.native_source }}
           TEST_RESULT: ${{ needs.test.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
           BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
@@ -2277,11 +2141,10 @@ jobs:
     # The run's coverage record (tools/ci/nightly.c's `record`, docs/ci.md): its commit, tree and first parent; the
     # files that pin its protocol, toolchain and corpus; what the selector chose; what it ran, reused, admitted and
     # deferred; the 9700X job's window, native correctness and host; and the outcome they add up to. It is the
-    # coverage-record-ATTEMPT artifact, kept 90 days, that the nightly coordinator's ledger harvests and a push reads
-    # from its pull request's run. Hosted, after everything. It fails only a nightly run that correctness blocked or
+    # coverage-record-ATTEMPT artifact, kept 90 days, that the nightly coordinator's ledger harvests. Hosted, after everything. It fails only a nightly run that correctness blocked or
     # a measurement failed, so that such a run shows red; every other run's status is the aggregate's.
     name: Coverage record
-    needs: [changes, evidence, test, fuzz, host-identity, benchmarks, qualification]
+    needs: [changes, evidence, test, fuzz, benchmarks, qualification]
     if: ${{ always() && github.repository_id == '1421805693' && needs.evidence.outputs.retired != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2321,14 +2184,14 @@ jobs:
           RECORD_MEASUREMENT_EVIDENCE: ${{ needs.evidence.outputs.measurement }}
           RECORD_MEASUREMENT_SOURCE: ${{ needs.evidence.outputs.measurement_source }}
           # What happened to the 9700X job: a push's reuse that its host didn't confirm ran it after all.
-          RECORD_HARDWARE: ${{ (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host)) && 'admit' || needs.evidence.outputs.hardware }}
-          RECORD_HARDWARE_REASON: ${{ (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host)) && 'host-unconfirmed' || needs.evidence.outputs.hardware_reason }}
+          RECORD_HARDWARE: ${{ needs.evidence.outputs.hardware }}
+          RECORD_HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
           RECORD_TEST_RESULT: ${{ needs.test.result }}
           RECORD_FUZZ_RESULT: ${{ needs.fuzz.result }}
           RECORD_BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
           RECORD_WINDOW: ${{ needs.benchmarks.outputs.window }}
           RECORD_NATIVE: ${{ needs.benchmarks.outputs.native }}
-          RECORD_HOST: ${{ needs.benchmarks.outputs.host || needs.host-identity.outputs.host }}
+          RECORD_HOST: ${{ needs.benchmarks.outputs.host }}
           RECORD_QUALIFICATION_RESULT: ${{ needs.qualification.result }}
           RECORD_OVERRIDE: ${{ inputs.override }}
         run: bash tools/ci/nightly.sh record "$RUNNER_TEMP/coverage-record"

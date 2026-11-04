@@ -9,11 +9,12 @@ nightly run do not replace that post-merge coverage.
 
 Main pushes have separate run-id concurrency groups: a later merge cannot
 replace an earlier pending main run. PRs keep their per-PR superseded-run
-cancellation. Hardware jobs still take the shared host lock. Native evidence
-reuse and the nightly measurement window do not reduce main's hosted suite:
+cancellation. Hardware jobs still take the shared host lock. Hardware admission
+and the nightly measurement window do not reduce main's hosted suite:
 push evidence always reports `scope=full`, `hosted=run` and no hosted source.
 The selector's main-policy mutants and the nightly glue fixtures pin this
-contract; native reuse and nightly benchmark scheduling are otherwise unchanged.
+contract; nightly benchmark scheduling is otherwise unchanged. Pushes run their
+own native correctness under #1272 rather than reusing PR native evidence.
 Both selector push modes force correctness for every file class. The
 qualification self-test rejects a main push with an all-skipped suite: only
 pre-merge PRs can use the no-code exemption.
@@ -61,7 +62,11 @@ Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
 feature set. Required vector coverage comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
 asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
-the complete suite before any benchmarks. Hosted and hardware jobs read one
+the complete suite before any benchmarks, except on a pull request (#1272, the
+owner's choice on 2026-11-04): its job measures without the native suite, which
+its hosted rows cover, so that a pull request holds the shared host for its
+measurements alone. Native correctness then runs after the merge, on main's
+push of the landed commit and on the daily and nightly runs. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
 external cross-checks. There is no vector emulation or randomized runner pool.
 Hosted runners are virtual machines, so the compiler runs there with
@@ -100,7 +105,9 @@ notices, package provenance and component license texts. Historical paths and
 the old Clang binary hash remain provenance records; the active oracle is the
 installed Clang 23 toolchain. A missing or changed input fails setup.
 
-The `benchmarks` job runs native correctness followed by benchmarks. It has
+The `benchmarks` job runs native correctness followed by benchmarks; on a pull
+request, the benchmarks alone (the native correctness step's `if` skips
+`pull_request`, and the selector's oracle policy pins that). It has
 `needs: [changes, evidence, test, fuzz]` and explicitly requires successful
 `test` and `fuzz` results, and the `evidence` job's success and admission.
 GitHub applies these results to their entire matrices. A failure, cancellation
@@ -113,7 +120,9 @@ rows only, and no fuzzing (see "Nightly main measurements"). The hardware job ch
 7 9700X identity and vector eligibility, and retains the existing host lock,
 CPU placements and benchmark selection. Native tests use eight CPUs under the
 lock, and benchmarks reuse that tested executable. A native test failure stops
-the job before measurements.
+the job before measurements. A pull request's benchmarks still check their
+paths against their scalar twins, so a vector-path defect they reach fails
+them there.
 
 The job stages the current official stable Clang 23.1.4 release and matching
 Clang API, linker and object/DWARF tools in the runner's private cache, verifying
@@ -162,16 +171,18 @@ corruption and changed input.
 
 The hosted `qualification` job retains the ruleset's existing required context,
 `Build and execute on Ryzen 7 9700X`. It requires the `evidence` job's success,
-successful hosted tests and fuzzing, and the hardware job, including native
-correctness. A skipped hardware job after a hosted failure therefore cannot
-satisfy the merge gate. Documentation-only changes keep their explicit no-code
-path.
+successful hosted tests and fuzzing, and the hardware job: on a push to main
+and on the daily and dispatched runs, native correctness and the measurements;
+on a ready pull request, the measurements alone, and the context's message
+says that native correctness was not run (#1272). A skipped hardware job after
+a hosted failure therefore cannot satisfy the merge gate. Documentation-only
+changes keep their explicit no-code path. A nightly dispatch reports through
+its coverage record and has no such context, and neither does a scheduled run
+the nightly mode retired.
 
-One skipped hardware job does pass: a push to main in the nightly mode whose
-`evidence` job reused its pull request's native qualification of the identical
-tree (see "Nightly main measurements"). The context's message then names the
-source run. A nightly dispatch reports through its coverage record and has no
-such context, and neither does a scheduled run the nightly mode retired.
+A push no longer reuses its pull request's native qualification: that run has
+none, so every push to main runs native correctness on the landed commit, and
+the `host-identity` job is gone.
 
 Draft PRs still run hosted correctness, but do not queue the 9700X. Both
 `ready_for_review` and `converted_to_draft` trigger the workflow, using the
@@ -185,7 +196,7 @@ coverage. Performance-document/harness exceptions remain selector-controlled.
 `tools/ci/qualification.c` is the aggregate's fail-closed predicate. It checks
 selector/event consistency as well as every required result; missing, invalid,
 failed or cancelled results cannot pass. Its `--self-test` enumerates
-50,000,000 combinations against the explicit allowed tuples. They span the
+37,500,000 combinations against the explicit allowed tuples. They span the
 event, draft state, selection, dispatch purpose, the `evidence` job's hardware
 decision, and seven job results.
 The hosted selector job runs that test before any hardware admission, and the
@@ -293,63 +304,18 @@ reported, but they don't block measurement, which was the owner's choice on
 Every `9700x.yml` run has an `evidence` job, which must succeed:
 
 - **Pull request:** its draft state alone.
-- **Push:** the one merged pull request of this repository whose merge commit
-  it is. That pull request's newest run of the workflow must have completed
-  within a day, with the 9700X job, the aggregate and every plain row green.
-  The run's own coverage record must name that run, the head and a completed
-  targeted measurement of the identical tree.
+- **Push:** admitted: its 9700X job runs native correctness and the
+  measurements on the landed commit. Since #1272 a pull request's 9700X job
+  skips native correctness, so a push reuses nothing from it; records from
+  before then that say a push reused its pull request's run
+  (`native-reused`, outcome `pending`) are still read by the harvest.
 
-  Tree identity carries everything the repository pins: the workflow, the
-  inventory, the toolchain's and corpus's digests, and the harnesses'
-  commits. The build and the inventory read no Git metadata; the self-test
-  fails if they start to.
-
-  What the repository doesn't pin is the host. Every 9700X job records it as
-  its host identity, made of:
-
-  - the kernel, the microcode, GCC's version and glibc;
-  - a digest of the software the native inventory runs, which covers:
-    - the package database's every package and version;
-    - the contents of each external tool the inventory calls, and of every
-      shared library those load. The tools are GCC with its `cc1`, `cc1plus`
-      and `collect2`, binutils, `gdb`, `perf`, `valgrind`, `mold`, `wild`,
-      `make`, `file` and the shell;
-    - the runtime GCC links a static program with (`libc.a`, `crt1.o` and the
-      rest, as `test-static`'s `cc -static` resolves them);
-    - every file of the packages that own any of those, and of the C
-      toolchain's packages (`gcc`, `gcc-libs`, `glibc`, `binutils`,
-      `linux-api-headers`): their headers, static libraries, startup
-      objects, linker scripts and configuration, by content.
-
-  So an oracle, runtime or header replaced under the same version changes the
-  identity. In the nightly mode, such a push runs a
-  `host-identity` job on the 9700X. It takes the lock for seconds and reads
-  the identity with the same steps as the 9700X job: the host's check, then
-  the identity. The self-test keeps both pairs identical. The 9700X job is skipped only when that identity
-  equals the one the pull request's run recorded. A component that can't be
-  read leaves no identity at all, never a placeholder that another unread
-  one would match. The cases are:
-
-  - a host without a package database;
-  - a file that can't be hashed;
-  - a package query that fails or prints anything on stderr;
-  - an ownership query that doesn't account for every file. Each file needs
-    an owner, at the version the package list gives, or pacman's "No package
-    owns" and no other message;
-  - an owners' file listing that lacks a file the ownership query attributed
-    to them.
-
-  A file no package owns is hashed like any other, but a failed query is
-  never taken for one. The warning names the check that failed.
-
-  The reuse accepts only an identity with every component present. A
-  different identity, an incomplete one, a record without one, or a failed
-  `host-identity` job runs native correctness after all. The record then says
-  `host-unconfirmed`.
-
-  Measurements are reused too only when the first-parent tree is also
-  identical; otherwise they are the backlog's. Missing, ambiguous, stale or
-  mismatched evidence, including an API failure, runs the work.
+  Every 9700X job records its host identity in the coverage record: the
+  kernel, the microcode, GCC's version and glibc, and a digest of the software
+  the native inventory runs (the package database, the external tools and the
+  libraries they load, the static runtime, and the files of the C toolchain's
+  packages). A component that can't be read leaves no identity, never a
+  placeholder.
 - **Nightly dispatch:** the commit must be a first-parent state of main at or
   before the pinned snapshot, or the job fails and nothing runs. The newest
   conclusive push or dispatch run of that commit decides its hosted rows: a
@@ -361,11 +327,11 @@ holds the commit, tree, first parent and first-parent tree; the blobs of the
 workflow, selector, inventory, toolchain and corpus scripts; the selection; what
 the run ran, reused, admitted and deferred; the 9700X job's window, native
 correctness and host identity; and the outcome. Outcomes are `complete`,
-`not-required`, `deferred` (no hardware admitted), `pending` (a push qualified
-by reuse whose measurements weren't reusable), `blocked-hosted`,
+`not-required`, `deferred` (no hardware admitted), `pending` (before #1272: a push
+qualified by reuse whose measurements weren't reusable), `blocked-hosted`,
 `blocked-native`, `failed` (a measurement after native correctness),
 `interrupted` (cancelled or timed out) and `rejected`. Only the 9700X job's
-success, or a push's evidenced reuse, completes.
+success completes (or, in records from before #1272, a push's evidenced reuse).
 
 ### The coordinator (`.github/workflows/nightly-backfill.yml`)
 
@@ -505,7 +471,7 @@ state is over three days old.
 **Capacity.** In late October main gained 31 to 82 first-parent commits a day.
 Nightly runs are bounded at 25 minutes, but PR jobs took 4 to 5 minutes. A
 three-hour window holds about 25 to 30 such runs, so the backlog drains only
-where pushes and reuse measure most states during the day. The report's alert
+where pushes measure most states during the day. The report's alert
 shows when they don't.
 
 **Rollout.** The switch is `vars.BUSTER_NIGHTLY`. Until it is `on`, scheduled

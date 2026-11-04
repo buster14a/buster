@@ -68,7 +68,10 @@ Failure restores the publication arena, clears code/count outputs, and
 rewinds the lane's intermediate arenas. An incomplete reservation is released.
 The lane can then compile another function. Publication/frame-adapter
 inconsistency is internal; it is not reported as an unsupported emitter.
-The existing frame representation and production probe policy are unchanged.
+The published frame is the frame emitter's own events (#1056, `EmittedCode`):
+a frame whose epilogue brackets aren't its exits' is that internal publication
+failure (`BUSTER_CHECK_TIER1_FRAME_PUBLICATION`). The production probe policy
+is unchanged.
 
 ## Reports and ordering
 

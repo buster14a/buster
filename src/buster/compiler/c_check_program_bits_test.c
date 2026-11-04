@@ -261,9 +261,105 @@ static __attribute__((noinline)) void check_test_bits_programs(CheckTest* test, 
     check_test_program_against(test, evaluated, evaluated, true, "bits-clang-evaluates-reversal-and-swap-arguments-twice", clang);
 }
 
+// The declarations of C23's <stdbit.h> functions that the stdc library fixtures call, as clang's table has them.
+#define BUSTER_CHECK_TEST_STDC_DECLARATIONS \
+    "unsigned int stdc_leading_zeros_uc(unsigned char);\nunsigned int stdc_count_ones_us(unsigned short);\n" \
+    "unsigned int stdc_bit_width_ui(unsigned int);\nunsigned long stdc_bit_floor_ul(unsigned long);\n" \
+    "_Bool stdc_has_single_bit_ull(unsigned long long);\nunsigned char stdc_bit_ceil_uc(unsigned char);\n" \
+    "unsigned int stdc_trailing_zeros_ull(unsigned long long);\nunsigned int stdc_first_leading_one_ul(unsigned long);\n"
+
+// C23's <stdbit.h> functions as clang's library builtins (cbuiltin_stdc_library): a call of the unit's declaration of
+// one, external and of the row's prototype, is the generic builtin's of its parameter's type, in C23 alone. Each fixture
+// is checked by both paths against clang -fsyntax-only in its mode: the results' types, folds in every constant context
+// of arguments converted to the parameters' types; a pointer's and a struct's argument, two arguments, a declaration of
+// another prototype or of internal linkage, and C17, where the call is the declaration's, no constant.
+static __attribute__((noinline)) void check_test_bits_stdc_library_sources(CheckTest* test, const char* clang)
+{
+    static const CheckSourceFixture fixtures[] =
+    {
+        { .name = "stdc library: result types and folds", .standard = 2023, .source =
+          BUSTER_CHECK_TEST_STDC_DECLARATIONS
+          "#define T(e, t) _Static_assert(_Generic((e), t: 1, default: 0), #e);\n"
+          "void f(unsigned char c, int i)\n{\nT(stdc_leading_zeros_uc(c), unsigned int) T(stdc_bit_floor_ul(i), unsigned long)\n"
+          "T(stdc_has_single_bit_ull(i), _Bool) T(stdc_bit_ceil_uc(i), unsigned char)\n}\n"
+          "_Static_assert(stdc_leading_zeros_uc(1) == 7 && stdc_count_ones_us(-1) == 16 && stdc_bit_width_ui(5) == 3 && stdc_bit_floor_ul(100) == 64, \"\");\n"
+          "_Static_assert(stdc_has_single_bit_ull(1ull << 63) && !stdc_has_single_bit_ull(3) && stdc_bit_ceil_uc(200) == 0 && stdc_bit_ceil_uc(0) == 1, \"\");\n"
+          "_Static_assert(stdc_leading_zeros_uc(-1) == 0 && stdc_count_ones_us(0x10000) == 0 && stdc_leading_zeros_uc(256) == 8, \"\");\n"
+          "enum { E = stdc_trailing_zeros_ull(1ull << 40) };\n"
+          "static int s = stdc_first_leading_one_ul(1);\n"
+          "int a[stdc_bit_ceil_uc(3)];\n"
+          "_Static_assert(E == 40 && sizeof a == 4 * sizeof(int), \"\");\n" },
+        { .name = "stdc library: a block's declaration and a const parameter", .standard = 2023, .source =
+          "unsigned stdc_leading_zeros_ui(const unsigned);\n_Static_assert(stdc_leading_zeros_ui(1) == 31, \"\");\n"
+          "unsigned f(double d)\n{\nextern unsigned stdc_count_ones_ui(unsigned);\nreturn stdc_leading_zeros_ui(d) + stdc_count_ones_ui(1.5);\n}\n" },
+        { .name = "stdc library: a pointer's argument", .standard = 2023, .rejected = true, .source =
+          BUSTER_CHECK_TEST_STDC_DECLARATIONS "unsigned f(int *p)\n{\nreturn stdc_bit_width_ui(p);\n}\n" },
+        { .name = "stdc library: a struct's argument", .standard = 2023, .rejected = true, .source =
+          BUSTER_CHECK_TEST_STDC_DECLARATIONS "struct S { int x; };\nunsigned f(struct S s)\n{\nreturn stdc_bit_width_ui(s);\n}\n" },
+        { .name = "stdc library: two arguments", .standard = 2023, .rejected = true, .source =
+          BUSTER_CHECK_TEST_STDC_DECLARATIONS "unsigned f(unsigned x)\n{\nreturn stdc_bit_width_ui(x, 1);\n}\n" },
+        { .name = "stdc library: another prototype's declaration is no constant", .standard = 2023, .rejected = true, .source =
+          "int stdc_leading_zeros_ui(int);\n_Static_assert(stdc_leading_zeros_ui(1) == 31, \"\");\n" },
+        { .name = "stdc library: another prototype's declaration is called", .standard = 2023, .source =
+          "int stdc_leading_zeros_ui(int);\nint f(int x)\n{\nreturn stdc_leading_zeros_ui(x);\n}\n" },
+        { .name = "stdc library: a static function is no constant", .standard = 2023, .rejected = true, .source =
+          "static unsigned stdc_leading_zeros_ui(unsigned x)\n{\nreturn x;\n}\n_Static_assert(stdc_leading_zeros_ui(1) == 31, \"\");\n" },
+        { .name = "stdc library: C17's declaration is no constant", .rejected = true, .source =
+          "unsigned stdc_leading_zeros_ui(unsigned);\n_Static_assert(stdc_leading_zeros_ui(1) == 31, \"\");\n" },
+        { .name = "stdc library: C17's declaration is called", .source =
+          BUSTER_CHECK_TEST_STDC_DECLARATIONS "unsigned f(unsigned x)\n{\nreturn stdc_bit_width_ui(x) + stdc_bit_ceil_uc(x);\n}\n" },
+    };
+    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
+    char directory[] = "/tmp/buster-checker-stdc-XXXXXX";
+    bool ready = mkdtemp(directory) != 0;
+    char paths[FILE_COUNT][160];
+    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        ready = parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
+    }
+    // Each standard's fixtures in a run of clang's own.
+    for (uint32_t group = 0; ready && group < 2; group += 1)
+    {
+        char* pointers[FILE_COUNT];
+        uint32_t indices[FILE_COUNT];
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+        {
+            if ((fixtures[i].standard == 2023) == (group == 1))
+            {
+                pointers[count] = paths[i];
+                indices[count] = i;
+                count += 1;
+            }
+        }
+        const char* arguments[] = { group == 1 ? "-std=gnu23" : "-std=gnu17" };
+        ParseTestClang outcomes[FILE_COUNT];
+        const bool ran = parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, count, outcomes);
+        check_test_expect(test, ran, "the stdc library builtins' Clang oracle ran");
+        for (uint32_t k = 0; ran && k < count; k += 1)
+        {
+            const CheckSourceFixture* fixture = fixtures + indices[k];
+            char description[192];
+            snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixture->name);
+            check_test_expect(test, outcomes[k].rejected == fixture->rejected, description);
+            check_test_source(test, fixture, paths[indices[k]], &outcomes[k]);
+        }
+    }
+    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+    {
+        unlink(paths[i]);
+    }
+    if (directory[0] != 0)
+    {
+        rmdir(directory);
+    }
+}
+
 static __attribute__((noinline)) void check_test_bits(CheckTest* test, const char* clang)
 {
     check_test_bits_sources(test, clang);
+    check_test_bits_stdc_library_sources(test, clang);
     check_test_bits_programs(test, clang);
 }
 

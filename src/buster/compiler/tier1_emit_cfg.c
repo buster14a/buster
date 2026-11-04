@@ -2350,6 +2350,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
     emitted->exits = ok ? ir_allocate(output, (uint64_t)returns + 1, 4, &ok) : 0;
     emitted->exit_count = 0;
+    // The frame's events (#1056): the prologue's, and each return's epilogue's.
+    emitted->frame_events = ok ? ir_allocate(output, BUSTER_TIER1_FRAME_EMIT_EVENTS * ((uint64_t)returns + 1), sizeof(EmissionFrameEvent), &ok) : 0;
+    emitted->frame_event_count = 0;
     // The certificate of the code (#939) reads each record's origin, and each block's and stub's first record.
     emitted->origins = ok && certify ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
     emitted->origin_values = ok && certify ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
@@ -2469,6 +2472,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         const bool selected = !plan->covered[node] && function->op[node] != IR_PHI && !tier1_select_entry_parameter(function, node);
         dropped[node] = selected && v != BUSTER_TIER1_CFG_NONE && tier1_emit_cfg_dead_definition(emitted, v, base + 2 * node + 1, dropped, base);
     }
+    buffer.events = emitted->frame_events;
+    buffer.event_capacity = emitted->frame_events != 0 ? (uint32_t)(BUSTER_TIER1_FRAME_EMIT_EVENTS * ((uint64_t)returns + 1)) : 0;
     if (error == TIER1_EMIT_OK && certify)
     {
         memcpy(emitted->dropped, dropped, count);
@@ -2477,6 +2482,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         error = TIER1_EMIT_FRAME;
     }
+    emitted->body_record = buffer.count;
     tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_FRAME, 0), BUSTER_IR_NONE);
     // A narrow parameter into its canonical 32-bit storage, in its register before anything reads it: its caller
     // extends it by its own type (sign or zero), which the canonical form doesn't keep.
@@ -2936,6 +2942,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         code->count = buffer.count;
         code->branch_count = buffer.branch_count;
+        emitted->frame_event_count = buffer.event_count;
         code->node_first[count] = buffer.count;
         code->error_node = BUSTER_IR_NONE;
         code->arena_bytes = output->length - output_mark;

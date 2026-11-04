@@ -167,6 +167,41 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "struct S;struct T{int x;};\nint f(void)\n{\nreturn __builtin_omp_required_simd_align(int[]) + __builtin_omp_required_simd_align(int[3]) +\n"
           "__builtin_omp_required_simd_align(struct S*) + __builtin_omp_required_simd_align(double[2][3]) + __builtin_omp_required_simd_align(struct T) +\n"
           "__builtin_omp_required_simd_align(int(*)(void));\n}\n" },
+        // clang's type traits of C (#148): an int constant in every context, of each kind of type, and an incomplete
+        // record's or enumeration's error, the destructible ones' of an array's base element too.
+        { .name = "generic: type traits' values and contexts", .source =
+          "struct S;struct T{int x;};union U{int y;};enum E{EA};\n"
+          "#define D(t, v) _Static_assert(__is_destructible(t) == v && __is_nothrow_destructible(t) == v, #t);\n"
+          "#define C(t, v) _Static_assert(__is_bitwise_cloneable(t) == v, #t);\n"
+          "D(int, 1) D(struct T, 1) D(union U, 1) D(enum E, 1) D(int[3], 1) D(int*, 1) D(struct S*, 1) D(_Atomic long double, 1) D(const volatile int, 1)\n"
+          "D(void, 0) D(const void, 0) D(int[], 0) D(void(void), 0) D(int(*)(void), 1) D(double[2][3], 1)\n"
+          "C(int, 1) C(struct T, 1) C(int[], 1) C(void(void), 1) C(void, 0) C(struct T[][2], 1) C(_Atomic int, 1) C(__int128, 1)\n"
+          "_Static_assert(_Generic(__is_destructible(int), int: 1, default: 0) && _Generic(__is_bitwise_cloneable(int), int: 1, default: 0), \"\");\n"
+          "enum { K = __is_destructible(int) + __is_bitwise_cloneable(void) };\nint a[__is_nothrow_destructible(int) + 1];\n"
+          "static int s = __is_bitwise_cloneable(struct T);\n"
+          "int f(int n)\n{\nswitch (n) { case __is_destructible(int): return __is_destructible(int[n]) + __is_bitwise_cloneable(int[n]); }\nreturn K;\n}\n" },
+        { .name = "generic: is_destructible of an incomplete struct", .source = "struct S;\nint f(void)\n{\nreturn __is_destructible(struct S);\n}\n", .rejected = true },
+        { .name = "generic: is_nothrow_destructible of an incomplete union", .source = "union S;\nint x =\n__is_nothrow_destructible(union S);\n",
+          .rejected = true },
+        { .name = "generic: is_bitwise_cloneable of an incomplete struct", .source = "struct S;\nint f(void)\n{\nreturn __is_bitwise_cloneable(struct S);\n}\n",
+          .rejected = true },
+        { .name = "generic: is_bitwise_cloneable of an incomplete enum", .source = "enum S;\nint f(void)\n{\nreturn __is_bitwise_cloneable(enum S);\n}\n",
+          .rejected = true },
+        { .name = "generic: ptrauth_type_discriminator of a type", .source = "unsigned long f(void)\n{\nreturn __builtin_ptrauth_type_discriminator(int);\n}\n",
+          .rejected = true },
+        { .name = "generic: ptrauth_type_discriminator in a constant", .source = "struct Z;\nenum { E =\n__builtin_ptrauth_type_discriminator(struct Z) };\n", .rejected = true },
+        { .name = "generic: is_destructible of an expression", .source = "int f(int n)\n{\nreturn __is_destructible(n);\n}\n", .rejected = true },
+        // __builtin_setjmp and __builtin_longjmp (#148): a buffer of five pointers, longjmp's value a constant 1 wherever the
+        // call is, and buffers of other types, which clang refuses.
+        { .name = "generic: setjmp and longjmp", .source =
+          "void *b[5];\nvoid f(void)\n{\n__builtin_longjmp(b, 1);\n}\nint g(void)\n{\nreturn __builtin_setjmp(b);\n}\n"
+          "_Static_assert(_Generic(__builtin_setjmp(b), int: 1, default: 0), \"\");\n" },
+        { .name = "generic: longjmp of 2", .source = "void *b[5];\nvoid f(int n)\n{\n__builtin_longjmp(b, 2);\n}\n", .rejected = true },
+        { .name = "generic: longjmp of a variable", .source = "void *b[5];\nvoid f(int n)\n{\n__builtin_longjmp(b, n);\n}\n", .rejected = true },
+        { .name = "generic: longjmp of 0 where it can't run", .source = "void *b[5];\nvoid f(void)\n{\nif (0) __builtin_longjmp(b, 0);\n}\n",
+          .rejected = true },
+        { .name = "generic: setjmp of an array of longs", .source = "long b[8];\nint f(void)\n{\nreturn __builtin_setjmp(b);\n}\n", .rejected = true },
+        { .name = "generic: setjmp of an array of char pointers", .source = "char *b[5];\nint f(void)\n{\nreturn __builtin_setjmp(b);\n}\n", .rejected = true },
         { .name = "generic: LINE of an argument", .source = "unsigned f(void)\n{\nreturn __builtin_LINE(1);\n}\n", .rejected = true },
         { .name = "generic: complex of an int", .source = "_Complex double f(void)\n{\nreturn __builtin_complex(1, 2.0);\n}\n", .rejected = true },
         { .name = "generic: complex of an int second", .source = "_Complex double f(double x)\n{\nreturn __builtin_complex(x, 2);\n}\n", .rejected = true },
@@ -411,6 +446,23 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix(__builtin_omp_required_simd_align(double));mix(sizeof(__builtin_FILE()));mix(_Generic(__builtin_LINE(),unsigned:1,default:2));\n"
         "mix(_Generic(__builtin_FILE(),char*:3,default:4));mix(_Generic(__builtin_vectorelements(v),unsigned long:5,default:6));return (int)(h^(h>>32));}\n",
         "generic-source-places-and-type-queries", clang);
+    // __builtin_setjmp and __builtin_longjmp (#148): a longjmp through eight frames of their own, after which a local the
+    // function didn't change keeps its value and a volatile one has its last, four times over, and the callee-saved
+    // registers the harness keeps across tested come back as they were; and the buffer's first word, the frame address.
+    check_test_program_source(test,
+        "static void* buf[5];static int depth;static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "static void deep(int n){volatile int pad[16];pad[n&15]=n;depth+=pad[n&15]+1;if(n>0)deep(n-1);else __builtin_longjmp(buf,1);}\n"
+        "static int jumps(int n){int kept=n*7+1;volatile int changed=0;if(__builtin_setjmp(buf)==0){changed=5;deep(n&7);return -1;}return kept+changed*100;}\n"
+        "static int frames(void){void* f[5];int r=__builtin_setjmp(f);return r==0&&f[0]==__builtin_frame_address(0);}\n"
+        "int tested(int n){h=(unsigned)n;depth=0;for(int i=0;i<4;i++)mix((unsigned)jumps(n+i));mix((unsigned)depth);mix((unsigned)frames());return (int)(h^(h>>32));}\n",
+        "generic-setjmp-longjmp", clang);
+    // clang's type traits of C (#148), their values in code: of complete, incomplete and variably modified types.
+    check_test_program_source(test,
+        "struct T{int x;};\n"
+        "int tested(int n){int k=n>0?n:1;return __is_destructible(int)+__is_destructible(void)*2+__is_destructible(int[])*4+__is_destructible(int[k])*8+\n"
+        "__is_nothrow_destructible(struct T)*16+__is_bitwise_cloneable(int[])*32+__is_bitwise_cloneable(void(void))*64+__is_bitwise_cloneable(void)*128+\n"
+        "__is_bitwise_cloneable(int[k][2])*256+n*1000;}\n",
+        "generic-type-traits", clang);
     // __builtin_vectorelements of a comma expression (#1126's review), its last operand's type, none of its operands
     // evaluated (a call among them).
     check_test_program_source(test,

@@ -160,9 +160,11 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
 but refused names would remain zero (none is now), and the vector builtins
-the checker checks but no lowering takes (`__builtin_elementwise_clmul`, the
-masked memory builtins and the matrix ones) have `BUSTER_CBUILTIN_CAP_CHECKER`
-alone, so `__has_builtin` answers 0 for them. clang's sized legacy atomics
+the checker checks but no lowering takes (`__builtin_elementwise_clmul` and the
+masked memory builtins) have `BUSTER_CBUILTIN_CAP_CHECKER` alone, so
+`__has_builtin` answers 0 for them. The matrix builtins are an error at every
+call, as clang's are without `-fenable-matrix`, so they have the source
+capability and `__has_builtin` answers 1 for them, as clang's does. clang's sized legacy atomics
 (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog
 resolves each to its family's builtin, with its capabilities
 (`cbuiltin_sized_entry`).
@@ -171,7 +173,10 @@ raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
 `__has_builtin` has them: its row's language modes and required target
 features (the preprocessor guide's "feature queries"; `CBuiltinSourceScope`
-keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's).
+keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's). The
+preprocessor's own builtins it answers 1 for are clang's: the target queries,
+`__is_target_variant_os` and `__is_target_variant_environment` among them,
+which it evaluates as clang's do (0 on Linux).
 
 ## Varargs contracts
 
@@ -1636,7 +1641,28 @@ features. Their prototypes are clang's metadata's:
   MXCSR's 13 and 14). Both go through the red zone below the leaf's return
   address;
 - `__builtin_extend_pointer(p)`: p as an `unsigned long long`;
-- `__builtin_verbose_trap(category, message)`: `ud2`, as `__builtin_trap`'s.
+- `__builtin_verbose_trap(category, message)`: `ud2`, as `__builtin_trap`'s;
+- `__builtin_setjmp(buf)` and `__builtin_longjmp(buf, 1)`: LLVM's SjLj lowering
+  (X86's `emitEHSjLjSetJmp` and `emitEHSjLjLongJmp`) as leaves. setjmp stores
+  the caller's frame pointer (rbp, its frame's address where it has one, as
+  clang's `llvm.frameaddress`), the resume address (the leaf's own return
+  address, after the caller's call) and the caller's stack pointer (clang's
+  `llvm.stacksave`) in the buffer's words 0 to 2, and returns 0. longjmp loads
+  rbp and rsp back, sets eax to 1 and jumps to the resume address, where the
+  call of setjmp returns again with 1; a `ud2` ends it, which no path reaches.
+  Since a longjmp from a deeper frame leaves every other register as that frame
+  left it, the function that calls setjmp has the frame LLVM's setjmp, which
+  clobbers every register, gives it (`Tier0Function.returns_twice`): it saves
+  every callee-saved register and restores it, as `unwind_init`'s does, keeps no
+  local in one and no value of its stacks either (its integer depths are the
+  nine caller-saved registers'), and a realigned frame whose base is r15 (an
+  over-aligned object beside `alloca` or a VLA) is refused. A value of an
+  enclosing expression pending across the call is reloaded from its call save
+  slot after the second return, which a later call with values pending at that
+  depth may have reused; C's contexts for setjmp (a condition, compared with a
+  constant) have none. Ordinary Tier 1 leaves such a function to Tier 0.
+  longjmp's second argument must be a constant 1, wherever the call is, with
+  clang's two errors at the call (`check_input_longjmp_argument`).
 
 A call's size of `memcpy_inline` and `memset_inline` must be an integer
 constant expression (the prototype's `I`). A non-constant one is refused at the
@@ -1724,12 +1750,32 @@ takes, code, static initializers, enumerators and `_Static_assert` alike.
 - Each is an `unsigned long`. An operand that isn't what clang takes is an
   error, as clang's is.
 
+clang's type traits of C, `__is_destructible(T)`, `__is_nothrow_destructible(T)`
+and `__is_bitwise_cloneable(T)`, are keywords of the same span and constants
+of the same walk, each an `int` (Sema's `getLogicalOperationType`), as
+`EvaluateUnaryTypeTrait` gives them where no type has a destructor:
+
+- the destructible ones are 1 for every complete type, a variably modified one
+  among them, and 0 for `void`, an array of no bound and a function type;
+- `__is_bitwise_cloneable` is its base element type's (`isBitwiseCloneableType`):
+  1 for a complete one and a function type, 0 for `void`;
+- `CheckUnaryTypeTraitTypeCompleteness` first requires the destructible ones'
+  base element type to be `void` or complete, and `__is_bitwise_cloneable`'s
+  type to be `void`, an array of no bound or complete: an incomplete record or
+  enumeration is an error at the keyword.
+
+`__builtin_ptrauth_type_discriminator(T)`, of the same span, is no constant:
+every use is an error at its keyword, where clang says "this target does not
+support pointer authentication".
+
 A deferred body's lane refuses a body that uses one of the first five (the
 preprocessor's places change as they are read), which source order then reads.
-`__has_builtin` answers 1 for all seven (`pp_implemented_builtin`), and
+`__has_builtin` answers 1 for all eleven (`pp_implemented_builtin`), and
 `__has_constexpr_builtin` 0, as clang's. `test-checker`'s
 `generic-source-places-and-type-queries` runs them natively against clang -O0's
-build by both paths, after a `#line` that names the file.
+build by both paths, after a `#line` that names the file, and `generic-type-traits`
+the traits of complete, incomplete and variably modified types; their source
+fixtures compare every kind of type and context, and the errors, with clang.
 
 ## Intrinsic checking contracts
 
@@ -1773,11 +1819,12 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 558 audited SemaX86 constraint facts for 530
+`c_check_builtin_x86.c` adds 559 audited SemaX86 constraint facts for 531
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
 rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 276 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 277 direct ranges,
+`_mm_prefetch`'s hint (0 to 7) the last of them.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -1979,8 +2026,13 @@ the existing families or of new ones:
   takes as the builtin; and the builtins of the dedicated paths
   (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
   declaration too, become calls of their names here.
-  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
-  modes, and stays out of the scope.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` where
+  the header is included, and without it clang's builtin (a
+  `TARGET_HEADER_BUILTIN` of no features), which is a leaf too: its hint a
+  constant of 0 to 7, SemaX86's range (`c_check_builtin_x86.c`'s last rule,
+  whose error clang defers to reachability), and its code no prefetch, as
+  `__builtin_prefetch`'s has none: a prefetch has no effect a program sees,
+  past its address's evaluation.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's
@@ -2132,7 +2184,9 @@ other generic vector builtins of clang 23 (#148), at catalog identities from
   functions and void here are refused as unsupported, the type table having
   none;
 - the matrix builtins are an error at every call, as clang's are without
-  `-fenable-matrix`, which buster hasn't: no unit has a matrix type.
+  `-fenable-matrix`, which buster hasn't: no unit has a matrix type. Since
+  nothing more could compile, they are implemented as clang's are, and
+  `__has_builtin` answers 1 for them.
 
 `test-checker` compares each family's valid calls and one error each with
 clang's acceptance and first error line (`c_check_builtin_vector_graph_test.c`),
@@ -2253,11 +2307,14 @@ folding, for which its `-pedantic` warns; this doesn't). Pointer results
 (`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
-**Plain names.** `c_builtin_library_plain.inc` lists the 373 `f` rows of C's
-modes but `<stdarg.h>`'s `va_start`, `va_end` and `va_copy`, whose prototypes
-take a `va_list` by reference. Each is a builtin of the unit unless `-fno-builtin`,
-`-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
-`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
+**Plain names.** `c_builtin_library_plain.inc` lists the 446 `f` rows of C's
+modes, `<stdarg.h>`'s `va_start`, `va_end` and `va_copy` among them, whose
+prototypes take a `va_list` by reference (`A`, spelled as its decayed
+`struct __va_list_tag *`): clang's code calls functions of those names, which
+no C library has. Each is a builtin of the unit unless `-fno-builtin`,
+`-ffreestanding` or `-fno-builtin-NAME` says otherwise, one of
+`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone,
+and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
 answers by. The list is pinned to Clang 23.1.4, CI's reference: its GNU rows
@@ -2297,6 +2354,29 @@ checking their prototypes (attribute `T`: `setjmp` and its kin, `getcontext`,
 `savectx`, `vfork`, Sema's `allowTypeMismatch`), which warn of nothing. `umask`
 and `pthread_create` have no prototype: their uses are any undeclared
 function's, as clang's are.
+
+**C23's `<stdbit.h>` functions.** `stdc_leading_zeros_uc` to
+`stdc_bit_ceil_ull`, the 14 operations of `__builtin_stdc_leading_zeros` to
+`__builtin_stdc_bit_ceil` (clang's `BIstdc_*`) of a parameter of `unsigned
+char`, `short`, `int`, `long` or `long long` each, are computed inline, as
+clang's code computes them: a call of the unit's declaration of one, where
+the name is a builtin of the unit (C23's, `pp_library_builtin`), the
+declaration has external linkage and the row's prototype (`unsigned int`,
+`bool` for `has_single_bit` or the parameter's type for `bit_floor` and
+`bit_ceil`, of the parameter's type), and the call has one argument, is the
+builtin (`check_input_stdc_library_call`, in the walk and in the reader's
+constant evaluator for an enumerator's value). It has an identity of its own
+(`CBUILTIN_STDC_LIBRARY_FIRST` + the operation × 5 + the type), which the bit
+builtins check as a fixed prototype's (`check_builtin_bits_parameter`: the
+argument converted as by assignment, a pointer's or a record's refused) and
+fold, and lower, as their generic builtin's of the parameter's type. So
+`stdc_leading_zeros_ui(1)` is 31 in an `_Static_assert`, and a call computes it
+even where the unit defines the function itself, whose address the name still
+is. A call of another count is the declaration's, with its count's error; a
+declaration of another prototype or of internal linkage, and every other mode,
+make the call the function's. `__has_constexpr_builtin` answers 1 for them in
+C23. Their implicit declarations' diagnostics spell `unsigned short` and C23's
+`bool`.
 
 **Refused.** The classification builtins of custom checking
 (`__builtin_isnormal` and its kin) and `__builtin_signbitf` and `signbitl`,
