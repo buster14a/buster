@@ -24,7 +24,8 @@
 // the arguments' errors clang gives after the subject's check (check_input_attribute_defer), the type attributes a tag
 // ignores, the declarations of no declarator (check_input_free_standing, check_input_attribute_ignored_lists, C23 lists
 // that begin one), and mode on an enum, with a fixed type's enumerator errors (BUSTER_CHECK_ENUM_MODED). Then static
-// analyses' and Objective-C's annotations (check_input_attribute_annotations, check_input_capture_names).
+// analyses' and Objective-C's annotations (check_input_attribute_annotations, check_input_capture_names), and other
+// targets' vector types, builtins' aliases, the loops' and compound statements' hints, and Blocks' byref.
 
 static void check_test_driver_attribute_arguments(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -1177,6 +1178,57 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void h(int *p __attribute__((param_typestate(consumed))));\n",
         "void f(void) __attribute__((return_typestate(unconsumed)));\n",
         "void h(int *p __attribute__((acquire_handle(\"zircon\"))));\n",
+        "void f(void) __attribute__((arm_sve_vector_bits));\n",
+        "void f(int a, int b) __attribute__((arm_sve_vector_bits));\n",
+        "void f(void) __attribute__((arm_sve_vector_bits)) {}\n",
+        "__attribute__((arm_sve_vector_bits)) void f(const char *s, ...);\n",
+        "void f(void) __attribute__((riscv_rvv_vector_bits));\n",
+        "void f(int a, int b) __attribute__((riscv_rvv_vector_bits));\n",
+        "void f(void) __attribute__((riscv_rvv_vector_bits)) {}\n",
+        "__attribute__((riscv_rvv_vector_bits)) void f(const char *s, ...);\n",
+        "void f(void) __attribute__((clang_builtin_alias));\n",
+        "void f(int a, int b) __attribute__((clang_builtin_alias));\n",
+        "void f(void) __attribute__((clang_builtin_alias)) {}\n",
+        "__attribute__((clang_builtin_alias)) void f(const char *s, ...);\n",
+        "void f(void) __attribute__((atomic));\n",
+        "void f(int a, int b) __attribute__((atomic));\n",
+        "void f(void) __attribute__((atomic)) {}\n",
+        "__attribute__((atomic)) void f(const char *s, ...);\n",
+        "void f(void) __attribute__((blocks));\n",
+        "void f(int a, int b) __attribute__((blocks));\n",
+        "void f(void) __attribute__((blocks)) {}\n",
+        "__attribute__((blocks)) void f(const char *s, ...);\n",
+        "void f(void) __attribute__((code_align));\n",
+        "void f(int a, int b) __attribute__((code_align));\n",
+        "void f(void) __attribute__((code_align)) {}\n",
+        "__attribute__((code_align)) void f(const char *s, ...);\n",
+        "void f(void) __attribute__((opencl_unroll_hint));\n",
+        "void f(int a, int b) __attribute__((opencl_unroll_hint));\n",
+        "void f(void) __attribute__((opencl_unroll_hint)) {}\n",
+        "__attribute__((opencl_unroll_hint)) void f(const char *s, ...);\n",
+        "void f(int *a) { __attribute__((code_align(8))) for (int i = 0; i < 4; i++) a[i] = 0; }\n",
+        "void f(int *a) { __attribute__((code_align(3))) for (int i = 0; i < 4; i++) a[i] = 0; }\n",
+        "void f(int *a) { __attribute__((code_align(8192))) while (*a) a++; }\n",
+        "void f(int *a) { __attribute__((code_align)) while (*a) a++; }\n",
+        "int n; void f(int *a) { __attribute__((code_align(n))) while (*a) a++; }\n",
+        "void f(int *a) { __attribute__((code_align(8))) a[0] = 1; }\n",
+        "void f(int *a) { __attribute__((code_align(8), code_align(16))) while (*a) a++; }\n",
+        "void f(int *a) { __attribute__((opencl_unroll_hint)) while (*a) a++; }\n",
+        "void f(int *a) { __attribute__((opencl_unroll_hint(0))) while (*a) a++; }\n",
+        "void f(int *a) { __attribute__((opencl_unroll_hint(2))) a[0] = 1; }\n",
+        "void f(int *a) { __attribute__((opencl_unroll_hint(2))) do a++; while (*a); }\n",
+        "void f(int *a) { [[clang::atomic(no_remote_memory)]] { a[0] = 1; } }\n",
+        "void f(int *a) { [[clang::atomic(nosuch)]] { a[0] = 1; } }\n",
+        "void f(int *a) { [[clang::atomic]] { a[0] = 1; } }\n",
+        "void f(int *a) { [[clang::atomic(remote_memory)]] a[0] = 1; }\n",
+        "void f(int *a) { __attribute__((atomic(no_fine_grained_memory, ignore_denormal_mode))) { a[0] = 1; } }\n",
+        "void f(void) { __attribute__((blocks(byref))) int x; }\n",
+        "void f(void) { __attribute__((blocks(other))) int x; }\n",
+        "int x __attribute__((blocks(byref)));\n",
+        "typedef int T __attribute__((riscv_rvv_vector_bits(64)));\n",
+        "typedef int T __attribute__((arm_sve_vector_bits(128)));\n",
+        "void f(int *a) { [[clang::code_align(16)]] for (;;) break; }\n",
+        "void f(void) { static __attribute__((blocks(byref))) int x; }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

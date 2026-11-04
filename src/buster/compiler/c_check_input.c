@@ -368,6 +368,8 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_MATCH_PAREN,
     // A declaration before the one a message is about (#147): "previous declaration is here".
     CHECK_INPUT_NOTE_PREVIOUS_DECLARATION,
+    // A statement's earlier attribute of the same kind (#147, code_align's): "previous attribute is here".
+    CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -4077,6 +4079,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             const String8 name = check_input_attribute_name(reader, attribute->name);
             const bool u32 = check_input_attribute_equal(name, "intel_reqd_sub_group_size") || check_input_attribute_equal(name, "amdgpu_num_sgpr") ||
                              check_input_attribute_equal(name, "amdgpu_num_vgpr");
+            const bool hint = check_input_attribute_equal(name, "code_align") || check_input_attribute_equal(name, "opencl_unroll_hint");
             if (u32)
             {
                 int64_t value = 0;
@@ -4086,7 +4089,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 attribute->wide = attribute->constant_argument && wide ? 1u : 0u;
             }
             else if (check_input_attribute_equal(name, "xray_log_args") || check_input_attribute_equal(name, "nonblocking") ||
-                     check_input_attribute_equal(name, "nonallocating"))
+                     check_input_attribute_equal(name, "nonallocating") || hint)
             {
                 int64_t value = 0;
                 attribute->constant_argument = check_input_constant_ice(reader, attribute->argument_first, attribute->argument_end, &value);

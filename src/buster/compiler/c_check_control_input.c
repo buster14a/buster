@@ -223,15 +223,107 @@ static bool check_input_statement_attribute_names(CheckInputReader* reader, uint
 // always_inline clang ignores on a statement (with a warning, which isn't modeled), and nomerge and suppress on any; musttail elsewhere, fallthrough on a
 // statement that isn't empty, and every other attribute are clang's errors, the first one's reported. The musttail's
 // first token, or BUSTER_CHECK_NONE, in `*musttail`. Whether they are valid.
-static bool check_input_statement_attribute_kinds(CheckInputReader* reader, CheckInputAttributes* attributes, bool empty, bool returns, uint32_t* musttail)
+static bool check_input_statement_attribute_kinds(CheckInputReader* reader, CheckInputAttributes* attributes, bool empty, bool returns, uint8_t next,
+                                                   uint32_t* musttail)
 {
     bool valid = true;
     *musttail = BUSTER_CHECK_NONE;
+    uint32_t aligned = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = attributes->records + i;
         const CheckInputAttributeKind kind = attribute->kind;
-        if (kind == CHECK_ATTRIBUTE_MUSTTAIL)
+        const String8 generic = kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
+        const bool code_align = check_input_attribute_equal(generic, "code_align");
+        const bool unroll = check_input_attribute_equal(generic, "opencl_unroll_hint");
+        const bool loop = next == PARSE_KIND_FOR || next == PARSE_KIND_WHILE || next == PARSE_KIND_DO;
+        const uint32_t reported = reader->output->report_count;
+        if (code_align || unroll)
+        {
+            // Loops' hints (#147), which change nothing at -O0: clang's subject first, then the count, the constant and its
+            // value, and a second code_align is a conflict.
+            const uint32_t location = check_input_expression_location(reader->parser, attribute->argument_first, attribute->argument_end);
+            CheckInputAttributes holder = { 0 };
+            if (!loop)
+            {
+                check_input_attribute_argument_error(reader, &holder, attribute, attribute->first, CHECK_ARGUMENT_LOOP_ONLY, 0);
+            }
+            else if ((code_align && attribute->argument_count != 1) || (unroll && attribute->argument_count > 1))
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT,
+                                            (code_align ? BUSTER_CHECK_COUNT_EXACT : BUSTER_CHECK_COUNT_MOST) | 1u << 8);
+            }
+            else if (attribute->argument_count == 1 && !attribute->constant_argument)
+            {
+                check_input_attribute_argument_error(reader, &holder, attribute, location, CHECK_ARGUMENT_NOT_ICE, 0);
+            }
+            else if (code_align && (attribute->value < 1 || attribute->value > 4096 || (attribute->value & (attribute->value - 1)) != 0))
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, &holder, attribute, attribute->first, CHECK_ARGUMENT_CODE_ALIGN, 0);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].value = (uint64_t)attribute->value;
+                }
+            }
+            else if (unroll && attribute->argument_count == 1 && attribute->value <= 0)
+            {
+                check_input_attribute_argument_error(reader, &holder, attribute, attribute->first, CHECK_ARGUMENT_POSITIVE, 0);
+            }
+            else if (code_align && aligned != BUSTER_CHECK_NONE)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, &holder, attribute, attribute->first, CHECK_ARGUMENT_LOOP_CONFLICT, 0);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].note_token = aligned;
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE;
+                }
+            }
+            valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
+            aligned = code_align && aligned == BUSTER_CHECK_NONE ? attribute->first : aligned;
+            attribute->ignored = true;
+        }
+        else if (check_input_attribute_equal(generic, "atomic"))
+        {
+            // A compound statement's atomic options (#147), which change nothing on x86-64: clang's subject first, then each
+            // option (remote_memory, fine_grained_memory and ignore_denormal_mode, each with no_ or not).
+            CheckInputAttributes holder = { 0 };
+            static const char* const options[] = { "remote_memory", "fine_grained_memory", "ignore_denormal_mode" };
+            if (next != PARSE_KIND_L_BRACE)
+            {
+                check_input_attribute_argument_error(reader, &holder, attribute, attribute->first, CHECK_ARGUMENT_COMPOUND_ONLY, 0);
+            }
+            else if (attribute->argument_count == 0)
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_LEAST | 1u << 8);
+            }
+            for (uint32_t token = attribute->argument_first; holder.error == CHECK_ATTRIBUTE_ERROR_NONE && next == PARSE_KIND_L_BRACE && token < attribute->argument_end;
+                 token += 1)
+            {
+                const uint8_t token_kind = reader->parser->tokens.kinds[token];
+                String8 option = token_kind == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, reader->parser->tokens.names[token]) : (String8){ 0 };
+                const bool negated = option.length > 3 && memcmp(option.pointer, "no_", 3) == 0;
+                option = negated ? (String8){ option.pointer + 3, option.length - 3 } : option;
+                bool known = token_kind == PARSE_KIND_COMMA;
+                for (uint32_t o = 0; !known && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+                {
+                    known = check_input_attribute_equal(option, options[o]);
+                }
+                if (!known)
+                {
+                    const uint32_t before = reader->output->report_count;
+                    check_input_attribute_argument_error(reader, &holder, attribute, token, CHECK_ARGUMENT_ATOMIC_OPTION, 0);
+                    if (reader->output->report_count > before)
+                    {
+                        reader->output->reports[before].value = token;
+                    }
+                }
+            }
+            valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
+            attribute->ignored = true;
+        }
+        else if (kind == CHECK_ATTRIBUTE_MUSTTAIL)
         {
             *musttail = *musttail == BUSTER_CHECK_NONE ? attribute->first : *musttail;
             valid = returns;
@@ -325,7 +417,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
         reader->statement_attributes = false;
         uint32_t musttail = BUSTER_CHECK_NONE;
-        valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, &musttail);
+        valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, next, &musttail);
         bool fallthrough = false;
         for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
         {

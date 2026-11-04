@@ -323,6 +323,25 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_PRECISE_LIFETIME:
             snprintf(text, capacity, "objc_precise_lifetime only applies to retainable types; type here is %.*s", (int)literal.length, literal.pointer);
             break;
+        case CHECK_ARGUMENT_TARGET_FEATURE:
+            snprintf(text, capacity, "'%s' attribute is not supported on targets missing '%s'; specify an appropriate -march= or -mcpu=", parsed,
+                     number == 1 ? "zve32x" : "sve");
+            break;
+        case CHECK_ARGUMENT_BUILTIN_ALIAS: snprintf(text, capacity, "'%s' attribute can only be applied to a ARM, HLSL, SPIR-V or RISC-V builtin", parsed); break;
+        case CHECK_ARGUMENT_BLOCK_NONLOCAL: snprintf(text, capacity, "'__block' is not allowed on a %s variable", number == 1 ? "static local" : "nonlocal"); break;
+        case CHECK_ARGUMENT_NOT_ICE: snprintf(text, capacity, "expression is not an integer constant expression"); break;
+        case CHECK_ARGUMENT_CODE_ALIGN:
+            snprintf(text, capacity, "'%s' attribute requires an integer argument which is a constant power of two between 1 and 4096 inclusive; provided argument was %" PRId64,
+                     parsed, (int64_t)value);
+            break;
+        case CHECK_ARGUMENT_LOOP_ONLY: snprintf(text, capacity, "'%s' attribute only applies to 'for', 'while', and 'do' statements", parsed); break;
+        case CHECK_ARGUMENT_POSITIVE: snprintf(text, capacity, "'%s' attribute requires a positive integral compile time constant expression", parsed); break;
+        case CHECK_ARGUMENT_ATOMIC_OPTION:
+            snprintf(text, capacity, "invalid argument '%.*s' to atomic attribute; valid options are: 'remote_memory', 'fine_grained_memory', 'ignore_denormal_mode' "
+                                     "(optionally prefixed with 'no_')", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_COMPOUND_ONLY: snprintf(text, capacity, "'%s' attribute only applies to compound statements", parsed); break;
+        case CHECK_ARGUMENT_LOOP_CONFLICT: snprintf(text, capacity, "conflicting loop attribute '%s'", parsed); break;
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
@@ -1863,7 +1882,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             }
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             // (lifetime_capture_by's argument as written: its token's spelling.)
-                            const bool captured = (report->detail & 0xffu) == CHECK_ARGUMENT_CAPTURE_UNKNOWN && report->value < count;
+                            const bool captured = ((report->detail & 0xffu) == CHECK_ARGUMENT_CAPTURE_UNKNOWN || (report->detail & 0xffu) == CHECK_ARGUMENT_ATOMIC_OPTION) &&
+                                                  report->value < count;
                             const uint32_t at = captured ? parser->tokens.sources[report->value] : 0;
                             uint8_t* spelling_buffer = captured ? arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 :
                                                                                  (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1) : NULL;
@@ -1875,10 +1895,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                     captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
                                                     captured ? (String8){ (char*)spelling_bytes, spelling_length } : (String8){ "", 0 };
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
-                            const bool matched = report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN && report->note_token < count;
+                            const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE) &&
+                                                 report->note_token < count;
                             const PPOutputDiagnosticNote note = {
                                 .token = matched ? parser->tokens.sources[report->note_token] : 0,
-                                .message = "to match this '('",
+                                .message = report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" : "to match this '('",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
                             arena_pop_to(scratch, type_mark);

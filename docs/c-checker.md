@@ -5574,6 +5574,22 @@ arguments against the function. The checker now gives these as clang does.
   (`-WNSObject-attribute`, `-WIndependentClass-attribute`), NSObject's typedef
   of no pointer to void or a record an error; `objc_precise_lifetime`'s error,
   no C type being retainable; and `enforce_read_only_placement`'s subjects.
+  Other targets' vector types (`arm_sve_vector_bits`, `riscv_rvv_vector_bits`)
+  are clang's target error wherever a declarator's type takes them ("is not
+  supported on targets missing 'sve'"), a tag's subject's error elsewhere;
+  `clang_builtin_alias` is always its error on x86-64 ("can only be applied to a
+  ARM, HLSL, SPIR-V or RISC-V builtin"); `blocks(byref)` is a local variable's
+  (another argument warned of, a static local's or a nonlocal one's an error).
+  The statements' hints, which change nothing at -O0, are clang's
+  (`check_input_statement_attribute_kinds`): `code_align` and
+  `opencl_unroll_hint` before a `for`, `while` or `do` ("only applies to 'for',
+  'while', and 'do' statements" elsewhere), code_align a power of two from 1 to
+  4096, opencl_unroll_hint positive, an argument of no integer constant
+  "expression is not an integer constant expression", and a second code_align
+  "conflicting loop attribute" noted at the first; `atomic` before a compound
+  statement, its options `remote_memory`, `fine_grained_memory` and
+  `ignore_denormal_mode` (each with `no_` or not). On a declaration each is
+  "cannot be applied to a declaration".
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as

@@ -565,6 +565,26 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_OWNERSHIP_CONFLICT,
     CHECK_ARGUMENT_NSOBJECT_POINTER,
     CHECK_ARGUMENT_PRECISE_LIFETIME,
+    // arm_sve_vector_bits's and riscv_rvv_vector_bits's wherever a type takes them, "'X' attribute is not supported on
+    // targets missing 'sve'" (1 'zve32x'), "...; specify an appropriate -march= or -mcpu="; clang_builtin_alias's "'X'
+    // attribute can only be applied to a ARM, HLSL, SPIR-V or RISC-V builtin"; blocks' "'__block' is not allowed on a
+    // nonlocal variable"; and the statements' (check_input_statement_attribute_kinds): an argument of no integer constant,
+    // "expression is not an integer constant expression" (at it); code_align's "'X' attribute requires an integer argument
+    // which is a constant power of two between 1 and 4096 inclusive; provided argument was V" (CheckInputReport.value);
+    // a loop's off one, "'X' attribute only applies to 'for', 'while', and 'do' statements"; opencl_unroll_hint's "'X'
+    // attribute requires a positive integral compile time constant expression"; atomic's "invalid argument 'A' to atomic
+    // attribute; valid options are: ..." (the argument's token in CheckInputReport.value) and "'X' attribute only applies to
+    // compound statements"; a second code_align, "conflicting loop attribute 'X'", with its note at the first.
+    CHECK_ARGUMENT_TARGET_FEATURE,
+    CHECK_ARGUMENT_BUILTIN_ALIAS,
+    CHECK_ARGUMENT_BLOCK_NONLOCAL,
+    CHECK_ARGUMENT_NOT_ICE,
+    CHECK_ARGUMENT_CODE_ALIGN,
+    CHECK_ARGUMENT_LOOP_ONLY,
+    CHECK_ARGUMENT_POSITIVE,
+    CHECK_ARGUMENT_ATOMIC_OPTION,
+    CHECK_ARGUMENT_COMPOUND_ONLY,
+    CHECK_ARGUMENT_LOOP_CONFLICT,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2507,6 +2527,9 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "param_typestate", "return_typestate", "lifetime_capture_by", "lifetime_capture_by_global", "lifetime_capture_by_this",
         "lifetime_capture_by_unknown", "ownership_holds", "ownership_returns", "ownership_takes", "NSObject", "objc_independent_class",
         "objc_precise_lifetime",
+        // Other targets' vector types, aliases of their builtins, statements' hints (check_input_statement_attribute_kinds),
+        // and Blocks' byref variables, whose checks in C on x86-64 are check_input_attribute_annotations'.
+        "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -4580,6 +4603,29 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
                                              typedef_name ? CHECK_WARNING_EVENT_INDEPENDENT_POINTER : CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF, located, located);
         attribute->ignored = true;
     }
+    else if (check_input_attribute_equal(spelled, "clang_builtin_alias") && attribute->argument_count == 1)
+    {
+        // (No builtin of x86-64's is one of its targets'.)
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BUILTIN_ALIAS, 0);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "blocks") && attribute->argument_count == 1 && !lone)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, 1);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "blocks") && attribute->argument_count == 1 && !check_input_attribute_equal(word, "byref"))
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED,
+                                             attribute->first, attribute->argument_first);
+        attribute->ignored = true;
+    }
+    else if (check_input_attribute_equal(spelled, "blocks") && attribute->argument_count == 1 && (declaration & BUSTER_CHECK_SUBJECT_GLOBAL) != 0)
+    {
+        // (A static local's, inside a function, is named so.)
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BLOCK_NONLOCAL, reader->function_result != 0 ? 1u : 0u);
+        valid = false;
+    }
     else if (check_input_attribute_equal(spelled, "objc_precise_lifetime"))
     {
         const uint32_t before = reader->output->report_count;
@@ -4739,6 +4785,19 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // where its subject's warning comes.
         const bool tag_declaration = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
         const bool overflow = generic_name && !tag_declaration && check_input_attribute_equal(generic_spelled, "overflow_behavior") && !attribute->ignored;
+        // Other targets' vector types are types' attributes: clang's target error first wherever a declarator's type takes
+        // them (a tag's declaration has its subject's); and the statements' attributes are a declaration's error.
+        const bool riscv = generic_name && check_input_attribute_equal(generic_spelled, "riscv_rvv_vector_bits");
+        const bool vector_bits = (riscv || (generic_name && check_input_attribute_equal(generic_spelled, "arm_sve_vector_bits"))) && !tag_declaration;
+        const bool statement_only = generic_name && (check_input_attribute_equal(generic_spelled, "atomic") || check_input_attribute_equal(generic_spelled, "code_align") ||
+                                                     check_input_attribute_equal(generic_spelled, "opencl_unroll_hint"));
+        if ((vector_bits || statement_only) && !attribute->ignored)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first,
+                                                 vector_bits ? CHECK_ARGUMENT_TARGET_FEATURE : CHECK_ARGUMENT_INVALID_ON_DECLARATION, riscv ? 1u : 0u);
+            valid = false;
+            continue;
+        }
         if (matrix && !attribute->ignored)
         {
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_MATRIX_DISABLED, 0);
