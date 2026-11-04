@@ -395,6 +395,9 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-oracle-cache
 == Test the runner
 "$BUSTER_COMPILER" test-parallel
+== Test the external tools' diagnostics
+# Fake, missing, quiet and hanging stand-ins for the tools the cross-checks probe; no external tool is needed.
+"$BUSTER_COMPILER" test-tool
 == Test GNU inline assembly's semantic fixtures against clang
 "$BUSTER_COMPILER" test-checker-asm
 == Test c-testsuite's harness
