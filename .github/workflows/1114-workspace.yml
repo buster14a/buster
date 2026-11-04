@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+# Temporary source transport for issue #1114; not intended for the implementation PR.
+name: Issue 1114 source snapshot
+on:
+  push:
+    branches: [agent/1114-workspace]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=tar -o "$RUNNER_TEMP/buster-source.tar" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-source-1114
+          path: ${{ runner.temp }}/buster-source.tar
+          retention-days: 1
+          if-no-files-found: error
