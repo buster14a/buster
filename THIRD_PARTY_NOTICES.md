@@ -651,8 +651,9 @@ and its header says so.
   `AttrParsedAttrImpl.inc`. Its `diagAppertainsToDecl` functions, its
   `ParsedAttrInfo` records' fields (`NumArgs`, `OptArgs`, `HasCustomParsing`,
   `IsTargetSpecific`, `IsType`, `IsStmt`, `IsKnownToGCC`), its
-  `acceptsLangOpts`, `existsInTarget` and `handleDeclAttribute` functions, and
-  their spellings were read; nothing else was taken. Also
+  `acceptsLangOpts`, `existsInTarget`, `handleDeclAttribute` and
+  `diagMutualExclusion` functions, and their spellings were read; nothing else
+  was taken. Also
   `clang-tblgen --gen-clang-attr-parsed-attr-kinds` of the same file, by the
   same tool: clang's `AttrParsedAttrKinds.inc`, whose `IgnoredAttribute`
   spellings were read.
@@ -664,8 +665,10 @@ and its header says so.
   list in byte order, and fails on a predicate it doesn't know. For the facts,
   it evaluates `existsInTarget`'s conditions for x86-64 Linux by a table of
   their predicates, and fails on one it doesn't know; it writes 366 GNU rows
-  and 283 C23 rows. The file's sha256 is
-  `b48267c10104b691001abc430ebc8fd75efb2de572d5d068e964694734b5461d`.
+  and 283 C23 rows. It writes the 44 pairs of mutually exclusive attributes
+  that both exist on x86-64, by GNU spelling, and fails on an excluded
+  attribute of no `ParsedAttrInfo`. The file's sha256 is
+  `f5a94de20e722ba50b65ae1a622c76e20364575edb4691d3a798436a4396817e`.
 - **Not from the table:** `sentinel`'s and `transparent_union`'s subjects,
   which clang's handlers check themselves, and `nonstring`'s type check and
   `transparent_union`'s field checks, are rows and code of `c_check_attribute.c`

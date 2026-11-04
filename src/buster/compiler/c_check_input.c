@@ -136,6 +136,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_VECTOR_TOO_LARGE,
     CHECK_INPUT_VECTOR_ZERO,
     CHECK_INPUT_VECTOR_MULTIPLE,
+    CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT,
+    CHECK_INPUT_ATTRIBUTE_EXCLUSION,
+    CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING,
     // GNU's function multiversioning: a function attribute clang refuses beside target("default"), target_clones or
     // cpu_specific/cpu_dispatch, at the function's name, naming the attribute; and a target attribute incompatible with
     // another multiversioning attribute, at the later attribute, with a note at the earlier one.

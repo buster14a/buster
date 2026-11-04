@@ -500,6 +500,28 @@ static void check_test_attribute_vocabulary(CheckTest* test)
                           vector_fact->minimum == 1 && vector_fact->maximum == 1 && bounded_fact != NULL && (bounded_fact->flags & BUSTER_CHECK_FACT_IGNORED) != 0 &&
                           check_input_fact_row((String8){ "clang", 5 }, (String8){ "cold", 4 }, true, true) == NULL,
                       "attribute facts: clang 23.1.5's 366 GNU and 283 C23 spellings; cold's, nonnull's, clang::noderef's, gnu::vector_size's and bounded's");
+    // C's attributes aren't another language's (`(!LangOpts.CPlusPlus)` holds in C), and CUDA's are.
+    const CheckInputFactRow* counted_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "counted_by", 10 }, false, false);
+    const CheckInputFactRow* device_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "device", 6 }, false, false);
+    check_test_expect(test, counted_fact != NULL && (counted_fact->flags & BUSTER_CHECK_FACT_NOT_C) == 0 && device_fact != NULL &&
+                          (device_fact->flags & BUSTER_CHECK_FACT_NOT_C) != 0,
+                      "attribute facts: counted_by is C's, device another language's");
+    // The mutual exclusions (#147): in byte order, both ways for hot and cold.
+    uint32_t exclusions_unordered = 0;
+    for (uint32_t i = 1; i < BUSTER_ARRAY_LENGTH(check_input_exclusions); i += 1)
+    {
+        const int order = strcmp(check_input_exclusions[i - 1].spelling, check_input_exclusions[i].spelling);
+        exclusions_unordered += order > 0 || (order == 0 && strcmp(check_input_exclusions[i - 1].excluded, check_input_exclusions[i].excluded) >= 0) ? 1u : 0u;
+    }
+    bool hot_cold = false;
+    bool cold_hot = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_input_exclusions); i += 1)
+    {
+        hot_cold |= strcmp(check_input_exclusions[i].spelling, "hot") == 0 && strcmp(check_input_exclusions[i].excluded, "cold") == 0;
+        cold_hot |= strcmp(check_input_exclusions[i].spelling, "cold") == 0 && strcmp(check_input_exclusions[i].excluded, "hot") == 0;
+    }
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_exclusions) == 44 && exclusions_unordered == 0 && hot_cold && cold_hot,
+                      "attribute exclusions: clang 23.1.5's 44 pairs, ordered, hot's and cold's");
     const CheckInputSubjectRow* cold = check_input_subject_row((String8){ "", 0 }, (String8){ "cold", 4 }, false, false);
     const CheckInputSubjectRow* scoped = check_input_subject_row((String8){ "_Clang", 6 }, (String8){ "nomerge", 7 }, true, true);
     check_test_expect(test, cold != NULL && cold->subjects == BUSTER_CHECK_SUBJECT_FUNCTION && !cold->error && scoped != NULL && scoped->error &&

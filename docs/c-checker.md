@@ -5174,10 +5174,10 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
   described as clang's `ConvertTypeToDiagnosticString` describes it:
   "'T' (vector of N 'E' values)" (`check_driver_warning_type`).
 - **Differences left.**
-  - An attribute clang knows that the checker has no rule for is refused by
-    name before its subject is checked: `int v __attribute__((optnone));`
-    is refused, where clang warns. The attribute's argument count isn't
-    checked either.
+  - An attribute clang knows that the checker neither has a rule for nor takes
+    generically (the next section's "Attributes without a rule") is refused by
+    name before its subject is checked: `int v __attribute__((weak_import));`
+    is refused, where clang warns.
   - The checker stops at a declaration's first error. So a later
     declaration's warnings, which clang gives too, are missing after an error
     row's error (`int e __attribute__((error("x")));`), as after any other
@@ -5233,7 +5233,12 @@ arguments against the function. The checker now gives these as clang does.
 
   The generator evaluates `existsInTarget` for x86-64 Linux, so a spelling of
   another target's is none. There are 366 GNU spellings and 283 C23 ones, as
-  many as clang's vocabulary has (`check_input_fact_row`).
+  many as clang's vocabulary has (`check_input_fact_row`). A C-only
+  attribute's condition (`!CPlusPlus`) is C's; the generator used to read it as
+  another language's.
+- **The exclusions table.** `BUSTER_CHECK_EXCLUSION` rows are clang's
+  generated `diagMutualExclusion` pairs, by GNU spelling, where both
+  attributes exist on x86-64: 44 of them (`check_input_exclusions`).
 - **GCC's positions.** On a function's definition, each GNU attribute after
   the declarator that GCC knows gets clang's parser warning "GCC does not
   allow 'X' attribute in this position on a function definition"
@@ -5364,6 +5369,45 @@ arguments against the function. The checker now gives these as clang does.
   `maybe_unused` and `nodiscard`. A tentative definition is no definition
   here. The check runs on the serial path: a body that a lane checks gets
   none.
+- **Attributes without a rule** (`check_input_attribute_generic`). An
+  attribute clang knows that the checker has no rule for is taken by its facts:
+  - one clang ignores everywhere (`bounded`) is ignored without a word;
+  - another language's (CUDA's `device`, `trivial_abi`, `called_once`) gets
+    clang's "'X' attribute ignored";
+  - one clang's generated handler applies with nothing more (`nouwtable`,
+    `disable_tail_calls`, `xray_never_instrument`, the analyses' and
+    Objective-C's) is kept with no effect, for its subject's check and its
+    argument count's;
+  - so are some whose own handlers check what is checked here: `minsize`,
+    `optnone`, `noescape`, `annotate`, `uninitialized`, `gcc_struct`,
+    `no_sanitize_memory`, `analyzer_noreturn` and `carries_dependency`. With
+    them come their handlers' warnings: `noescape` on a parameter of no
+    pointer type, and `optnone` taking over `always_inline` and `minsize`,
+    "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
+    argument must be a string literal.
+
+  The rest stay refused by name: `selectany` (a COMDAT),
+  `no_caller_saved_registers` (a calling convention), `loader_uninitialized`,
+  `weak_import`, and the attributes whose handlers clang has its own (the
+  thread-safety analysis's, `pass_object_size`, `ms_struct`, `interrupt`,
+  `internal_linkage` and others).
+- **Argument counts.** An attribute's count of arguments other than clang's
+  is clang's error, worded as clang's three messages: "'X' attribute takes no
+  arguments", "takes one argument", "requires exactly N arguments", "takes at
+  least N arguments", "takes no more than N arguments". A generic attribute's
+  is checked after its subject, as clang checks it; a supported one's as its
+  arguments are read. `cleanup`'s is checked after its subject already, and an
+  attribute whose arguments clang parses its own way isn't counted.
+- **Mutual exclusions** (`check_input_attribute_excluding`). After an
+  attribute's subject check, one that an attribute already on the declaration
+  excludes is clang's error "'cold' and 'hot' attributes are not compatible",
+  with "conflicting attribute is here" at the other. The new attribute is
+  named as written, the earlier one as clang names an applied attribute: a GNU
+  one without its keyword's underscores, a C23 one with its scope. A
+  redeclaration's attribute is checked against its entity's earlier
+  declarations' (`check_input_attribute_merge_exclusions`) after the
+  attributes it drops after the definition, as clang's `mergeDeclAttributes`
+  does.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers
     (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
@@ -5382,11 +5426,11 @@ arguments against the function. The checker now gives these as clang does.
     attributes' order. Clang gives the type's first.
   - Clang's `-Wdeprecated-declarations` warnings at uses of what
     `deprecated` marks are not made, for tags or anything else.
-  - Clang's mutual exclusions between attributes (`hot` and `cold`, on one
-    declaration or across redeclarations) are not checked: the checker takes
-    what clang rejects there, and warns of a late `hot` after a `cold`
-    definition where clang's error comes first.
-  - A body checked on a lane doesn't warn of attributes after a definition.
+  - A body checked on a lane doesn't warn of attributes after a definition, nor
+    check mutual exclusions across redeclarations.
+  - An argument count of a supported attribute is checked as its arguments are
+    read, before its subject. So `int x __attribute__((cold(1)));` is the
+    count's error, where clang warns of the subject and ignores it.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -5400,7 +5444,13 @@ arguments against the function. The checker now gives these as clang does.
     `_Static_assert`;
   - attributes in type names, `vector_size`'s errors, and
     `-Wgnu-alignof-expression`;
-  - attributes after a definition, with the alignment they no longer give.
+  - attributes after a definition, with the alignment they no longer give;
+  - attributes without a rule of each kind, argument counts, and mutual
+    exclusions on one declaration, through a specifier's list and across
+    redeclarations.
+
+  `test-checker` checks the exclusions table's order and pairs, and that the
+  facts tell C's attributes from another language's.
 
 ## Ignorable and unsupported pragmas
 

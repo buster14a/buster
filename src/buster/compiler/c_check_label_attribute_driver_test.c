@@ -818,6 +818,44 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "extern int u [[gnu::deprecated]];\nstatic int s = 1;\nstatic int s __attribute__((section(\".x\")));\n"
         "int g(int *p) { return *p; }\nint g(int *p) __attribute__((nonnull));\nvoid h(void) {}\nvoid h(void) __attribute__((weak, cold));\n"
         "int y = 2;\nextern int y __attribute__((visibility(\"hidden\")));\n",
+        // Attributes the checker has no rule for, as clang takes them (check_input_attribute_generic): another language's
+        // ignored with its warning, one clang ignores everywhere without a word, one its generated handler applies kept for
+        // its subject's check, and those whose handlers' checks are made here (noescape's, optnone's over always_inline
+        // and minsize); their argument counts, and supported ones', are clang's errors, each in a unit of its own.
+        "struct __attribute__((trivial_abi)) S { int a; };\nvoid f(void) __attribute__((device));\nint x __attribute__((shared));\n"
+        "void g(void) __attribute__((called_once(1)));\nint z __attribute__((bounded));\nvoid h(void) __attribute__((nouwtable));\n"
+        "int w __attribute__((nouwtable));\nvoid k(void) __attribute__((disable_tail_calls, xray_never_instrument));\n"
+        "void n(void) __attribute__((minsize));\nvoid p(int *q __attribute__((noescape)), int r __attribute__((noescape)));\n"
+        "void a1(void) __attribute__((optnone));\nvoid a2(void) __attribute__((optnone, always_inline));\n"
+        "void a3(void) __attribute__((minsize, optnone));\nint c1 __attribute__((annotate(\"x\")));\nint c2 __attribute__((annotate(\"x\", 1, 2)));\n"
+        "void d1(void) { int v __attribute__((uninitialized)); (void)v; }\nint d2 __attribute__((uninitialized));\n"
+        "struct __attribute__((gcc_struct)) S1 { int a; };\nvoid e1(void) __attribute__((no_sanitize_memory));\n"
+        "void g1(void) __attribute__((analyzer_noreturn));\nvoid i1(void) __attribute__((optnone)) {}\nvoid j(void) [[clang::nouwtable]];\n",
+        "void m(void) __attribute__((nouwtable(1)));\n",
+        "int v __attribute__((minsize));\n",
+        "int c3 __attribute__((annotate(1)));\n",
+        "int c4 __attribute__((annotate));\n",
+        "int e2 __attribute__((no_sanitize_memory));\n",
+        "int j1 __attribute__((carries_dependency));\n",
+        "void a(void) __attribute__((cold(1)));\n",
+        "int b __attribute__((aligned(1, 2)));\n",
+        "int c __attribute__((section));\n",
+        "void d(const char *f, ...) __attribute__((format(printf)));\n",
+        "void e(void) __attribute__((noreturn(1)));\n",
+        "int g __attribute__((visibility));\n",
+        "void i(void) __attribute__((constructor(1, 2)));\n",
+        "int k __attribute__((deprecated(\"a\", \"b\", \"c\")));\n",
+        "void l(void) __attribute__((target));\n",
+        // Mutual exclusions (check_input_attribute_excluding), on one declaration, through a specifier's list, and across
+        // redeclarations, but not after a definition, where the later one is dropped first.
+        "void f(void) __attribute__((hot, cold));\n",
+        "void f(void) __attribute__((__hot__, __cold__));\n",
+        "[[gnu::hot]] void g(void) __attribute__((cold));\n",
+        "__attribute__((hot)) void m(void), n(void) __attribute__((cold));\n",
+        "void q(void) __attribute__((not_tail_called, always_inline));\n",
+        "void h(void) __attribute__((cold));\nvoid h(void);\nvoid h(void) __attribute__((hot));\n",
+        "static void s(void) __attribute__((hot));\nstatic void s(void) __attribute__((cold)) {}\n",
+        "void k(void) __attribute__((hot)) {}\nvoid k(void) __attribute__((cold));\nvoid c(void) __attribute__((cold)) __attribute__((cold));\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

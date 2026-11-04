@@ -200,7 +200,19 @@ struct CheckInputAttribute
     // cleanup has another count of arguments than one, an error only on a variable it applies to, as clang checks the
     // subject first (check_input_cleanup_declaration).
     bool cleanup_count;
+    // An attribute clang applies by its generated handler alone, which has no effect here (#147, CHECK_ATTRIBUTE_UNKNOWN's
+    // kind): its argument count against clang's, an error after its subject's check (check_input_attribute_subjects),
+    // as BUSTER_CHECK_COUNT_* and the bound.
+    uint8_t count_check;
+    uint32_t count_bound;
 };
+
+// An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
+// the bound, fewer than it, or more.
+#define BUSTER_CHECK_COUNT_NONE 0
+#define BUSTER_CHECK_COUNT_EXACT 1
+#define BUSTER_CHECK_COUNT_LEAST 2
+#define BUSTER_CHECK_COUNT_MOST 3
 
 typedef struct CheckInputAttributes CheckInputAttributes;
 struct CheckInputAttributes
@@ -1083,6 +1095,7 @@ static const CheckInputSubjectRow check_input_subject_handlers[] =
 
 #define BUSTER_CHECK_FACT_GNU(spelling, flags, minimum, maximum)
 #define BUSTER_CHECK_FACT_C23(spelling, flags, minimum, maximum)
+#define BUSTER_CHECK_EXCLUSION(spelling, excluded)
 static const CheckInputSubjectRow check_input_subject_gnu[] =
 {
 #define BUSTER_CHECK_SUBJECT_GNU(spelling, subjects, error, message) { spelling, sizeof(spelling) - 1, subjects, error, message },
@@ -1142,6 +1155,30 @@ static const CheckInputFactRow check_input_fact_c23[] =
 #define BUSTER_CHECK_FACT_GNU(spelling, flags, minimum, maximum)
 #define BUSTER_CHECK_FACT_C23(spelling, flags, minimum, maximum) { spelling, sizeof(spelling) - 1, flags, minimum, maximum },
 #include "c_check_attribute_subjects.inc"
+#undef BUSTER_CHECK_FACT_C23
+#undef BUSTER_CHECK_FACT_GNU
+};
+#undef BUSTER_CHECK_EXCLUSION
+
+// Two attributes clang's generated diagMutualExclusion makes an error on one declaration (#147,
+// c_check_attribute_subjects.inc's BUSTER_CHECK_EXCLUSION rows): `spelling`'s, which `excluded` already there excludes,
+// by their GNU spellings, in byte order.
+typedef struct CheckInputExclusionRow CheckInputExclusionRow;
+struct CheckInputExclusionRow
+{
+    const char* spelling;
+    uint32_t length;
+    const char* excluded;
+    uint32_t excluded_length;
+};
+
+static const CheckInputExclusionRow check_input_exclusions[] =
+{
+#define BUSTER_CHECK_FACT_GNU(spelling, flags, minimum, maximum)
+#define BUSTER_CHECK_FACT_C23(spelling, flags, minimum, maximum)
+#define BUSTER_CHECK_EXCLUSION(spelling, excluded) { spelling, sizeof(spelling) - 1, excluded, sizeof(excluded) - 1 },
+#include "c_check_attribute_subjects.inc"
+#undef BUSTER_CHECK_EXCLUSION
 #undef BUSTER_CHECK_FACT_C23
 #undef BUSTER_CHECK_FACT_GNU
 };
@@ -1274,8 +1311,9 @@ static void check_input_attribute_gcc_position(CheckInputReader* reader, const C
                 .kind = CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
                 .token = attribute->name_token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                // The parser's, before Sema's diagnostics of the same attribute.
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = attribute->name_token + 1,
+                .completion = attribute->name_token,
                 .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
             };
             check_input_warning_event(reader, &event, NULL, 0);
@@ -1476,6 +1514,54 @@ static void check_input_attribute_unsupported(CheckInputReader* reader, const Ch
     check_input_attribute_named_once(reader, attribute, CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED);
 }
 
+// The count of an attribute's arguments, its commas outside nested brackets (#147).
+static uint32_t check_input_attribute_count(const Parser* parser, const CheckInputAttribute* attribute)
+{
+    uint32_t count = attribute->argument_end > attribute->argument_first ? 1 : 0;
+    uint32_t depth = 0;
+    for (uint32_t t = attribute->argument_first; t < attribute->argument_end; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        depth = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? depth + 1 :
+                (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? depth - 1 : depth;
+        count += depth == 0 && kind == PARSE_KIND_COMMA;
+    }
+    return count;
+}
+
+// `count` arguments against clang's for an attribute of `fact` (handleCommonAttributeFeatures, #147): BUSTER_CHECK_COUNT_*,
+// with the count clang's message names in `bound`. One whose arguments clang parses its own way isn't counted.
+static uint8_t check_input_attribute_count_check(const CheckInputFactRow* fact, uint32_t count, uint32_t* bound)
+{
+    const uint32_t minimum = fact != NULL ? fact->minimum : 0;
+    const uint32_t maximum = fact != NULL ? fact->maximum : UINT32_MAX;
+    const bool custom = fact == NULL || (fact->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0;
+    const uint8_t result = custom ? BUSTER_CHECK_COUNT_NONE : minimum == maximum && count != minimum ? BUSTER_CHECK_COUNT_EXACT :
+                           count < minimum ? BUSTER_CHECK_COUNT_LEAST :
+                           maximum != UINT32_MAX && count > maximum ? BUSTER_CHECK_COUNT_MOST : BUSTER_CHECK_COUNT_NONE;
+    *bound = result == BUSTER_CHECK_COUNT_MOST ? maximum : minimum;
+    return result;
+}
+
+// Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
+// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT),
+// no_caller_saved_registers (a calling convention) and loader_uninitialized (no initializer), which stay refused by name;
+// and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
+// (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
+// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency.
+static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact)
+{
+    const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
+    const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers") ||
+                        check_input_attribute_equal(name, "loader_uninitialized");
+    const bool handled = check_input_attribute_equal(name, "minsize") || check_input_attribute_equal(name, "optnone") ||
+                         check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
+                         check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
+                         check_input_attribute_equal(name, "no_sanitize_memory") || check_input_attribute_equal(name, "analyzer_noreturn") ||
+                         check_input_attribute_equal(name, "carries_dependency");
+    return fact != NULL && ((simple && !effect) || handled);
+}
+
 // Whether the attribute at `first` is in a type name (#147): the group around it, past its list's parentheses and a
 // declarator's grouping ones, is a cast's, a sizeof's or alignof's, a compound literal's, a specifier's (typeof, _Atomic, _Alignas)
 // or a keyword's type argument (va_arg, offsetof, _Generic's association). A parameter's list (a function
@@ -1610,6 +1696,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         // A GNU attribute of a declaration in a type name: clang ignores it with its warning, keeping nothing (#147).
         const CheckInputFactRow* gnu_fact = known && !standard ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        // The facts of one this checker has no rule for (#147), which decide how clang takes it.
+        const CheckInputFactRow* generic_fact = known && rule == 0 ? (standard ? fact : gnu_fact) : NULL;
         const bool type_name = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 && check_input_attribute_in_type_name(parser, attribute.first);
         if (chunk_gnu && !typed)
         {
@@ -1644,13 +1732,58 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             reader->late_attributes |= late_kind;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
-            if (rule->kind == CHECK_ATTRIBUTE_MUSTTAIL)
+            // An argument count other than clang's is its error, worded as clang's (#147): before the arguments are read,
+            // where clang checks it after the subject. cleanup's is checked after its subject's already
+            // (check_input_cleanup_declaration).
+            uint32_t bound = 0;
+            const CheckInputFactRow* counted = standard ? fact : check_input_fact_row((String8){ "", 0 }, name, false, false);
+            const uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
+                                        rule->kind == CHECK_ATTRIBUTE_CLEANUP ? BUSTER_CHECK_COUNT_NONE :
+                                        check_input_attribute_count_check(counted, check_input_attribute_count(parser, &attribute), &bound);
+            if (count_check != BUSTER_CHECK_COUNT_NONE)
+            {
+                check_input_report_argument(reader, attribute.first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, count_check | bound << 8);
+                valid = false;
+                attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                attributes->error_first = attribute.first;
+                attributes->error_end = attribute.end;
+            }
+            else if (rule->kind == CHECK_ATTRIBUTE_MUSTTAIL)
             {
                 valid = check_input_attribute_musttail(reader, attributes, &attribute);
             }
             else
             {
                 valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
+            }
+        }
+        else if (valid && known && generic_fact != NULL && (generic_fact->flags & BUSTER_CHECK_FACT_IGNORED) != 0)
+        {
+            // One clang ignores wherever it is, without a word (its IgnoredAttribute spellings, #147).
+            unknown = true;
+        }
+        else if (valid && known && generic_fact != NULL && (generic_fact->flags & BUSTER_CHECK_FACT_NOT_C) != 0)
+        {
+            // Another language's: clang's warning that it ignores it, before anything else (#147).
+            check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+            unknown = true;
+        }
+        else if (valid && known && check_input_attribute_generic(name, generic_fact))
+        {
+            // One clang's generated handler applies with nothing more, which changes nothing here (#147): kept for its
+            // subject's check, then its argument count's against clang's.
+            const uint32_t count = check_input_attribute_count(parser, &attribute);
+            attribute.kind = CHECK_ATTRIBUTE_UNKNOWN;
+            attribute.argument_count = count;
+            attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
+            // annotate's first argument is a string literal (handleAnnotateAttr), clang's error at it otherwise.
+            if (count != 0 && check_input_attribute_equal(name, "annotate") && parser->tokens.kinds[attribute.argument_first] != PARSE_KIND_STRING)
+            {
+                check_input_report(reader, attribute.argument_first, CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING);
+                valid = false;
+                attributes->error = CHECK_ATTRIBUTE_ERROR_STRING;
+                attributes->error_first = attribute.argument_first;
+                attributes->error_end = attribute.end;
             }
         }
         else if (valid && known)
@@ -2604,6 +2737,48 @@ static uint32_t check_input_attribute_begin(const Parser* parser, uint32_t token
     return begin < end ? begin : token;
 }
 
+// The record before `index` among `attributes` (kept, no keyword's) that excludes the one at `index`, as clang's generated
+// diagMutualExclusion has it (#147, check_input_exclusions, by their names without a GNU keyword's underscores or a C23
+// scope), or UINT32_MAX. Most names exclude none: a binary search finds whether the one at `index` is in the table first.
+static uint32_t check_input_attribute_excluding_in(CheckInputReader* reader, String8 name, const CheckInputAttributes* attributes, uint32_t limit);
+
+static uint32_t check_input_attribute_excluding(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t index)
+{
+    return check_input_attribute_excluding_in(reader, check_input_attribute_name(reader, attributes->records[index].name), attributes, index);
+}
+
+// The record before `limit` among `attributes` (kept, no keyword's) that excludes an attribute named `name`
+// (check_input_attribute_excluding), or UINT32_MAX.
+static uint32_t check_input_attribute_excluding_in(CheckInputReader* reader, String8 name, const CheckInputAttributes* attributes, uint32_t limit)
+{
+    uint32_t lower = 0;
+    uint32_t upper = BUSTER_ARRAY_LENGTH(check_input_exclusions);
+    while (lower < upper)
+    {
+        const uint32_t middle = lower + (upper - lower) / 2;
+        const CheckInputExclusionRow* row = check_input_exclusions + middle;
+        const uint64_t common = name.length < row->length ? name.length : row->length;
+        int order = common != 0 ? memcmp(row->spelling, name.pointer, common) : 0;
+        order = order != 0 ? order : (row->length > name.length) - (row->length < name.length);
+        lower = order < 0 ? middle + 1 : lower;
+        upper = order < 0 ? upper : middle;
+    }
+    uint32_t result = UINT32_MAX;
+    for (uint32_t r = lower; result == UINT32_MAX && r < BUSTER_ARRAY_LENGTH(check_input_exclusions) && check_input_attribute_equal(name, check_input_exclusions[r].spelling);
+         r += 1)
+    {
+        const String8 excluded = { (char*)check_input_exclusions[r].excluded, check_input_exclusions[r].excluded_length };
+        for (uint32_t j = 0; result == UINT32_MAX && attributes != NULL && j < limit && j < attributes->count; j += 1)
+        {
+            const CheckInputAttribute* earlier = attributes->records + j;
+            const bool kept = !earlier->ignored && !earlier->subject_ignored && !earlier->keyword;
+            result = kept && check_input_attribute_equal(check_input_attribute_name(reader, earlier->name), excluded.pointer) &&
+                     check_input_attribute_name(reader, earlier->name).length == excluded.length ? j : result;
+        }
+    }
+    return result;
+}
+
 static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t declaration, TypeId type, uint32_t begin,
                                            uint32_t name)
 {
@@ -2665,6 +2840,74 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             check_input_warning_event(reader, &event, NULL, 0);
             attribute->ignored = true;
             attribute->subject_ignored = true;
+        }
+        // noescape on a parameter of no pointer type: its handler's warning, which ignores it (#147).
+        const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword;
+        const String8 spelled = generic ? check_input_attribute_name(reader, attribute->name) : (String8){ "", 0 };
+        if (generic && !attribute->ignored && check_input_attribute_equal(spelled, "noescape") && (declaration & BUSTER_CHECK_SUBJECT_PARAMETER) != 0 &&
+            type != 0 && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_POINTER)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NONNULL_POINTERS);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        // After its subject's check, as clang's handleCommonAttributeFeatures has them (#147): an attribute already on the
+        // declaration that excludes it (diagMutualExclusion), with the note at that one, then its count of arguments.
+        const bool kept = valid && !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
+        const uint32_t excluding = kept ? check_input_attribute_excluding(reader, attributes, i) : UINT32_MAX;
+        if (excluding != UINT32_MAX)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_EXCLUSION, 0);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].note_token = attributes->records[excluding].first;
+                reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE;
+            }
+            valid = false;
+        }
+        else if (kept && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+        {
+            check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            valid = false;
+        }
+    }
+    // optnone takes over always_inline and minsize, wherever they are: clang's warning at each, with a note at optnone.
+    for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* optnone = attributes->records + i;
+        const bool kept = !optnone->ignored && !optnone->subject_ignored && optnone->kind == CHECK_ATTRIBUTE_UNKNOWN && !optnone->keyword &&
+                          check_input_attribute_equal(check_input_attribute_name(reader, optnone->name), "optnone");
+        for (uint32_t j = 0; kept && j < attributes->count; j += 1)
+        {
+            CheckInputAttribute* other = attributes->records + j;
+            const bool minsize = other->kind == CHECK_ATTRIBUTE_UNKNOWN && !other->keyword &&
+                                 check_input_attribute_equal(check_input_attribute_name(reader, other->name), "minsize");
+            if (!other->ignored && !other->subject_ignored && (other->kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || minsize))
+            {
+                const Parser* parser = reader->parser;
+                const uint32_t scope_name = other->standard && other->first != other->name_token ? parser->tokens.names[other->first] : 0;
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                    .kind = CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED,
+                    .token = other->first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = other->first,
+                    .payload = { .name = other->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                 .data = scope_name | (other->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+                };
+                const CheckWarningNote note =
+                {
+                    .kind = CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE,
+                    .token = optnone->first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, &note, 1);
+                other->ignored = true;
+            }
         }
     }
     return valid;
@@ -2821,6 +3064,51 @@ static void check_input_attribute_summary(CheckInputAttributes* attributes)
     }
 }
 
+// clang's error for an attribute of a redeclaration that an earlier declaration's of its entity excludes (#147, as its
+// mergeDeclAttributes takes them in): at the attribute, with the note at the earlier one. On the serial path, where the
+// declarations of `previous`'s entity before `token` are found by their linked object.
+static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
+    const uint32_t object = reader->objects != NULL ? reader->objects[previous] : 0;
+    bool reported = false;
+    for (uint32_t i = 0; !reader->lane && !reported && object != 0 && attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool kept = !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
+        const String8 name = kept ? check_input_attribute_name(reader, attribute->name) : (String8){ "", 0 };
+        bool listed = false;
+        for (uint32_t r = 0; kept && !listed && r < BUSTER_ARRAY_LENGTH(check_input_exclusions); r += 1)
+        {
+            listed = name.length == check_input_exclusions[r].length && memcmp(name.pointer, check_input_exclusions[r].spelling, name.length) == 0;
+        }
+        const bool scalar = reader->parser->options.scalar;
+        const CheckSparseWide all = reader->output->attributes;
+        for (uint32_t first = listed ? check_input_attributed_next(all, 0, token, scalar) : token; !reported && first < token;
+             first = check_input_attributed_next(all, first + 16, token, scalar))
+        {
+            const uint32_t lanes = check_input_attributed_group(all, first, token, scalar);
+            for (uint32_t selected = lanes; !reported && selected != 0; selected &= selected - 1)
+            {
+                const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
+                const CheckInputAttributes* earlier = reader->objects[d] == object ? check_input_attributes_at(reader->output, d) : 0;
+                const uint32_t excluding = earlier != 0 ? check_input_attribute_excluding_in(reader, name, earlier, earlier->count) : UINT32_MAX;
+                if (excluding != UINT32_MAX)
+                {
+                    const uint32_t before = reader->output->report_count;
+                    check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_EXCLUSION, 0);
+                    if (reader->output->report_count > before)
+                    {
+                        reader->output->reports[before].note_token = earlier->records[excluding].first;
+                        reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE;
+                    }
+                    reported = true;
+                }
+            }
+        }
+    }
+}
+
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
 // declaration must precede the definition (Sema's checkNewAttributesAfterDef): weak, constructor, destructor, used,
 // retain, gnu_inline and unscoped standard noreturn; and on the serial path any other declaration attribute that the
@@ -2921,6 +3209,7 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         }
         check_input_set_attributes_at(reader->output, token, copy);
     }
+    check_input_attribute_merge_exclusions(reader, token, previous);
 }
 
 // Whether a parameter of `type` is one nonnull's index may name, as clang's isValidPointerAttrType has it: a pointer, or a

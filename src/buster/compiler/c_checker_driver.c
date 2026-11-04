@@ -137,6 +137,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_VECTOR_TOO_LARGE: result = "vector size too large"; break;
         case CHECK_INPUT_VECTOR_ZERO: result = "zero vector size"; break;
         case CHECK_INPUT_VECTOR_MULTIPLE: result = "vector size not an integral multiple of component size"; break;
+        case CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT: result = "attribute takes another count of arguments"; break;
+        case CHECK_INPUT_ATTRIBUTE_EXCLUSION: result = "attributes are not compatible"; break;
+        case CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING: result = "expected string literal as argument of 'annotate' attribute"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
@@ -1250,7 +1253,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
                         }
                         else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ||
-                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT || kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_TYPES) && named)
+                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT || kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_TYPES ||
+                                  kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT || kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION) && named)
                         {
                             // An attribute on a label or a statement that clang refuses there (#147), from its first token
                             // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
@@ -1283,14 +1287,46 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             // by its place among the attribute's arguments.
                             char bounds[64];
                             snprintf(bounds, sizeof(bounds), "parameter %u is out of bounds", input->reports[index].detail);
+                            // An argument count other than clang's (#147, BUSTER_CHECK_COUNT_*), as its three messages word it.
+                            const uint32_t detail = input->reports[index].detail;
+                            const uint32_t bound = detail >> 8;
+                            char arguments[64];
+                            snprintf(arguments, sizeof(arguments), (detail & 0xffu) == BUSTER_CHECK_COUNT_EXACT ?
+                                     (bound == 0 ? "takes no arguments" : bound == 1 ? "takes one argument" : "requires exactly %u arguments") :
+                                     (detail & 0xffu) == BUSTER_CHECK_COUNT_LEAST ? (bound == 1 ? "takes at least %u argument" : "takes at least %u arguments") :
+                                     (bound == 1 ? "takes no more than %u argument" : "takes no more than %u arguments"), bound);
+                            // A mutual exclusion names the attribute already there too, as clang names an applied one: a
+                            // GNU one without its keyword's underscores, a C23 one as above (check_input_attribute_excluding).
+                            const uint32_t other = kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION ? input->reports[index].note_token : count;
+                            char excluded[160] = { 0 };
+                            if (other < count)
+                            {
+                                const bool other_scoped = other + 2 < count && parser->tokens.kinds[other + 1] == PARSE_KIND_COLON;
+                                const uint32_t other_at = !other_scoped ? other : parser->tokens.kinds[other + 2] == PARSE_KIND_COLON && other + 3 < count ? other + 3 : other + 2;
+                                const uint32_t other_name = parser->tokens.names[other_at];
+                                const String8 other_bare = check_warning_attribute_normalized((String8){ (char*)intern_bytes(pp->table, other_name), intern_length(pp->table, other_name) });
+                                String8 other_scope = other_scoped ? check_warning_attribute_normalized((String8){ (char*)intern_bytes(pp->table, parser->tokens.names[other]),
+                                                                                                          intern_length(pp->table, parser->tokens.names[other]) }) :
+                                                                     (String8){ "", 0 };
+                                other_scope = check_input_attribute_equal(other_scope, "_Clang") ? (String8){ "clang", 5 } : other_scope;
+                                snprintf(excluded, sizeof(excluded), "and '%.*s%s%.*s' attributes are not compatible", (int)other_scope.length, other_scope.pointer,
+                                         other_scoped ? "::" : "", (int)other_bare.length, other_bare.pointer);
+                            }
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT ? arguments :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION ? excluded :
                                                  kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS ? bounds :
                                                  kind == CHECK_INPUT_ATTRIBUTE_TYPES ? "cannot be applied to types" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
                                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? subjects :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
-                                                 scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);
+                            const PPOutputDiagnosticNote conflicting = {
+                                .token = other < count ? parser->tokens.sources[other] : 0,
+                                .message = "conflicting attribute is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &conflicting, other < count ? 1u : 0u, "'%.*s%s%.*s' %s%s",
+                                                        (int)scope_text.length, scope_text.pointer, scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer,
+                                                        other < count ? "" : "attribute ", ending);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
                         {

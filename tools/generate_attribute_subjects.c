@@ -150,6 +150,23 @@ enum
 static Fact facts[FACTS];
 static uint32_t fact_count;
 
+// A pair of attributes clang's generated diagMutualExclusion makes an error on one declaration, by their GNU spellings:
+// `spelling`'s, and the one it excludes.
+typedef struct Exclusion Exclusion;
+struct Exclusion
+{
+    char spelling[96];
+    char excluded[96];
+};
+
+enum
+{
+    EXCLUSIONS = 256,
+};
+
+static Exclusion exclusions[EXCLUSIONS];
+static uint32_t exclusion_count;
+
 // The target predicates an attribute's existsInTarget can ask, and their answers for x86-64 Linux.
 typedef struct Predicate Predicate;
 struct Predicate
@@ -529,7 +546,8 @@ static bool read_facts(const char* text, const char* kinds, uint32_t minimum)
         const char* ret = lang != NULL ? strstr(lang, "return ") : NULL;
         const char* semicolon = ret != NULL ? strchr(ret, ';') : NULL;
         // In C, of clang's language conditions, `(!LangOpts.CPlusPlus)` alone holds; any other names a language C isn't.
-        const bool c = lang == NULL || (semicolon != NULL && strncmp(ret, "return (!LangOpts.CPlusPlus);", 30) == 0);
+        static const char c_only[] = "return (!LangOpts.CPlusPlus);";
+        const bool c = lang == NULL || (semicolon != NULL && strncmp(ret, c_only, sizeof(c_only) - 1) == 0);
         const bool other = lang != NULL && semicolon != NULL && (strncmp(ret + strlen("return "), "LangOpts.", 9) == 0 || ret[7] == '(');
         const char* handler = strstr(info, "AttrHandling handleDeclAttribute(");
         const bool simple = handler != NULL && (next == NULL || handler < next);
@@ -588,6 +606,89 @@ static bool read_facts(const char* text, const char* kinds, uint32_t minimum)
     return valid;
 }
 
+// The GNU spelling of the attribute whose ParsedAttrInfo is `info` (until `next`), into `spelling`, or false for none.
+static bool info_gnu_spelling(const char* text, const char* info, const char* next, char* spelling, size_t capacity)
+{
+    const char* field = strstr(info, "/*Spellings=*/");
+    bool valid = field != NULL && (next == NULL || field < next);
+    const char* name = valid ? field + strlen("/*Spellings=*/") : NULL;
+    size_t length = 0;
+    while (valid && name[length] != ',' && name[length] != 0)
+    {
+        length += 1;
+    }
+    char header[160];
+    snprintf(header, sizeof(header), "static constexpr ParsedAttrInfo::Spelling %.*s[] = {", valid ? (int)length : 0, valid ? name : "");
+    const char* array = valid && length != 2 ? strstr(text, header) : NULL;
+    const char* close = array != NULL ? strstr(array, "};") : NULL;
+    const char* gnu = array != NULL ? strstr(array, "{AttributeCommonInfo::AS_GNU, \"") : NULL;
+    valid = gnu != NULL && gnu < close;
+    const char* quote = valid ? strchr(gnu, '"') : NULL;
+    const char* end = quote != NULL ? strchr(quote + 1, '"') : NULL;
+    valid = end != NULL && (size_t)(end - quote - 1) < capacity;
+    if (valid)
+    {
+        snprintf(spelling, capacity, "%.*s", (int)(end - quote - 1), quote + 1);
+    }
+    return valid;
+}
+
+static int exclusion_order(const void* a, const void* b)
+{
+    const Exclusion* left = a;
+    const Exclusion* right = b;
+    const int first = strcmp(left->spelling, right->spelling);
+    return first != 0 ? first : strcmp(left->excluded, right->excluded);
+}
+
+// Each attribute's mutual exclusions (its diagMutualExclusion's `D->getAttr<XAttr>()`), where both it and X exist for
+// x86-64 Linux and have GNU spellings: the pair of those, in byte order. False where an excluded X has no ParsedAttrInfo.
+static bool read_exclusions(const char* text)
+{
+    bool valid = true;
+    exclusion_count = 0;
+    for (const char* info = strstr(text, "\nstruct ParsedAttrInfo"); valid && info != NULL; info = strstr(info + 1, "\nstruct ParsedAttrInfo"))
+    {
+        const char* next = strstr(info + 1, "\nstruct ParsedAttrInfo");
+        const char* exclusion = strstr(info, "bool diagMutualExclusion(");
+        exclusion = exclusion != NULL && (next == NULL || exclusion < next) ? exclusion : NULL;
+        bool known = true;
+        char spelling[96];
+        const bool own = exclusion != NULL && target_exists(info, next, &known) && known && info_gnu_spelling(text, info, next, spelling, sizeof(spelling));
+        for (const char* get = own ? strstr(exclusion, "getAttr<") : NULL; valid && get != NULL && (next == NULL || get < next); get = strstr(get + 1, "getAttr<"))
+        {
+            const char* name = get + strlen("getAttr<");
+            const char* suffix = strstr(name, "Attr>");
+            valid = suffix != NULL && suffix - name < 80;
+            char header[128];
+            snprintf(header, sizeof(header), "\nstruct ParsedAttrInfo%.*s final", valid ? (int)(suffix - name) : 0, valid ? name : "");
+            const char* other = valid ? strstr(text, header) : NULL;
+            valid = other != NULL;
+            if (!valid)
+            {
+                fprintf(stderr, "generate_attribute_subjects: an excluded attribute of no ParsedAttrInfo: %.40s\n", name);
+            }
+            const char* other_next = other != NULL ? strstr(other + 1, "\nstruct ParsedAttrInfo") : NULL;
+            bool other_known = true;
+            char excluded[96];
+            const bool pair = valid && target_exists(other, other_next, &other_known) && other_known &&
+                              info_gnu_spelling(text, other, other_next, excluded, sizeof(excluded));
+            valid = valid && exclusion_count < EXCLUSIONS;
+            if (valid && pair)
+            {
+                Exclusion* row = &exclusions[exclusion_count++];
+                snprintf(row->spelling, sizeof(row->spelling), "%s", spelling);
+                snprintf(row->excluded, sizeof(row->excluded), "%s", excluded);
+            }
+        }
+    }
+    if (valid)
+    {
+        qsort(exclusions, exclusion_count, sizeof(exclusions[0]), exclusion_order);
+    }
+    return valid;
+}
+
 static bool write_table(FILE* output, const char* source)
 {
     bool valid = fprintf(output,
@@ -614,6 +715,13 @@ static bool write_table(FILE* output, const char* source)
     {
         valid = fprintf(output, "BUSTER_CHECK_FACT_%s(\"%s\", 0x%xu, %uu, %uu)\n", facts[f].standard ? "C23" : "GNU", facts[f].spelling, facts[f].flags,
                         facts[f].minimum, facts[f].maximum) > 0;
+    }
+    valid = valid && (exclusion_count == 0 || fprintf(output,
+                                                      "// BUSTER_CHECK_EXCLUSION rows: two attributes clang's diagMutualExclusion makes an error on one\n"
+                                                      "// declaration, by their GNU spellings: the one it checks and the one that excludes it. In byte order.\n") > 0);
+    for (uint32_t e = 0; valid && e < exclusion_count; e += 1)
+    {
+        valid = fprintf(output, "BUSTER_CHECK_EXCLUSION(\"%s\", \"%s\")\n", exclusions[e].spelling, exclusions[e].excluded) > 0;
     }
     valid = valid && fflush(output) == 0 && !ferror(output);
     return valid;
@@ -693,7 +801,7 @@ int main(int argc, char** argv)
         char* text = read_all(argv[1], &length);
         char* kinds = read_all(argv[2], &kinds_length);
         const bool valid = text != NULL && length != 0 && kinds != NULL && kinds_length != 0 && read_attributes(text, 100) && read_facts(text, kinds, 300) &&
-                           write_table(stdout, argv[3]);
+                           read_exclusions(text) && write_table(stdout, argv[3]);
         if (!valid)
         {
             fprintf(stderr, "generate_attribute_subjects: %s: failed\n", argv[1]);

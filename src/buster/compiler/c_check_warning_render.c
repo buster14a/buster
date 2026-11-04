@@ -600,6 +600,7 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
+        case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
         case CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD:
             result = check_warning_text(scratch, "%s of first field is %u bits", (note->payload.data & 0xffu) == BUSTER_CHECK_TRANSPARENT_SIZE ? "size" : "alignment",
                                         note->payload.data >> 8);
