@@ -66,7 +66,6 @@ static CheckInputPragmaDisposition check_input_pragma_disposition(const CheckInp
             { "pop_macro", 1, CHECK_PRAGMA_OWNED },
             { "redefine_extname", 1, CHECK_PRAGMA_SEMANTIC },
             { "scalar_storage_order", 1 | 2, CHECK_PRAGMA_SEMANTIC },
-            { "target", 2, CHECK_PRAGMA_SEMANTIC },
             { "weak", 1, CHECK_PRAGMA_SEMANTIC },
             { "ms_struct", 1, CHECK_PRAGMA_SEMANTIC },
             { "section", 1, CHECK_PRAGMA_SEMANTIC },
