@@ -598,6 +598,12 @@ static bool static_test_expected(const Link* link, const ExecutableTestImage* im
                 value = link->symbols.size[target] + addend;
                 range = 2;
                 break;
+            case BUSTER_LINK_FIXUP_TPOFF64:
+            case BUSTER_LINK_FIXUP_DTPOFF64:
+                // The 64-bit offsets (#1115), TPOFF32's and DTPOFF32's values in 8 bytes.
+                value = symbol + addend;
+                range = 2;
+                break;
             default:
                 result = false;
                 break;
@@ -1164,7 +1170,9 @@ struct StaticTestSource
 //   - nested: a nested function called through a pointer, which GCC 14's heap trampolines make (libgcc_eh.a's
 //     heap-trampoline.o, whose thread-local state its local-dynamic accesses reach);
 //   - tls: each general- and local-dynamic sequence, through the PLT and through the GOT, two local-dynamic offsets from
-//     one module's block among them: the sum, 31, is its status;
+//     one module's block among them, a 64-bit offset from the thread pointer (movabs $value@tpoff, TPOFF64) and two
+//     64-bit offsets in the module's block as data (.quad x@dtpoff, DTPOFF64, as DWARF writes them), whose difference
+//     is 4: the sum, 40, is its status;
 //   - ifunc: a local IFUNC called directly, called through a pointer in .data and its address compared with the
 //     pointer's (a stub's address everywhere), and a global one called through its GOT slot: 21 + 21 + 10 + 1 = 53.
 //     As a static PIE too, as lld's link runs; GNU ld's gives the pointer in .data the IFUNC's implementation, from an
@@ -1260,10 +1268,21 @@ static const StaticTestSource static_test_sources[] = {
                   "    leaq value@tlsld(%rip), %rdi\n"
                   "    call *__tls_get_addr@GOTPCREL(%rip)\n"
                   "    addl value@dtpoff(%rax), %ebx\n"
+                  "    movabsq $value@tpoff, %rcx\n"
+                  "    movq %fs:0, %rdx\n"
+                  "    addl (%rdx,%rcx), %ebx\n"
+                  "    movq tls_offsets+8(%rip), %rcx\n"
+                  "    subq tls_offsets(%rip), %rcx\n"
+                  "    addl %ecx, %ebx\n"
                   "    movl %ebx, %eax\n"
                   "    popq %rbx\n"
                   "    ret\n"
                   "    .size main, .-main\n"
+                  "    .data\n"
+                  "    .align 8\n"
+                  "tls_offsets:\n"
+                  "    .quad shared_value@dtpoff\n"
+                  "    .quad value@dtpoff\n"
                   "    .section .note.GNU-stack,\"\",@progbits\n",
         .assembly = true,
     },
@@ -2051,7 +2070,7 @@ static void static_test_starved(StaticTestTally* tally, BindTestLink* test, cons
 }
 
 // Each refusal of the runtime's kind refused by every lane count and by the exact twins with 1 and 8 lanes, naming its
-// symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 31.
+// symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 40.
 static bool static_test_refused(const ExecutableTestDirectory* directory, const Runtime* runtime)
 {
     const bool pie = static_test_pie(runtime);
@@ -2098,7 +2117,7 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
     static_test_expect(&tally, bound, "the tls program bound", 0);
     if (bound)
     {
-        static_test_starved(&tally, &test, runtime, path, 31, scratch.arena);
+        static_test_starved(&tally, &test, runtime, path, 40, scratch.arena);
     }
     if (imported)
     {

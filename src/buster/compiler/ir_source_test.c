@@ -114,7 +114,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     // selected and their target features checked. The source's state lives in an arena of its own that the file's end
     // releases: an entry point, which main.c's other units see as an inline definition, holds no static object.
     CheckSource source;
-    const bool chosen = check_source_prepare(&source, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true, .lifetimes = lifetimes });
+    const bool chosen = check_source_prepare(&source, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true, .lifetimes = lifetimes, .asm_helpers = true });
     const bool allocated = source.pp != 0;
     const bool valid = source.stage != CHECK_SOURCE_OPTIONS;
     const bool preprocessed = valid && source.stage != CHECK_SOURCE_PREPROCESS;

@@ -171,9 +171,9 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
                                    expected.varargs[4].node == end && expected.varargs[4].evaluated_operands == 1 && !expected.varargs[4].mutates_list,
                               "va_copy and va_end retain distinct evaluation/lifetime contracts");
             const uint64_t mark = output.length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
-                const CheckOptions options = { .batch_size = batch };
+                const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
                 CheckStream actual;
                 const bool accepted = check_graph_run(table, &graph, &output, &scratch, &options, &actual);
                 check_test_expect(test, accepted && check_test_stream_equal(&expected, &actual, 0),

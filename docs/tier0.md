@@ -527,8 +527,10 @@ builtins on vectors, as on structs, call libatomic's generic functions.
   in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
   memory, on the stack whole.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
-  the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
-  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
+  the copies of selection, measuring and the deferred entries' emitter that look for their entries
+  (`tier0_memory_function`), as `x87` and `int128` do, and the vectors' slots where an entry is of class VECTOR
+  (`tier0_vector_slots`, 64 entries' classes at a time on the vector path): a function whose rows are scalar alone (an
+  asm statement's placed in its caller, #1059, an x86 builtin's of general registers or masks) reserves none. Tier 0's own records for them are EVEX ones, so a front
   end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
 
 **Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
@@ -564,7 +566,11 @@ VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the
 non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
 values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are, and the
 extensions' system instructions: RAO-INT's atomic operations, `cldemote`, `serialize`, UINTR's, `ptwrite`, `umonitor`,
-MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); a VEX form without
+MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); any general-purpose legacy
+form of the same rule (#1059, for an asm statement placed in its caller: `tier0_operation_general_effects`), covered and of
+named operands, whose control goes on and that changes no flag but the status ones (not the direction flag) and touches
+none of the x87's state (`add`, `bswap`, `lock xadd`, `lea`, `setcc`, `mfence`, `lfence`, `sfence`, `pause`, the
+prefetches; not `cpuid`, `push`, `jmp r/m`, `cld` or `fld`); a VEX form without
 operands only where its effects name no register either (`tilerelease`, not `vzeroupper` or `vzeroall`); no branch,
 symbol or RIP-relative address, each field's role of its class (an integer operand's no narrower than its field, the
 integer result's in a field of 32 or 64 bits), and each record `x86_validate` takes with its roles placed. So a row

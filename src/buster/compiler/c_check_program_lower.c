@@ -2388,6 +2388,8 @@ static uint32_t check_lower_temporary_of(CheckLowerWriter* writer, TypeId type)
     return local;
 }
 
+static uint32_t check_lower_operation_add(CheckLowerWriter* writer, const Tier0Operation* row);
+
 // A row's index among the function's machine operations (CheckLowerWriter.operations): an equal row's, or a new one's.
 // The rows are few (an operator's at a type), and check_vector_lower_row clears each one's padding.
 static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier0Operation* row)
@@ -2405,6 +2407,13 @@ static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier
             check_lower_unsupported(writer, "vector machine operation unavailable at this target");
         }
     }
+    return check_lower_operation_add(writer, row);
+}
+
+// A row's index among the function's machine operations as it is, each distinct row once: an asm statement's placed in
+// its caller (#1059, check_asm_row) keeps its template's forms, whatever the target, as its helper's would.
+static uint32_t check_lower_operation_add(CheckLowerWriter* writer, const Tier0Operation* row)
+{
     uint32_t index = 0;
     while (index < writer->operation_count && memcmp(&writer->operations[index], row, sizeof(*row)) != 0)
     {
@@ -11296,6 +11305,48 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     else if (count > BUSTER_CHECK_ASM_OPERANDS)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (plan->row != 0)
+    {
+        // Placed in its caller (#1059, check_asm_row): the row's operands on the stack in clang's order (each output's
+        // address, a `+` register output's value loaded through it, then each input's value, a matching input's as its
+        // output's type has it, or a memory input's address), and its X86 entry, which runs the template and stores the
+        // register outputs through their addresses. A function with an X86 entry is one with vectors (Tier0Function's).
+        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VOID, check_lower_operation_add(writer, plan->row));
+        writer->vectors = true;
+        for (uint32_t k = count; k-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const CheckAsmPlace* place = plan->places + k;
+            const uint32_t node = statement->operands[k].node;
+            if (k < statement->output_count)
+            {
+                if (place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, place->type), 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                check_lower_expression(writer, node, true, 0);
+            }
+            else if (place->kind == BUSTER_CHECK_ASM_MEMORY)
+            {
+                check_lower_expression(writer, node, true, 0);
+            }
+            else if (place->tied != BUSTER_CHECK_NONE)
+            {
+                // In its output's register, as GCC and clang place it (check_asm_tied_type): a narrower integer zero-extended.
+                const CheckAsmPlace* output = plan->places + place->tied;
+                const TypeId placed = check_asm_tied_type(types, place->type, output->type);
+                if (placed != output->type)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, check_lower_class(writer, output->type), 0);
+                }
+                check_lower_expression(writer, node, false, placed);
+            }
+            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            {
+                check_lower_expression(writer, node, false, place->type);
+            }
+        }
     }
     else if (plan->helper != BUSTER_CHECK_NONE)
     {
