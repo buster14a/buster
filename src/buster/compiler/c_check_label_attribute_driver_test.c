@@ -1013,6 +1013,24 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "typedef int T __attribute__((unavailable(\"gone\")));\nstruct __attribute__((deprecated)) S { T m; };\n",
         "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
         "struct S { T m; };\nenum E { A = sizeof(D) };\n",
+        // A marked tag's definition with declarators is a use of it at its name (its attributes after the body counting),
+        // a standalone one isn't; and a tag's use in a declaration's specifiers is diagnosed once for each declarator, in
+        // that declarator's context, at any scope, where a typedef name's is once.
+        "struct __attribute__((unavailable(\"gone\"))) S;\nstruct S { int m; } obj;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S;\nstruct S { int m; };\nstruct __attribute__((deprecated(\"old\"))) R;\n"
+        "struct R { int m; };\nstruct __attribute__((deprecated(\"old\"))) Q;\nstruct Q { int m; } q1, q2;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S { int m; } obj;\n",
+        "struct __attribute__((deprecated(\"old\"))) S { int m; } obj;\ntypedef struct __attribute__((deprecated(\"old\"))) R { int m; } RT;\n"
+        "struct __attribute__((deprecated(\"old\"))) Q;\nstruct Q { int m; } obj2 __attribute__((deprecated));\n"
+        "struct P { int m; } __attribute__((deprecated(\"late\"))) p;\n",
+        "enum __attribute__((unavailable(\"gone\"))) E : int;\nenum E : int { A } obj;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S;\nstruct S { int m; };\nstruct S *p;\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nD a, b;\nD c __attribute__((deprecated)), e;\nD f, g __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated(\"t\"))) S { int m; };\nstruct S h, i;\nstruct S j __attribute__((deprecated)), k;\n"
+        "struct S l, m __attribute__((deprecated));\nvoid n(void) { struct S o, q __attribute__((deprecated)); (void)o; (void)q; }\n"
+        "struct X { struct S r, u; struct S v __attribute__((deprecated)), w; };\nstruct S (*fp)(void), x, *y = 0;\n"
+        "typedef struct S T1, T2;\nvoid z(struct S a, struct S b);\nint size = sizeof(struct S);\n",
+        "struct __attribute__((unavailable(\"gone\"))) U;\nstruct U *u1, *u2;\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

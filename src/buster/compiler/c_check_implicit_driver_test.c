@@ -498,7 +498,9 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char kr_deprecated[] =
         "typedef int D __attribute__((deprecated(\"old\")));\n"
         "__attribute__((deprecated)) int f(a) D a; { return a; }\n"
-        "int g(b) D b; { return b; }\n";
+        "int g(b) D b; { return b; }\n"
+        // A tag's use is diagnosed once for each of a K&R parameter declaration's declarators.
+        "struct __attribute__((deprecated(\"t\"))) S { int m; };\nint h(c, e) struct S c, e; { return 0; }\n";
     static const char self_initialization[] =
         "int a(void) { int x = x; return x; }\n"
         "int b(void) { int x = x + 1; return x; }\n";

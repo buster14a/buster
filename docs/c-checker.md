@@ -5605,7 +5605,14 @@ arguments against the function. The checker now gives these as clang does.
   tag's own definition is its body's context (and an enum's base's), nested
   tags included: its mark is its declarations' up to the body, and an enum's
   attributes after it, but not a struct's (`check_input_availability_tag`).
-  A tag definition's name is no use of the tag.
+  A tag definition's name is a use of the tag only where declarators follow
+  its body (`struct S { ... } x;`, its attributes after the body counting),
+  as clang diagnoses the specifiers' type for them; a standalone definition's
+  isn't. A tag's use in a declaration's specifiers is diagnosed once for each
+  declarator, at any scope, each in its declarator's context
+  (`check_input_tag_use_copies`): `struct S a, b;` warns twice, and
+  `struct S a __attribute__((deprecated)), b;` once, where a typedef name's
+  use is diagnosed once, in the first declarator's context.
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
@@ -6079,7 +6086,8 @@ arguments against the function. The checker now gives these as clang does.
     `D`), which clang drops: the member marks aren't the uses' pass's. Nor
     does a deprecated anonymous struct's use in its own declaration warn
     (`struct __attribute__((deprecated)) { ... } x;`, clang's "'struct
-    (unnamed at ...)' is deprecated").
+    (unnamed at ...)' is deprecated" at its keyword, or its typedef's name
+    for `typedef struct __attribute__((deprecated)) { ... } T;`).
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations.
   - An argument count of a supported attribute is checked as its arguments are

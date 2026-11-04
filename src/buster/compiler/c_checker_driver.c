@@ -1609,9 +1609,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = noted,
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
-                                                        (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
-                                                        (int)message.length, message.pointer);
+                            // Once more for each of a tag's declarators after the first (report->value).
+                            for (uint64_t copy = 0; copy <= report->value; copy += 1)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "'%.*s' is unavailable%s%.*s", (int)intern_length(pp->table, used), intern_bytes(pp->table, used),
+                                                            message.length != 0 ? ": " : "", (int)message.length, message.pointer);
+                            }
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
                         {

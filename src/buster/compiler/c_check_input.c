@@ -395,7 +395,8 @@ struct CheckInputReport
     // An attribute's argument a message names, from 1 (CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS's); two calling conventions
     // (CHECK_INPUT_ATTRIBUTE_CONVENTIONS's, the one asked for in the low byte); or 0.
     uint32_t detail;
-    // The value a message prints (CHECK_ARGUMENT_TOO_LARGE's), or 0.
+    // The value a message prints (CHECK_ARGUMENT_TOO_LARGE's), the times a CHECK_INPUT_UNAVAILABLE_USE is given again
+    // (a tag's, once for each declarator, #147), or 0.
     uint64_t value;
     // The type a message names (CHECK_INPUT_VECTOR_ELEMENT's), and its typedef specifier's declaration
     // (check_input_typedef_spelling), or 0.
