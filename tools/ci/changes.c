@@ -2462,8 +2462,8 @@ static void changes_test_split(ChangesTest* test)
 // Pull requests run the hosted plain builds alone; pushes to main and the periodic/manual runs add the sanitizer rows
 // and the fuzz campaigns. The `evidence` job (tools/ci/nightly.c) must succeed and admit the 9700X job; a nightly
 // dispatch may skip its hosted rows only where that job found its commit's own earlier run had passed them (`reused`);
-// and skip fuzzing only in the plain scope. Pull requests never reach the 9700X job (#1272): its `if` starts with
-// tools/ci/admission.c's guard, which that tool checks across every workflow. Nightly backlog runs reuse the oracle cache, as
+// and skip fuzzing only in the plain scope, as a pull request does. A pull request's 9700X job skips the native
+// correctness step (#1272); every other run's runs it before the measurements. Nightly backlog runs reuse the oracle cache, as
 // pull requests do; the snapshot's comprehensive run checks it, as the daily run did.
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow)
@@ -2476,6 +2476,9 @@ static bool changes_oracle_policy(Text workflow)
     bool native_success = false;
     bool native_modes = false;
     bool native_revision = false;
+    // The native correctness step skips pull requests alone (#1272): its `if` comes right after its id.
+    bool native_step = false;
+    bool after_native_id = false;
     size_t offset = 0;
     Text line;
     while (text_next_line(workflow, &offset, &line))
@@ -2496,19 +2499,22 @@ static bool changes_oracle_policy(Text workflow)
         hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
         hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
         native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, evidence, test, fuzz]");
-        native_success |= job == 2 && text_equal_c(line, "    if: ${{ ((github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/nightly/')))) && (!cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain' && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped'))) }}");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}");
         native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}");
         native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        const bool comment = line.length > 8 && memcmp(line.data, "        #", 9) == 0;
+        native_step |= job == 2 && after_native_id && text_equal_c(line, "        if: github.event_name != 'pull_request'");
+        after_native_id = job == 2 && (text_equal_c(line, "        id: native") || (after_native_id && comment));
     }
-    return hosted_check && hosted_variants && hosted_revision && native_needs && native_success && native_modes && native_revision;
+    return hosted_check && hosted_variants && hosted_revision && native_needs && native_success && native_modes && native_revision && native_step;
 }
 
 static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
 {
     changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
     const char* source = text_terminated(workflow);
-    changes_expect(test, strstr(source, "    types: [opened, reopened, synchronize]\n") != NULL, "pull requests run on their revisions alone: a draft transition qualifies nothing new", (Text){ 0 });
-    changes_expect(test, strstr(source, "tools/ci/qualification.c") != NULL && strstr(source, "tools/ci/admission.c") != NULL && strstr(source, "PR_DRAFT:") == NULL, "aggregate qualification uses the tested hosted-on-PR policy, and the admission check runs", (Text){ 0 });
+    changes_expect(test, strstr(source, "    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]") != NULL, "draft transitions trigger a fresh current-revision run", (Text){ 0 });
+    changes_expect(test, strstr(source, "tools/ci/qualification.c") != NULL && strstr(source, "PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}") != NULL, "aggregate qualification uses the tested draft-aware policy", (Text){ 0 });
     static const struct
     {
         const char* before;
@@ -2520,27 +2526,28 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
         { "    needs: [changes, evidence, test, fuzz]", "    needs: changes" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: [changes, evidence, test]" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: [changes, test, fuzz]" },
-        // The admission guard comes first (#1272): no pull request, merge queue or other branch's dispatch.
-        { "((github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/nightly/')))) && ", "" },
-        { "github.event_name == 'push' || github.event_name == 'schedule'", "github.event_name != 'pull_request' || github.event_name == 'schedule'" },
-        { "(github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/nightly/')))", "true" },
         // The evidence job must succeed and admit; hosted rows are skipped only by its evidenced reuse, on a dispatch.
         { " && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit'", " && needs.evidence.outputs.hardware == 'admit'" },
         { "needs.evidence.outputs.hardware == 'admit' &&", "needs.evidence.outputs.hardware != 'skip' &&" },
         { "github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && ", "" },
         { "needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped'", "needs.test.result == 'skipped'" },
-        { "(github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain' && ", "(needs.evidence.outputs.scope == 'plain' && " },
+        { "(github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')", "needs.evidence.outputs.scope == 'plain'" },
         { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
-        { " && (needs.fuzz.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain' && needs.fuzz.result == 'skipped'))", "" },
+        { " && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))", "" },
         { "needs.fuzz.result == 'success'", "needs.fuzz.result != 'failure'" },
-        // Plain-scope dispatches skip the fuzz campaigns; nothing else may.
-        { "github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain' && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
+        { " && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)", "" },
+        { "github.event.pull_request.draft == false", "github.event.pull_request.draft != true" },
+        // Pull requests and plain-scope dispatches skip the fuzz campaigns; nothing else may.
+        { "(github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
         { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}",
           "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'schedule' && 'check' || 'use' }}" },
         { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}",
           "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog') && 'check' || 'use' }}" },
         { "(github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check'", "github.event_name == 'workflow_dispatch') && 'check'" },
         { "&& 'check' || 'use'", "&& 'use' || 'use'" },
+        // Native correctness is skipped on pull requests alone.
+        { "        if: github.event_name != 'pull_request'\n        run: |\n          # The record tells", "        if: github.event_name == 'push'\n        run: |\n          # The record tells" },
+        { "        if: github.event_name != 'pull_request'\n        run: |\n          # The record tells", "        if: false\n        run: |\n          # The record tells" },
     };
     const char* original = text_terminated(workflow);
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)

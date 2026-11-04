@@ -32,33 +32,24 @@ its byte-input callback. Hosted frontend, ELF and crash/replay campaigns gate
 the same runs. Additional full ASan/UBSan suites run at `-O1`;
 `BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit level.
 See `docs/ci.md` for usage and the precise coverage boundaries.
-**Pull requests and merge queues never run on the 9700X** (#1272), whatever
-they change, drafts and ready ones alike: their required checks finish on hosted
-runners alone. Native correctness and the measurements run after the merge, on
-each push to main against the landed SHA, on the daily run and on the nightly
-coordinator's workers. Every job that could take the host, or dispatch work
-that does, starts its `if` with `tools/ci/admission.c`'s guard, an allowlist of
-main's pushes, the schedule and dispatches on main or `nightly/SHA`; the
-`evidence` job runs `admission --self-test` and `admission
-.github/workflows/*.yml` first on every event and fails the run when a job
-lacks it. A manual `full` dispatch reaches the host only for a first-parent
-state of main. Read "Hardware admission" in [the CI guide](../../docs/ci.md)
-before adding a workflow, a job, a runner label or a trigger.
-On main and the scheduled runs, after all the hosted variants and fuzz jobs a
-run has pass on the same triggering revision, Benchpress requires the complete
-vector feature set and runs native correctness before benchmarks, reusing one
-build and the existing shared lock. All correctness builds run the same suite
-inventory, `tools/ci/correctness.tests`. Failed, cancelled or skipped hosted
-tests cannot queue the hardware job; failed native tests cannot start
-benchmarks. A pull request's run stops at its first failure: its test rows fail
-fast, and its tests don't start when the guide-size or DCO hook check fails.
-Pushes to main, the daily and dispatched runs report every row.
-The required check keeps its historical name, `Build and execute on Ryzen 7
-9700X`. On a pull request it is hosted qualification alone: it passes when the
-hosted rows and policy checks pass and the 9700X was excluded by policy, and
-its message says native correctness was not run. On main and the daily and
-`full` runs it needs hosted and native correctness and the measurements. A
-merge queue or any other event fails it. Its C predicate in
+After all the hosted variants and fuzz jobs a run has pass on the same triggering revision, Benchpress
+requires the complete vector feature set and runs native correctness before
+benchmarks, reusing one build and the existing shared lock. On a pull request
+it runs the benchmarks without the native correctness step (#1272): hosted
+correctness covers the pull request, and native correctness runs after the
+merge, on main's push of the landed commit and on the daily and nightly runs.
+The required aggregate's message then says native correctness was not run. All correctness builds run
+the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
+skipped hosted tests cannot queue the hardware job; failed native tests cannot
+start benchmarks. A pull request's run stops at its first failure: its test rows
+fail fast, and its tests don't start when the guide-size or DCO hook check
+fails. Pushes to main, the daily and dispatched runs report every row. The
+existing required check name is retained by a hosted aggregation job that fails
+when either stage fails.
+Draft PRs retain hosted feedback but cannot queue hardware. Ready/draft transitions
+start a new run and cancel the superseded run in the same PR group. The required
+aggregate explicitly fails a code-changing draft until ready; the selector's
+legitimate no-code exemption still passes. Its C predicate in
 `tools/ci/qualification.c` exhaustively tests the allowed outcomes, including
 missing/invalid/skipped results and event/selector consistency.
 See [the CI guide](../../docs/ci.md) for tool and frozen-input setup.
@@ -78,27 +69,25 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Every main push's and nightly worker's job queues behind every other's, so
-  keep the job short. Pull requests no longer run it (#1272); the selection
-  below is what a push to main in the nightly mode and a nightly backlog run
-  measure against their first parents. It runs a benchmark's plain run, which
-  checks its paths against their scalar twins, where the change touches what
-  the benchmark measures (the `changes` job's `measure`): a file that the benchmark's translation unit
+- Every pull request's job queues behind every other's, so keep the job short.
+  A pull request runs a benchmark's plain run, which checks its paths against
+  their scalar twins, where it changes what the benchmark measures (the
+  `changes` job's `measure`): a file that the benchmark's translation unit
   includes, for one built as a unit of its own (the build's `*_benchmark.c`),
   or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
   units (the files that define the functions it calls); or the benchmark's own
   step. A change to the build's description (`build.sh`, `CMakeLists.txt`,
   `cmake/`) runs every one, and so does a push to main before the nightly mode
   (below), so that main has each benchmark's numbers at every commit; with it,
-  a push measures what its first-parent change selects (the selector's
-  targeted push), and the nightly backlog measures the
+  a push measures what its first-parent change selects, as its pull request
+  did (the selector's targeted push), and the nightly backlog measures the
   states no push measured. A new benchmark's
   step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
   others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
   repeated processes), which cost about 200 ms before each of 21 samples per
   case, go in a step of their own that runs where the `changes` job's output
-  for the module isn't `false`: on the daily scheduled run, dispatched runs and,
-  in the nightly mode, pushes and backlog runs that change the module's sources (its `changes_modules` entry,
+  for the module isn't `false`: on the daily scheduled run, dispatched runs and
+  pull requests that change the module's sources (its `changes_modules` entry,
   which no `*_test.c` matches: tests don't change what the samples measure).
   Keep the pattern to what the samples measure: a module's own decision
   campaign (#336's binding handoff) has a module of its own, not the whole
@@ -109,19 +98,19 @@ there at a time, so everything takes one lock:
   (`emit` and `build`) where the emission, the lowering or Tier 0 change, and
   every pass only where the rows' own passes do (`check_debug_rows`).
   The daily and dispatched runs time them all. A step gated so also runs on
-  the targeted push or backlog run that changes it.
+  the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's
   foreign phases, `clang -E`'s times beside the preprocessor's benchmark
   (`--clang`, its harness `c_preprocessor_benchmark.c`) and the first-party
   performance readers' qualification (`tools/performance`, `docs/performance`,
   `web/perf`, their pin; a change to `docs/performance` alone runs the job for
   it). A push
-  to main runs none of them before the nightly mode: the full set took the job
-  past its 10 minutes, and the daily run measures them all.
+  to main runs none of them before the nightly mode: its pull request's run
+  measured what it changes, and the full set took the job past its 10 minutes.
   The daily and dispatched runs, and the nightly snapshot's, have 25 minutes;
-  a push and a nightly backlog run have 20.
-- Before #1272, a pull request that changed the checker's sources (the
-  `changes` job's `checker` output isn't `false`) also compared `-c sqlite3.c` by its base and
+  a nightly backlog run has a pull request's 20.
+- A pull request that changes the checker's sources (the `changes` job's
+  `checker` output isn't `false`) also compares `-c sqlite3.c` by its base and
   by its tree ("Compare check-expressions with the pull request's base over
   placements", #1050). Each is built at four placements of
   `main_unit_checker.c` (`./build.sh shifts`). The step then runs:
@@ -132,11 +121,8 @@ there at a time, so everything takes one lock:
   - the checker's functions' samples;
   - the forwarding failures by function.
 
-  The objects must be the same bytes. It took about 90 s
-  (`docs/c-checker.md`, "The per-node machinery"). That step, and the
-  branch-sizing comparison with the base, still require a pull request's
-  event, so they no longer run; moving them to a push's first-parent comparison
-  is a follow-up.
+  The objects must be the same bytes. It takes about 90 s
+  (`docs/c-checker.md`, "The per-node machinery").
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
   before it decides, and fails the job (so that `test` runs everything) when
@@ -162,30 +148,29 @@ there at a time, so everything takes one lock:
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
   benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
-  job's `needs` (`[changes, evidence, test, fuzz]`), its `if:` (the admission
-  guard first, the `evidence` job's success and admission, hosted rows skipped
-  only by evidenced reuse on a dispatch, fuzzing only in the plain scope) and the oracle cache's modes, with
+  job's `needs` (`[changes, evidence, test, fuzz]`), its `if:` (the `evidence`
+  job's success and admission, hosted rows skipped only by evidenced reuse on a
+  dispatch, fuzzing only in the plain scope), the native correctness step's
+  skip on pull requests alone and the oracle cache's modes, with
   counterexamples for each.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
-## Admission, reuse and the nightly backlog
+## Reuse and the nightly backlog
 
 `tools/ci/nightly.c` makes the decisions, `tools/ci/nightly.sh` is their API and
 Git glue, and [the CI guide](../../docs/ci.md#nightly-main-measurements) has
 the policy. In short:
 
-- Every `9700x.yml` run has an `evidence` job, which must succeed. It first
-  runs `tools/ci/admission.c` (above). A pull request is never admitted
-  (`pull-request`). A push to main is admitted and runs its own native
-  correctness: it reuses nothing from its pull request, whose run never
-  reaches the host. A nightly dispatch's `evidence` job checks that the commit
-  is a first-parent state of main, may reuse the commit's own earlier plain
-  hosted rows, and enforces 04:00-07:00 Europe/Madrid; a `full` dispatch of a
-  commit off main's first-parent history runs hosted rows alone (`not-main`).
-  The 9700X job checks the window again after it takes the lock, right after
-  the host's OS and CPU-model check. That is before the host identity's
-  package queries and hashing, and before any setup.
+- Every `9700x.yml` run has an `evidence` job, which must succeed. A push to
+  main is admitted and runs its own native correctness: it reuses nothing
+  from its pull request, whose 9700X job skips native correctness (#1272).
+  A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
+  main, may reuse the commit's own earlier plain hosted rows, and enforces
+  04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
+  takes the lock, right after the host's OS and CPU-model check. That is
+  before the host identity's package queries and hashing, and before any
+  setup.
 - Every run's `record` job writes the `coverage-record-ATTEMPT` artifact. The
   coordinator, `.github/workflows/nightly-backfill.yml`, harvests those
   records into its ledger. It pins the cycle's snapshot, prepares hosted
@@ -203,8 +188,9 @@ the policy. In short:
 - Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
   and the glue against a fake `gh` and a merge history) and
   `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
-  the `evidence` job; `changes` runs `nightly --self-test`, which also fails
-  if the build or the inventory ever calls `git`.
+  the `evidence` job before any hardware; `changes` runs
+  `nightly --self-test`, which also fails if the build or the inventory ever
+  calls `git`.
 
 ## Queue and execution timing
 

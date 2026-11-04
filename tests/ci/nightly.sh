@@ -161,13 +161,14 @@ run_evidence()
     (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log"
 }
 
-# Pull requests never reach the 9700X (#1272), drafts and ready ones alike, and read no API.
-GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head run_evidence "$history"
+# A draft pull request: hosted feedback, no hardware, and no API call. A ready one's 9700X job measures (it skips
+# native correctness: #1272).
+GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=true run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a pull request runs the plain rows'
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a pull request keeps off the 9700X'
-expect_line "$GITHUB_OUTPUT" 'hardware_reason=pull-request' 'and says it is the policy, not a pass'
+expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a draft keeps off the 9700X'
+expect_line "$GITHUB_OUTPUT" 'hardware_reason=draft' 'a draft says why'
 GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=false run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a ready pull request is not admitted either'
+expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a ready pull request is admitted'
 expect_no_match "$fixtures/calls.log" 'commits/|actions/' 'a pull request reads no API'
 # A merge queue, and any other event, is no supported path: the job fails and nothing runs.
 for event in merge_group pull_request_target workflow_run repository_dispatch; do
@@ -192,23 +193,12 @@ now=$(madrid '2026-11-04 12:00')
 export NIGHTLY_NOW=$now
 : > "$fixtures/calls.log"
 for nightly in on ''; do
-    GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_SHA=$head EVIDENCE_NIGHTLY=$nightly run_evidence "$history"
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=$nightly run_evidence "$history"
     expect_line "$GITHUB_OUTPUT" 'native=run' "a push runs native correctness (nightly mode '$nightly')"
     expect_line "$GITHUB_OUTPUT" 'hardware=admit' "and is admitted (nightly mode '$nightly')"
     expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
 done
 expect_no_match "$fixtures/calls.log" 'pulls|actions/' 'a push looks up no pull request run'
-if GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/feature GITHUB_SHA=$head run_evidence "$history" 2> /dev/null; then
-    fail 'a push to another branch was accepted'
-fi
-
-# A manual full run reaches the 9700X only for a first-parent state of main: no way around the pull-request exclusion.
-GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$head EVIDENCE_PURPOSE=full run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a full run of main'"'"'s head is admitted'
-GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$inside EVIDENCE_PURPOSE=full run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a full run of a branch-internal commit is not'
-expect_line "$GITHUB_OUTPUT" 'hardware_reason=not-main' 'and says why'
-expect_line "$GITHUB_OUTPUT" 'scope=full' 'it still runs every hosted row'
 
 # A nightly backlog dispatch: its commit's push run passed the plain rows, and the window decides.
 cat > "$fixtures/runs-head-$merge.json" <<JSON

@@ -45,10 +45,9 @@ on:
     - cron: '23 7 * * *'
   # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
   # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
-  # the merge. A pull request runs the hosted jobs alone, drafts and ready ones alike, so a draft transition starts no
-  # run: the 9700X never runs for a pull request or a merge queue (#1272; tools/ci/admission.c).
+  # the merge.
   pull_request:
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
 
 permissions:
   contents: read
@@ -56,7 +55,8 @@ permissions:
 # Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
 # cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push replaces its
 # pending run, which would only qualify a commit already superseded. A newer push to a PR also cancels the PR's run in
-# progress, whose hosted rows would only qualify a superseded commit; a push to main lets main's run finish. The daily run has a group of its
+# progress, which is mostly a job waiting for the 9700X (the slot is held from then on, so a run waiting hours would
+# otherwise still run for its stale commit); a push to main lets main's run finish. The daily run has a group of its
 # own, so that a push to main doesn't replace it while it waits. The runner's job hooks serialize all jobs with the
 # shared host lock (AGENTS.md).
 concurrency:
@@ -169,14 +169,12 @@ jobs:
           fi
 
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
-  # "Nightly main measurements"). First, tools/ci/admission.c checks every workflow's jobs that can reach the 9700X
-  # (#1272): when one lacks the guard that keeps pull requests and merge queues off the host, this job fails, and no
-  # hardware work starts. A pull request: never admitted (`pull-request`), drafts and ready ones alike; its hosted rows
-  # alone qualify it. A push to main: admitted, its native correctness on the 9700X after its own hosted rows. A
-  # dispatch: that its commit is a first-parent state of main (a nightly one's, at or before the pinned snapshot; else it
-  # fails, and nothing runs; a `full` one's, else hosted alone, `not-main`), the plain hosted rows of the commit's own
-  # earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or mismatched evidence runs the work; an
-  # API failure is missing evidence. Read-only API access.
+  # "Nightly main measurements"). A pull request: its draft state alone; its 9700X job measures and skips native
+  # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
+  # correctness and measurements on the landed commit. A nightly
+  # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
+  # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
+  # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
   evidence:
     name: Reuse evidence and hardware admission
     runs-on: ubuntu-26.04
@@ -208,16 +206,6 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Check that no pull request or merge queue can reach the 9700X
-        # tools/ci/admission.c (#1272): its own self-test (the guard's verdict for every event and ref, and the
-        # workflow checks on fixtures), then every workflow of this commit. On every event, so that a push or a
-        # scheduled run whose workflows would let pull requests reach the host admits no hardware either.
-        shell: bash
-        run: |
-          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/admission.c -o "$RUNNER_TEMP/admission"
-          "$RUNNER_TEMP/admission" --self-test
-          "$RUNNER_TEMP/admission" .github/workflows/*.yml
-
       - name: Test the nightly glue and the 9700X's caches against fixtures
         # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, without
         # network access (tools/ci/nightly.c's own self-test runs in `changes`).
@@ -236,6 +224,7 @@ jobs:
           EVIDENCE_HARDWARE: ${{ inputs.hardware }}
           EVIDENCE_SNAPSHOT: ${{ inputs.snapshot }}
           EVIDENCE_OVERRIDE: ${{ inputs.override }}
+          EVIDENCE_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
 
@@ -667,18 +656,17 @@ jobs:
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
     needs: [changes, evidence, test, fuzz]
-    # Pull requests and merge queues never reach the 9700X (#1272): the `if`
-    # starts with tools/ci/admission.c's guard, which admits only main's pushes,
-    # the schedule and dispatches on main or a nightly/SHA worker branch, before
-    # GitHub allocates the runner; the evidence job's admission.c check fails
-    # the run when a job that can take the host lacks it. Both hosted variants
-    # (and fuzzing) must pass before any hardware work, including native
-    # correctness. The `evidence` job must admit it: a nightly run outside the
-    # window or deferred, and a dispatch whose commit is not a first-parent
-    # state of main, are not admitted. A nightly run's plain rows (the `plain`
-    # scope, without fuzzing) gate it, either run here or, by evidence, by its
-    # commit's earlier run.
-    if: ${{ ((github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/nightly/')))) && (!cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain' && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped'))) }}
+    # Both hosted variants must pass before any hardware work. Drafts keep
+    # hosted feedback but cannot occupy the hardware. This also covers
+    # scheduled/manual runs, whose selector is skipped. The `evidence` job must
+    # admit it: a nightly run outside the window or deferred, and a draft, are
+    # not admitted. A nightly run's plain rows (the `plain` scope, without
+    # fuzzing) gate it as a pull request's do, either run here or, by evidence,
+    # by its commit's earlier run. A pull request's run measures but skips the
+    # native correctness step (#1272): its hosted rows cover correctness, and
+    # native correctness runs after the merge, on main's push and the scheduled
+    # and nightly runs.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -922,6 +910,9 @@ jobs:
 
       - name: Run complete native vector correctness before benchmarks
         id: native
+        # Not on pull requests (#1272): their hosted rows cover correctness, and native correctness runs after the
+        # merge, on main's push and the scheduled and nightly runs, before their measurements.
+        if: github.event_name != 'pull_request'
         run: |
           # The record tells a correctness failure here (started, never passed) from a measurement's after it.
           printf 'native=started\n' >> "$GITHUB_OUTPUT"
@@ -2112,16 +2103,13 @@ jobs:
           test "$status" -le 1
 
   qualification:
-    # The required context, under its historical name. On a pull request (#1272)
-    # it is hosted qualification alone: the selector, the policy checks, the
-    # evidence job (which must have excluded the 9700X, `pull-request`) and both
-    # hosted variants must pass, and the 9700X job must not have run; its output
-    # and summary say that native correctness was excluded by policy, not passed.
-    # On a push to main and on the daily and `full` dispatched runs, hosted and
-    # native correctness and the measurements must pass on the same revision. A
-    # nightly dispatch reports through its coverage record instead, and a
-    # retired scheduled run (the nightly mode's) runs nothing, so neither has
-    # this context.
+    # Preserve the existing required context: both hosted variants and the gated
+    # 9700X job must pass on the same revision. On a ready pull request that job
+    # measures without its native correctness step (#1272), and the context
+    # says so; on a push to main and on the daily and dispatched runs it runs
+    # native correctness before the measurements. A nightly dispatch reports
+    # through its coverage record instead, and a retired scheduled run (the
+    # nightly mode's) runs nothing, so neither has this context.
     name: Build and execute on Ryzen 7 9700X
     needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) }}
@@ -2147,6 +2135,7 @@ jobs:
           BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
           EVENT_NAME: ${{ github.event_name }}
           PURPOSE: ${{ inputs.purpose }}
+          PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
         shell: bash
         run: |
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"

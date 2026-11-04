@@ -88,23 +88,20 @@ evidence()
 {
     local event=${GITHUB_EVENT_NAME:?} commit=${GITHUB_SHA:?} run=${GITHUB_RUN_ID:?}
     local scope=full hosted=run hosted_source='' native=run native_source='' measurement=run measurement_source=''
-    local hardware=admit reason=admitted retired=false notes='' native_host='' window_start='' window_deadline='' window_override=false
+    local hardware=admit reason=admitted retired=false notes='' window_start='' window_deadline='' window_override=false
     case "$event" in
         pull_request)
-            # Pull requests never run on the 9700X (#1272), drafts and ready ones alike: their hosted rows qualify them,
-            # and native correctness runs after the merge, on main's push and the scheduled runs.
+            # A ready pull request's 9700X job measures, without native correctness, which its hosted rows cover and
+            # which runs after the merge (#1272); a draft keeps off the 9700X.
             scope=plain
-            hardware=skip
-            reason=pull-request
-            notes='pull requests run no 9700X work: native correctness and measurements run after the merge'
+            if [ "${EVIDENCE_DRAFT:-false}" = true ]; then
+                hardware=skip
+                reason=draft
+            fi
             ;;
         push)
-            # A push to main (the workflow's only push branch): its own native correctness, after its own hosted rows.
-            # It reuses nothing from its pull request, whose run never reaches the 9700X.
-            if [ "${GITHUB_REF:-refs/heads/main}" != refs/heads/main ]; then
-                printf '::error title=Hardware admission::a push to %s is no main revision\n' "$GITHUB_REF"
-                exit 1
-            fi
+            # A push to main: its own native correctness and measurements, after its own hosted rows. It reuses nothing
+            # from its pull request, whose run measures without native correctness.
             ;;
         schedule)
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
@@ -118,17 +115,7 @@ evidence()
         workflow_dispatch)
             local purpose=${EVIDENCE_PURPOSE:-full}
             case "$purpose" in
-                full)
-                    # A manual run reaches the 9700X only for a first-parent state of main, so that dispatch is no way
-                    # around the pull-request exclusion (#1272): any other commit gets its hosted rows alone.
-                    local history="$work/history.git"
-                    fetch_main "$history" tree:0
-                    if ! git -C "$history" rev-list --first-parent main | has_line "$commit"; then
-                        hardware=skip
-                        reason=not-main
-                        notes="$commit is not a first-parent state of main: hosted rows alone"
-                    fi
-                    ;;
+                full) ;;
                 backlog|snapshot)
                     # The commit must be a first-parent state of main, at or before the cycle's pinned snapshot.
                     local history="$work/history.git" snapshot=${EVIDENCE_SNAPSHOT:-}
@@ -209,7 +196,6 @@ evidence()
     output hardware "$hardware"
     output hardware_reason "$reason"
     output retired "$retired"
-    output native_host "$native_host"
     output window_start "$window_start"
     output window_deadline "$window_deadline"
     output window_override "$window_override"

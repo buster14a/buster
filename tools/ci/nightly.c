@@ -23,8 +23,8 @@
 //
 // Policy (docs/ci.md, "Nightly main measurements"): a main state's measurement needs the plain hosted rows (both host
 // architectures, every shard: the gate a pull request needs before the 9700X) of that exact commit, and native
-// correctness on the 9700X in the same job as its measurements. Pull requests and merge queues run no 9700X work
-// (#1272; tools/ci/admission.c): main's pushes and the scheduled runs and their dispatched workers carry it all. A state whose first-parent change is documentation alone
+// correctness on the 9700X in the same job as its measurements. A pull request's 9700X job measures without native
+// correctness (#1272), so main's pushes and the scheduled runs and their dispatched workers carry it all. A state whose first-parent change is documentation alone
 // needs none. Coverage is targeted (the selector's choice against the state's first parent), plain (every benchmark's
 // plain run: pushes before the nightly mode) or full (everything, with the isolated samples and the oracle audit);
 // targeted is what each state needs, full is the cycle's snapshot's, and plain satisfies neither. Reuse is by evidence
@@ -162,7 +162,7 @@ enum NightlyOutcome
     // Hardware wasn't admitted (outside the window, or deferred to measure later): nothing ran, nothing failed.
     NIGHTLY_OUTCOME_DEFERRED,
     // A push whose pull request's run qualified it but whose measurements it couldn't reuse: the backlog's. Only
-    // records from before #1272 have it: pull requests no longer run 9700X work, so a push never reuses theirs.
+    // records from before #1272 have it: pull requests no longer run native correctness, so a push never reuses theirs.
     NIGHTLY_OUTCOME_PENDING,
     NIGHTLY_OUTCOME_BLOCKED_HOSTED,
     NIGHTLY_OUTCOME_BLOCKED_NATIVE,
@@ -3447,8 +3447,8 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
         reads_checkout = at != window && at < window_end;
     }
     nightly_expect(test, !reads_checkout, "the window step needs nothing checked out");
-    // Pull requests run no 9700X work (#1272), so no push reuses a pull request's native run: no job but the 9700X
-    // job itself takes the host.
+    // Pull requests run no native correctness (#1272), so no push reuses a pull request's native run: no job but the
+    // 9700X job itself takes the host.
     nightly_expect(test, found && strstr(text.data, "\n  host-identity:\n") == NULL, "no host-identity job confirms a pull request's host for a push");
     free(text.data);
 }

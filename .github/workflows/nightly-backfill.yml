@@ -114,8 +114,7 @@ jobs:
   prepare:
     name: Prepare the cycle
     needs: test
-    # tools/ci/admission.c's guard: it dispatches 9700X work, so pull requests and merge queues never run it.
-    if: ${{ ((github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/nightly/')))) && (github.repository_id == '1421805693' && github.ref == 'refs/heads/main') }}
+    if: github.event_name != 'pull_request' && github.repository_id == '1421805693' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     environment: nightly-ledger
