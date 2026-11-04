@@ -130,6 +130,13 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
         case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
         case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
+        case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
+        case CHECK_INPUT_VECTOR_BIT_INT: result = "'_BitInt' vector element width must be a power of 2"; break;
+        case CHECK_INPUT_VECTOR_CONSTANT: result = "vector_size attribute requires an integer constant"; break;
+        case CHECK_INPUT_VECTOR_NEGATIVE: result = "vector must have non-negative size"; break;
+        case CHECK_INPUT_VECTOR_TOO_LARGE: result = "vector size too large"; break;
+        case CHECK_INPUT_VECTOR_ZERO: result = "zero vector size"; break;
+        case CHECK_INPUT_VECTOR_MULTIPLE: result = "vector size not an integral multiple of component size"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
@@ -1284,6 +1291,25 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
                                                  scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
+                        {
+                            // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
+                                                           (String8){ 0 };
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid vector element type %.*s", (int)type.length, type.pointer);
+                            arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
                         {

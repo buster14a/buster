@@ -1162,7 +1162,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .name = "zero vector element count",
             .source = "typedef int V __attribute__((vector_size(0)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_VECTOR,
-            .error_word = "0",
+            // clang's "zero vector size" is at the attribute (check_input_vector_size).
+            .error_word = "vector_size",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
             .rejected = true,

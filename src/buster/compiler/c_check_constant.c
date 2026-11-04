@@ -1277,6 +1277,7 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
             const bool type_argument = valid && attribute->kind == CHECK_ATTRIBUTE_ALIGNAS &&
                                        (input->raw ? check_constant_raw_type_start(input, first) : check_constant_type_start(reader->parser, first));
             int64_t integer = 0;
+            bool unresolved = false;
             if (valid && type_argument)
             {
                 const TypeId type = check_constant_type(input, first, end);
@@ -1286,16 +1287,19 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
             else if (valid)
             {
                 CheckValue value = { 0 };
-                valid = (!input->raw || check_constant_raw_expression(input, first, end)) &&
-                        check_constant_range_value(input, first, end, &value) && check_input_integer_attribute(reader, &value) &&
-                        check_action_i64(reader->types, &value, &integer);
-                if (valid)
+                valid = (!input->raw || check_constant_raw_expression(input, first, end)) && check_constant_range_value(input, first, end, &value);
+                const bool integral = valid && check_input_integer_attribute(reader, &value) && check_action_i64(reader->types, &value, &integer);
+                // vector_size's size of no integer constant stays unresolved: its element type is checked first, then its
+                // size, with clang's error (check_input_vector_size, #147).
+                unresolved = valid && !integral && attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE;
+                valid = integral || unresolved;
+                if (integral)
                 {
                     check_input_constant_warning(reader, first, end, &value, true);
                 }
             }
-            valid = valid && (scalar ? check_input_attribute_value(reader, &job->parsed, i, integer) :
-                                       check_input_attribute_argument_value(reader, &job->parsed, i, argument, integer));
+            valid = valid && (unresolved || (scalar ? check_input_attribute_value(reader, &job->parsed, i, integer) :
+                                                      check_input_attribute_argument_value(reader, &job->parsed, i, argument, integer)));
         }
     }
     if (valid && job->publish)
@@ -2951,6 +2955,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         {
             if (action.op == CHECK_OP_ALIGNOF && action.type == 0 && count == 1)
             {
+                check_input_alignof_expression(reader, token);
                 const TypeId aligned = check_constant_object_alignment(reader, token, action.operands[0].type);
                 action.type = aligned != action.operands[0].type ? aligned : 0;
                 valid = aligned != 0;
@@ -3152,6 +3157,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
             }
             if (action.op == CHECK_OP_ALIGNOF && action.type == 0 && operation.arity == 1)
             {
+                check_input_alignof_expression(reader, operation.token);
                 const TypeId aligned = check_constant_object_alignment(reader, operation.token, action.operands[0].type);
                 action.type = aligned != action.operands[0].type ? aligned : 0;
                 valid = aligned != 0;

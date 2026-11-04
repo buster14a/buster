@@ -3788,6 +3788,13 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         ParseFrame* array = parse_scalar_open(parser, i, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_MODE_OPERAND, PARSE_MODE_AFTER_DECLARATOR, false, step);
         array->flags |= BUSTER_PARSE_FRAME_ARRAY_DECLARATOR | BUSTER_PARSE_FRAME_EMPTY_OK;
     }
+    else if (kind == PARSE_KIND_ATTRIBUTE && abstract && (group == PARSE_ROLE_OPEN_CAST || group == PARSE_ROLE_OPEN_SIZEOF || group == PARSE_ROLE_OPEN_COMPOUND ||
+                                                          group == PARSE_ROLE_OPEN_KEYWORD || group == PARSE_ROLE_OPEN_SPECIFIER))
+    {
+        // A type name's declarator takes no attribute after it: its group's `)` is due there, as clang's parser has it
+        // (#147). A parameter's does.
+        parse_scalar_close_expected(parser, i, PARSE_KIND_L_PAREN, true);
+    }
     else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && definition_scope && !kr))
     {
         // An attribute after the declarator, or an asm label, which renames the declared symbol.

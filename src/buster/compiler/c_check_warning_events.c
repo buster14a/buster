@@ -32,6 +32,7 @@ enum
     CHECK_WARNING_ID_BUILTIN_HEADER = 40,
     CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE = 41,
     CHECK_WARNING_ID_GCC_COMPAT = 42,
+    CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION = 43,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -90,6 +91,14 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED,
     CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED,
+    // A tag declaration's attribute (#147, check_input_tag_attribute_warning): after a bare declaration's name (its tag's
+    // keyword in data: 0 struct, 1 union, 2 enum), or after the tag's definition (data as above, a note at it).
+    CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE,
+    CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED,
+    // A GNU declaration attribute in a type name (#147, check_input_attribute_in_type_name), named as written.
+    CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE,
+    // _Alignof or alignof of an expression (#147, check_input_alignof_expression): its keyword in the payload's name.
+    CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

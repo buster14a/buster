@@ -757,6 +757,67 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void __attribute__((preserve_most)) __attribute__((preserve_all)) f4(void);\n",
         "typedef void __attribute__((ms_abi)) T(void);\nT __attribute__((sysv_abi)) f6;\n",
         "void (__vectorcall __cdecl *fp)(void);\n",
+        // A tag declaration's attributes (check_input_tag_attributes): those of earlier declarations reach the definition's
+        // layout; after a reference's name they are its declarators'; after a bare declaration's name ignored with clang's
+        // warning; after the definition warned of unless it has them; an enum reference's ignored; and C23 lists on a
+        // reference, an error.
+        "struct A; struct __attribute__((aligned(16))) A *pa; struct A { int a; };\n_Static_assert(__alignof__(struct A) == 16, \"A\");\n"
+        "struct __attribute__((packed)) B; struct B { char c; int i; };\n_Static_assert(sizeof(struct B) == 5, \"B\");\n"
+        "struct __attribute__((aligned(32))) C *pc; struct __attribute__((aligned(8))) C { int a; };\n_Static_assert(__alignof__(struct C) == 32, \"C\");\n"
+        "union __attribute__((aligned(16))) U; union U { int a; };\n_Static_assert(__alignof__(union U) == 16, \"U\");\n"
+        "enum __attribute__((packed)) E; enum E { E0 };\n_Static_assert(sizeof(enum E) == 1, \"E\");\n"
+        "struct __attribute__((aligned(16), packed)) G; struct G { char c; int i; };\n_Static_assert(sizeof(struct G) == 16, \"G\");\n"
+        "struct S { int a; };\nstruct S __attribute__((aligned(16))) v2;\n_Static_assert(__alignof__(v2) == 16, \"v2\");\n"
+        "struct S __attribute__((cold, aligned(32))) v6, v7[2];\n_Static_assert(__alignof__(v7) == 32, \"v7\");\n"
+        "struct __attribute__((aligned(16), packed)) S v1;\nstruct __attribute__((cold)) S v4;\nstruct __attribute__((unused)) S v10;\n"
+        "struct S __attribute__((__cold__, aligned(8)));\nstruct __attribute__((aligned(16))) S;\nvoid f(struct __attribute__((aligned(16))) S *p);\n"
+        "union __attribute__((transparent_union)) U2;\nunion __attribute__((transparent_union)) U3 *pu;\nenum E2 { A2 };\n"
+        "enum __attribute__((aligned(16))) E2 e2;\nenum __attribute__((cold)) E2 e3;\nenum __attribute__((aligned(16))) F2 : int;\n"
+        "struct T2; struct __attribute__((aligned(8))) T2; struct T2 { int a; }; struct __attribute__((aligned(16))) T2 t2;\n",
+        "struct S { int a; };\nstruct [[gnu::aligned(16)]] S v9;\n",
+        "struct S { int a; };\nstruct S [[gnu::cold]] v;\n",
+        // A GNU declaration attribute in a type name is ignored with clang's warning, mode's too (sizeof stays 4), once for
+        // a cast in a constant; a function type's on another type warns as a declaration's does.
+        "int s1 = sizeof(int __attribute__((aligned(16))));\nint s2 = sizeof(__attribute__((aligned(16))) int);\n"
+        "int s3 = sizeof(int __attribute__((cold, __aligned__(8))));\n_Static_assert(sizeof(int __attribute__((mode(DI)))) == 4, \"m\");\n"
+        "_Static_assert(sizeof((int __attribute__((mode(QI))))300) == 4, \"c\");\ntypedef typeof(int __attribute__((aligned(16)))) T1;\n"
+        "int g(void) { return (int)sizeof(char __attribute__((packed))) + _Generic(1, int __attribute__((cold)): 1, default: 0); }\n"
+        "int h(void) { return (int __attribute__((unused))){5} + (int)sizeof(int * __attribute__((aligned(16)))); }\n"
+        "int k = sizeof(int __attribute__((stdcall)));\nint m = sizeof(int __attribute__((__vector_size__(8))));\n",
+        // vector_size's checks in clang's order, each an error of its own.
+        "struct S { int a; };\nstruct S v1 __attribute__((vector_size(16)));\n",
+        "struct S { int a; };\ntypedef struct S TS;\nTS __attribute__((vector_size(16))) v2;\n",
+        "int * __attribute__((vector_size(16))) v;\n",
+        "typedef int *P;\nP __attribute__((vector_size(16))) v;\n",
+        "_Bool __attribute__((vector_size(16))) v;\n",
+        "_Complex float __attribute__((vector_size(16))) v;\n",
+        "enum E { A };\nenum E __attribute__((vector_size(16))) v;\n",
+        "union U { int a; };\nunion U __attribute__((vector_size(16))) v;\n",
+        "int __attribute__((vector_size(16), vector_size(32))) v;\n",
+        "_BitInt(7) __attribute__((vector_size(16))) v;\n",
+        "int __attribute__((vector_size(0))) v;\n",
+        "int __attribute__((vector_size(-4))) v;\n",
+        "int __attribute__((vector_size(1ULL << 40))) v;\n",
+        "int __attribute__((vector_size(3))) v;\n",
+        "int __attribute__((vector_size(16.0))) v;\n",
+        "int __attribute__((vector_size(\"x\"))) v;\n",
+        "struct S { int a; };\nstruct S __attribute__((vector_size(16.0))) v;\n",
+        "int * [[gnu::vector_size(16)]] v;\n",
+        "short __attribute__((vector_size(6))) a;\nint __attribute__((vector_size(12))) b;\n_BitInt(8) __attribute__((vector_size(16))) c;\n",
+        // _Alignof and alignof of an expression, a GNU extension (check_input_alignof_expression), once whichever evaluation
+        // reaches them; __alignof__ of one, and either of a type, without a word.
+        "int v;\nint a = __alignof__(v);\nint b = _Alignof(v);\nint c = alignof(v);\n_Static_assert(_Alignof(v) == 4, \"\");\n"
+        "int f(void) { int x; return _Alignof(x) + alignof(int) + _Alignof(v + 1); }\nint arr[_Alignof(v)];\nenum { E = alignof(v) };\n",
+        // A declaration attribute after its entity's definition that the definition lacks: clang's warning, and it's
+        // ignored, an alignment's too (check_input_attribute_after_kind); one the definition has, a tentative
+        // definition's, and C23's deprecated, without a word.
+        "int v = 1;\nextern int v __attribute__((aligned(16)));\n_Static_assert(__alignof__(v) == 4, \"v\");\nvoid f(void) {}\n"
+        "void f(void) __attribute__((cold));\nint w __attribute__((aligned(8))) = 1;\nextern int w __attribute__((aligned(16)));\nint u = 1;\n"
+        "extern int u [[maybe_unused]];\nextern int u __attribute__((unused));\nvoid a(void) __attribute__((cold));\nvoid a(void) {}\n"
+        "void a(void) __attribute__((cold));\nint t;\nextern int t __attribute__((aligned(16)));\nextern int u [[deprecated]];\n"
+        "extern int u [[gnu::deprecated]];\nstatic int s = 1;\nstatic int s __attribute__((section(\".x\")));\n"
+        "int g(int *p) { return *p; }\nint g(int *p) __attribute__((nonnull));\nvoid h(void) {}\nvoid h(void) __attribute__((weak, cold));\n"
+        "int y = 2;\nextern int y __attribute__((visibility(\"hidden\")));\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

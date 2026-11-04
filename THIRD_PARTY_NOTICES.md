@@ -677,8 +677,11 @@ and its header says so.
   `checkFunctionOrMethodParameterIndex` (`SemaDeclAttr.cpp`), the type places
   of `processTypeAttrs` and `handleFunctionTypeAttr` (`SemaType.cpp`), the
   specifiers' check and the GCC-position warning of `ParseDecl.cpp` and
-  `Parser.cpp`, and the x86-64 target's `checkCallingConvention`. None of that
-  code is copied.
+  `Parser.cpp`, and the x86-64 target's `checkCallingConvention`; and
+  `BuildVectorType` (`SemaType.cpp`), `ActOnTag` and
+  `checkNewAttributesAfterDef` (`SemaDecl.cpp`), and `ParseClassSpecifier`
+  (`ParseDeclCXX.cpp`), for tags' attributes, type names' and `vector_size`'s.
+  None of that code is copied.
 - **Procedure:** [the checker guide](docs/c-checker.md)'s "Attributes on
   declarations they don't apply to (#147)".
 

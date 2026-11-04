@@ -603,10 +603,15 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
                 }
             }
         }
-        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
+        else if (attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
         {
             valid = value > 0 && (uint64_t)value <= BUSTER_TYPE_MAX_VECTOR_BITS;
             error = CHECK_ATTRIBUTE_ERROR_VECTOR;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE)
+        {
+            // Checked with its element type (check_input_vector_size, #147), as clang's BuildVectorType checks it.
+            valid = true;
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_REGPARM)
         {
@@ -1414,7 +1419,8 @@ static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
     const uint8_t kind = open > 0 ? parser->tokens.kinds[open - 1] : PARSE_KIND_END;
     const uint8_t role = open > 0 ? parser->tree.roles[open - 1] : 0;
     const bool chunk = role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_SUBSCRIPT || kind == PARSE_KIND_STAR;
-    const bool specifiers = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER;
+    const bool specifiers = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER ||
+                            role == PARSE_ROLE_TAG;
     return qualifiers ? BUSTER_CHECK_PLACE_QUALIFIERS : role == PARSE_ROLE_CLOSE_FUNCTION ? BUSTER_CHECK_PLACE_FUNCTION : chunk ? BUSTER_CHECK_PLACE_CHUNK :
            specifiers && open > 0 ? BUSTER_CHECK_PLACE_SPECIFIERS : BUSTER_CHECK_PLACE_DECLARATION;
 }
@@ -1440,28 +1446,67 @@ static void check_input_attribute_named_event(CheckInputReader* reader, const Ch
     check_input_warning_event(reader, &event, NULL, 0);
 }
 
-// clang's warning for a calling convention x86-64 hasn't (stdcall, fastcall, thiscall and pascal, which
-// X86_64TargetInfo::checkCallingConvention warns of and ignores: CHECK_CALL_IGNORED_X86_32), once each attribute meets a
-// function type (`function`): at its first token, named as written (a C23 one's normalized). Each is warned of once
-// (CheckInputReader.convention_warned), as its declaration specifiers' record meets each declarator's function.
-static void check_input_attribute_unsupported(CheckInputReader* reader, const CheckInputAttribute* attribute)
+// check_input_attribute_named_event once an attribute (CheckInputReader.attribute_warned): its declaration specifiers'
+// record meets each declarator, and a type name's attributes are read by the constant evaluator and the walk.
+static void check_input_attribute_named_once(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind)
 {
     const uint32_t count = reader->parser->tokens.count;
-    if (reader->convention_warned == NULL)
+    if (reader->attribute_warned == NULL)
     {
-        reader->convention_warned = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, (uint64_t)count / 64 + 1);
-        if (reader->convention_warned != NULL)
+        reader->attribute_warned = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, (uint64_t)count / 64 + 1);
+        if (reader->attribute_warned != NULL)
         {
-            memset(reader->convention_warned, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
+            memset(reader->attribute_warned, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
         }
     }
     const uint32_t token = attribute->first;
-    const bool warned = reader->convention_warned == NULL || token >= count || ((reader->convention_warned[token >> 6] >> (token & 63)) & 1) != 0;
+    const bool warned = reader->attribute_warned == NULL || token >= count || ((reader->attribute_warned[token >> 6] >> (token & 63)) & 1) != 0;
     if (!warned)
     {
-        reader->convention_warned[token >> 6] |= (uint64_t)1 << (token & 63);
-        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED);
+        reader->attribute_warned[token >> 6] |= (uint64_t)1 << (token & 63);
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, kind);
     }
+}
+
+// clang's warning for a calling convention x86-64 hasn't (stdcall, fastcall, thiscall and pascal, which
+// X86_64TargetInfo::checkCallingConvention warns of and ignores: CHECK_CALL_IGNORED_X86_32), once each attribute meets a
+// function type: at its first token, named as written (a C23 one's normalized).
+static void check_input_attribute_unsupported(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    check_input_attribute_named_once(reader, attribute, CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED);
+}
+
+// Whether the attribute at `first` is in a type name (#147): the group around it, past its list's parentheses and a
+// declarator's grouping ones, is a cast's, a sizeof's or alignof's, a compound literal's, a specifier's (typeof, _Atomic, _Alignas)
+// or a keyword's type argument (va_arg, offsetof, _Generic's association). A parameter's list (a function
+// declarator's), a block, a statement, a declaration's end or a tag's own list is none. A scan back over at most 256
+// tokens.
+static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t first)
+{
+    uint32_t depth = 0;
+    uint32_t i = first;
+    bool result = false;
+    bool scanning = true;
+    for (uint32_t steps = 0; scanning && i > 0 && steps < 256; steps += 1)
+    {
+        i -= 1;
+        const uint8_t kind = parser->tokens.kinds[i];
+        const uint8_t role = parser->tree.roles[i];
+        const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
+        const bool close = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
+        const bool stop = kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE;
+        // A declarator's grouping parentheses and attributes' own are no type name's bounds.
+        const bool transparent = role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_OPEN_ATTRIBUTE || role == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER ||
+                                 role == PARSE_ROLE_OPEN_ATTRIBUTE_LEFT || role == PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT || role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
+        // A tag's own list, between its keyword and its name or body, is the tag's.
+        const bool tag = open && depth == 0 && role == PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT;
+        const bool enclosing = (open && depth == 0 && !transparent) || tag;
+        result = enclosing && !tag && (role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND ||
+                               role == PARSE_ROLE_OPEN_SPECIFIER || role == PARSE_ROLE_OPEN_KEYWORD);
+        depth = close ? depth + 1 : open && depth != 0 ? depth - 1 : depth;
+        scanning = !stop && !enclosing;
+    }
+    return result;
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
@@ -1563,9 +1608,17 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             }
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_GCC_COMPAT, CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE);
         }
+        // A GNU attribute of a declaration in a type name: clang ignores it with its warning, keeping nothing (#147).
+        const CheckInputFactRow* gnu_fact = known && !standard ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        const bool type_name = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 && check_input_attribute_in_type_name(parser, attribute.first);
         if (chunk_gnu && !typed)
         {
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_POSITION);
+            unknown = true;
+        }
+        else if (valid && type_name)
+        {
+            check_input_attribute_named_once(reader, &attribute, CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE);
             unknown = true;
         }
         else if (valid && ignored_type)
@@ -1820,6 +1873,48 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, const CheckIn
     return valid_mode && result != 0 ? type_qualify(reader->types, result, type_qualifiers(base)) : 0;
 }
 
+// vector_size's checks of its element type `element` and its size, as clang's BuildVectorType makes them, in its order
+// (#147): an element of no builtin integer type but bool, real floating type or _BitInt, or of a _BitInt whose width is
+// no power of 2; a size of no integer constant, negative (at the argument), 2^61 bytes or more, zero, no multiple of the
+// element's, or of more than 2^32 - 1 elements. Each is clang's error at the attribute, false. A size this checker's
+// types can't hold is refused after (type_vector_size).
+static bool check_input_vector_size(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, TypeId element)
+{
+    const TypeTable* types = reader->types;
+    const TypeId bare = type_unqualified(type_strip_aligned(types, element));
+    const uint8_t kind = type_is_valid(types, bare) ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const bool bit_int = kind == BUSTER_TYPE_KIND_BIT_INT;
+    const bool integer = kind == BUSTER_TYPE_KIND_FLOATING || bit_int || (kind == BUSTER_TYPE_KIND_INTEGER && bare != BUSTER_TYPE_BOOL);
+    const uint64_t width = bit_int ? types->types.extent[type_index(bare)] : 0;
+    const uint64_t element_size = integer ? type_size(types, bare) : 0;
+    const int64_t value = attribute->value;
+    const CheckInputMessage message = !integer ? CHECK_INPUT_VECTOR_ELEMENT :
+                                      bit_int && (width & (width - 1)) != 0 ? CHECK_INPUT_VECTOR_BIT_INT :
+                                      !attribute->resolved ? CHECK_INPUT_VECTOR_CONSTANT :
+                                      value < 0 ? CHECK_INPUT_VECTOR_NEGATIVE :
+                                      (uint64_t)value >= (UINT64_C(1) << 61) ? CHECK_INPUT_VECTOR_TOO_LARGE :
+                                      value == 0 ? CHECK_INPUT_VECTOR_ZERO :
+                                      element_size == 0 || (uint64_t)value % element_size != 0 ? CHECK_INPUT_VECTOR_MULTIPLE :
+                                      (uint64_t)value / element_size > UINT32_MAX ? CHECK_INPUT_VECTOR_TOO_LARGE : CHECK_INPUT_UNSUPPORTED;
+    const bool valid = message == CHECK_INPUT_UNSUPPORTED;
+    if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        // Published after the attribute's warnings at its token (check_input_report_argument).
+        const uint32_t token = message == CHECK_INPUT_VECTOR_NEGATIVE ? attribute->argument_first : attribute->first;
+        const uint32_t before = reader->output->report_count;
+        check_input_report_argument(reader, token, message, 0);
+        if (reader->output->report_count > before && message == CHECK_INPUT_VECTOR_ELEMENT)
+        {
+            reader->output->reports[before].type = element;
+            reader->output->reports[before].type_spelling = check_input_typedef_spelling(reader->output, reader->parser, attribute->first);
+        }
+        attributes->error = CHECK_ATTRIBUTE_ERROR_VECTOR;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+    }
+    return valid;
+}
+
 // Mode/vector attributes change the scalar element, while a typedef's alignment wraps the resulting complete type.
 // An object's/member's alignment is declaration metadata: applying ALIGNED to its type would incorrectly alter
 // pointer/array compatibility. The caller feeds the alignment to the layout/storage consumer instead. Of `deduced`
@@ -1841,6 +1936,10 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
             result = check_input_attribute_mode(reader, attribute, result);
             valid = result != 0;
             error = CHECK_ATTRIBUTE_ERROR_MODE;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE && !check_input_vector_size(reader, attributes, attribute, result))
+        {
+            valid = false;
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
         {
@@ -2666,18 +2765,79 @@ static bool check_input_attribute_alias_definition(const CheckInputAttributes* a
     return alias;
 }
 
+// Whether clang drops `attribute` from a declaration after its entity's definition when the definition (and the
+// declarations it inherits from) has none of its kind (#147, checkNewAttributesAfterDef), besides
+// check_input_attribute_late_kind's: any declaration attribute but a type's (its facts', the machine mode), the alias
+// family's, multiversioning's, overloadable, the keywords', a statement's or a local's, and C23's deprecated,
+// maybe_unused and nodiscard, which may come after it.
+static bool check_input_attribute_after_kind(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const CheckInputAttributeKind kind = attribute->kind;
+    const bool excluded = attribute->keyword || check_input_attribute_late_kind(attribute) || kind == CHECK_ATTRIBUTE_UNKNOWN || kind == CHECK_ATTRIBUTE_PACKED ||
+                          kind == CHECK_ATTRIBUTE_ALIGNAS || kind == CHECK_ATTRIBUTE_MODE || kind == CHECK_ATTRIBUTE_VECTOR_SIZE ||
+                          kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE || kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || kind == CHECK_ATTRIBUTE_ALIAS ||
+                          kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_ASM_LABEL ||
+                          kind == CHECK_ATTRIBUTE_CALLING_CONVENTION || kind == CHECK_ATTRIBUTE_NORETURN || kind == CHECK_ATTRIBUTE_OVERLOADABLE ||
+                          kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                          kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_CLEANUP || kind == CHECK_ATTRIBUTE_FALLTHROUGH ||
+                          kind == CHECK_ATTRIBUTE_UNSEQUENCED || kind == CHECK_ATTRIBUTE_REPRODUCIBLE || kind == CHECK_ATTRIBUTE_NULLABILITY ||
+                          kind == CHECK_ATTRIBUTE_REGPARM || kind == CHECK_ATTRIBUTE_MUSTTAIL || kind == CHECK_ATTRIBUTE_NOMERGE ||
+                          kind == CHECK_ATTRIBUTE_SUPPRESS ||
+                          (attribute->standard && (kind == CHECK_ATTRIBUTE_DEPRECATED || kind == CHECK_ATTRIBUTE_UNUSED || kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT));
+    const Parser* parser = reader->parser;
+    const bool scoped = attribute->standard && attribute->first != attribute->name_token;
+    const String8 scope = scoped ? check_input_attribute_name(reader, parser->tokens.names[attribute->first]) : (String8){ "", 0 };
+    const CheckInputFactRow* fact = excluded ? NULL : check_input_fact_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+    return !excluded && (unsigned)kind < 128 && !(fact != NULL && (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0);
+}
+
+// The declaration attribute kinds of `attributes` that clang checks after a definition (check_input_attribute_after_kind),
+// as two words of bits, into `kinds`.
+static void check_input_attribute_after_kinds(CheckInputReader* reader, const CheckInputAttributes* attributes, uint64_t* kinds)
+{
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        if (!attribute->ignored && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute))
+        {
+            kinds[(uint32_t)attribute->kind >> 6] |= (uint64_t)1 << ((uint32_t)attribute->kind & 63);
+        }
+    }
+}
+
+// The layout summary of `attributes` again after some were dropped: its packed and the largest of its aligned.
+static void check_input_attribute_summary(CheckInputAttributes* attributes)
+{
+    attributes->packed = false;
+    attributes->alignment_log2 = 0;
+    for (uint32_t i = 0; i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool kept = !attribute->ignored && !attribute->subject_ignored;
+        attributes->packed |= kept && attribute->kind == CHECK_ATTRIBUTE_PACKED;
+        const bool aligned = kept && (attribute->kind == CHECK_ATTRIBUTE_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALIGNAS) && attribute->resolved && attribute->value > 0;
+        const uint8_t alignment = aligned ? (uint8_t)__builtin_ctzll((uint64_t)attribute->value) + 1 : 0;
+        attributes->alignment_log2 = alignment > attributes->alignment_log2 ? alignment : attributes->alignment_log2;
+    }
+}
+
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
 // declaration must precede the definition (Sema's checkNewAttributesAfterDef): weak, constructor, destructor, used,
-// retain, gnu_inline and unscoped standard noreturn. Earlier accepted attributes remain in their declaration records.
-// A specifier's list is each declarator's: one declarator's is copied before its records are marked.
+// retain, gnu_inline and unscoped standard noreturn; and on the serial path any other declaration attribute that the
+// definition and the declarations before it lack the kind of (check_input_attribute_after_kind, #147), whose layout
+// it then no longer changes. Earlier accepted attributes remain in their declaration records. A specifier's list is
+// each declarator's: one declarator's is copied before its records are marked.
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
-    const CheckInputAttributes* attributes = reader->late_attributes ? check_input_attributes_at(reader->output, token) : 0;
-    const bool after = attributes != 0 && reader->definition_origins[previous] && !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+    const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
+    const bool after = attributes != 0 && reader->definition_origins != NULL && reader->definition_origins[previous] &&
+                       !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
     {
-        late |= !attributes->records[i].ignored && check_input_attribute_late_kind(&attributes->records[i]);
+        const CheckInputAttribute* attribute = attributes->records + i;
+        late |= !attribute->ignored && ((reader->late_attributes && check_input_attribute_late_kind(attribute)) ||
+                                        (!reader->lane && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute)));
     }
     CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
     const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
@@ -2692,10 +2852,13 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     {
         const uint32_t count = reader->parser->tokens.count;
         reader->late_attribute_masks = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)count + 1);
-        reader->output->resource |= reader->late_attribute_masks == NULL;
+        reader->late_attribute_kinds = reader->late_attribute_masks != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, 2 * ((uint64_t)count + 1)) : NULL;
+        reader->output->resource |= reader->late_attribute_kinds == NULL;
+        reader->late_attribute_masks = reader->late_attribute_kinds != NULL ? reader->late_attribute_masks : NULL;
         if (reader->late_attribute_masks != NULL)
         {
             memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
+            memset(reader->late_attribute_kinds, 0, 2 * ((uint64_t)count + 1) * sizeof(uint64_t));
             const bool scalar = reader->parser->options.scalar;
             const CheckSparseWide attributes = reader->output->attributes;
             for (uint32_t first = check_input_attributed_next(attributes, 0, token, scalar); first < token; first = check_input_attributed_next(attributes, first + 16, token, scalar))
@@ -2708,18 +2871,25 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                     if (object != 0 && object <= count)
                     {
                         reader->late_attribute_masks[object] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, d), reader->output->function_flags[d]);
+                        check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, d), reader->late_attribute_kinds + 2 * (uint64_t)object);
                     }
                 }
             }
         }
     }
+    bool dropped = false;
     for (uint32_t i = 0; copied && !reader->lane && reader->late_attribute_masks != NULL && i < copy->count; i += 1)
     {
         CheckInputAttribute* attribute = copy->records + i;
-        if (!attribute->ignored && check_input_attribute_late_kind(attribute))
+        const bool late_kind = reader->late_attributes && check_input_attribute_late_kind(attribute);
+        const bool after_kind = !late_kind && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute);
+        const uint64_t* kinds = reader->late_attribute_kinds + 2 * (uint64_t)reader->objects[previous];
+        const bool had = after_kind && ((kinds[(uint32_t)attribute->kind >> 6] >> ((uint32_t)attribute->kind & 63)) & 1) != 0;
+        if (!attribute->ignored && (late_kind || (after_kind && !had)))
         {
-            const bool inherited = (reader->late_attribute_masks[reader->objects[previous]] & check_input_attribute_late_bit(attribute)) != 0;
+            const bool inherited = late_kind && (reader->late_attribute_masks[reader->objects[previous]] & check_input_attribute_late_bit(attribute)) != 0;
             attribute->ignored = true;
+            dropped = true;
             const bool missing_inline = attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE &&
                                         (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_INLINE) == 0;
             if (!inherited || missing_inline)
@@ -2745,6 +2915,10 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     }
     if (copied)
     {
+        if (dropped)
+        {
+            check_input_attribute_summary(copy);
+        }
         check_input_set_attributes_at(reader->output, token, copy);
     }
 }

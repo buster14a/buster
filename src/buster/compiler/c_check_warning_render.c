@@ -521,6 +521,28 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         attribute.pointer, ending);
             break;
         }
+        case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
+        {
+            static const char* const keywords[] = { "struct", "union", "enum" };
+            result = check_warning_text(scratch, "attribute '%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)name.length,
+                                        name.pointer, keywords[payload->data < 3 ? payload->data : 0]);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED:
+        {
+            result = "attribute declaration must precede definition";
+            break;
+        }
+        case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
+        {
+            result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE:
+        {
+            result = check_warning_text(scratch, "'%.*s' attribute ignored when parsing type", (int)name.length, name.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_TYPE_POSITION:
         case CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE:
         case CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED:

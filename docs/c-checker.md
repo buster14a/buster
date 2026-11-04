@@ -5296,6 +5296,74 @@ arguments against the function. The checker now gives these as clang does.
 - **Calling conventions starting a declarator.** One may start a declarator
   in parentheses (`void (__cdecl *f)(void)`), but not a later declarator of a
   declaration (`int a, __cdecl b;`), which is clang's parser error.
+- **A tag declaration's attributes** (`check_input_tag_attributes`), as
+  clang's `ParseClassSpecifier` and `ActOnTag` take them:
+  - The attributes before a tag's name are the tag's. On a declaration or a
+    reference that isn't its definition, they are checked as the tag's
+    subject. Then they are kept for the definition, which takes them before
+    its own: `struct __attribute__((packed)) B; struct B { char c; int i; };`
+    is 5 bytes, and `aligned` takes the largest. The checker used to drop
+    them, which changed such a struct's layout.
+  - On a declaration after the definition, each attribute the definition
+    lacks is warned of as "attribute declaration must precede definition",
+    with a note at the definition, and ignored. C23's `deprecated`,
+    `maybe_unused` and `nodiscard` may come after it.
+  - An enum reference's attributes (`enum __attribute__((x)) E e;`) are
+    ignored without a word.
+  - The attributes after a reference's name are its declarators', as if they
+    were written before `struct`: `struct S __attribute__((aligned(16))) v;`
+    aligns `v`. The checker used to drop them too.
+  - After a bare declaration's name (`struct S __attribute__((x));`), each is
+    ignored with "attribute 'x' is ignored, place it after "struct" to apply
+    attribute to type declaration".
+  - A `transparent_union` of no definition is ignored with clang's warning,
+    which clang gives twice.
+  - A C23 list before a reference's name is the parser's error "an attribute
+    list cannot appear here", at its first attribute. So is one after a bare
+    declaration's name, at its `[[`. One after a reference's name is in the
+    specifiers' place.
+- **Type names.** A GNU attribute of a declaration in a type name (a cast's,
+  `sizeof`'s or `_Alignof`'s, a compound literal's, `typeof`'s, `_Atomic`'s, a
+  builtin's type argument, `_Generic`'s association) is ignored with "'X'
+  attribute ignored when parsing type" (`check_input_attribute_in_type_name`),
+  once. `sizeof(int __attribute__((mode(DI))))` used to be 8, where clang's
+  is 4. A function type's attribute there on another type gets the
+  function-types warning. A GNU attribute after a type name's declarator
+  (`sizeof(int [2] __attribute__((x)))`) is the parser's "expected ')'". A
+  parameter's is still its own.
+- **`vector_size`** (`check_input_vector_size`), checked in the order of
+  clang's `BuildVectorType`, each its error at the attribute:
+  - an element of no builtin integer type but `bool`, no real floating type
+    and no `_BitInt`: "invalid vector element type 'T'", the type as clang
+    prints it with its typedef. Struct, union and enum elements used to be
+    accepted;
+  - a `_BitInt` whose width is no power of 2;
+  - a size of no integer constant, negative (at the argument), of 2^61 bytes
+    or more, zero, or no multiple of the element's size, or more than 2^32 - 1
+    elements.
+
+  A size the checker's types can't hold is still refused.
+- **`-Wgnu-alignof-expression`.** C11's `_Alignof` and C23's `alignof` of an
+  expression get clang's "'_Alignof' applied to an expression is a GNU
+  extension" at the keyword (`check_input_alignof_expression`), once whichever
+  evaluation reaches it. GNU's `__alignof__` doesn't.
+- **Attributes after a definition.** A function's or variable's declaration
+  after the entity's definition may carry a declaration attribute that the
+  definition lacks: the definition's own and those it took from earlier
+  declarations. As clang's `checkNewAttributesAfterDef` does, the checker warns
+  "attribute declaration must precede definition", with a note at the
+  definition, and ignores the attribute
+  (`check_input_attribute_after_kind`, beside `check_input_attribute_late`'s
+  seven kinds). An ignored alignment no longer aligns the object:
+  `int v = 1; extern int v __attribute__((aligned(16)));` keeps `v` at 4,
+  where the checker used to give it 16.
+
+  Some attributes are left alone, as clang leaves them: type attributes, the
+  machine mode, the alias family, multiversioning's, `overloadable`, the
+  keywords, statements' and locals' attributes, and C23's `deprecated`,
+  `maybe_unused` and `nodiscard`. A tentative definition is no definition
+  here. The check runs on the serial path: a body that a lane checks gets
+  none.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers
     (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
@@ -5303,16 +5371,22 @@ arguments against the function. The checker now gives these as clang does.
     types; type here is 'void'".
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
-    recovery errors.
+    recovery errors and their "to match this '('" notes.
   - GNU's `noderef` is refused by name, and so are `lifetimebound` and
     `nocf_check` elsewhere (clang's subject error, and its warning without
     `-fcf-protection`).
-  - `vector_size` of an invalid element type or size, and
-    `int * _Atomic [[gnu::unused]] p`, are the generic error where clang's
-    messages are its own.
+  - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
+    "an attribute list cannot appear here".
   - When a GNU attribute of a declaration and a calling convention keyword
     on another type share the specifiers, the two warnings come in the
     attributes' order. Clang gives the type's first.
+  - Clang's `-Wdeprecated-declarations` warnings at uses of what
+    `deprecated` marks are not made, for tags or anything else.
+  - Clang's mutual exclusions between attributes (`hot` and `cold`, on one
+    declaration or across redeclarations) are not checked: the checker takes
+    what clang rejects there, and warns of a late `hot` after a `cold`
+    definition where clang's error comes first.
+  - A body checked on a lane doesn't warn of attributes after a definition.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -5321,7 +5395,12 @@ arguments against the function. The checker now gives these as clang does.
   - GCC's positions on definitions;
   - nonnull's warnings, and its out-of-bounds error;
   - C23 lists in each place, and lists before suffixes;
-  - the conventions x86-64 hasn't, and each kind of conflict.
+  - the conventions x86-64 hasn't, and each kind of conflict;
+  - tag declarations' attributes, with the layouts they give, checked by
+    `_Static_assert`;
+  - attributes in type names, `vector_size`'s errors, and
+    `-Wgnu-alignof-expression`;
+  - attributes after a definition, with the alignment they no longer give.
 
 ## Ignorable and unsupported pragmas
 
