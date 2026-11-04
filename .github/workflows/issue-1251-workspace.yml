@@ -28,6 +28,11 @@ jobs:
           git switch --detach 441db2428d2bd8d28503037b28c1b3740fe4b25a
           git apply --check --unidiff-zero "$RUNNER_TEMP/issue1251.patch"
           git apply --index --unidiff-zero "$RUNNER_TEMP/issue1251.patch"
+          python3 -c 'from pathlib import Path; p=Path("src/buster/compiler/c_check_program_test.c"); s=p.read_text(); a="struct P p={x:++calls,.x:n,y:5,6};"; assert s.count(a)==1; p.write_text(s.replace(a,"struct P p={x:++calls,.x=n,y:5,6};"))'
+          python3 -c 'from pathlib import Path; p=Path("src/buster/compiler/c_check_input.c"); s=p.read_text(); a="    CHECK_INPUT_INITIALIZER_MEMBER,\n"; assert s.count(a)==1; s=s.replace(a,""); a="    CHECK_INPUT_CONSTANT_INITIALIZER,\n"; assert s.count(a)==1; p.write_text(s.replace(a,a+"    // A field designator that names no member of the record in CheckInputReport.type.\n    CHECK_INPUT_INITIALIZER_MEMBER,\n"))'
+          git add src/buster/compiler/c_check_program_test.c src/buster/compiler/c_check_input.c
+          git diff --cached --binary --unified=0 > "$RUNNER_TEMP/issue1251-corrected.patch"
+          printf 'e63bdcc3e175f4c2bae29dedb31007738171c00e4a8e16527f75649ed2803301  %s\n' "$RUNNER_TEMP/issue1251-corrected.patch" | sha256sum --check
           git diff --cached --check
           git diff --cached --stat
       - name: Install the repository's pinned hosted toolchain
@@ -37,38 +42,25 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue1251-build.log"
-      - name: Checker scalar and vector source and ELF tests
-        id: checker
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build/compiler test-checker --seed 133 2>&1 | tee "$RUNNER_TEMP/issue1251-checker.log"
       - name: Automatic initializer generated-program tests
-        id: programs
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           ./build/compiler test-checker --program-initializers 2>&1 | tee "$RUNNER_TEMP/issue1251-programs.log"
+      - name: Checker source and ELF tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/compiler test-checker --seed 133 2>&1 | tee "$RUNNER_TEMP/issue1251-checker.log"
       - name: Driver and exact Clang diagnostic comparisons
-        id: driver
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           ./build/compiler test-checker-driver --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue1251-driver.log"
-      - name: Require all tests before publishing the clean fix branch
-        env:
-          CHECKER_RESULT: ${{ steps.checker.outcome }}
-          PROGRAMS_RESULT: ${{ steps.programs.outcome }}
-          DRIVER_RESULT: ${{ steps.driver.outcome }}
+      - name: Publish and audit the clean fix after every test passes
         shell: bash
         run: |
           set -euo pipefail
-          test "$CHECKER_RESULT" = success
-          test "$PROGRAMS_RESULT" = success
-          test "$DRIVER_RESULT" = success
           test "$(git rev-parse HEAD)" = 441db2428d2bd8d28503037b28c1b3740fe4b25a
           git diff --exit-code
           git diff --cached --check
@@ -79,6 +71,8 @@ jobs:
           git commit -F "$RUNNER_TEMP/issue1251-message"
           git show --no-patch --format=fuller HEAD
           test "$(git rev-parse HEAD^)" = 441db2428d2bd8d28503037b28c1b3740fe4b25a
+          cc -O2 -o build/dco tools/dco/dco.c
+          build/dco audit --base 441db2428d2bd8d28503037b28c1b3740fe4b25a --head HEAD 2>&1 | tee "$RUNNER_TEMP/issue1251-dco.log"
           git push origin HEAD:refs/heads/fix/checker-old-style-field-designator-1251
           git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
       - name: Retain validation output
