@@ -129,6 +129,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS: result = "attribute parameter is out of bounds"; break;
         case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
         case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
+        case CHECK_INPUT_ATTRIBUTES_MISPLACED: result = "misplaced attributes; expected attributes here"; break;
+        case CHECK_INPUT_ENUM_NOT_REPRESENTABLE: result = "enumerator value is not representable in the underlying type"; break;
         case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
         case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
         case CHECK_INPUT_VECTOR_BIT_INT: result = "'_BitInt' vector element width must be a power of 2"; break;
@@ -290,6 +292,14 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             break;
         case CHECK_ARGUMENT_OPENCL_KERNEL: snprintf(text, capacity, "attribute '%.*s' can only be applied to an OpenCL kernel function", (int)bare.length, bare.pointer); break;
         case CHECK_ARGUMENT_KERNEL_ONLY: snprintf(text, capacity, "'%.*s' attribute only applies to kernel functions", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_ALIGNAS_DECLARATION:
+            snprintf(text, capacity, "'%.*s' attribute cannot be applied to %s", (int)written.length, written.pointer,
+                     number == 1 ? "a variable with 'register' storage class" : number == 3 ? "a bit-field" : "a function parameter");
+            break;
+        case CHECK_ARGUMENT_ALIGNAS_SUBJECT: snprintf(text, capacity, "'%.*s' attribute only applies to variables and fields", (int)written.length, written.pointer); break;
+        case CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED:
+            snprintf(text, capacity, "requested alignment is less than minimum alignment of %u for type %.*s", number, (int)literal.length, literal.pointer);
+            break;
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
@@ -1619,6 +1629,37 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             }
                             arena_pop_to(scratch, type_mark);
                         }
+                        else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTES_MISPLACED && token < count)
+                        {
+                            // Just after the tag's keyword, where clang's fix-it puts the attributes.
+                            const uint32_t keyword = parser->tokens.names[token];
+                            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, keyword != 0 ? intern_length(pp->table, keyword) : 0, publication, "%s", message);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE)
+                        {
+                            // The underlying type as clang prints it, its typedef's name first (check_driver_warning_type).
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
+                                                           (String8){ 0 };
+                            char value[32] = "";
+                            if (report->detail == 1)
+                            {
+                                snprintf(value, sizeof(value), " %" PRIu64, report->value);
+                            }
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "enumerator value%s is not representable in the underlying type %.*s", value,
+                                                  (int)type.length, type.pointer);
+                            arena_pop_to(scratch, type_mark);
+                        }
                         else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
                         {
                             // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
@@ -1783,10 +1824,23 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             // An attribute argument's error (#147) as clang's handler words it; a parser's "expected ')'" with
                             // its note at the arguments' `(`.
-                            char text[192];
+                            char text[320];
                             const CheckInputReport* report = input->reports + index;
-                            const String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ?
-                                                    check_warning_string_text(parser, pp, token, scratch) : (String8){ "", 0 };
+                            const uint64_t type_mark = scratch->length;
+                            // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
+                            const bool typed = (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED && report->type != 0;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
+                                                    spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
+                                                              (String8){ "", 0 };
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
                             const bool matched = report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN && report->note_token < count;
                             const PPOutputDiagnosticNote note = {
@@ -1794,6 +1848,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 .message = "to match this '('",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
+                            arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)
                         {

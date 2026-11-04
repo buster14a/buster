@@ -226,6 +226,10 @@ struct CheckInputAttribute
     bool constant_argument;
     uint8_t constants;
     uint8_t wide;
+    // An argument's error clang's handler gives once the attribute's subject takes it (#147: tls_model's model, constructor's,
+    // destructor's and assume_aligned's integers), which the attributes' reader made and moved here
+    // (check_input_attribute_defer), for check_input_attribute_subjects to give; or NULL.
+    struct CheckInputReport* deferred;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -530,6 +534,13 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_OPENCL_KERNEL,
     CHECK_ARGUMENT_KERNEL_ONLY,
     CHECK_ARGUMENT_TOO_LARGE,
+    // An alignment specifier where clang's AddAlignedAttr refuses it (check_input_alignas_error), at its keyword: "'_Alignas'
+    // attribute cannot be applied to a function parameter" (the number 0; 1 "a variable with 'register' storage class",
+    // 3 "a bit-field"); "'_Alignas' attribute only applies to variables and fields"; and clang's CheckAlignasUnderalignment,
+    // "requested alignment is less than minimum alignment of N for type 'T'" (CheckInputReport.type).
+    CHECK_ARGUMENT_ALIGNAS_DECLARATION,
+    CHECK_ARGUMENT_ALIGNAS_SUBJECT,
+    CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -550,6 +561,56 @@ static void check_input_attribute_argument_error(CheckInputReader* reader, Check
             reader->output->reports[before].attribute = attribute->first;
         }
     }
+}
+
+// An alignment specifier's error (#147, C11 6.7.5p2: CHECK_ARGUMENT_ALIGNAS_*), at the keyword of the declaration's first
+// (its specifiers', `common`, then its declarator's, `own`): on a parameter, a register variable or a bit-field
+// (`declaration` 0, 1 or 3, as clang numbers them) "cannot be applied to", on a typedef or a function (BUSTER_CHECK_NONE)
+// "only applies to variables and fields"; with `type` (and `declaration` its alignment in bytes) "requested alignment
+// is less than minimum alignment" (`spelling` the declaration's typedef's, check_input_typedef_spelling).
+static void check_input_alignas_error(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, uint32_t declaration, TypeId type,
+                                      uint32_t spelling)
+{
+    CheckInputAttribute* found = NULL;
+    CheckInputAttributes* holder = NULL;
+    for (uint32_t list = 0; found == NULL && list < 2; list += 1)
+    {
+        CheckInputAttributes* attributes = list == 0 ? common : own;
+        for (uint32_t i = 0; attributes != NULL && found == NULL && i < attributes->count; i += 1)
+        {
+            found = attributes->records[i].kind == CHECK_ATTRIBUTE_ALIGNAS ? attributes->records + i : NULL;
+            holder = found != NULL ? attributes : holder;
+        }
+    }
+    const CheckAttributeArgumentError error = type != 0 ? CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED :
+                                              declaration == BUSTER_CHECK_NONE ? CHECK_ARGUMENT_ALIGNAS_SUBJECT : CHECK_ARGUMENT_ALIGNAS_DECLARATION;
+    const uint32_t before = reader->output->report_count;
+    if (found != NULL)
+    {
+        check_input_attribute_argument_error(reader, holder, found, found->first, error, declaration == BUSTER_CHECK_NONE ? 0 : declaration);
+    }
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].type = type;
+        reader->output->reports[before].type_spelling = spelling;
+    }
+}
+
+// clang's CheckAlignasUnderalignment (#147, C11 6.7.5p4), on a declaration's or a member's own type, its declarator's
+// (`type`, its name `name`), where one of its alignments is _Alignas's: the greatest of them all, GNU aligned's too, less
+// than the type's is an error at the keyword, naming the type as clang prints it (its typedef's spelling). Whether it is
+// fine. The specifiers' type isn't checked (check_input_specifiers): a declarator makes another type of it.
+static bool check_input_alignas_underaligned(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint32_t name)
+{
+    const bool checked = attributes != 0 && attributes->required_alignment_log2 != 0 && type != 0 && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION;
+    const uint32_t natural = checked ? type_alignment_log2(reader->types, type) : 0;
+    const bool underaligned = checked && attributes->alignment_log2 - 1 < natural;
+    if (underaligned)
+    {
+        const uint32_t spelling = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0;
+        check_input_alignas_error(reader, attributes, NULL, 1u << natural, type, spelling);
+    }
+    return !underaligned;
 }
 
 // clang's Expr::getExprLoc of the expression from `first` to `end` (#147), where some handlers report an argument: a
@@ -597,6 +658,29 @@ static void check_input_attribute_too_large(CheckInputReader* reader, CheckInput
     {
         reader->output->reports[before].value = (uint64_t)value;
     }
+}
+
+// The report the attributes' reader made from `before` (its one), an argument's error clang's handler gives after its
+// subject's check (CheckInputAttribute.deferred), moved off the unit's reports into the attribute, with the error it set on
+// the declaration's attributes undone (`error`, `error_first` and `error_end` as they were); a use of an undeclared name,
+// clang's parser's error, stays. Whether it moved one.
+static bool check_input_attribute_defer(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t before,
+                                        CheckInputAttributeError error, uint32_t error_first, uint32_t error_end)
+{
+    CheckInput* output = reader->output;
+    const bool moving = output->report_count == before + 1 && output->reports[before].message != CHECK_INPUT_UNDECLARED && !output->resource;
+    CheckInputReport* copy = moving ? arena_push(reader->arena, sizeof(CheckInputReport), 8) : NULL;
+    output->resource |= moving && copy == NULL;
+    if (copy != NULL)
+    {
+        *copy = output->reports[before];
+        output->report_count = before;
+        attributes->error = error;
+        attributes->error_first = error_first;
+        attributes->error_end = error_end;
+        attribute->deferred = copy;
+    }
+    return copy != NULL;
 }
 
 // An integer argument (its `argument`'s place from 0, `first` to `end`) that is no integer constant, as clang's handlers
@@ -1321,9 +1405,10 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const uint32_t handle = named ? check_input_library_binding(reader, name, token) : 0;
         // A name that names nothing is clang's parser's error, which drops the attribute: no subject of it is checked.
         const bool undeclared = named && handle == 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
-        valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
+        const bool shadowed = named && check_input_use_shadowed(reader, token, handle);
+        valid = literal || (named && !shadowed && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) != 0);
         attribute->ignored |= valid && undeclared;
-        reader->output->resource |= named && !valid;
+        reader->output->resource |= named && !valid && !shadowed;
         error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
         attribute->cleanup_function = handle != 0 && token == attribute->argument_first ? reader->bindings.declaration[handle - 1] + 1u : 0;
         attribute->cleanup_expression = valid && (literal || (handle != 0 && token != attribute->argument_first));
@@ -1351,7 +1436,13 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
         if (!valid)
         {
+            // (After its subject's check: thread-local variables, an error off one.)
+            const CheckInputAttributeError saved = attributes->error;
+            const uint32_t saved_first = attributes->error_first;
+            const uint32_t saved_end = attributes->error_end;
+            const uint32_t before = reader->output->report_count;
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->argument_first, CHECK_ARGUMENT_TLS_MODEL, 0);
+            valid = check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
         }
     }
     if (!valid)
@@ -1862,6 +1953,126 @@ static const CheckInputFactRow* check_input_fact_row(String8 scope, String8 name
     return result;
 }
 
+static bool check_constant_type_start(const Parser* parser, uint32_t token);
+
+// clang's parser's reading of attributes it applies nothing of (#147): a free-standing declaration's specifiers' (clang's
+// ParsedFreeStandingDeclSpec), and a bare tag declaration's after its name. Of each GNU list's items and each alignment
+// specifier's argument from `first` to `end` (a tag's tokens skipped, CheckInputReader.tag_ends), only what clang's parser
+// checks: an argument that must be a string literal (CheckInputArgumentsRow.strings), "expected string literal as argument
+// of 'X' attribute", and a name in an argument read as an expression that names nothing, "use of undeclared identifier"
+// (an attribute clang doesn't know takes a lone identifier as its first argument), the first an error at it. Then, with
+// `warn`, each one's warning: a GNU item's "attribute 'X' is ignored, place it after "struct" to apply attribute to type
+// declaration" (`keyword` the tag's: 0 struct, 1 union, 2 enum), an alignment specifier's "'_Alignas' attribute ignored";
+// at its token, or after the declaration's `;` (`delimiter`, after the storage class's warnings). Whether there was no
+// error.
+static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32_t first, uint32_t end, bool warn, uint32_t keyword, uint32_t delimiter)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
+    bool valid = true;
+    for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+    {
+        uint32_t t = first;
+        while (valid && t < end)
+        {
+            const uint8_t kind = parser->tokens.kinds[t];
+            const bool gnu = kind == PARSE_KIND_ATTRIBUTE && t + 2 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN &&
+                             parser->tokens.kinds[t + 2] == PARSE_KIND_L_PAREN;
+            const bool alignas = kind == PARSE_KIND_ALIGNAS && t + 1 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
+            const uint32_t outer = gnu || alignas ? parser->tree.parents[t + 1] : BUSTER_CHECK_NONE;
+            // Each item: its name, and its arguments (an alignment specifier's from `(`), from `k`.
+            uint32_t k = gnu ? t + 3 : alignas ? t : end;
+            const uint32_t items_end = gnu ? parser->tree.parents[t + 2] : alignas ? t + 1 : end;
+            while (valid && k < items_end && k < end)
+            {
+                const bool comma = parser->tokens.kinds[k] == PARSE_KIND_COMMA;
+                const uint32_t name = k;
+                const bool argued = !comma && k + 1 < end && parser->tokens.kinds[k + 1] == PARSE_KIND_L_PAREN;
+                const uint32_t arguments_first = argued ? k + 2 : BUSTER_CHECK_NONE;
+                const uint32_t arguments_end = argued ? parser->tree.parents[k + 1] : BUSTER_CHECK_NONE;
+                k = comma ? k + 1 : argued ? arguments_end + 1 : k + 1;
+                const String8 spelled = !comma ? check_input_attribute_name(reader, parser->tokens.names[name]) : (String8){ 0 };
+                const CheckInputArgumentsRow* row = gnu && !comma ? check_input_arguments_row(spelled) : NULL;
+                const bool known = gnu && !comma && check_input_fact_row((String8){ "", 0 }, spelled, false, false) != NULL;
+                const uint32_t flags = row != NULL ? row->flags : 0;
+                const uint32_t strings = row != NULL ? row->strings : 0;
+                const bool typed = (flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 || (alignas && arguments_first < arguments_end &&
+                                                                                 check_constant_type_start(parser, arguments_first));
+                uint32_t index = 0;
+                for (uint32_t argument = arguments_first; pass == 0 && valid && !typed && argument < arguments_end; index += 1)
+                {
+                    uint32_t stop = argument;
+                    bool literals = true;
+                    while (stop < arguments_end && parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+                    {
+                        literals &= parser->tokens.kinds[stop] == PARSE_KIND_STRING;
+                        stop = check_input_attribute_after_group(parser, stop, arguments_end);
+                    }
+                    const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+                    const bool identifier = lone && ((index == 0 && ((flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0 || !known)) || (flags & identifiers) != 0);
+                    const bool string = index < 32 && ((strings >> index) & 1u) != 0 && (flags & identifiers) == 0;
+                    bool builtin = false;
+                    for (uint32_t token = argument; token < stop; token += 1)
+                    {
+                        const String8 word = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) :
+                                                                                                    (String8){ 0 };
+                        builtin |= (word.length > 10 && memcmp(word.pointer, "__builtin_", 10) == 0) || parser->tokens.kinds[token] == PARSE_KIND_TYPE_ARGUMENT ||
+                                   parser->tokens.kinds[token] == PARSE_KIND_GENERIC;
+                    }
+                    uint32_t undeclared = BUSTER_CHECK_NONE;
+                    for (uint32_t token = argument; !identifier && !string && !builtin && undeclared == BUSTER_CHECK_NONE && token < stop; token += 1)
+                    {
+                        const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
+                        const uint32_t word = parser->tokens.names[token];
+                        const bool named = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && previous != PARSE_KIND_PERIOD && previous != PARSE_KIND_ARROW &&
+                                           previous != PARSE_KIND_STRUCT && previous != PARSE_KIND_ENUM;
+                        const bool library = reader->library_declarations != NULL && reader->library_declarations[word] != 0;
+                        undeclared = named && !library && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, word) == 0 ? token : BUSTER_CHECK_NONE;
+                    }
+                    if (string && !identifier && !literals)
+                    {
+                        CheckInputAttributes holder = { 0 };
+                        const CheckInputAttribute item = { .first = name, .name_token = name, .name = parser->tokens.names[name], .end = items_end };
+                        check_input_attribute_argument_error(reader, &holder, &item, argument, CHECK_ARGUMENT_STRING_LITERAL, 0);
+                        valid = false;
+                    }
+                    else if (undeclared != BUSTER_CHECK_NONE)
+                    {
+                        check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+                        valid = false;
+                    }
+                    argument = stop + 1;
+                }
+                if (pass == 1 && warn && !comma && (gnu || alignas))
+                {
+                    const CheckWarningEvent event =
+                    {
+                        .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                        .kind = gnu ? CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE : CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED,
+                        .token = name,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = delimiter != BUSTER_CHECK_NONE ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = delimiter != BUSTER_CHECK_NONE ? delimiter : name + 1,
+                        .payload = { .name = parser->tokens.names[name], .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = gnu ? keyword : 0 },
+                    };
+                    check_input_warning_event(reader, &event, NULL, 0);
+                }
+                k = alignas ? items_end : k;
+            }
+            // (Their tokens are read, as check_input_attributes marks a list it reads.)
+            if (pass == 1 && valid && outer != BUSTER_CHECK_NONE && outer > t && outer < end)
+            {
+                memset(reader->ignored + t, 1, outer + 1 - t);
+            }
+            const bool tag = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM;
+            const uint32_t skipped = tag && reader->tag_ends != NULL && reader->tag_ends[t] > t ? reader->tag_ends[t] :
+                                     (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE) && parser->tree.parents[t] > t ? parser->tree.parents[t] + 1 : t + 1;
+            t = outer != BUSTER_CHECK_NONE && outer > t ? outer + 1 : skipped;
+        }
+    }
+    return valid;
+}
+
 // clang's parser's -Wgcc-compat warning for a function definition (#147, Parser::ParseFunctionDefinition): each GNU
 // attribute after its declarator (`attributes`, the declarator's own) whose attribute GCC knows, at its name, named as
 // written, "GCC does not allow 'X' attribute in this position on a function definition".
@@ -2237,7 +2448,6 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
     return result;
 }
 
-static bool check_constant_type_start(const Parser* parser, uint32_t token);
 
 // Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
 // handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT) and
@@ -2886,7 +3096,9 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
     const bool floating = kind == BUSTER_TYPE_KIND_FLOATING || complex_floating;
     uint32_t integer_width = 0;
     bool is_signed = false;
-    const bool signed_base = integral && check_action_integer_type(types, element, &integer_width, &is_signed) && is_signed;
+    // (An enum with no integer type yet takes int's, signed, as clang's AddModeAttr defaults it.)
+    const bool signed_base = (integral && check_action_integer_type(types, element, &integer_width, &is_signed) && is_signed) ||
+                             (enumeration && !type_is_complete(types, element));
     TypeId result = 0;
     if (integer_mode)
     {
@@ -3034,6 +3246,10 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         {
             valid = attribute->resolved && !(is_typedef && attribute->kind == CHECK_ATTRIBUTE_ALIGNAS);
             error = attribute->resolved ? CHECK_ATTRIBUTE_ERROR_SUBJECT : CHECK_ATTRIBUTE_ERROR_INTEGER;
+            if (attribute->resolved && !valid)
+            {
+                check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
+            }
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION)
         {
@@ -3053,19 +3269,15 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
             check_input_attribute_error(reader, attributes, attribute->first, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
         }
     }
+    // clang's CheckAlignasUnderalignment: the greatest of all the alignments (GNU aligned's too) where one is _Alignas's.
     if (valid && attributes->required_alignment_log2 != 0 && !deduced)
     {
-        valid = type_kind(reader->types, result) != BUSTER_TYPE_KIND_FUNCTION && attributes->required_alignment_log2 - 1 >= type_alignment_log2(reader->types, result);
+        const bool function = type_kind(reader->types, result) == BUSTER_TYPE_KIND_FUNCTION;
+        const uint32_t natural = function ? 0 : type_alignment_log2(reader->types, result);
+        valid = !function && attributes->alignment_log2 - 1 >= natural;
         if (!valid)
         {
-            for (uint32_t i = 0; i < attributes->count; i += 1)
-            {
-                const CheckInputAttribute* attribute = &attributes->records[i];
-                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
-                {
-                    check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_ALIGNMENT);
-                }
-            }
+            check_input_alignas_error(reader, attributes, NULL, function ? BUSTER_CHECK_NONE : 1u << natural, function ? 0 : result, 0);
         }
     }
     if (valid && is_typedef && attributes->alignment_log2 != 0)
@@ -4343,6 +4555,18 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             valid = check_input_thread_attribute(reader, attribute, declaration, type);
         }
+        else if (kept && attribute->deferred != NULL)
+        {
+            // Its argument's error, its handler's once its subject takes it (check_input_attribute_defer).
+            CheckInput* output = reader->output;
+            if (output->report_count < output->report_capacity)
+            {
+                output->reports[output->report_count++] = *attribute->deferred;
+            }
+            output->resource |= output->report_count >= output->report_capacity && output->reports[output->report_count - 1].token != attribute->deferred->token;
+            attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
+            valid = false;
+        }
     }
     // A kernel's attributes on a function of no GPU kernel's convention (#147, clang's ProcessDeclAttributeList's end).
     if (valid && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0 && name < parser->tokens.count)
@@ -4782,7 +5006,7 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         }
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
-            check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
+            check_input_alignas_error(reader, attributes, NULL, BUSTER_CHECK_NONE, 0, 0);
             valid = false;
         }
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;
@@ -4813,13 +5037,15 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
             check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED, attribute->first,
                                                  attribute->argument_first);
         }
-        // alloc_size's and alloc_align's function that returns no pointer: their handlers' warnings, which ignore them.
-        if (allocation && !pointer_result)
+        // alloc_size's, alloc_align's and assume_aligned's function that returns no pointer: their handlers' warnings, which
+        // ignore them (assume_aligned's before its arguments' errors, check_input_attribute_defer).
+        const bool assumed = attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && !attribute->ignored;
+        if ((allocation || assumed) && !pointer_result)
         {
             check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
                                               attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE ? CHECK_WARNING_EVENT_RETURN_POINTERS : CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES);
         }
-        if (!recognized_format || (allocation && !pointer_result))
+        if (!recognized_format || ((allocation || assumed) && !pointer_result))
         {
             attribute->ignored = true;
         }

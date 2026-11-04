@@ -73,11 +73,14 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
 // types it (Sema::CheckEnumConstant), and after the list the enum's in C23 alone (check_input_enum_complete). Explicit
 // values are representable as clang's isRepresentableIntegerValue has it: a negative one by its significant bits, the
 // others by their active bits, less the sign bit for a signed type. An error is reported at the enumerator's name, as
-// clang reports it.
-static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTagFrame* frame, uint32_t name, bool explicit_value, CheckValue* value)
+// clang reports it: "enumerator value is not representable in the underlying type 'T'" (its typedef's spelling from the
+// base), the one after the greatest naming its value. An enum a mode completed (BUSTER_CHECK_ENUM_MODED, `moded`) has its
+// explicit values checked alone, and kept as a plain enum's.
+static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTagFrame* frame, uint32_t name, bool explicit_value, CheckValue* value, bool moded)
 {
     const TypeTable* types = reader->types;
     const TypeId underlying = types->types.base[type_index(frame->type)];
+    unsigned __int128 next = 0;
     uint32_t width = 0;
     bool sign = false;
     bool valid = check_action_integer_type(types, underlying, &width, &sign);
@@ -91,7 +94,7 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
         const bool negative = valid && value_sign && (bits >> (value_width - 1)) != 0;
         const uint32_t needed = negative ? check_input_enum_active_bits(~bits & mask) + 1 : check_input_enum_active_bits(bits);
         valid = valid && needed <= (negative || !sign ? width : width - 1);
-        if (valid)
+        if (valid && !moded)
         {
             check_action_convert_plain(types, value, underlying, name);
         }
@@ -102,6 +105,7 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
         const unsigned __int128 maximum = sign ? mask >> 1 : mask;
         const unsigned __int128 previous = frame->enumerator & mask;
         valid = frame->count == 0 || previous != maximum;
+        next = previous + 1;
         *value = (CheckValue)
         {
             .type = underlying,
@@ -111,10 +115,24 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
             .integer = frame->count == 0 ? 0 : (previous + 1) & mask,
         };
     }
-    value->type = underlying;
+    value->type = moded ? value->type : underlying;
+    const uint32_t before = reader->output->report_count;
     if (!valid)
     {
-        check_input_report(reader, name, CHECK_INPUT_DECLARATION);
+        check_input_report(reader, name, CHECK_INPUT_ENUM_NOT_REPRESENTABLE);
+    }
+    if (reader->output->report_count > before)
+    {
+        // (A fixed base's typedef spelled from its `{`, back to its `:`.)
+        uint32_t open = frame->token;
+        while (open < frame->close && reader->parser->tokens.kinds[open] != PARSE_KIND_L_BRACE)
+        {
+            open += 1;
+        }
+        reader->output->reports[before].type = underlying;
+        reader->output->reports[before].type_spelling = moded ? 0 : check_input_typedef_spelling(reader->output, reader->parser, open);
+        reader->output->reports[before].detail = explicit_value ? 0 : 1;
+        reader->output->reports[before].value = (uint64_t)next;
     }
     return valid;
 }
@@ -129,8 +147,11 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
     CheckInputAttributes* attributes = frame->enumerator_attributes;
-    // An enum with a fixed underlying type is complete from its base on (check_input_tag_identity).
-    const bool fixed = type_is_complete(reader->types, frame->type);
+    // An enum with a fixed underlying type is complete from its base on (check_input_tag_identity); one a mode completed
+    // isn't fixed (BUSTER_CHECK_ENUM_MODED).
+    const bool complete = type_is_complete(reader->types, frame->type);
+    const bool moded = complete && reader->enum_fixed[reader->types->types.index[type_index(frame->type)]] == BUSTER_CHECK_ENUM_MODED;
+    const bool fixed = complete && !moded;
     *nested_tag = BUSTER_CHECK_NONE;
     const bool resumed = frame->enum_job != 0;
     if (!resumed)
@@ -196,7 +217,11 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
         }
         if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
         {
-            valid = check_input_enum_fixed_value(reader, frame, name, true, &value);
+            valid = check_input_enum_fixed_value(reader, frame, name, true, &value, false);
+        }
+        else if (valid && *nested_tag == BUSTER_CHECK_NONE && moded && !check_input_enum_fixed_value(reader, frame, name, true, &value, true))
+        {
+            valid = false;
         }
         else if (valid && *nested_tag == BUSTER_CHECK_NONE && check_input_enum_fits_int(reader->types, &value))
         {
@@ -205,7 +230,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     }
     else if (valid && fixed)
     {
-        valid = check_input_enum_fixed_value(reader, frame, name, false, &value);
+        valid = check_input_enum_fixed_value(reader, frame, name, false, &value, false);
     }
     else if (valid)
     {
@@ -295,7 +320,13 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     const uint8_t alignment = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0;
     const uint32_t tag = reader->types->types.index[type_index(frame->type)];
     bool valid = frame->count != 0;
-    if (reader->enum_fixed[tag] != BUSTER_CHECK_ENUM_NONE)
+    const bool moded = reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_MODED;
+    // A mode after its body (#147): clang's ActOnEnumBody applies the enum's attributes before it takes a type, and takes
+    // the mode's (check_input_enum_mode).
+    const CheckInputAttribute* late_mode = !moded && reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_NONE ? check_input_enum_mode(frame->attributes, frame->close) : NULL;
+    const TypeId late_moded = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type) : 0;
+    valid &= late_mode == NULL || late_moded != 0;
+    if (reader->enum_fixed[tag] != BUSTER_CHECK_ENUM_NONE && !moded)
     {
         // Complete from its base, with its enumerators of the base's type in its list; an alignment after its body comes
         // too late for that (one before its name was applied there). After the list, its enumerators are of its own type
@@ -313,9 +344,12 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     }
     else
     {
-        const TypeId underlying = type_enum_underlying(packed, frame->negative_bits, frame->positive_bits);
-        valid = valid && type_enum_complete(reader->types, frame->type, underlying, alignment);
+        // (One a mode completed has its type; one after its body gives it.)
+        const TypeId underlying = moded ? reader->types->types.base[type_index(frame->type)] : late_moded != 0 ? late_moded :
+                                  type_enum_underlying(packed, frame->negative_bits, frame->positive_bits);
+        valid = valid && (moded || type_enum_complete(reader->types, frame->type, underlying, alignment));
         reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
+        reader->enum_fixed[tag] = moded ? BUSTER_CHECK_ENUM_LISTED : reader->enum_fixed[tag];
         if (valid)
         {
             if (frame->negative_bits > 64 || frame->positive_bits > 64 || (frame->negative_bits != 0 && frame->positive_bits == 64))

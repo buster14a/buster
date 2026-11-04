@@ -1182,7 +1182,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "_Alignas cannot reduce alignment",
             .source = "_Alignas(1) int x;\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
+            // clang's "requested alignment is less than minimum alignment" (check_input_alignas_error, #147).
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "_Alignas",
             .base = BUSTER_TYPE_INT,
             .rejected = true,
@@ -1191,7 +1192,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "_Alignas cannot annotate typedef",
             .source = "_Alignas(16) typedef int I;\n",
-            .error = CHECK_ATTRIBUTE_ERROR_SUBJECT,
+            // clang's "'_Alignas' attribute only applies to variables and fields" (check_input_alignas_error, #147).
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "_Alignas",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
@@ -1246,8 +1248,10 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid TLS model",
             .source = "__thread int x __attribute__((tls_model(\"invented\")));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "\"invented\"",
+            // Read, its model's error kept for after its subject's check (CheckInputAttribute.deferred, #147), which the
+            // driver test compares with clang's.
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_TLS_MODEL,
             .rejected = true,
         },
         {

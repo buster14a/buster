@@ -5656,13 +5656,25 @@ arguments against the function. The checker now gives these as clang does.
     floating-point types", "type of machine mode does not match type of base
     type", "unsupported machine mode 'M'" and "type of machine mode does not
     support base vector types".
+  - `mode` on an enum gives it the mode's integer type, signed (an enum of no
+    integer type yet takes `int`'s, as clang's `AddModeAttr` defaults it).
+    Before its body, as clang's `EnumDecl::setIntegerType` makes it, the enum
+    is complete from that type and each explicit value must be representable
+    in it, its enumerators otherwise a plain enum's
+    (`BUSTER_CHECK_ENUM_MODED`); after its body, clang's `ActOnEnumBody`
+    takes it for the enum's type. A value no fixed or moded type represents
+    is clang's "enumerator value is not representable in the underlying type
+    'T'" (`CHECK_INPUT_ENUM_NOT_REPRESENTABLE`), the base spelled as written
+    ("'T' (aka 'signed char')"), and a fixed type's value after its greatest
+    names the value.
 
   And the handlers' warnings, each of which ignores its attribute
   (-Wignored-attributes): "'X' attribute argument not supported: Y" (a
   visibility clang doesn't know, at the string; a format kind it doesn't
   know, at the attribute: its ignored `gcc_diag` kinds are silent), "'X'
   attribute only applies to return values that are pointers" (alloc_size)
-  and "... pointers or references" (alloc_align), "'visibility' attribute
+  and "... pointers or references" (alloc_align, and assume_aligned's before
+  its arguments' errors), "'visibility' attribute
   ignored" on a typedef, target's strings clang's `checkTargetAttr` doesn't
   take ("unsupported 'F' in the 'target' attribute string; 'target'
   attribute ignored", its unknown CPU and tune CPU, a duplicate `arch=` or
@@ -5674,6 +5686,41 @@ arguments against the function. The checker now gives these as clang does.
   'format' attribute to be variadic" (-Wgcc-compat) at the declaration's
   name. A cleanup's name that names nothing is clang's parser's error alone:
   the attribute is dropped, its subject unchecked.
+- **Subject before arguments** (`CheckInputAttribute.deferred`). The
+  handlers clang runs once an attribute's subject takes it give their
+  arguments' errors only then: tls_model's model, constructor's, destructor's
+  and assume_aligned's integers. The reader evaluates them where it reads them
+  (a tag's subjects are reached from the constant evaluator) and moves the
+  error into the attribute (`check_input_attribute_defer`), which
+  `check_input_attribute_subjects` gives after the subject, the exclusions and
+  the count; a use of an undeclared name, clang's parser's error, stays. The
+  type attributes clang leaves to a declarator's type (regparm,
+  ext_vector_type) are ignored on a tag's declaration without a word, their
+  arguments unread (`CheckInputReader.tag_attributes`).
+- **Declarations of no declarator** (`check_input_free_standing`). clang's
+  `ParsedFreeStandingDeclSpec` applies none of the specifiers' attributes. Their
+  GNU lists and alignment specifiers are read as its parser reads them alone
+  (`check_input_attribute_ignored_lists`: an argument that must be a string
+  literal, and a name in an expression that names nothing, are its errors), and
+  on a tag's declaration each is warned of after the storage class's warnings:
+  "attribute 'X' is ignored, place it after "struct" to apply attribute to type
+  declaration" (named as written), "'_Alignas' attribute ignored". A bare tag
+  declaration's attributes after its name are read the same way. C23 lists that
+  begin such a declaration are clang's parser's error, "misplaced attributes;
+  expected attributes here" just after a file-scope tag declaration's keyword,
+  else "an attribute list cannot appear here", with "declaration does not
+  declare anything" at the specifiers after them.
+- **Alignment specifiers** (`check_input_alignas_error`, C11 6.7.5). On a
+  parameter, a `register` variable or a bit-field, "'_Alignas' attribute cannot
+  be applied to a function parameter" (and the others); on a typedef or a
+  function, "'_Alignas' attribute only applies to variables and fields"; an
+  alignment below the declared type's, "requested alignment is less than
+  minimum alignment of N for type 'T'", the greatest of all the declaration's
+  alignments (GNU aligned's too) against its declarator's type, not its
+  specifiers' (`check_input_alignas_underaligned`). Two declarators of one
+  `_Alignas` are clang's error twice, here once: the checker stops at a
+  declaration's first attribute error (as for `aligned(n)` on two
+  declarations).
 - **Mutual exclusions** (`check_input_attribute_excluding`). After an
   attribute's subject check, one that an attribute already on the declaration
   excludes is clang's error "'cold' and 'hot' attributes are not compatible",

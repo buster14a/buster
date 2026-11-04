@@ -1729,7 +1729,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
                 const bool is_typedef = reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
-                valid = is_typedef == (role == PARSE_ROLE_SPECIFIER);
+                valid = is_typedef == (role == PARSE_ROLE_SPECIFIER) && !check_input_use_shadowed(reader, token, handle);
                 if (valid)
                 {
                     reader->output->declarations[token] = declaration;
@@ -1738,7 +1738,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     {
                         reader->output->overload_heads[token] = reader->output->overload_heads[declaration];
                     }
-                    if (c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) == 0)
+                    if (c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) == 0)
                     {
                         reader->output->resource = true;
                         valid = false;
@@ -3782,6 +3782,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 valid = intrinsic != 0 || (input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
+            valid = valid && !(!input->cached && builtin == CBUILTIN_NONE && check_input_use_shadowed(reader, token, handle));
             if (valid && !input->cached && builtin == CBUILTIN_NONE && handle != 0)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
@@ -3791,7 +3792,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 {
                     reader->output->overload_heads[token] = reader->output->overload_heads[declaration];
                 }
-                valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0;
+                valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) != 0;
                 reader->output->resource |= !valid;
             }
         }
