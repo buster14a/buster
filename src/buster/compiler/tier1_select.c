@@ -979,7 +979,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = destination;
-        record.form = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+        // A folded sign extension keeps the load's access width in source_width and its result width in width.
+        // The memory record stays last, so the CFG consumer can still patch a frame object's base and offset.
+        const uint32_t source_width = holes->source_width;
+        if (source_width != 0)
+        {
+            record.form = source_width == 4 ? X86_FORM_MOVSXD_R64_RM32 : source_width == 2 ? (width == 8 ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVSX_R32_RM16) : (width == 8 ? X86_FORM_MOVSX_R64_RM8 : X86_FORM_MOVSX_R32_RM8);
+        }
+        else
+        {
+            record.form = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -2854,9 +2864,25 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         {
             const bool right = tier1_select_constant(function, b, &constant);
             const bool left = !right && tier1_select_constant(function, a, &constant);
-            taken = (right || left) && !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
-            next.base = right ? a : b;
-            constant_node = right ? b : a;
+            if (right || left)
+            {
+                taken = !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
+                next.base = right ? a : b;
+                constant_node = right ? b : a;
+            }
+            else
+            {
+                // The typed stream also spells a pointer offset as inttoptr(add(ptrtoint(base), index)).
+                // Its full-width addition is the memory operand's base and index, not a separate lea. Never
+                // cross a narrow addition/extension or introduce a second index into an existing address.
+                taken = address.index == BUSTER_IR_NONE;
+                if (taken)
+                {
+                    next.base = a;
+                    next.index = tier1_select_index(forest, root, b, 1, &next.displacement, &peeled);
+                    next.scale = 0;
+                }
+            }
         }
         else if (taken && op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
         {
@@ -3364,6 +3390,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
         }
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A signed byte/word/dword load is one movsx/movsxd, including its folded address (#1217). Only move
+        // an ordinary single-use load past the same barriers as an arithmetic memory operand. I8 -> I16
+        // stays separate: its canonical storage also needs the upper half cleared after sign extension.
+        if (op == IR_SEXT && integer && tier1_select_load_folds(forest, node, a))
+        {
+            Tier1SelectPattern loaded = base;
+            loaded.values[0] = BUSTER_IR_NONE;
+            tier1_select_fold(forest, node, a, &loaded);
+            const bool walked = tier1_select_memory(forest, node, function->a[a], &loaded, 0);
+            loaded.rule = walked ? TIER1_RULE_LOAD_ADDRESS : TIER1_RULE_LOAD;
+            loaded.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, loaded);
+        }
         // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
         // setcc and movzx already the extension's 32 (or 64) bits.
         Tier1SelectPattern folded = base;
@@ -3415,7 +3454,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[0] = other;
             folded.values[1] = BUSTER_IR_NONE;
             folded.immediate = immediate;
-            folded.intrinsic_cost = op == IR_MUL ? 1 : 2;
+            // A three-operand imul is one record, but pricing it below a copy plus shift chose imul even for
+            // powers of two (#1217). Use a latency penalty, as division already does, so the
+            // shift and 3/5/9 lea candidates win. Keep the BURS grammar's two immediate-multiply costs equal.
+            folded.intrinsic_cost = op == IR_MUL ? 3 : 2;
             tier1_select_fold(forest, node, constant, &folded);
             tier1_select_add_candidate(forest, node, &candidates, folded);
             if (op == IR_ADD)
@@ -3838,8 +3880,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
 }
 
 // The scalar oracle is maximal munch: most covered nodes first. A switch fixes ties independently of the vector
-// minimum-cost selection. Both share legality, not the choice of cheapest cover. In particular munch chooses a
-// power-of-two multiply's shift before its three-operand immediate IMUL; the costed cover may choose the latter. A
+// minimum-cost selection. Both share legality, not the choice of cheapest cover. Both prefer a power-of-two
+// multiply's shift to its three-operand immediate IMUL (#1217's latency penalty). A
 // division by a register ranks below every rule for a constant divisor, which covers its constant even where the
 // constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
 static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)

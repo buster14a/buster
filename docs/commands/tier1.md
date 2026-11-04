@@ -88,3 +88,29 @@ requirements. [Command index](README.md).
   one run per build. `correctness.tests` checks its dispatch on every run: an
   incomplete command prints its usage, and one without its inputs fails its
   first build.
+
+## Address-arithmetic selection regressions
+
+`test-tier1-select` includes `tier1_address_arithmetic_test.c` (#1217) on
+both the scalar and bottom-up paths. It checks every power-of-two multiply
+in 32 and 64 bits (both operand orders and separate/coalesced destinations),
+signed byte/word/dword loads at sign boundaries and a protected page end,
+memory-order and shared-load counterexamples, and full-width pointer-integer
+addition folded into a memory operand. `test-x86-target-selection` also
+reaches these fixtures through the existing memory-plan tests.
+
+The immediate-multiply candidate and both corresponding BURS productions
+have cost 3, versus 2 for a copy and shift and 1 for a 3/5/9 multiply's lea.
+This is a latency-biased selection heuristic, not a measured runtime result
+or an instruction-count bound. Signed loads retain their exact access width
+in the selected pattern's `source_width`; its `width` is the 32- or 64-bit
+result. Their existing single-use, same-block and memory-barrier checks
+remain mandatory. I8-to-I16 sign extensions keep their canonicalization,
+and narrow arithmetic is never widened by the address walk.
+
+These local rules do not establish #1217's corpus-wide acceptance targets.
+Repeated frame/symbol-address rematerialization and table-base hoisting
+still need separate allocation/IR evidence. Record speedtest1/Lua dynamic
+counts and approved-host runtime results in `buster14a/buster-performance`,
+not in this source repository; use `measure-tier1-programs` for the runtime
+comparison described above.
