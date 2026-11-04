@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+name: Issue 1238 source snapshot
+on:
+  push:
+    branches: ['astra/1238-source-snapshot']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1238-source
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
