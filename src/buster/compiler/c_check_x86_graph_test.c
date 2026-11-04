@@ -127,10 +127,10 @@ static __attribute__((noinline)) void check_test_x86_graph(CheckTest* test, Type
                                    check_graph_x86_ice_mask(calls[4].info, true) == 16,
                               "decoded and handwritten x86 ICE constraints retain independent source positions");
             const uint64_t mark = output.length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 CheckStream actual;
-                const CheckOptions partition = { .batch_size = batch };
+                const CheckOptions partition = { .batch_size = batch, .regions = batch != 0 };
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &actual) &&
                                        check_test_stream_equal(&scalar, &actual, graph.argument_count),
                                   "all graph partitions preserve x86 conversions and event metadata");
