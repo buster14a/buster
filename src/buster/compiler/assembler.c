@@ -77,6 +77,11 @@ struct AsmSymbol
     uint32_t location;
     SymbolId link;
     uint32_t section_index;
+    uint32_t group;
+    uint32_t group_flags;
+    // A mention outside a group declaration, and an expression use (including one cancelled by arithmetic).
+    bool ordinary;
+    bool referenced;
     uint8_t flags;
     bool defined;
     bool absolute;
@@ -237,6 +242,7 @@ typedef struct AsmSection AsmSection;
 struct AsmSection
 {
     ObjectAtomSection object;
+    uint32_t group;
     uint32_t size;
     AtomId atom;
     uint8_t class;
@@ -363,6 +369,7 @@ struct AsmParser
     uint32_t section_mask;
     uint32_t section_count;
     uint32_t section_capacity;
+    uint32_t group_count;
     uint32_t section;
     // .pushsection/.popsection's stack, and the section .previous returns to.
     uint32_t* section_stack;
@@ -862,7 +869,7 @@ static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
     return result;
 }
 
-static uint32_t asm_find_section(const AsmParser* parser, String8 name);
+static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group);
 static void asm_line_instruction(AsmParser* parser, uint32_t location);
 
 static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
@@ -890,7 +897,7 @@ static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t loca
             parser->symbols[result] = (AsmSymbol){.name = name, .location = location, .internal = internal};
             if (!internal && name.length != 0 && name.pointer[0] == '.')
             {
-                const uint32_t section = asm_find_section(parser, name);
+                const uint32_t section = asm_find_section(parser, name, 0);
                 parser->symbols[result].section_start = section != 0;
                 parser->symbols[result].section_index = section;
             }
@@ -902,7 +909,9 @@ static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t loca
 
 static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
 {
-    return asm_symbol_scoped(parser, name, location, false);
+    const uint32_t result = asm_symbol_scoped(parser, name, location, false);
+    parser->symbols[result].ordinary = true;
+    return result;
 }
 
 static uint32_t asm_numeric(AsmParser* parser, uint32_t digit, bool forward, bool definition, uint32_t location)
@@ -1278,6 +1287,7 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                             asm_fail(parser, token.start, "expected address register");
                         }
                         const uint32_t symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
+                        parser->symbols[symbol].referenced = true;
                         if (parser->at < end && parser->tokens[parser->at].kind == '@')
                         {
                             if (parser->at + 1 >= end || parser->tokens[parser->at + 1].kind != BUSTER_ASM_WORD)
@@ -4890,7 +4900,7 @@ static void asm_emit(AsmParser* parser)
         AsmSymbol* symbol = &parser->symbols[i];
         if (symbol->absolute)
         {
-            if (symbol->explicit_binding || symbol->has_size)
+            if (symbol->explicit_binding || symbol->has_size || symbol->group != 0)
             {
                 asm_fail(parser, symbol->location, "exported absolute symbols are not supported by the shared object writer");
             }
@@ -4917,6 +4927,13 @@ static void asm_emit(AsmParser* parser)
             }
             continue;
         }
+        // A group-only signature is a local NOTYPE symbol of its SHT_GROUP section, not an undefined Link symbol.
+        // An explicitly global or referenced signature, and any definition, retain their ordinary symbol instead.
+        if (symbol->group != 0 && !symbol->defined && !symbol->alias && symbol->common == 0 &&
+            (!symbol->ordinary || ((symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK && !symbol->used && !symbol->referenced)))
+        {
+            continue;
+        }
         if (symbol->alias || symbol->view != 0)
         {
             // No reference is to it any more (asm_resolve_aliases), or it is a view number (asm_resolve).
@@ -4933,7 +4950,7 @@ static void asm_emit(AsmParser* parser)
             symbol->link = link_add_symbol(link, name, target->atom, 0, 0, symbol->flags, BUSTER_LINK_SOURCE_PROGRAM);
             continue;
         }
-        if (!symbol->defined && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0)))
+        if (!symbol->defined && symbol->group == 0 && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0)))
         {
             asm_fail(parser, symbol->location, "undefined local symbol");
             continue;

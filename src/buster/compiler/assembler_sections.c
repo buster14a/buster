@@ -19,7 +19,7 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
             for (uint32_t i = 1; i < parser->section_count; i += 1)
             {
                 const String8 name = parser->sections[i].object.name;
-                uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & (count - 1);
+                uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ ((uint64_t)parser->sections[i].group * UINT64_C(0x9e3779b97f4a7c15))) & (count - 1);
                 while (slots[slot] != 0)
                 {
                     slot = (slot + 1) & (count - 1);
@@ -33,7 +33,7 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
     else
     {
         const String8 name = parser->sections[id].object.name;
-        uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->section_mask;
+        uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ ((uint64_t)parser->sections[id].group * UINT64_C(0x9e3779b97f4a7c15))) & parser->section_mask;
         while (parser->section_slots[slot] != 0)
         {
             slot = (slot + 1) & parser->section_mask;
@@ -82,14 +82,14 @@ static bool asm_section_prefix(String8 name, const char* prefix)
     return name.length >= length && memcmp(name.pointer, prefix, length) == 0;
 }
 
-static uint32_t asm_find_section(const AsmParser* parser, String8 name)
+static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group)
 {
-    uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->section_mask;
+    uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ ((uint64_t)group * UINT64_C(0x9e3779b97f4a7c15))) & parser->section_mask;
     uint32_t result = parser->section_slots[slot];
     while (result != 0)
     {
         const String8 candidate = parser->sections[result].object.name;
-        if (candidate.length == name.length && memcmp(candidate.pointer, name.pointer, name.length) == 0)
+        if (parser->sections[result].group == group && candidate.length == name.length && memcmp(candidate.pointer, name.pointer, name.length) == 0)
         {
             break;
         }
@@ -105,7 +105,8 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     const bool named = asm_is(parser, token, ".section") || asm_is(parser, token, ".pushsection");
     const uint32_t name_token = named ? parser->at++ : token;
     const String8 name = asm_name_text(parser, name_token);
-    uint32_t id = asm_find_section(parser, name);
+    uint32_t group = 0;
+    uint32_t id = asm_find_section(parser, name, group);
     ObjectAtomSection object = id != 0 ? parser->sections[id].object : (ObjectAtomSection){.name = name, .type = SHT_PROGBITS};
     if (id == 0)
     {
@@ -126,6 +127,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         {
             const String8 flags = asm_name_text(parser, parser->at++);
             object.flags = 0;
+            object.entry_size = 0;
             for (uint64_t i = 0; i < flags.length; i += 1)
             {
                 switch (flags.pointer[i])
@@ -136,6 +138,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 case 'M': object.flags |= SHF_MERGE; break;
                 case 'S': object.flags |= SHF_STRINGS; break;
                 case 'T': object.flags |= SHF_TLS; break;
+                case 'G': object.flags |= SHF_GROUP; break;
                 default: asm_fail(parser, location, "unsupported section flag"); break;
                 }
             }
@@ -169,8 +172,54 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 }
                 object.entry_size = (uint32_t)size;
             }
+            if ((object.flags & SHF_GROUP) != 0)
+            {
+                asm_expect(parser, ',', "grouped section requires a signature");
+                const uint32_t signature_token = parser->at;
+                const String8 signature_name = parser->at < end ? asm_name_text(parser, parser->at) : (String8){0};
+                const bool named_signature = parser->at < end && asm_name_token(parser, parser->at);
+                if (!named_signature || signature_name.length == 0)
+                {
+                    asm_fail(parser, location, "expected section group signature");
+                }
+                else
+                {
+                    parser->at += 1;
+                    uint32_t flags = 0;
+                    if (asm_take(parser, ','))
+                    {
+                        if (!asm_is(parser, parser->at, "comdat"))
+                        {
+                            asm_fail(parser, location, "unsupported section group linkage");
+                        }
+                        flags = BUSTER_LINK_GROUP_COMDAT;
+                        parser->at += 1;
+                    }
+                    if (parser->result.error == 0)
+                    {
+                        const uint32_t signature = asm_symbol_scoped(parser, signature_name, parser->tokens[signature_token].start, false);
+                        AsmSymbol* symbol = &parser->symbols[signature];
+                        if (symbol->group != 0 && symbol->group_flags != flags)
+                        {
+                            asm_fail(parser, location, "section group linkage changed after declaration");
+                        }
+                        else
+                        {
+                            if (symbol->group == 0)
+                            {
+                                symbol->group = ++parser->group_count;
+                                symbol->group_flags = flags;
+                            }
+                            group = symbol->group;
+                        }
+                    }
+                }
+            }
         }
     }
+    // A name alone selects the ungrouped section. Grouped instances, even conventional names such as .text, have
+    // independent metadata and layout; never inherit a different group's attributes.
+    id = asm_find_section(parser, name, group);
     const bool executable = (object.flags & SHF_EXECINSTR) != 0;
     const bool zero = object.type == SHT_NOBITS;
     const bool tls = (object.flags & SHF_TLS) != 0;
@@ -204,6 +253,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         }
         AsmSection* section = &parser->sections[id];
         section->object = object;
+        section->group = group;
         // The Link's string pools are of bytes: wider characters' strings are read-only data, as the importer classes
         // them, whose section keeps its merge flags and entry size (the object writer's descriptor).
         section->class = zero ? (tls ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS) :
@@ -232,8 +282,60 @@ static bool asm_object_declares(const AsmSymbol* symbol)
            (!weak || symbol->used);
 }
 
+static void asm_object_groups(AsmParser* parser)
+{
+    Link* link = &parser->result.link;
+    if (parser->group_count != 0 && parser->result.error == 0 && link->error == LINK_ERROR_NONE)
+    {
+        const uint32_t count = parser->group_count + 1;
+        LinkGroup* groups = BUSTER_ARENA_PUSH_ARRAY(parser->arena, LinkGroup, count);
+        uint32_t* atoms = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, link->atoms.count);
+        if (groups == 0 || atoms == 0)
+        {
+            asm_fail(parser, 0, "arena exhausted publishing section groups");
+        }
+        else
+        {
+            memset(groups, 0, count * sizeof(LinkGroup));
+            memset(atoms, 0, link->atoms.count * sizeof(uint32_t));
+            for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+            {
+                const AsmSymbol* symbol = &parser->symbols[i];
+                if (symbol->group != 0)
+                {
+                    if (symbol->absolute || symbol->alias || symbol->view != 0 || symbol->common != 0)
+                    {
+                        asm_fail(parser, symbol->location, "unsupported section group signature definition");
+                    }
+                    const NameId name = symbol->link != 0 ? link->symbols.name[symbol->link] :
+                                        link_add_name(link, (const uint8_t*)symbol->name.pointer, symbol->name.length);
+                    groups[symbol->group] = (LinkGroup){
+                        .name = name,
+                        .signature = symbol->link,
+                        .flags = symbol->group_flags,
+                    };
+                }
+            }
+            for (uint32_t i = 1; i < parser->section_count; i += 1)
+            {
+                const AsmSection* section = &parser->sections[i];
+                if (section->atom != 0)
+                {
+                    atoms[section->atom] = section->group;
+                }
+            }
+            link->groups = (LinkGroups){.data = groups, .atom_groups = atoms, .count = count, .atom_count = link->atoms.count};
+            if (link->error != LINK_ERROR_NONE)
+            {
+                asm_fail(parser, 0, "arena exhausted publishing group signatures");
+            }
+        }
+    }
+}
+
 static void asm_object_options(AsmParser* parser)
 {
+    asm_object_groups(parser);
     Link* link = &parser->result.link;
     ObjectAtomSection* sections = BUSTER_ARENA_PUSH_ARRAY(parser->arena, ObjectAtomSection, link->atoms.count);
     uint8_t* temporary = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint8_t, link->symbols.count);
@@ -392,7 +494,7 @@ static bool asm_section_holds(const AsmParser* parser, uint32_t section)
 static uint32_t asm_debug_section(AsmParser* parser, const char* name, bool strings)
 {
     const String8 spelling = { .pointer = (char*)name, .length = strlen(name) };
-    uint32_t id = asm_find_section(parser, spelling);
+    uint32_t id = asm_find_section(parser, spelling, 0);
     if (id == 0 && parser->section_count >= parser->section_capacity)
     {
         asm_fail(parser, 0, "section capacity exhausted");
