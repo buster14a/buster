@@ -218,6 +218,44 @@ static bool check_input_statement_attribute_names(CheckInputReader* reader, uint
     return result;
 }
 
+// Whether an assumption (from `first` to `end`, which the evaluator read) has clang's (potential) side effects (#147,
+// HasSideEffects): a volatile object's read (`flags`, the evaluator's), an increment, a decrement or an assignment, or a
+// call of other than a function declared const or pure (its declaration's attributes); an operand of sizeof, _Alignof
+// or typeof isn't evaluated.
+static bool check_input_assume_effects(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t flags)
+{
+    const Parser* parser = reader->parser;
+    bool result = (flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+    uint32_t token = first;
+    while (!result && token < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint8_t role = parser->tree.roles[token];
+        const bool unevaluated = (kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_TYPEOF) && token + 1 < end && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN &&
+                                 parser->tree.parents[token + 1] > token + 1 && parser->tree.parents[token + 1] < end;
+        const uint32_t callee = role == PARSE_ROLE_OPEN_CALL && token > first && parser->tokens.kinds[token - 1] == PARSE_KIND_IDENTIFIER ? token - 1 : BUSTER_CHECK_NONE;
+        const uint32_t declaration = callee != BUSTER_CHECK_NONE && reader->output->declarations != NULL ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
+        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? check_input_attributes_at(reader->output, declaration) : NULL;
+        bool pure = false;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            pure |= attributes->records[i].kind == CHECK_ATTRIBUTE_CONST || attributes->records[i].kind == CHECK_ATTRIBUTE_PURE;
+        }
+        // (A name of a volatile object, or one of a pointer to one that it dereferences, whose read the evaluator's
+        // non-constant value doesn't mark.)
+        const TypeId named = kind == PARSE_KIND_IDENTIFIER ? reader->declared_types[token] : 0;
+        const TypeId bare = named != 0 ? type_strip_aligned(reader->types, named) : 0;
+        const bool pointer = bare != 0 && type_kind(reader->types, bare) == BUSTER_TYPE_KIND_POINTER;
+        const bool dereferenced = (token > first && parser->tokens.kinds[token - 1] == PARSE_KIND_STAR && parser->tree.roles[token - 1] == PARSE_ROLE_PREFIX) ||
+                                  (token + 1 < end && (parser->tokens.kinds[token + 1] == PARSE_KIND_L_SQUARE || parser->tokens.kinds[token + 1] == PARSE_KIND_ARROW));
+        const bool volatile_name = (named != 0 && (type_qualifiers(named) & BUSTER_TYPE_VOLATILE) != 0) ||
+                                   (pointer && dereferenced && (type_qualifiers(reader->types->types.base[type_index(bare)]) & BUSTER_TYPE_VOLATILE) != 0);
+        result = kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS || role == PARSE_ROLE_ASSIGN || (role == PARSE_ROLE_OPEN_CALL && !pure) || volatile_name;
+        token = unevaluated ? parser->tree.parents[token + 1] + 1 : token + 1;
+    }
+    return result;
+}
+
 // A statement's attributes, as clang's Sema takes them, after their reading (check_input_read_attributes) took each: a null
 // statement's fallthrough (`empty`), and a return's musttail (`returns`) are the statement's; GNU's noinline and
 // always_inline clang ignores on a statement (with a warning, which isn't modeled), and nomerge and suppress on any; musttail elsewhere, fallthrough on a
@@ -282,6 +320,77 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
             }
             valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
             aligned = code_align && aligned == BUSTER_CHECK_NONE ? attribute->first : aligned;
+            attribute->ignored = true;
+        }
+        else if (check_input_attribute_equal(generic, "assume"))
+        {
+            // GNU's assumption (#147), which changes nothing at -O0: clang's subject (an empty statement), its count, its
+            // argument a conditional expression (an assignment or a comma at its top needs parentheses), read as clang's Sema
+            // reads it (check_input_evaluate), of a scalar, and its (potential) side effects warned of (-Wassume), which
+            // drop it.
+            CheckInputAttributes holder = { 0 };
+            const Parser* parser = reader->parser;
+            uint32_t bare = BUSTER_CHECK_NONE;
+            for (uint32_t token = attribute->argument_first; empty && attribute->argument_count != 0 && bare == BUSTER_CHECK_NONE && token < attribute->argument_end;)
+            {
+                const uint8_t role = parser->tree.roles[token];
+                bare = role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA || parser->tokens.kinds[token] == PARSE_KIND_COMMA ? token : BUSTER_CHECK_NONE;
+                token = check_input_attribute_after_group(parser, token, attribute->argument_end);
+            }
+            if (!empty)
+            {
+                check_input_attribute_argument_error(reader, &holder, attribute, attribute->first, CHECK_ARGUMENT_EMPTY_ONLY, 0);
+            }
+            else if (attribute->argument_count == 0)
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT | 1u << 8);
+            }
+            else if (bare != BUSTER_CHECK_NONE)
+            {
+                check_input_attribute_argument_error(reader, &holder, attribute, bare, CHECK_ARGUMENT_ASSUME_PARENTHESES, 0);
+            }
+            else
+            {
+                // (A name that names nothing is clang's parser's error first.)
+                uint32_t undeclared = BUSTER_CHECK_NONE;
+                for (uint32_t token = attribute->argument_first; undeclared == BUSTER_CHECK_NONE && token < attribute->argument_end; token += 1)
+                {
+                    const uint8_t previous = parser->tokens.kinds[token - 1];
+                    const uint32_t name = parser->tokens.names[token];
+                    const bool library = reader->library_declarations != NULL && reader->library_declarations[name] != 0;
+                    const String8 spelled = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, name) : (String8){ 0 };
+                    const bool builtin = spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0;
+                    undeclared = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && previous != PARSE_KIND_PERIOD && previous != PARSE_KIND_ARROW &&
+                                 previous != PARSE_KIND_STRUCT && previous != PARSE_KIND_ENUM && !library && !builtin &&
+                                 c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0 ? token : BUSTER_CHECK_NONE;
+                }
+                CheckValue value = { 0 };
+                const bool evaluated = undeclared == BUSTER_CHECK_NONE && check_input_evaluate(reader, attribute->argument_first, attribute->argument_end, &value);
+                const uint8_t value_kind = evaluated ? type_kind(reader->types, type_strip_aligned(reader->types, value.type)) : 0;
+                if (undeclared != BUSTER_CHECK_NONE)
+                {
+                    check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+                }
+                else if (!evaluated && reader->output->report_count == reported)
+                {
+                    check_input_report(reader, attribute->argument_first, CHECK_INPUT_UNSUPPORTED);
+                }
+                else if (value_kind == BUSTER_TYPE_KIND_STRUCT || value_kind == BUSTER_TYPE_KIND_UNION)
+                {
+                    const uint32_t before = reader->output->report_count;
+                    check_input_attribute_argument_error(reader, &holder, attribute, attribute->argument_first, CHECK_ARGUMENT_NOT_BOOL, 0);
+                    if (reader->output->report_count > before)
+                    {
+                        reader->output->reports[before].type = value.type;
+                    }
+                }
+                else if (evaluated && check_input_assume_effects(reader, attribute->argument_first, attribute->argument_end, value.flags))
+                {
+                    check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_ASSUME, CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS, attribute->argument_first,
+                                                         BUSTER_CHECK_WARNING_NO_SOURCE);
+                }
+            }
+            valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
             attribute->ignored = true;
         }
         else if (check_input_attribute_equal(generic, "atomic"))

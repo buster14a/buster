@@ -5589,7 +5589,17 @@ arguments against the function. The checker now gives these as clang does.
   "conflicting loop attribute" noted at the first; `atomic` before a compound
   statement, its options `remote_memory`, `fine_grained_memory` and
   `ignore_denormal_mode` (each with `no_` or not). On a declaration each is
-  "cannot be applied to a declaration".
+  "cannot be applied to a declaration". GNU's `assume` is an empty
+  statement's ("only applies to empty statements" elsewhere): one argument, a
+  conditional expression (an assignment or a comma at its top is "use of this
+  expression in an 'assume' attribute requires parentheses", at it), read as
+  clang's Sema reads it (a name that names nothing first, a structure's or
+  union's value "is not contextually convertible to 'bool'"), and dropped with
+  -Wassume's "assumption is ignored because it contains (potential)
+  side-effects" where it has them (an increment, an assignment, a volatile
+  read, a call of other than a const or pure function; an operand of sizeof or
+  typeof aside: `check_input_assume_effects`). Left: clang's -Wunused-value
+  warnings inside it, which come from its expression's walk.
 
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as

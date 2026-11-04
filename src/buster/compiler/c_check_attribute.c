@@ -585,6 +585,13 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_ATOMIC_OPTION,
     CHECK_ARGUMENT_COMPOUND_ONLY,
     CHECK_ARGUMENT_LOOP_CONFLICT,
+    // assume's (check_input_statement_attribute_kinds): off an empty statement, "'X' attribute only applies to empty
+    // statements"; an assignment or a comma not in parentheses, "use of this expression in an 'assume' attribute requires
+    // parentheses" (at its operator); a value of a structure or union, "value of type 'T' is not contextually convertible
+    // to 'bool'" (CheckInputReport.type).
+    CHECK_ARGUMENT_EMPTY_ONLY,
+    CHECK_ARGUMENT_ASSUME_PARENTHESES,
+    CHECK_ARGUMENT_NOT_BOOL,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2529,7 +2536,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "objc_precise_lifetime",
         // Other targets' vector types, aliases of their builtins, statements' hints (check_input_statement_attribute_kinds),
         // and Blocks' byref variables, whose checks in C on x86-64 are check_input_attribute_annotations'.
-        "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks",
+        "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -4790,7 +4797,8 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         const bool riscv = generic_name && check_input_attribute_equal(generic_spelled, "riscv_rvv_vector_bits");
         const bool vector_bits = (riscv || (generic_name && check_input_attribute_equal(generic_spelled, "arm_sve_vector_bits"))) && !tag_declaration;
         const bool statement_only = generic_name && (check_input_attribute_equal(generic_spelled, "atomic") || check_input_attribute_equal(generic_spelled, "code_align") ||
-                                                     check_input_attribute_equal(generic_spelled, "opencl_unroll_hint"));
+                                                     check_input_attribute_equal(generic_spelled, "opencl_unroll_hint") ||
+                                                     check_input_attribute_equal(generic_spelled, "assume"));
         if ((vector_bits || statement_only) && !attribute->ignored)
         {
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->first,

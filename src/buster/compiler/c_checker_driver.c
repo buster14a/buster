@@ -342,6 +342,9 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             break;
         case CHECK_ARGUMENT_COMPOUND_ONLY: snprintf(text, capacity, "'%s' attribute only applies to compound statements", parsed); break;
         case CHECK_ARGUMENT_LOOP_CONFLICT: snprintf(text, capacity, "conflicting loop attribute '%s'", parsed); break;
+        case CHECK_ARGUMENT_EMPTY_ONLY: snprintf(text, capacity, "'%s' attribute only applies to empty statements", parsed); break;
+        case CHECK_ARGUMENT_ASSUME_PARENTHESES: snprintf(text, capacity, "use of this expression in an 'assume' attribute requires parentheses"); break;
+        case CHECK_ARGUMENT_NOT_BOOL: snprintf(text, capacity, "value of type %.*s is not contextually convertible to 'bool'", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
@@ -1870,8 +1873,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const CheckInputReport* report = input->reports + index;
                             const uint64_t type_mark = scratch->length;
                             // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
-                            const bool typed = ((report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED || (report->detail & 0xffu) == CHECK_ARGUMENT_PRECISE_LIFETIME) &&
-                               report->type != 0;
+                            const bool typed = ((report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED || (report->detail & 0xffu) == CHECK_ARGUMENT_PRECISE_LIFETIME ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL) && report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
                             spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;

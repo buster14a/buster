@@ -631,6 +631,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_INDEPENDENT_POINTER:
         case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
         case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
+        case CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -698,6 +699,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ?
                 check_warning_text(scratch, "'lifetime_capture_by(%s)' is deprecated; use 'lifetime_capture_by_%s' instead", argument, argument) :
                 event->kind == CHECK_WARNING_EVENT_MIG_ROUTINE ? "'mig_server_routine' attribute only applies to routines that return a kern_return_t" :
+                event->kind == CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS ? "assumption is ignored because it contains (potential) side-effects" :
                 event->kind == CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF ? "'NSObject' attribute may be put on a typedef only; attribute is ignored" :
                 event->kind == CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF ? "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" :
                 event->kind == CHECK_WARNING_EVENT_INDEPENDENT_POINTER ?

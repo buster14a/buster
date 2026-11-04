@@ -25,7 +25,7 @@
 // ignores, the declarations of no declarator (check_input_free_standing, check_input_attribute_ignored_lists, C23 lists
 // that begin one), and mode on an enum, with a fixed type's enumerator errors (BUSTER_CHECK_ENUM_MODED). Then static
 // analyses' and Objective-C's annotations (check_input_attribute_annotations, check_input_capture_names), and other
-// targets' vector types, builtins' aliases, the loops' and compound statements' hints, and Blocks' byref.
+// targets' vector types, builtins' aliases, the loops' and compound statements' hints, Blocks' byref, and GNU's assume.
 
 static void check_test_driver_attribute_arguments(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -1229,6 +1229,30 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "typedef int T __attribute__((arm_sve_vector_bits(128)));\n",
         "void f(int *a) { [[clang::code_align(16)]] for (;;) break; }\n",
         "void f(void) { static __attribute__((blocks(byref))) int x; }\n",
+        "void f(int x) { __attribute__((assume(x > 0))); }\n",
+        "void f(int x) { __attribute__((assume(nosuch))); }\n",
+        "struct S { int a; }; void f(struct S s) { __attribute__((assume(s))); }\n",
+        "void f(int *p) { __attribute__((assume(p))); }\n",
+        "int g(void); void f(void) { __attribute__((assume(g()))); }\n",
+        "int g(void) __attribute__((const)); void f(void) { __attribute__((assume(g()))); }\n",
+        "int g(void) __attribute__((pure)); void f(void) { __attribute__((assume(g()))); }\n",
+        "void f(int x) { __attribute__((assume(x = 1))); }\n",
+        "void f(int x) { __attribute__((assume(x++ > 0))); }\n",
+        "void f(volatile int x) { __attribute__((assume(x > 0))); }\n",
+        "void f(double d) { __attribute__((assume(d))); }\n",
+        "void f(void) { __attribute__((assume(\"s\"))); }\n",
+        "void f(int x) { [[clang::assume(x > 0)]]; }\n",
+        "void f(int x) { __attribute__((assume(x > 0))) __attribute__((assume(x < 9))); }\n",
+        "void f(int x) { __attribute__((assume(x > 0))); if (x) return; }\n",
+        "int x __attribute__((assume(1)));\n",
+        "void f(void) { __attribute__((assume(1))) return; }\n",
+        "void f(void (*fp)(void)) { __attribute__((assume(fp))); }\n",
+        "void f(int *p) { __attribute__((assume(*p))); }\n",
+        "void f(int x) { __attribute__((assume)); }\n",
+        "int f(int x) { __attribute__((assume(x > 0))); return x / 2; } int main(void) { return f(4) - 2; }\n",
+        "void f(volatile int *p) { __attribute__((assume(*p > 0))); }\n",
+        "int g(int); void f(int x) { __attribute__((assume(sizeof(g(x)) == 4))); }\n",
+        "void f(volatile int x) { __attribute__((assume(sizeof(x) == 4))); }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
