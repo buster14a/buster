@@ -1624,7 +1624,10 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
   `__builtin_ptrauth_strip`) need a target x86 isn't: every call is an error, as
   clang's is ("is only available in C++", "this target does not support pointer
   authentication"), the latter's after their arity. `__has_builtin` answers 1
-  for them, as clang's does, and `__has_constexpr_builtin` as clang's.
+  for the ten, and `201802L` for `__builtin_operator_new` and
+  `__builtin_operator_delete` in every language, as clang's does (the date of
+  the change that let them call any usual allocation function, which libc++
+  asks about); `__has_constexpr_builtin` answers as clang's.
 
 `__builtin_preserve_access_index` and `__builtin_hlsl_resource_getpointer_typed`
 (0x452 and 0x453, #148) are checked as clang's Sema checks them in C, and `-c`
