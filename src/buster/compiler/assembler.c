@@ -48,7 +48,7 @@ struct AsmExpr
     uint32_t plus;
     uint32_t minus;
     // Intel addresses keep register terms through parentheses. These fields occupy the record's former padding.
-    uint8_t registers[2]; // Architectural GPR number plus one; 17 is RIP.
+    uint8_t registers[2]; // Architectural GPR number plus one; 17 is RIP; a vector index 32 + 32 * (class - XMM) + number.
     uint8_t scales[2];
     uint8_t register_count;
     uint8_t indexed; // Multiplication explicitly chooses an index, including a scale of one.
@@ -1251,12 +1251,14 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                     const bool is_register = parser->options.intel && prefixed == parser->prefix && token.kind != BUSTER_ASM_STRING && text.length <= 5 && asm_token_register(parser, name_at, &reg);
                     if (is_register)
                     {
-                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != 255))
+                        // A gather's or scatter's vector index too (#1115, `[rdx+4*ymm7]`).
+                        const bool vector = reg.class >= BUSTER_X86_CLASS_XMM && reg.class <= BUSTER_X86_CLASS_ZMM;
+                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != 255 && !vector))
                         {
                             asm_fail(parser, token.start, "invalid use of register");
                         }
                         value.register_count = 1;
-                        value.registers[0] = reg.class == 255 ? 17 : reg.reg + 1;
+                        value.registers[0] = reg.class == 255 ? 17 : vector ? (uint8_t)(32 + 32 * (reg.class - BUSTER_X86_CLASS_XMM) + reg.reg) : reg.reg + 1;
                         value.scales[0] = 1;
                     }
                     else
@@ -1548,9 +1550,18 @@ static bool asm_read_register(AsmParser* parser, uint32_t end, X86Operand* opera
 
 static void asm_address_register(AsmParser* parser, X86Operand* memory, X86Operand reg, uint32_t scale, bool index, uint32_t location)
 {
+    const bool vector = reg.class >= BUSTER_X86_CLASS_XMM && reg.class <= BUSTER_X86_CLASS_ZMM;
     if (reg.class == 255 && !index && !(memory->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)))
     {
         memory->mode = BUSTER_X86_MEMORY_RIP;
+    }
+    else if (vector && (index || parser->options.intel) && !(memory->mode & (BUSTER_X86_MODE_RIP | BUSTER_X86_MODE_INDEX)) && scale <= 3)
+    {
+        // A gather's or scatter's vector index (VSIB, #1115: clang's `vpgatherqd 32(%rdx,%ymm7), %xmm8 {%k1}`, Intel's
+        // `[rdx+4*ymm7]`): in Intel syntax wherever it is written, which is never a base; in AT&T's, the index's place.
+        memory->mode |= BUSTER_X86_MODE_INDEX | scale;
+        memory->index = reg.reg;
+        memory->vsib = reg.class;
     }
     else if (reg.class != BUSTER_X86_CLASS_GPR64 || (memory->mode & BUSTER_X86_MODE_RIP) || scale > 3)
     {
@@ -1607,12 +1618,13 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
     {
         const uint32_t factor = expression->scales[i];
         const uint32_t scale = factor == 2 ? 1 : factor == 4 ? 2 : factor == 8 ? 3 : 0;
+        const uint8_t number = expression->registers[i];
         const X86Operand reg =
         {
             .kind = X86_OPERAND_REGISTER,
-            .class = expression->registers[i] == 17 ? 255 : BUSTER_X86_CLASS_GPR64,
+            .class = number == 17 ? 255 : number >= 32 ? (uint8_t)(BUSTER_X86_CLASS_XMM + (number - 32) / 32) : BUSTER_X86_CLASS_GPR64,
             .width = 8,
-            .reg = expression->registers[i] - 1,
+            .reg = number >= 32 ? (uint8_t)((number - 32) % 32) : (uint8_t)(number - 1),
         };
         asm_address_register(parser, operand, reg, scale, (expression->indexed >> i) & 1, location);
     }

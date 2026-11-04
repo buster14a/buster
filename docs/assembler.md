@@ -151,9 +151,15 @@ families (`x86_match_supported`): a form is admitted when
   (#147), at most four of them;
 - every operand descriptor is one the parser reads: general registers of 8 to 64
   bits, XMM, YMM and ZMM registers, opmasks, the x87's stack registers
-  (`%st` and `%st(i)`, Intel's `st` and `st(i)`, #147), and memory addressed by
-  general registers; not MMX, bound, control, debug, segment or tile registers,
-  vector-indexed (VSIB) memory, register pairs or a default flags value;
+  (`%st` and `%st(i)`, Intel's `st` and `st(i)`, #147), memory addressed by
+  general registers, and a gather's or scatter's vector-indexed (VSIB) memory
+  (#1115: `vpgatherqd 32(%rdx,%ymm7), %xmm8 {%k1}`, Intel's `[rdx+4*ymm7]`,
+  whose vector register is the index wherever it is written); not MMX, bound,
+  control, debug, segment or tile registers, register pairs or a default flags
+  value. A VSIB operand matches only a VSIB form of its index's class, and
+  memory of a general index only the others. The mask, index and destination
+  registers must be distinct, which GNU as only warns of (the instruction
+  faults);
 - its mnemonic is one the parser spells, with the catalogue's prefixes composed
   from their tokens: `lock` before any instruction, `notrack` and `bnd` before a
   near call or jmp, `rep`, `repe` and `repne` before the string instructions and
@@ -197,10 +203,11 @@ forms, and AVX-512 F, BW, DQ, CD and VBMI forms), and an index for every feature
 feature for (AVX512-FP16, AVX10.2, AMX, XOP, FMA4, TBM, LWP, Key Locker, APX's
 EVEX promotions and the others) stay out on every target. Other unsupported
 syntax is diagnosed: rounding/SAE, explicit pseudo-prefixes (`{vex}`, `{load}`),
-far branches, 16/32-bit execution modes and 32-bit addresses, other segment
-registers, VSIB, section groups, relocation modifiers other than `@PLT`,
+far branches, 16/32-bit execution modes and 32-bit addresses (but a string
+instruction's, below), other segment registers (but a string instruction's
+source's), section groups, relocation modifiers other than `@PLT`,
 `@GOTPCREL`, `@GOTPCRELX` and the TLS models' (below), debug directives other
-than the compiler's `.file`, `.loc`, `.uleb128` and `.sleb128` data, and
+than the compiler's `.file` and `.loc` (the line table, below), `.uleb128` and `.sleb128` data, and
 macro-assembler directives. An unsupported form never reaches the trusted
 encoder. FFREEP (`ffreep %st(i)`, DF C0+i), which every x86-64 processor runs,
 is baseline in the target table with the x87's other stack-register forms
@@ -1148,12 +1155,14 @@ named failure here rather than one a user meets. The programs are original
 - `program-strings.c`: narrow and wide string literals (merged strings of 1-, 2-
   and 4-byte characters) and stdio;
 - `program-switch.c`: dense switches, which GCC and Clang compile at `-O2` to
-  jump tables of label differences across sections.
+  jump tables of label differences across sections;
+- `program-gather.c`: a table read through an index of each width, which clang
+  compiles at `-O3 -march=x86-64-v4` to AVX-512's gathers.
 
 GCC and Clang (Clang with `-fno-integrated-as`, as in the corpus above) compile
 each at `-O0`, `-O2`, `-O2 -fPIC`, `-O3 -march=x86-64-v4`, and `-O0` and `-O2`
 with `-g`, in AT&T and Intel syntax, with `-fcf-protection=none` and
-`-fcommon`: 96 sources. Every variant names its `-march` (`x86-64` but for
+`-fcommon`: 120 sources. Every variant names its `-march` (`x86-64` but for
 `-O3`), its debug information (`-g0` or `-g`) and `-fPIE` or `-fPIC`: a
 compiler's defaults may be others (Ubuntu 26.04's GCC 15 writes AVX's
 instructions at `-O2` without one). Each source must

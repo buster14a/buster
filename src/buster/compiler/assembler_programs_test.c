@@ -2,13 +2,13 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Included after assembler_corpus_test.c. #1115's whole-program corpus: ordinary C programs (examples/assembler/
 // program-*.c: floating point of every width, thread-local storage of every model with threads, common and static
-// zero-initialized storage, wide string literals, dense switches' jump tables) that GCC and Clang compile to assembly,
-// at -O0, -O2, -O2 -fPIC, -O3 -march=x86-64-v4, and -O0 and -O2 with -g (whose DWARF leaves its line table and view
-// numbers to the assembler), in AT&T and Intel syntax. Each source must assemble by both paths into the same object, by
-// the `assemble` command too, into GNU as's sections, symbols and relocations (the existing comparator's); and the
-// program linked from it must print what the one linked from GNU as's object prints, and succeed. Every refusal is then
-// a named gap of the compilers' ordinary output, rather than one a user meets. The x86-64-v4 programs run where the
-// host has every feature of x86-64-v4; elsewhere their objects are still compared.
+// zero-initialized storage, wide string literals, dense switches' jump tables, gathers) that GCC and Clang compile to
+// assembly, at -O0, -O2, -O2 -fPIC, -O3 -march=x86-64-v4, and -O0 and -O2 with -g (whose DWARF leaves its line table
+// and view numbers to the assembler), in AT&T and Intel syntax. Each source must assemble by both paths into the same
+// object, by the `assemble` command too, into GNU as's sections, symbols and relocations (the existing comparator's);
+// and the program linked from it must print what the one linked from GNU as's object prints, and succeed. Every refusal
+// is then a named gap of the compilers' ordinary output, rather than one a user meets. The x86-64-v4 programs run where
+// the host has every feature of x86-64-v4; elsewhere their objects are still compared.
 
 // #1115's fixtures, each compared with GNU as by --cross-check: the TLS models' relocation modifiers in both cases and
 // syntaxes, on instructions and on .long (with GNU as's prefixes written as statements, data16 and rex64, and its
@@ -207,6 +207,16 @@ static const char asm_test_vmovq_fixture[] =
     ".text\nvmovq_forms:\nvmovq %xmm1, (%r14,%rcx)\nvmovq (%r13,%rax), %xmm1\nvmovq %xmm9, (%rax)\nvmovq (%rax), %xmm9\nvmovq %xmm1, (%rax)\nvmovq %rax, %xmm9\n"
     "vmovq %xmm9, %r10\nvmovq %xmm9, %xmm2\nvmovq %xmm17, (%r14)\nvmovq (%r14), %xmm17\n.intel_syntax noprefix\nvmovq qword ptr [r14+rcx], xmm1\n";
 
+// AVX2's and AVX-512's gathers and scatters, of vector-indexed (VSIB) memory (#1115: clang's `vpgatherqd
+// 32(%rdx,%ymm7), %xmm8 {%k1}`): each index class, with and without a base, a displacement and a scale, high
+// registers, in both syntaxes (Intel's vector index wherever it is written).
+static const char asm_test_gather_fixture[] =
+    ".text\ngathers:\nvpgatherqd 32(%rdx,%ymm7), %xmm8 {%k1}\nvpgatherqq (%rax,%zmm1,8), %zmm2 {%k3}\nvpgatherdd %ymm1, (%rax,%ymm2,4), %ymm0\n"
+    "vgatherdps %xmm1, 8(%rax,%xmm9,2), %xmm3\nvpscatterdd %zmm0, (%rax,%zmm1,4) {%k1}\nvgatherqpd (,%zmm20,8), %zmm5 {%k2}\n"
+    "vpgatherdd (%r12,%zmm31), %zmm30 {%k7}\nvscatterqps %ymm3, -64(%r9,%zmm4,4) {%k5}\nvgatherdpd 0x80(%rsp,%xmm4,8), %ymm2 {%k1}\n"
+    "vpgatherqd %xmm0, (%rbp,%ymm1), %xmm2\n.intel_syntax noprefix\nvpgatherdd ymm0, dword ptr [rax+ymm2*4], ymm1\n"
+    "vpgatherqd xmm8 {k1}, dword ptr [rdx+ymm7+32]\nvpscatterdd dword ptr [rax+4*zmm1] {k1}, zmm0\nvgatherqpd zmm5 {k2}, qword ptr [8*zmm20]\n"
+    "vgatherdps xmm3, dword ptr [rax+xmm9*2+8], xmm1\n.att_syntax prefix\n";
 // GNU as's line table of `.file` and `.loc` (#1115), compared byte for byte: DWARF 5's tables with MD5s and each way
 // a file names its directory; each row's file, column, discriminator, isa, is_stmt, basic_block, prologue_end and
 // epilogue_begin; line advances in and out of a special opcode's range, address advances by special opcode,
@@ -271,6 +281,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_line_label_fixture, X86_ARCH_BASELINE },
         { asm_test_string_fixture, X86_ARCH_BASELINE },
         { asm_test_vmovq_fixture, X86_ARCH_V4 },
+        { asm_test_gather_fixture, X86_ARCH_V4 },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -363,6 +374,25 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
         asm_test_pair(test, (String8){ .pointer = (char*)rejected[i], .length = strlen(rejected[i]) }, 0, X86_ARCH_BASELINE);
+    }
+    // Gathers' and scatters' operands on x86-64-v4, where their forms are (#1115): what GNU as refuses too, k0 or no
+    // mask of AVX-512's, a zeroing mask, an index of another class, a vector index on an instruction without VSIB, a
+    // vector base and RIP's; and, deliberately, the mask, index and destination registers that aren't distinct, which
+    // GNU as warns of (the instruction faults).
+    static const char* const rejected_vsib[] = {
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm2 {%k0}\n",
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm2\n",
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm2 {%k1}{z}\n",
+        ".text\nvpgatherdd %ymm1, (%rax,%xmm2,4), %ymm0\n",
+        ".text\nmovl (%rax,%xmm1), %eax\n",
+        ".text\nvpgatherdd %ymm1, (%ymm2), %ymm0\n",
+        ".text\nvpgatherdd %ymm1, (%rip,%ymm2), %ymm0\n",
+        ".text\nvpgatherdd %ymm1, (%rax,%ymm1,4), %ymm0\n",
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm1 {%k1}\n",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected_vsib); i += 1)
+    {
+        asm_test_pair(test, (String8){ .pointer = (char*)rejected_vsib[i], .length = strlen(rejected_vsib[i]) }, 0, X86_ARCH_V4);
     }
     // The object's common symbols and _GLOBAL_OFFSET_TABLE_, without --cross-check too: SHN_COMMON with the alignment as
     // the value (each its own atom, BUSTER_LINK_SYMBOL_COMMON's, which the object leaves to the linker), and an
@@ -686,7 +716,7 @@ static bool asm_test_program_link(const char* compiler, const char* object, cons
 
 static void asm_test_program_corpus(AsmTest* test, const char* directory, bool keep)
 {
-    static const char* const programs[] = { "floating", "storage", "strings", "switch" };
+    static const char* const programs[] = { "floating", "storage", "strings", "switch", "gather" };
     static const char* const compilers[] = { "gcc", "clang" };
     static const char* const syntaxes[] = { "-masm=att", "-masm=intel" };
     static const AsmProgramVariant variants[] = {
