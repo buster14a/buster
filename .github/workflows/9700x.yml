@@ -1709,6 +1709,15 @@ jobs:
               echo "== head: $function's sampled instructions"
               perf annotate -i "$ab/head.data" --stdio --no-source -s "$function" 2> /dev/null | awk '$1 + 0 >= 0.05 { print $1, $3 }'
           done
+          # Where this tree's loads fail to take a store's data (ls_bad_status2.stli_other), one sample in 500: by function,
+          # and in the graph run by address, which a sample takes at or after its load.
+          echo "== head: store-to-load forwarding's failures by function"
+          taskset -c 2 perf record -q -e ls_bad_status2.stli_other:u -c 500 -o "$ab/forwarding.data" -- \
+              "$ab/head/compiler-0" "${options[@]}" -o "$ab/forwarding.o"
+          perf report -i "$ab/forwarding.data" --stdio --no-children --sort symbol --percent-limit 0.3 > "$ab/forwarding-symbols.txt"
+          awk '/%/ && shown++ < 40' "$ab/forwarding-symbols.txt"
+          echo "== head: check_graph_run's instructions at its forwarding failures"
+          perf annotate -i "$ab/forwarding.data" --stdio --no-source -s check_graph_run 2> /dev/null | awk '$1 + 0 >= 0.3 { print $1, $3 }'
 
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g
