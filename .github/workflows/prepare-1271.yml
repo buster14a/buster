@@ -1,0 +1,91 @@
+name: Prepare and validate CI fix 1271
+
+on:
+  push:
+    branches: [agent/1271-ci-preparation]
+    paths:
+      - .github/workflows/prepare-1271.yml
+      - .github/issue-1271.patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-ci-1271
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out this trusted preparation revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply the bounded patch to the pinned main source
+        run: |
+          set -euo pipefail
+          base=f3d2071458762ff597d7937de8d0cfb68a1913b1
+          git merge-base --is-ancestor "$base" HEAD
+          printf '%s\n' .github/issue-1271.patch .github/workflows/prepare-1271.yml > "$RUNNER_TEMP/preparation-paths"
+          git diff --name-only "$base" HEAD | diff -u "$RUNNER_TEMP/preparation-paths" -
+          sed 's/^ diff --git /diff --git /' .github/issue-1271.patch > "$RUNNER_TEMP/issue-1271.patch"
+          git apply --recount --unidiff-zero --check "$RUNNER_TEMP/issue-1271.patch"
+          git apply --recount --unidiff-zero "$RUNNER_TEMP/issue-1271.patch"
+          git diff --check
+          printf '%s\n' .github/workflows/9700x.yml AGENTS.md docs/ci.md docs/commands/ci.md tests/ci/nightly.sh tools/ci/changes.c tools/ci/qualification.c > "$RUNNER_TEMP/implementation-paths"
+          git diff --name-only | diff -u "$RUNNER_TEMP/implementation-paths" -
+          test "$(wc -c < AGENTS.md)" -le 30000
+          git diff --stat
+
+      - name: Validate workflow and shell syntax
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-yaml jq zip unzip
+          /usr/bin/python3 -c 'import yaml; p=".github/workflows/9700x.yml"; w=yaml.load(open(p), Loader=yaml.BaseLoader); assert w["on"]["push"] == {"branches": ["main"]}; assert "github.run_id" in w["concurrency"]["group"]; print("Workflow YAML and unfiltered main trigger: PASS")'
+          bash -n tests/ci/nightly.sh tools/ci/nightly.sh tests/ci/caches.sh tests/ci/timings.sh
+
+      - name: Check selector and exhaustive qualification regressions
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/changes.c -o "$RUNNER_TEMP/changes"
+          "$RUNNER_TEMP/changes" --self-test
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
+          "$RUNNER_TEMP/qualification" --self-test
+
+      - name: Check real evidence glue, caches and timing fixtures
+        run: |
+          set -euo pipefail
+          bash tests/ci/nightly.sh
+          bash tests/ci/caches.sh
+          bash tests/ci/timings.sh
+
+      - name: Publish only the tested implementation tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=f3d2071458762ff597d7937de8d0cfb68a1913b1
+          base_tree=$(git rev-parse "$base^{tree}")
+          entries="$RUNNER_TEMP/entries.jsonl"
+          : > "$entries"
+          while IFS= read -r path; do
+              jq -n --rawfile content "$path" '{content: $content, encoding: "utf-8"}' > "$RUNNER_TEMP/blob.json"
+              sha=$(gh api --method POST repos/buster14a/buster/git/blobs --input "$RUNNER_TEMP/blob.json" --jq .sha)
+              test "$sha" = "$(git hash-object "$path")"
+              jq -nc --arg path "$path" --arg sha "$sha" '{path: $path, mode: "100644", type: "blob", sha: $sha}' >> "$entries"
+          done < "$RUNNER_TEMP/implementation-paths"
+          jq -s --arg base "$base_tree" '{base_tree: $base, tree: .}' "$entries" > "$RUNNER_TEMP/tree.json"
+          tree=$(gh api --method POST repos/buster14a/buster/git/trees --input "$RUNNER_TEMP/tree.json" --jq .sha)
+          printf 'TESTED_BASE=%s\nTESTED_TREE=%s\n' "$base" "$tree"
+          printf 'All focused regression checks passed.\n\nBase: `%s`\n\nImplementation tree: `%s`\n' "$base" "$tree" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nOnly the seven implementation paths were published; this workflow and its patch are not in the tree.\n' >> "$GITHUB_STEP_SUMMARY"
