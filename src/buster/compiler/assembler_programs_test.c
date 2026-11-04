@@ -218,13 +218,14 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     static const uint8_t base64[] = { 'h', 'e', 'l', 'l', 'o', 0, 1, 2, 0xff, 'h', 'i' };
     asm_test_bytes(test, ".data\n.base64 \"aGVsbG8=\", \"AAEC/w==\"\n.base64 \"\"\n.base64 \"aGk=\"\n", 2, base64, sizeof(base64), ".base64 decodes each string");
     // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`),
-    // @GOTTPOFF without RIP, a 2-byte TLS offset as data, a TLS modifier on a symbol outside a TLS section;
-    // .comm's alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined
-    // or weak common symbol, a local's .comm or .lcomm declared again; strings of 8-byte characters; %st(8); fsubp of
-    // ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an uppercase mnemonic, as every
-    // mnemonic is lowercase here (GNU as takes either); malformed base64; a label difference whose subtrahend is in
-    // neither the datum's section nor the minuend's, which GNU as can't resolve; and, deliberately, an undefined .L label,
-    // which GNU as lists as an undefined global for the link to fail on.
+    // @GOTTPOFF without RIP, a 2-byte TLS offset as data, a TLS modifier on a symbol outside a TLS section; .comm's
+    // alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined or
+    // weak common symbol, a local's .comm or .lcomm declared again, an alias of a global common (before or after its
+    // .comm) and a TLS modifier on one; strings of 8-byte characters; %st(8); fsubp of ST(0) and ST(i), and Intel's
+    // arithmetic without operands, which GNU as refuses; an uppercase mnemonic, as every mnemonic is lowercase here
+    // (GNU as takes either); malformed base64; a label difference whose subtrahend is in neither the datum's section
+    // nor the minuend's, which GNU as can't resolve; and, deliberately, an undefined .L label, which GNU as lists as an
+    // undefined global for the link to fail on.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",
@@ -241,6 +242,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".weak x\n.comm x,4,4\n",
         ".local x\n.comm x,4,4\n.comm x,4,16\n",
         ".lcomm x,4\n.lcomm x,4\n",
+        ".comm c,4,4\n.globl a\n.set a, c\n.data\n.quad a\n",
+        ".set a, c+4\n.comm c,4,4\n",
+        ".comm t,4,4\n.text\nmovl %fs:t@tpoff, %eax\n",
         ".text\njmp .Lnowhere\n",
         ".section .rodata.str8.8,\"aMS\",@progbits,8\n.quad 0\n",
         "fadd %st(8)\n",
@@ -263,8 +267,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         asm_test_pair(test, (String8){ .pointer = (char*)rejected[i], .length = strlen(rejected[i]) }, 0, X86_ARCH_BASELINE);
     }
     // The object's common symbols and _GLOBAL_OFFSET_TABLE_, without --cross-check too: SHN_COMMON with the alignment as
-    // the value, and an undefined global no relocation refers to; and a C template's .comm, which the checker refuses
-    // (asm_assemble's common_count).
+    // the value (each its own atom, BUSTER_LINK_SYMBOL_COMMON's, which the object leaves to the linker), and an
+    // undefined global no relocation refers to; asm_assemble counts the commons (AsmResult.common_count).
     AsmResult common = asm_test_pair(test, BUSTER_S8(".comm block,40\n.comm word,4,8\ncommon_reader: movq x@GOTPCREL(%rip), %rax\n"), 1, X86_ARCH_BASELINE);
     const Object object = common.error == 0 ? asm_object(&common, BUSTER_S8("common.s"), &test->vector) : (Object){ .error = OBJECT_ERROR_RANGE };
     ObjectView view;
@@ -282,8 +286,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         okay = okay && (ELF64_ST_TYPE(symbol->st_info) == STT_OBJECT) == (block || word || (name != 0 && symbol->st_shndx == SHN_COMMON));
     }
     asm_test_check(test, okay && found == 3, "common symbols are SHN_COMMON objects and the GOT symbol is declared", error);
-    // The writer refuses declared symbols it can't take before it writes: a count without a list, a defined symbol, an
-    // id past the table, common alignments short of the symbols, and the same of symbol sizes.
+    // The writer refuses declared symbols it can't take before it writes: a count without a list, a defined symbol (the
+    // first with an atom, a common one), an id past the table, and symbol sizes short of the symbols.
     ObjectUnits units;
     ObjectSymbols symbols;
     if (common.error == 0 && object_prepare(&units, &common.link, 1, &test->vector) && object_map_symbols(&symbols, &common.link, &test->vector))
@@ -304,9 +308,6 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         const Object declared_defined = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
         options.declared_symbols = &wrong[1];
         const Object declared_past = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
-        options = common.object_options;
-        options.common_alignment_count -= 1;
-        const Object short_alignments = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
         // And symbol sizes short of the symbols, or one below the Link's size.
         uint64_t sizes[64] = { 0 };
         SymbolId sized = 0;
@@ -323,9 +324,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         options.symbol_size_count = common.link.symbols.count;
         const Object smaller_size = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
         asm_test_check(test, defined != 0 && sized != 0 && common.link.symbols.count <= BUSTER_ARRAY_LENGTH(sizes) && no_list.error == OBJECT_ERROR_RANGE &&
-                                 declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE && short_alignments.error == OBJECT_ERROR_RANGE &&
+                                 declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE &&
                                  short_sizes.error == OBJECT_ERROR_RANGE && smaller_size.error == OBJECT_ERROR_RANGE && test->vector.length == saved,
-                       "invalid declared symbols, common alignments and symbol sizes are refused before output allocation", 0);
+                       "invalid declared symbols and symbol sizes are refused before output allocation", 0);
     }
     else
     {

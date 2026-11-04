@@ -103,7 +103,7 @@ struct AsmSymbol
     // hold: the object's st_size (ObjectOptions.symbol_sizes), or 0.
     uint64_t beyond;
     // `.comm` and `.lcomm` (#1115): ASM_COMMON_GLOBAL for a common symbol (SHN_COMMON, of common_size bytes aligned to
-    // common_alignment), ASM_COMMON_BSS for one .bss holds (.lcomm, or a local's .comm), placed after .bss's other
+    // common_alignment: a COMMON symbol of its own atom in the Link, asm_emit), ASM_COMMON_BSS for one .bss holds (.lcomm, or a local's .comm), placed after .bss's other
     // contents in directive order (common_next, from AsmParser.common_first), as GNU as places them.
     uint8_t common;
     uint32_t common_alignment;
@@ -2582,12 +2582,13 @@ static uint32_t asm_note_section(const AsmParser* parser, uint32_t end)
 
 // `.comm name, size[, alignment]` and `.lcomm name, size` (#1115), as GNU as reads them for ELF. A common symbol (C's
 // tentative definitions under -fcommon) is an object of SHN_COMMON, which the linker places: a global OBJECT whose
-// alignment is the third operand, or without one the size's power of two up to 16. A local's .comm and every .lcomm
-// are instead an object of .bss, placed after its other contents (GNU as's subsection 1) in directive order, aligned
-// to the third operand or, for .lcomm, to the size's power of two up to 8 (asm_place_commons). A global's repeated
-// .comm keeps the first size, as GNU as does (it warns of another), and takes the last alignment: its third operand, or
-// without one (or 0) the kept size's power of two. A local's repeated .comm or .lcomm, or a name defined otherwise, is
-// a duplicate definition, as in GNU as; a weak name, and a common one made local and declared again, are refused.
+// alignment is the third operand, or without one the size's power of two up to 16 (in the Link, #147's COMMON symbol
+// of its own atom). A local's .comm and every .lcomm are instead an object of .bss, placed after its other contents
+// (GNU as's subsection 1) in directive order, aligned to the third operand or, for .lcomm, to the size's power of two
+// up to 8 (asm_place_commons). A global's repeated .comm keeps the first size, as GNU as does (it warns of another),
+// and takes the last alignment: its third operand, or without one (or 0) the kept size's power of two; one made local
+// and declared again joins .bss's, as GNU as places it (below). A local's repeated .comm or .lcomm, or a name defined
+// otherwise, is a duplicate definition, as in GNU as, and a weak name is refused.
 static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end)
 {
     const uint32_t location = parser->tokens[token].start;
@@ -2770,6 +2771,11 @@ static void asm_resolve_aliases(AsmParser* parser)
         else if (symbol->alias && target->absolute)
         {
             asm_fail(parser, symbol->location, "absolute expression required here (forward constants are unsupported)");
+        }
+        else if (symbol->alias && target->common == ASM_COMMON_GLOBAL)
+        {
+            // GNU as refuses it too, whichever comes first (#1115): a common symbol has no place yet to be one of.
+            asm_fail(parser, symbol->location, "a symbol can't be equated to a common symbol");
         }
         else if (symbol->alias && target->defined && !target->section_start && target->offset + symbol->alias_target.value >= INT32_MIN &&
                  target->offset + symbol->alias_target.value <= INT32_MAX)
@@ -4501,7 +4507,8 @@ static void asm_emit(AsmParser* parser)
     const LinkCapacity capacity =
         {
             .names = parser->symbol_count,
-            .atoms = parser->section_count,
+            // A section's atom each, and a global common's (#147's representation).
+            .atoms = parser->section_count + parser->common_count,
             .symbols = parser->symbol_count,
             .fixups = parser->fragment_count + parser->instruction_count * 2,
             .wide_addends = parser->fragment_count + parser->instruction_count * 2,
@@ -4640,9 +4647,17 @@ static void asm_emit(AsmParser* parser)
         // access.
         const bool tls_section = symbol->defined && link_class_is_tls(parser->sections[definition->section].class);
         const uint8_t type = symbol->flags & BUSTER_LINK_SYMBOL_TYPE;
+        // A global common (#147's representation, BUSTER_LINK_SYMBOL_COMMON): a symbol of its own zero-filled atom,
+        // which the object writer leaves to the linker as SHN_COMMON, its value the atom's alignment (#1115).
+        const bool common = symbol->common == ASM_COMMON_GLOBAL && !symbol->defined;
         if (symbol->common == ASM_COMMON_GLOBAL && symbol->defined)
         {
             asm_fail(parser, symbol->location, "duplicate symbol definition");
+        }
+        if (common && symbol->tls)
+        {
+            // As GNU as refuses it ("Accessing `x' as thread-local object"): a common symbol is no TLS variable.
+            asm_fail(parser, symbol->location, "TLS relocation modifier on a common symbol");
         }
         if (symbol->defined && symbol->tls && !tls_section)
         {
@@ -4670,7 +4685,16 @@ static void asm_emit(AsmParser* parser)
         const bool beyond = symbol->defined && (uint64_t)size.value > remaining;
         symbol->beyond = beyond ? (uint64_t)size.value : 0;
         parser->beyond_count += beyond;
-        symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, beyond ? remaining : (uint64_t)size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+        if (common)
+        {
+            const AtomId atom = link_add_atom(link, BUSTER_LINK_CLASS_BSS, (uint8_t)__builtin_ctz(symbol->common_alignment), symbol->common_size, 0, 0);
+            symbol->flags = (uint8_t)((symbol->flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON);
+            symbol->link = link_add_symbol(link, name, atom, 0, symbol->common_size, symbol->flags, BUSTER_LINK_SOURCE_PROGRAM);
+        }
+        else
+        {
+            symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, beyond ? remaining : (uint64_t)size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+        }
     }
     parser->result.directives = link->symbols.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint8_t, link->symbols.count) : 0;
     if (link->symbols.count != 0 && parser->result.directives == 0)

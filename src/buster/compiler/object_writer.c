@@ -167,13 +167,10 @@ struct ObjectOptions
     const uint8_t* temporary_symbols;
     uint32_t temporary_symbol_count;
     // Optional, for an assembler's objects (#1115): undefined symbols the object lists though no relocation refers to
-    // them, after those that do, in this order (GNU as's .comm symbols and the _GLOBAL_OFFSET_TABLE_ it declares); and
-    // indexed by SymbolId, a common symbol's alignment, or 0 for any other symbol. An undefined symbol with an alignment
-    // is a common one: SHN_COMMON, an OBJECT whose st_value is the alignment and st_size its size.
+    // them, after those that do, in this order (each that GNU as lists: `.globl x`, `.size x, 4`, an alias's target, the
+    // _GLOBAL_OFFSET_TABLE_ it declares). A common symbol is no undefined one: BUSTER_LINK_SYMBOL_COMMON's (#147).
     const SymbolId* declared_symbols;
     uint32_t declared_symbol_count;
-    const uint32_t* common_alignments;
-    uint32_t common_alignment_count;
     // Optional, for an assembler's objects (#1115): indexed by SymbolId, a defined symbol's st_size, at least the Link's.
     // GNU as writes a size that reaches past the symbol's section end (`.size` beyond it, or `.set tail, object+2` of a
     // 4-byte object, which takes its size), where a Link symbol lies within its atom.
@@ -1889,11 +1886,9 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         }
         entry += 1;
     }
-    // The undefined symbols: no type but TLS (or each its own, ObjectOptions.undefined_types), with their binding and
-    // visibility; and the common ones (ObjectOptions.common_alignments), OBJECTs of SHN_COMMON with their alignment and
-    // size.
+    // The undefined symbols: no type but TLS (or each its own, and its size, ObjectOptions.undefined_types), with their
+    // binding and visibility.
     const SymbolId* undefined = builder->undefined;
-    const uint32_t* common_alignments = builder->options.common_alignments;
     const bool typed = builder->options.undefined_types;
     for (uint64_t i = 0; i < builder->undefined_count; i += 1)
     {
@@ -1901,17 +1896,13 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         const uint32_t name_bytes_with_nul = symbol_name_bytes[symbol];
         const uint8_t flags = symbol_flags[symbol];
         const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
-        const uint32_t alignment = common_alignments != 0 ? common_alignments[symbol] : 0;
-        const uint8_t info = alignment != 0 ? (uint8_t)((flags & BUSTER_LINK_SYMBOL_BINDING) | STT_OBJECT)
-                           : typed          ? link_symbol_elf_info(flags)
-                                            : (uint8_t)((flags & BUSTER_LINK_SYMBOL_BINDING) | (tls ? STT_TLS : STT_NOTYPE));
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 ? (uint32_t)name : 0,
-            .st_info = info,
+            .st_info = typed ? link_symbol_elf_info(flags) : (uint8_t)((flags & BUSTER_LINK_SYMBOL_BINDING) | (tls ? STT_TLS : STT_NOTYPE)),
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
-            .st_shndx = alignment != 0 ? SHN_COMMON : SHN_UNDEF,
-            .st_value = alignment,
-            .st_size = alignment != 0 || typed ? symbol_sizes[symbol] : 0,
+            .st_shndx = SHN_UNDEF,
+            .st_value = 0,
+            .st_size = typed ? symbol_sizes[symbol] : 0,
         };
         if (name_bytes_with_nul != 0)
         {
@@ -2021,7 +2012,6 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
     };
     bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
                  (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count) &&
-                 (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count) &&
                  (options.symbol_sizes == 0 || options.symbol_size_count == link->symbols.count) &&
                  (options.declared_symbol_count == 0 || options.declared_symbols != 0);
     for (uint32_t i = 0; built && options.symbol_sizes != 0 && i < options.symbol_size_count; i += 1)

@@ -304,11 +304,13 @@ keeps the clipped size there.
 `.comm name, size[, alignment]` and `.lcomm name, size` (#1115) are GNU as's
 for ELF. A global's `.comm` (C's tentative definitions under `-fcommon`) is a
 common symbol: an `SHN_COMMON` OBJECT of its size whose value is its alignment,
-the third operand or the size's power of two up to 16. In the `Link` it is an
-undefined OBJECT, and the result's `object_options` declares it common to the
-writer (`ObjectOptions.declared_symbols` and `common_alignments`), which lists
-it though no relocation refers to it; `AsmResult.common_count` counts them, and
-the C checker refuses a template's. A local's `.comm` (GCC's statics at `-O0`:
+the third operand or the size's power of two up to 16. In the `Link` it is the
+representation #147 gave C's commons: a `BUSTER_LINK_SYMBOL_COMMON` symbol of
+its own zero-filled atom, which the object writer leaves to the linker
+(`SHN_COMMON`, its value the atom's alignment). `AsmResult.common_count` counts
+them, and the C checker refuses a template's. As GNU as does, an alias of a
+global common (`.set a, c`, before or after the `.comm`) and a TLS modifier on
+one are refused. A local's `.comm` (GCC's statics at `-O0`:
 `.local x` / `.comm x,4,4`) and every `.lcomm` are objects of `.bss`, placed
 after its other contents (GNU as's subsection 1) in directive order, aligned to
 the third operand, or for `.lcomm`, whose ELF form takes none, to the size's

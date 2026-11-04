@@ -266,38 +266,24 @@ static void asm_object_options(AsmParser* parser)
             .undefined_types = true,
         };
     }
-    // The undefined symbols GNU as lists without a relocation (#1115): the common ones, with their alignments, then every
-    // other the source names (asm_object_declares), as the _GLOBAL_OFFSET_TABLE_ a GOT or TLS modifier declares.
+    // The undefined symbols GNU as lists without a relocation (#1115), every one the source names (asm_object_declares),
+    // as the _GLOBAL_OFFSET_TABLE_ a GOT or TLS modifier declares. (A global .comm is a common symbol of its own atom,
+    // which the object writer lists as SHN_COMMON's.)
     uint32_t declared_count = 0;
     for (uint32_t i = 1; i < parser->symbol_count; i += 1)
     {
-        declared_count += parser->symbols[i].common == ASM_COMMON_GLOBAL && parser->symbols[i].link != 0;
         declared_count += asm_object_declares(&parser->symbols[i]);
     }
     if (parser->result.error == 0 && declared_count != 0)
     {
         SymbolId* declared = BUSTER_ARENA_PUSH_ARRAY(parser->arena, SymbolId, declared_count);
-        uint32_t* alignments = parser->common_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, link->symbols.count) : 0;
-        if (declared == 0 || (parser->common_count != 0 && alignments == 0))
+        if (declared == 0)
         {
             asm_fail(parser, 0, "arena exhausted publishing object metadata");
         }
         else
         {
             uint32_t count = 0;
-            if (alignments != 0)
-            {
-                memset(alignments, 0, link->symbols.count * sizeof(uint32_t));
-            }
-            for (uint32_t i = 1; i < parser->symbol_count; i += 1)
-            {
-                const AsmSymbol* symbol = &parser->symbols[i];
-                if (symbol->common == ASM_COMMON_GLOBAL && symbol->link != 0)
-                {
-                    alignments[symbol->link] = symbol->common_alignment;
-                    declared[count++] = symbol->link;
-                }
-            }
             for (uint32_t i = 1; i < parser->symbol_count; i += 1)
             {
                 if (asm_object_declares(&parser->symbols[i]))
@@ -307,8 +293,6 @@ static void asm_object_options(AsmParser* parser)
             }
             parser->result.object_options.declared_symbols = declared;
             parser->result.object_options.declared_symbol_count = count;
-            parser->result.object_options.common_alignments = alignments;
-            parser->result.object_options.common_alignment_count = alignments != 0 ? link->symbols.count : 0;
         }
     }
     // The object's st_size of each symbol whose size reaches past its section's end; the others keep the Link's.
