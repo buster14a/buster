@@ -381,38 +381,48 @@ static uint32_t check_common_function_end(const Parser* parser, uint32_t token)
 
 // The first token of the subtree rooted at `root`: the left operand of an unparenthesized comma has no group
 // opener, so its start is the leftmost token whose parent chain reaches the operand's root.
-static uint32_t check_common_subtree_start(const Parser* parser, uint32_t root)
+// Whether `token`'s parent chain reaches `root` — the token lies in root's subtree.
+static bool check_common_token_descendant(const Parser* parser, uint32_t token, uint32_t root)
 {
-    uint32_t result = root;
-    bool found = false;
-    for (uint32_t at = root; at-- > 0;)
+    uint32_t node = token;
+    bool result = false;
+    for (uint32_t steps = 0; node < parser->tokens.count && steps < parser->tokens.count; steps += 1)
     {
-        uint32_t node = at;
-        bool descendant = false;
-        for (uint32_t steps = 0; node < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        if (node == root)
         {
-            if (node == root)
-            {
-                descendant = true;
-                break;
-            }
-            const uint32_t parent = parser->tree.parents[node];
-            if (parent == BUSTER_CHECK_NONE || parent >= parser->tokens.count || parent == node)
-            {
-                break;
-            }
-            node = parent;
+            result = true;
+            break;
         }
-        if (descendant)
-        {
-            result = at;
-            found = true;
-        }
-        else if (found)
+        const uint32_t parent = parser->tree.parents[node];
+        if (parent == BUSTER_CHECK_NONE || parent >= parser->tokens.count || parent == node)
         {
             break;
         }
+        node = parent;
     }
+    return result;
+}
+
+static uint32_t check_common_subtree_start(const Parser* parser, uint32_t root)
+{
+    // A subtree's tokens are a contiguous span ending at `root`, so the descendant predicate is
+    // monotone below it and binary search finds the span's first token in logarithmic climbs —
+    // scanning the prefix linearly instead costs a whole translation unit per comma operand.
+    uint32_t low = 0;
+    uint32_t high = root;
+    while (high - low > 1)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (check_common_token_descendant(parser, middle, root))
+        {
+            high = middle;
+        }
+        else
+        {
+            low = middle;
+        }
+    }
+    const uint32_t result = check_common_token_descendant(parser, low, root) ? low : high;
     return result;
 }
 
@@ -2175,16 +2185,34 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
     }
 }
 
-// Whether a spine-marked node passes through to operands — a cast, conversion or unary plus passes
-// operand0, and a conditional passes its arms — making it spine interior rather than a leaf. An
-// operand that is not a child index leaves the node a leaf.
-static bool check_common_format_spine(const CheckGraph* graph, uint32_t node)
+// A leaf-walk node pushed on the worklist, growing its arena column on demand: the walk's depth is
+// the format argument's cast-and-conditional spine depth, small in practice but unbounded in the
+// grammar, so a fixed bound would either truncate valid arguments or waste a graph-sized column.
+static void check_common_format_leaf_push(Preprocessor* pp, const CheckGraph* graph, Arena* scratch, uint32_t** leaf_nodes,
+                                          uint32_t* leaf_capacity, uint32_t* leaf_count, uint32_t node)
 {
-    const CheckOp op = graph->ops[node];
-    const bool result = ((op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_CAST) &&
-                         graph->operand0[node] < node) ||
-                        (op == CHECK_OP_CONDITIONAL && (graph->operand1[node] < node || graph->operand2[node] < node));
-    return result;
+    if (node < graph->count && !pp->fatal)
+    {
+        if (*leaf_count == *leaf_capacity)
+        {
+            const uint32_t grown = *leaf_capacity * 2;
+            uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, grown);
+            if (next == NULL)
+            {
+                pp->fatal = true;
+            }
+            else
+            {
+                memcpy(next, *leaf_nodes, (uint64_t)*leaf_count * sizeof(uint32_t));
+                *leaf_nodes = next;
+                *leaf_capacity = grown;
+            }
+        }
+        if (!pp->fatal)
+        {
+            (*leaf_nodes)[(*leaf_count)++] = node;
+        }
+    }
 }
 
 // The conditional `node`'s condition reduced to a compile-time truth value, as clang's
@@ -2250,56 +2278,21 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             offset <= graph->argument_count && count <= graph->argument_count - offset)
         {
             const uint32_t format_node = graph->argument_nodes[offset + format_index];
-            const uint32_t format_token = format_node < graph->count ? graph->tokens[format_node] : BUSTER_CHECK_NONE;
-            const uint32_t direct_string = format_token < input->token_count ? check_common_sparse_get(input->string_ids, format_token) : BUSTER_CHECK_NONE;
-            // The format expression's literal spine: casts, conversions and unary plus pass operand0
-            // through, and a conditional passes each arm in order — or only the taken arm when the
-            // condition is a compile-time constant. Whatever else the spine reaches is a leaf; the
-            // check walks leaves in arm order and stops at the first leaf that is not a string
-            // literal, the way clang's checkFormatStringExpr returns early on SLCT_NotALiteral.
-            uint8_t* spine = NULL;
-            if (direct_string == BUSTER_CHECK_NONE && format_node < graph->count)
+            // The format expression's literal spine, walked depth-first in arm order the way clang's
+            // checkFormatStringExpr recurses: casts, conversions and unary plus pass operand0 through,
+            // and a conditional passes each arm in order — or only the taken arm when the condition is
+            // a compile-time constant. Whatever else pops is a leaf; the first leaf that is not a
+            // string literal ends the walk, like SLCT_NotALiteral's early return.
+            uint32_t leaf_capacity = 16;
+            uint32_t* leaf_nodes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, leaf_capacity);
+            if (leaf_nodes == NULL)
             {
-                spine = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)format_node + 1);
-                if (spine == NULL)
-                {
-                    pp->fatal = true;
-                }
-                else
-                {
-                    memset(spine, 0, (uint64_t)format_node + 1);
-                    spine[format_node] = 1;
-                    for (uint32_t i = format_node + 1; i-- > 0;)
-                    {
-                        if (spine[i] == 0)
-                        {
-                            continue;
-                        }
-                        const CheckOp spine_op = graph->ops[i];
-                        if (spine_op == CHECK_OP_CONVERT || spine_op == CHECK_OP_POSITIVE || spine_op == CHECK_OP_CAST)
-                        {
-                            if (graph->operand0[i] < i)
-                            {
-                                spine[graph->operand0[i]] = 1;
-                            }
-                        }
-                        else if (spine_op == CHECK_OP_CONDITIONAL)
-                        {
-                            bool taken = false;
-                            const bool constant = check_common_format_condition(graph, stream, i, &taken);
-                            const uint32_t true_arm = graph->operand1[i];
-                            const uint32_t false_arm = graph->operand2[i];
-                            if ((!constant || taken) && true_arm < i)
-                            {
-                                spine[true_arm] = 1;
-                            }
-                            if ((!constant || !taken) && false_arm < i)
-                            {
-                                spine[false_arm] = 1;
-                            }
-                        }
-                    }
-                }
+                pp->fatal = true;
+            }
+            uint32_t leaf_count = 0;
+            if (leaf_nodes != NULL && format_node < graph->count)
+            {
+                leaf_nodes[leaf_count++] = format_node;
             }
             // Each literal keeps its own argument coverage: the extra-arguments verdict is the
             // largest first-uncovered index any finished literal left, while a literal covering —
@@ -2315,11 +2308,27 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
             bool all_covered = false;
             bool nonliteral_leaf = false;
-            for (uint32_t leaf = direct_string != BUSTER_CHECK_NONE ? format_node : 0;
-                 leaf < graph->count && leaf <= format_node && !pp->fatal; leaf += 1)
+            while (leaf_count != 0 && !nonliteral_leaf && !pp->fatal)
             {
-                if (direct_string == BUSTER_CHECK_NONE && (spine == NULL || spine[leaf] == 0 || check_common_format_spine(graph, leaf)))
+                const uint32_t leaf = leaf_nodes[--leaf_count];
+                const CheckOp leaf_op = graph->ops[leaf];
+                if ((leaf_op == CHECK_OP_CONVERT || leaf_op == CHECK_OP_POSITIVE || leaf_op == CHECK_OP_CAST) && graph->operand0[leaf] < leaf)
                 {
+                    check_common_format_leaf_push(pp, graph, scratch, &leaf_nodes, &leaf_capacity, &leaf_count, graph->operand0[leaf]);
+                    continue;
+                }
+                if (leaf_op == CHECK_OP_CONDITIONAL && (graph->operand1[leaf] < leaf || graph->operand2[leaf] < leaf))
+                {
+                    bool taken = false;
+                    const bool constant = check_common_format_condition(graph, stream, leaf, &taken);
+                    if (!constant || !taken)
+                    {
+                        check_common_format_leaf_push(pp, graph, scratch, &leaf_nodes, &leaf_capacity, &leaf_count, graph->operand2[leaf] < leaf ? graph->operand2[leaf] : graph->count);
+                    }
+                    if (!constant || taken)
+                    {
+                        check_common_format_leaf_push(pp, graph, scratch, &leaf_nodes, &leaf_capacity, &leaf_count, graph->operand1[leaf] < leaf ? graph->operand1[leaf] : graph->count);
+                    }
                     continue;
                 }
                 const uint32_t format_token = graph->tokens[leaf];
@@ -2923,7 +2932,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 // specifier may mark an index without advancing past it, so plain and positional
                 // styles share the scan.
                 const uint32_t extra_node = graph->argument_nodes[offset + first_argument + max_uncovered];
-                const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
+                const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : graph->tokens[format_node];
                 const uint32_t natural = extra_token < parser->tokens.count ? parser->tokens.sources[extra_token] : order;
                 order = natural > order ? natural : order;
                 check_common_report_published(parser, pp, input, extra_token, order, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
