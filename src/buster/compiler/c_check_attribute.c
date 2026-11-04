@@ -472,6 +472,11 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_FORMAT_STRING,
     CHECK_ARGUMENT_FORMAT_RESULT,
     CHECK_ARGUMENT_STRFTIME,
+    // A type argument's parser errors (#147): "unknown type name 'T'" (the name after the attribute's first token by the
+    // number), "expected a type" and "expected ')'", at the argument.
+    CHECK_ARGUMENT_UNKNOWN_TYPE,
+    CHECK_ARGUMENT_EXPECTED_TYPE,
+    CHECK_ARGUMENT_EXPECTED_PAREN,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -692,6 +697,52 @@ static bool check_input_target_warning(CheckInputReader* reader, const CheckInpu
         check_input_warning_event(reader, &event, NULL, 0);
     }
     return warned;
+}
+
+// How clang's parser reads each attribute's arguments (#147, c_check_attribute_arguments.inc, which
+// tools/generate_attribute_arguments.c makes from clang's AttrParserStringSwitches.inc): by its name without a keyword's
+// underscores, the lists that name it and the arguments it reads as string literals, by place (bit N the Nth).
+#define BUSTER_CHECK_ARGUMENTS_IDENTIFIER 0x1u
+#define BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER 0x2u
+#define BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER 0x4u
+#define BUSTER_CHECK_ARGUMENTS_TYPE 0x8u
+#define BUSTER_CHECK_ARGUMENTS_UNEVALUATED 0x10u
+#define BUSTER_CHECK_ARGUMENTS_FUNCTION_SCOPE 0x20u
+#define BUSTER_CHECK_ARGUMENTS_LATE 0x40u
+#define BUSTER_CHECK_ARGUMENTS_LATE_EXPERIMENTAL 0x80u
+
+typedef struct CheckInputArgumentsRow CheckInputArgumentsRow;
+struct CheckInputArgumentsRow
+{
+    const char* name;
+    uint32_t flags;
+    uint32_t strings;
+};
+
+static const CheckInputArgumentsRow check_input_arguments_rows[] = {
+#define BUSTER_CHECK_ARGUMENTS(name, flags, strings) { name, flags, strings },
+#include "c_check_attribute_arguments.inc"
+#undef BUSTER_CHECK_ARGUMENTS
+};
+
+// The row of `name` (without a keyword's underscores), by a binary search of the rows' byte order, or NULL for none.
+static const CheckInputArgumentsRow* check_input_arguments_row(String8 name)
+{
+    uint32_t low = 0;
+    uint32_t high = BUSTER_ARRAY_LENGTH(check_input_arguments_rows);
+    const CheckInputArgumentsRow* result = NULL;
+    while (result == NULL && low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const char* row = check_input_arguments_rows[middle].name;
+        const uint64_t length = strlen(row);
+        const int compared = memcmp(name.pointer, row, name.length < length ? name.length : length);
+        const int order = compared != 0 ? compared : name.length < length ? -1 : name.length > length ? 1 : 0;
+        result = order == 0 ? check_input_arguments_rows + middle : NULL;
+        low = order > 0 ? middle + 1 : low;
+        high = order < 0 ? middle : high;
+    }
+    return result;
 }
 
 // Whether clang's visibility attribute knows a visibility (VisibilityAttr::ConvertStrToVisibilityType).
@@ -2039,22 +2090,37 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
     return result;
 }
 
+static bool check_constant_type_start(const Parser* parser, uint32_t token);
+
 // Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
 // handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT) and
 // no_caller_saved_registers (a calling convention), which stay refused by name;
 // and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
 // (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
-// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency; and the
-// thread-safety analysis's (check_input_thread_rows).
-static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact)
+// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency; the
+// thread-safety analysis's (check_input_thread_rows); one of no C subject (`subjectless`: Objective-C's, C++'s and the like,
+// whose subject's diagnostic is all clang gives in C); and these, whose handlers change nothing in C past their subjects,
+// counts and arguments' kinds (#147): available_only_in_default_eval_method (whose `#pragma clang fp eval_method` the
+// checker refuses), btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
+// -frandomize-layout-seed), Objective-C's boxable and bridge_mutable, Fuchsia's handles (the analyzer's), suppress, Swift's
+// bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone).
+static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact, bool subjectless)
 {
+    static const char* const unchanged[] = {
+        "available_only_in_default_eval_method", "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
+        "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
+    };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
-    const bool handled = check_input_attribute_equal(name, "minsize") || check_input_attribute_equal(name, "optnone") ||
-                         check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
-                         check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
-                         check_input_attribute_equal(name, "no_sanitize_memory") || check_input_attribute_equal(name, "analyzer_noreturn") ||
-                         check_input_attribute_equal(name, "carries_dependency") || check_input_thread_row(name) != NULL;
+    bool handled = check_input_attribute_equal(name, "minsize") || check_input_attribute_equal(name, "optnone") ||
+                   check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
+                   check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
+                   check_input_attribute_equal(name, "no_sanitize_memory") || check_input_attribute_equal(name, "analyzer_noreturn") ||
+                   check_input_attribute_equal(name, "carries_dependency") || check_input_thread_row(name) != NULL || subjectless;
+    for (uint32_t i = 0; !handled && i < BUSTER_ARRAY_LENGTH(unchanged); i += 1)
+    {
+        handled = check_input_attribute_equal(name, unchanged[i]);
+    }
     return fact != NULL && ((simple && !effect) || handled);
 }
 
@@ -2181,12 +2247,21 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool chunk_gnu = valid && chunk && gnu_scope;
         const bool ignored_type = known && ((clang_scope && check_input_attribute_equal(name, "noderef")) || (specifiers && check_input_attribute_equal(name, "vector_size")));
         const bool misplaced = known && place != BUSTER_CHECK_PLACE_DECLARATION && fact != NULL && !typed;
-        // clang's parser reads a string argument as an unevaluated string literal (#147): one that is none is its error at
-        // the argument, wherever the attribute is, before its place decides anything. visibility's identifier (an
-        // enumerator's argument) is its handler's.
-        const bool string_schema = valid && known && rule != 0 && (rule->schema == CHECK_ATTRIBUTE_STRING || rule->schema == CHECK_ATTRIBUTE_STRING_LIST);
+        // clang's parser reads an attribute's arguments by their kinds (#147, check_input_arguments_row: ParseAttributeArgsCommon),
+        // before its place decides anything: an identifier first argument of one that takes an identifier is one (each
+        // identifier argument of one whose identifiers all are); then an argument it reads as an unevaluated string literal
+        // that is none is its error at the argument. One whose arguments clang parses its own way (availability's and the
+        // like) is its own.
+        const CheckInputFactRow* parsed = standard ? fact : known ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        // One of no C subject (#147, check_input_attribute_generic).
+        const CheckInputSubjectRow* subject_row = known ? check_input_subject_row(scope, name, scoped, standard) : NULL;
+        const bool subjectless = subject_row != NULL && subject_row->subjects == 0;
+        const bool custom = parsed != NULL && (parsed->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0;
+        const CheckInputArgumentsRow* arguments = valid && known && !custom ? check_input_arguments_row(name) : NULL;
+        const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         uint32_t literal = BUSTER_CHECK_NONE;
-        for (uint32_t argument = attribute.argument_first; string_schema && literal == BUSTER_CHECK_NONE && argument < attribute.argument_end;)
+        uint32_t index = 0;
+        for (uint32_t argument = attribute.argument_first; arguments != NULL && literal == BUSTER_CHECK_NONE && argument < attribute.argument_end; index += 1)
         {
             uint32_t stop = argument;
             bool strings = true;
@@ -2195,13 +2270,57 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 strings &= parser->tokens.kinds[stop] == PARSE_KIND_STRING;
                 stop = check_input_attribute_after_group(parser, stop, attribute.argument_end);
             }
-            const bool enumerator = rule->kind == CHECK_ATTRIBUTE_VISIBILITY && stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
-            literal = stop > argument && !strings && !enumerator ? argument : BUSTER_CHECK_NONE;
+            const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+            const bool identifier = lone && ((index == 0 && (arguments->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (arguments->flags & identifiers) != 0);
+            const bool string = index < 32 && ((arguments->strings >> index) & 1u) != 0 && (arguments->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
+            literal = string && !identifier && !strings ? argument : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, literal, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            valid = false;
+        }
+        // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
+        // no type "expected a type" and "expected ')'" there; a type followed by a `,` is "expected ')'" at it.
+        const uint32_t type_argument = valid && arguments != NULL && (arguments->flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 &&
+                                       attribute.argument_first < attribute.argument_end ? attribute.argument_first : BUSTER_CHECK_NONE;
+        const bool typed_argument = type_argument != BUSTER_CHECK_NONE && check_constant_type_start(parser, type_argument);
+        uint32_t comma = BUSTER_CHECK_NONE;
+        for (uint32_t token = typed_argument ? type_argument : attribute.argument_end; comma == BUSTER_CHECK_NONE && token < attribute.argument_end;)
+        {
+            comma = parser->tokens.kinds[token] == PARSE_KIND_COMMA ? token : BUSTER_CHECK_NONE;
+            token = check_input_attribute_after_group(parser, token, attribute.argument_end);
+        }
+        if (type_argument != BUSTER_CHECK_NONE && !typed_argument && parser->tokens.kinds[type_argument] == PARSE_KIND_IDENTIFIER)
+        {
+            check_input_attribute_argument_error(reader, attributes, &attribute, type_argument, CHECK_ARGUMENT_UNKNOWN_TYPE, type_argument - attribute.first);
+            valid = false;
+        }
+        else if (type_argument != BUSTER_CHECK_NONE && !typed_argument)
+        {
+            check_input_attribute_argument_error(reader, attributes, &attribute, type_argument, CHECK_ARGUMENT_EXPECTED_TYPE, 0);
+            const uint32_t before = reader->output->report_count;
+            check_input_report_argument(reader, type_argument, CHECK_INPUT_ATTRIBUTE_ARGUMENT, CHECK_ARGUMENT_EXPECTED_PAREN);
+            // (A second error at the same token, which the driver keeps, with its note at the arguments' `(`.)
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].attribute = attribute.first;
+                reader->output->reports[before].repeated = true;
+                reader->output->reports[before].note_token = attribute.argument_first - 1;
+                reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
+            }
+            valid = false;
+        }
+        else if (comma != BUSTER_CHECK_NONE)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, &attribute, comma, CHECK_ARGUMENT_EXPECTED_PAREN, 0);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].note_token = attribute.argument_first - 1;
+                reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
+            }
             valid = false;
         }
         if (valid && chunk_gnu && typed)
@@ -2309,7 +2428,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED);
             unknown = true;
         }
-        else if (valid && known && check_input_attribute_generic(name, generic_fact))
+        else if (valid && known && check_input_attribute_generic(name, generic_fact, subjectless))
         {
             // One clang's generated handler applies with nothing more, which changes nothing here (#147): kept for its
             // subject's check, then its argument count's against clang's.

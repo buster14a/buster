@@ -5238,6 +5238,20 @@ build/generate_attribute_subjects parsed.inc kinds.inc "clang/include/clang/Basi
 Then update THIRD_PARTY_NOTICES.md's record and the counts `test-checker`
 checks.
 
+`c_check_attribute_arguments.inc`, how clang's parser reads each attribute's
+arguments (`check_input_arguments_row`), is made the same way from clang's
+parser switches, by `tools/generate_attribute_arguments.c`:
+
+```sh
+clang-tblgen --gen-clang-attr-parser-string-switches -I . clang/Basic/Attr.td -o switches.inc
+cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_attribute_arguments.c -o build/generate_attribute_arguments
+build/generate_attribute_arguments --self-test
+build/generate_attribute_arguments switches.inc "clang/include/clang/Basic/Attr.td at llvmorg-X (sha256 ...), by clang-tblgen VERSION; see THIRD_PARTY_NOTICES.md" > src/buster/compiler/c_check_attribute_arguments.inc
+```
+
+A list's value that is a condition is evaluated for GNU's and C23's syntax on
+x86-64; the generator fails on a condition it doesn't know.
+
 ## Attributes' places, GCC's positions and their handlers' checks (#147)
 
 Clang reads an attribute's place before its subject: where a C23 list stands
@@ -5426,7 +5440,32 @@ arguments against the function. The checker now gives these as clang does.
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
     "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
-    argument must be a string literal.
+    argument must be a string literal;
+  - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
+    `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
+    subject's diagnostic is all clang gives in C;
+  - and these, whose handlers change nothing in C past their subjects,
+    counts and arguments' kinds: `available_only_in_default_eval_method`
+    (whose `#pragma clang fp eval_method` the checker refuses),
+    `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
+    `-frandomize-layout-seed`), `objc_boxable`, `objc_bridge_mutable`,
+    Fuchsia's `use_handle` and `release_handle`, `suppress`, `swift_bridge`,
+    `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`.
+
+  Every attribute's arguments are read first as clang's parser reads them,
+  by their kinds (`check_input_arguments_row`, from
+  `c_check_attribute_arguments.inc`): an identifier first argument of one
+  that takes an identifier is one; an argument it reads as an unevaluated
+  string literal that is none is "expected string literal as argument of 'X'
+  attribute" at it, wherever the attribute is; a type argument that starts
+  no type is "unknown type name" (an identifier) or "expected a type" and
+  "expected ')'"; and a generic attribute's expressions' names must name
+  something where the attribute is (`check_input_thread_names`): an earlier
+  declaration, a struct's earlier member, and a function declarator's
+  parameters only for the attributes clang parses in the function's scope or
+  after the declaration (`enable_if`, `diagnose_if`, the thread-safety
+  analysis's). An attribute whose arguments clang parses its own way
+  (`availability`, `counted_by` and the like) is its own.
 
   Five have rules of their own, with their handlers' checks and effects:
   - `lifetimebound` changes nothing in C. On a parameter of a function that
@@ -5470,7 +5509,9 @@ arguments against the function. The checker now gives these as clang does.
   The rest stay refused by name: `selectany` (a COMDAT),
   `no_caller_saved_registers` (a calling convention), and the attributes
   whose handlers clang has its own (`pass_object_size`, `ms_struct`,
-  `interrupt` and others).
+  `interrupt` and others). A type argument's type name (`preferred_type`'s,
+  `vec_type_hint`'s) is the parser's error here, which reads attributes'
+  arguments as expressions.
 - **Argument counts.** An attribute's count of arguments other than clang's
   is clang's error, worded as clang's three messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at
@@ -5588,6 +5629,8 @@ arguments against the function. The checker now gives these as clang does.
     of the wrong type is one error, where clang goes on to "unsupported
     machine mode" where both apply. A string argument with escapes names the
     piece of target's string from its spelling.
+  - `annotate`'s arguments after its string must be constant expressions,
+    clang's error with its evaluator's notes otherwise; they are taken here.
   - `int x _Alignas(3);` stops at clang's "expected ';' after top level
     declarator", where clang's recovery also reads `_Alignas(3);` as a
     declaration that declares nothing (-Wmissing-declarations).

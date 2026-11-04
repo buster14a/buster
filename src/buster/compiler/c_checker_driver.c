@@ -236,7 +236,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
     snprintf(parsed, sizeof(parsed), "%.*s%s%.*s", (int)scope.length, scope.pointer, scoped ? "::" : "", (int)(standard ? bare : written).length,
              (standard ? bare : written).pointer);
     const uint32_t number = detail >> 8;
-    // mode's name, as written, after the attribute's first token by `number`.
+    // mode's name, or a type argument's, as written, after the attribute's first token by `number`.
     const String8 argument = first + number < count ? check_driver_attribute_spelling(parser, pp, first + number, false) : (String8){ "", 0 };
     switch ((CheckAttributeArgumentError)(detail & 0xffu))
     {
@@ -265,6 +265,9 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_FORMAT_STRING: snprintf(text, capacity, "format argument not a string type"); break;
         case CHECK_ARGUMENT_FORMAT_RESULT: snprintf(text, capacity, "function does not return string type"); break;
         case CHECK_ARGUMENT_STRFTIME: snprintf(text, capacity, "strftime format attribute requires 3rd parameter to be 0"); break;
+        case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
+        case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
         default: snprintf(text, capacity, "invalid attribute argument"); break;
     }
 }
@@ -1750,11 +1753,17 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && input->reports[index].attribute < count)
                         {
-                            // An attribute argument's error (#147) as clang's handler words it.
+                            // An attribute argument's error (#147) as clang's handler words it; a parser's "expected ')'" with
+                            // its note at the arguments' `(`.
                             char text[192];
                             const CheckInputReport* report = input->reports + index;
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, text, sizeof(text));
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", text);
+                            const bool matched = report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN && report->note_token < count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = matched ? parser->tokens.sources[report->note_token] : 0,
+                                .message = "to match this '('",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)
                         {

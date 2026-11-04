@@ -472,6 +472,28 @@ static void check_test_attribute_vocabulary(CheckTest* test)
     }
     check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_subject_gnu) == 304 && BUSTER_ARRAY_LENGTH(check_input_subject_c23) == 225,
                       "attribute subjects: clang 23.1.5's 304 GNU spellings and 225 C23 ones with subjects");
+    // The arguments rows (#147): clang 23.1.5's parser switches' 160 names, in byte order, each found by its search; a
+    // name of none is none.
+    {
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        const uint32_t count = BUSTER_ARRAY_LENGTH(check_input_arguments_rows);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            unordered += i != 0 && strcmp(check_input_arguments_rows[i - 1].name, check_input_arguments_rows[i].name) >= 0 ? 1u : 0u;
+            const String8 name = { (char*)check_input_arguments_rows[i].name, strlen(check_input_arguments_rows[i].name) };
+            found += check_input_arguments_row(name) == check_input_arguments_rows + i ? 1u : 0u;
+        }
+        const CheckInputArgumentsRow* format = check_input_arguments_row((String8){ "format", 6 });
+        const CheckInputArgumentsRow* deprecated = check_input_arguments_row((String8){ "deprecated", 10 });
+        const CheckInputArgumentsRow* typed = check_input_arguments_row((String8){ "preferred_type", 14 });
+        const CheckInputArgumentsRow* enable_if = check_input_arguments_row((String8){ "enable_if", 9 });
+        check_test_expect(test, count == 160 && unordered == 0 && found == count && check_input_arguments_row((String8){ "aligned", 7 }) == NULL &&
+                          check_input_arguments_row((String8){ "", 0 }) == NULL && format != NULL && format->flags == BUSTER_CHECK_ARGUMENTS_IDENTIFIER &&
+                          deprecated != NULL && deprecated->strings == 3 && typed != NULL && typed->flags == BUSTER_CHECK_ARGUMENTS_TYPE &&
+                          enable_if != NULL && enable_if->flags == BUSTER_CHECK_ARGUMENTS_FUNCTION_SCOPE && enable_if->strings == 2,
+                          "attribute arguments: clang 23.1.5's 160 names, ordered, each found, with their lists and string places");
+    }
     // The facts rows (#147): each spelling clang has for x86-64 Linux, as its vocabulary has them, in byte order.
     for (uint32_t standard = 0; standard < 2; standard += 1)
     {
