@@ -2940,6 +2940,71 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
                                   check_test_tier1_rows_other_source, "-march=x86-64-v4", host);
 }
 
+// A machine row with a floating role in a VEX form (#141): F16C's half-precision conversions at x86-64-v3, whose rows
+// name the float in an XMM field that only a register below 16 holds. Tier 1 refuses the row at selection
+// (tier1_select_row_supported), so that the function is Tier 0's rather than staged through an EVEX copy the target has
+// none of: by each path, the build by --tier1 refuses _cvtsh_ss at selection, and where the host has x86-64-v3, it runs as
+// clang -O0's build does.
+static const char check_test_tier1_half_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) float widen(unsigned short h) { return _cvtsh_ss(h); }\n"
+    "__attribute__((noinline)) unsigned short narrow(float f) { return _cvtss_sh(f, 0); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    float s = 0;\n"
+    "    for (int i = 0; i < 1000; i += 1) s += widen(narrow((float)i * 0.37f));\n"
+    "    printf(\"%.3f %u\\n\", s, narrow(3.25f));\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_half(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v3 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
+    const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-half.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-half-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_half_source, strlen(check_test_tier1_half_source));
+    char* reference_arguments[] = { (char*)clang, "-O0", "-march=x86-64-v3", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
+    check_test_expect(test, ran, "clang's build of the half-precision fixture runs");
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        char program[512];
+        char message[256];
+        snprintf(program, sizeof(program), "%s/tier1-half-%u", directory, path);
+        char* arguments[10] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "-march=x86-64-v3" };
+        uint32_t count = 5;
+        if (path != 0)
+        {
+            arguments[count++] = "--scalar";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = program;
+        arguments[count++] = unit;
+        arguments[count] = NULL;
+        text = NULL;
+        const bool built = check_test_driver_spawn(arguments, &text) == 0;
+        const bool refused = built && text != NULL && strstr(text, "tier1-refused\t_cvtsh_ss\tselection") != NULL;
+        free(text);
+        snprintf(message, sizeof(message), "a row with a floating role in a VEX form is refused at selection, and its function is Tier 0's (path %u)", path);
+        check_test_expect(test, refused, message);
+        char actual[256] = { 0 };
+        snprintf(message, sizeof(message), "the half-precision fixture by --tier1 runs as clang -O0's build does (path %u)", path);
+        check_test_expect(test, built && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+        unlink(program);
+    }
+    unlink(reference);
+    unlink(unit);
+}
+
 // The convention's rarer shapes' fixture (#141).
 static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {

@@ -99,6 +99,11 @@ struct Tier1MasksFixture
     bool divisions;
     // A cycle of vectors' phis (#141), which goes through xmm15, the vector class's scratch register.
     bool vector_cycle;
+    // A machine row short of free opmask registers (#141), which borrows live masks' and reloads them after it.
+    bool borrows;
+    // The buffer after a run, from the input and the count, where the interpreter can't run the fixture: a machine row's
+    // (#141), which it has no model of. Null for the interpreter's.
+    void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
 };
 
 static bool tier1_masks_test_expect(Tier1MasksTest* test, bool condition, const char* message)
@@ -125,6 +130,44 @@ static uint64_t tier1_masks_test_next(Tier1MasksTest* test)
 static uint64_t tier1_masks_test_successor(uint64_t value)
 {
     return value + 1;
+}
+
+// The machine rows' fixture's buffer (#141): its seven word masks back at 128 on, (~x) & 0xffff at 160 (through k1 and k2,
+// named by number), the masks' (a & b) ^ a at 164 (through a mask scratch register and the result read as its first
+// operand), x + y at 168 (the result read as its first operand) and y at 172 (a row of no records, its result its
+// operand), of x and y at 16 and 20.
+static void tier1_masks_test_rows_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint16_t masks[7];
+    uint32_t x = 0;
+    uint32_t y = 0;
+    memcpy(masks, input, sizeof(masks));
+    memcpy(&x, input + 16, 4);
+    memcpy(&y, input + 20, 4);
+    memcpy(output + 128, masks, sizeof(masks));
+    const uint32_t complement = ~x & 0xffffu;
+    const uint16_t mixed = (uint16_t)((masks[0] & masks[1]) ^ masks[0]);
+    const uint32_t sum = x + y;
+    memcpy(output + 160, &complement, 4);
+    memcpy(output + 164, &mixed, 2);
+    memcpy(output + 168, &sum, 4);
+    memcpy(output + 172, &y, 4);
+}
+
+// The floating row's buffer (#141): the low lanes of a float's and another's bits added as integers at 128, the result
+// read as its first operand, of the floats at 0 and 4.
+static void tier1_masks_test_floating_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint32_t a = 0;
+    uint32_t b = 0;
+    memcpy(&a, input, 4);
+    memcpy(&b, input + 4, 4);
+    const uint32_t sum = a + b;
+    memcpy(output + 128, &sum, 4);
 }
 
 static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
@@ -872,6 +915,83 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .count = 1000,
         .calls = true,
     },
+    {
+        // #141: machine rows beside seven word masks live in k1 to k7 across them: one naming k1 and k2 by number and one
+        // taking a mask scratch register, both of which borrow live masks' registers; and rows reading their result as
+        // their first operand, as Tier 0 places them, and a row of no records, its result its operand.
+        .name = "machine rows under opmask pressure",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (u32) -> u32 [KMOVW_K_R32 0x01 0x00 0x80 0x00 0x00 0x00 0 0] [KNOTW_K_K 0x02 0x00 0x01 0x00 0x00 0x00 0 0] [KMOVW_R32_K 0x90 0x00 0x02 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (mask2, mask2) -> mask2 [KANDW_K_K_K 0xa0 0x80 0x81 0x00 0x00 0x00 0 0] [KXORW_K_K_K 0x90 0xa0 0x90 0x00 0x00 0x00 0 0]\n"
+                "  row #2 (u32, u32) -> u32 [ADD_R32_RM32 0x90 0x00 0x81 0x00 0x00 0x00 0 0]\n"
+                "  row #3 (u32) -> u32\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.m16 %0 align=2\n"
+                "  %2 = address.ptr %0 offset=2\n"
+                "  %3 = load.m16 %2 align=2\n"
+                "  %4 = address.ptr %0 offset=4\n"
+                "  %5 = load.m16 %4 align=2\n"
+                "  %6 = address.ptr %0 offset=6\n"
+                "  %7 = load.m16 %6 align=2\n"
+                "  %8 = address.ptr %0 offset=8\n"
+                "  %9 = load.m16 %8 align=2\n"
+                "  %10 = address.ptr %0 offset=10\n"
+                "  %11 = load.m16 %10 align=2\n"
+                "  %12 = address.ptr %0 offset=12\n"
+                "  %13 = load.m16 %12 align=2\n"
+                "  %14 = address.ptr %0 offset=16\n"
+                "  %15 = load.i32 %14 align=4\n"
+                "  %16 = address.ptr %0 offset=20\n"
+                "  %17 = load.i32 %16 align=4\n"
+                "  %18 = call.i32 row #0(%15) fixed=(i32) variadic=0\n"
+                "  %19 = call.m16 row #1(%1, %3) fixed=(m16, m16) variadic=0\n"
+                "  %20 = call.i32 row #2(%15, %17) fixed=(i32, i32) variadic=0\n"
+                "  %21 = call.i32 row #3(%17) fixed=(i32) variadic=0\n"
+                "  %22 = address.ptr %0 offset=128\n"
+                "  %23 = store.void %22, %1 align=2\n"
+                "  %24 = address.ptr %0 offset=130\n"
+                "  %25 = store.void %24, %3 align=2\n"
+                "  %26 = address.ptr %0 offset=132\n"
+                "  %27 = store.void %26, %5 align=2\n"
+                "  %28 = address.ptr %0 offset=134\n"
+                "  %29 = store.void %28, %7 align=2\n"
+                "  %30 = address.ptr %0 offset=136\n"
+                "  %31 = store.void %30, %9 align=2\n"
+                "  %32 = address.ptr %0 offset=138\n"
+                "  %33 = store.void %32, %11 align=2\n"
+                "  %34 = address.ptr %0 offset=140\n"
+                "  %35 = store.void %34, %13 align=2\n"
+                "  %36 = address.ptr %0 offset=160\n"
+                "  %37 = store.void %36, %18 align=4\n"
+                "  %38 = address.ptr %0 offset=164\n"
+                "  %39 = store.void %38, %19 align=2\n"
+                "  %40 = address.ptr %0 offset=168\n"
+                "  %41 = store.void %40, %20 align=4\n"
+                "  %42 = address.ptr %0 offset=172\n"
+                "  %43 = store.void %42, %21 align=4\n"
+                "  %44 = ret.void\n"
+                "}\n",
+        .borrows = true,
+        .model = tier1_masks_test_rows_model,
+    },
+    {
+        // #141: a floating row of an EVEX form, its floating roles in zmm16 and on, its result read as its first operand.
+        .name = "a floating machine row",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128_EVEX 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.f32 %0 align=4\n"
+                "  %2 = address.ptr %0 offset=4\n"
+                "  %3 = load.f32 %2 align=4\n"
+                "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
+                "  %5 = address.ptr %0 offset=128\n"
+                "  %6 = store.void %5, %4 align=4\n"
+                "  %7 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_floating_model,
+    },
 };
 
 // Refusals: a vector, a mask's select.
@@ -897,6 +1017,22 @@ static const char tier1_masks_test_select[] = "function (ptr, i64) -> void {\n"
                                               "  %8 = store.void %7, %6 align=2\n"
                                               "  %9 = ret.void\n"
                                               "}\n";
+
+// A machine row with a floating role in a VEX form (#141), which only a register below 16 can hold:
+// tier1_select_row_supported refuses it (its EVEX twin is "a floating machine row"'s), so that its function is Tier 0's
+// rather than staged through an EVEX copy a target without AVX-512 has none of.
+static const char tier1_masks_test_vex_floating[] = "function (ptr) -> void {\n"
+                                                    "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
+                                                    "b0:\n"
+                                                    "  %0 = param.ptr 0\n"
+                                                    "  %1 = load.f32 %0 align=4\n"
+                                                    "  %2 = address.ptr %0 offset=4\n"
+                                                    "  %3 = load.f32 %2 align=4\n"
+                                                    "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
+                                                    "  %5 = address.ptr %0 offset=128\n"
+                                                    "  %6 = store.void %5, %4 align=4\n"
+                                                    "  %7 = ret.void\n"
+                                                    "}\n";
 
 // A word mask alone: kmovw and kandw, AVX512F's.
 static const char tier1_masks_test_words[] = "function (ptr) -> void {\n"
@@ -1152,6 +1288,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_expect(test, !fixture->vector_cycle || vector_scratch_moves != 0, "the vectors' swap's cycle goes through xmm15");
         tier1_masks_test_expect(test, !fixture->spills || (emitted.spill_stores != 0 && emitted.spill_loads != 0), "masks past k1 to k7 are spilled and reloaded");
         tier1_masks_test_expect(test, !fixture->calls || (emitted.call_stores != 0 && emitted.call_loads != 0), "masks live across a call are saved and reloaded");
+        tier1_masks_test_expect(test, !fixture->borrows || (emitted.call_stores != 0 && emitted.call_loads != 0), "a machine row short of opmask registers borrows live masks' and reloads them");
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
         uint32_t frame_accesses = 0;
@@ -1276,7 +1413,14 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
                 bytes[byte] = input % 4 == 1 ? 0 : input % 4 == 2 ? 0xff : (uint8_t)random;
             }
             counts[input] = fixture->count != 0 ? 1 + tier1_masks_test_next(test) % fixture->count : 0;
-            ok = tier1_masks_test_interpret(test, &function, bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
+            if (fixture->model != NULL)
+            {
+                fixture->model(bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
+            }
+            else
+            {
+                ok = tier1_masks_test_interpret(test, &function, bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
+            }
         }
         // Both paths, each with rematerialization (as the C driver's --tier1 runs) and without.
         for (uint32_t run = 0; ok && run < 4; run += 1)
@@ -1377,12 +1521,14 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
     const char* const texts[] = {
         tier1_masks_test_vector,
         tier1_masks_test_select,
+        tier1_masks_test_vex_floating,
         tier1_masks_test_fixtures[0].text,
         tier1_masks_test_fixtures[0].text,
         tier1_masks_test_words,
     };
     // The target each is emitted for (selection refusals stop first), and whether it is refused.
     const uint8_t* const targets[] = {
+        test->v4,
         test->v4,
         test->v4,
         baseline,
@@ -1394,11 +1540,13 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         true,
         true,
         true,
+        true,
         false,
     };
     const char* const names[] = {
         "a vector result is refused at selection",
         "a mask's select is refused at selection",
+        "a machine row with a floating role in a VEX form is refused at selection",
         "the baseline target has no opmask form",
         "AVX512F alone has no kandb, kmovd or kmovq",
         "AVX512F alone has kmovw and kandw",
@@ -1422,7 +1570,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
                 };
                 Tier1EmitResult emitted = { 0 };
                 const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, targets[c], &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_UNSUPPORTED;
-                const bool selection = c < 2;
+                const bool selection = c < 3;
                 const bool expected = selection ? selected == TIER1_SELECT_ERROR_UNSUPPORTED : refused[c] ? selected == TIER1_SELECT_OK && error == TIER1_EMIT_TARGET : selected == TIER1_SELECT_OK && error == TIER1_EMIT_OK;
                 tier1_masks_test_expect(test, expected, names[c]);
                 if (!expected)
@@ -2014,7 +2162,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             const uint64_t expected_runs = test.native ? 4u * BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
             tier1_masks_test_expect(&test, test.native_runs == expected_runs, "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
             tier1_masks_test_expect(&test, test.recomputed != 0, "with rematerialization, general values beside the masks are recomputed");
-            tier1_masks_test_expect(&test, test.refused == 8, "every refusal on both paths");
+            tier1_masks_test_expect(&test, test.refused == 10, "every refusal on both paths");
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");

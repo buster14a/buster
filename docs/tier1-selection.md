@@ -879,9 +879,9 @@ does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
 | Role | Register |
 | --- | --- |
 | `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
-| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, moved into the destination last |
+| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
-| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no operand is; else a free register, moved into the destination last |
+| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
 
 The free registers are the caller-saved general registers (rax, rcx, rdx, rsi,
@@ -907,7 +907,21 @@ permutes and shuffles, shifts by immediates, by counts in general registers and 
 vectors, masked loads and stores, a store of no result and a compress, inserts,
 extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
-edge.
+edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
+paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
+refuses at selection, so that its function is Tier 0's, and the program runs as
+clang -O0's does.
+
+`test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
+model of each (the interpreter has none of x86 records) by both paths, with and
+without rematerialization: rows beside seven word masks live in k1 to k7, one
+naming k1 and k2 by number and one taking a mask scratch register, which borrow
+live masks' registers and reload them; rows that read their integer and mask
+results as their first operands, as Tier 0 places them; a row of no records, its
+result its operand; and an EVEX floating row, its result read as its first
+operand. Its refusals take a row with a floating role in a VEX form, refused at
+selection by both paths; and its random mask programs whose rows the decoders
+refuse run as machine rows against the generator's model.
 
 ## Tests and benchmark
 

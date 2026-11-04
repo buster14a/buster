@@ -2144,17 +2144,19 @@ static uint8_t tier1_emit_cfg_take(uint32_t* free)
 // which no value takes and an EVEX form names (tier1_select_row_supported), or for a row with a VEX or legacy form's
 // vector register the lowest run of free xmm registers below 16 (xmm15 among them, the class's scratch); each vector
 // operand moved there first at its width and the result moved from VECTOR(0) into the destination last; its floating
-// roles the zmm registers past them. An
-// integer, mask or floating operand its records don't write (tier1_select_row_written) stays in its register, and one they
-// write is moved into a free register of its class first. Its scratch roles and its integer or mask result take free
-// registers: the caller-saved general registers (r11 among them) and k1 to k7 that hold no value live past the node and
-// no operand, an integer or mask result its destination where no operand is there. The opmask registers it names by
-// number, its own scratch, take free ones too (tier1_select_row_rename), but a pair's (VP2INTERSECT's), which must be
-// free where it is. Short of free registers, the row is refused (TIER1_EMIT_UNSUPPORTED: its function is Tier 0's). A
-// move into place never overwrites another's source: its destination is free or a vector role's.
+// roles the zmm registers past them. An integer, mask or floating operand its records don't write
+// (tier1_select_row_written) stays in its register, and one they write is copied into a free register of its class first.
+// Its result shares a register with its class's first operand, as Tier 0's placement has them (a row may read either as
+// the other), that operand copied there first: an integer's or a mask's its destination where no other operand is there,
+// else a free register; a floating one's past the vector roles. Its scratch roles take free registers: the caller-saved
+// general registers (r11 among them) and k1 to k7 that hold no value live past the node and no operand. The opmask
+// registers it names by number, its own scratch, take free ones too (tier1_select_row_rename), but a pair's
+// (VP2INTERSECT's), which must be free where it is. Short of free opmask registers, it borrows those of masks live past
+// it, saved and reloaded around it; short of others, the row is refused (TIER1_EMIT_UNSUPPORTED: its function is Tier
+// 0's). A move into place never overwrites another's source: its destination is free or a vector role's.
 // `sources` are the operands' registers at the node's use phase, as a kernel's holes are, before its definition phase's
 // moves, which may take an operand's register for the definition or store an operand live past the node into its slot.
-static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, const uint8_t* sources, uint32_t node, uint32_t use, Tier1EmitBuffer* buffer)
+static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, const uint8_t* sources, uint32_t node, uint32_t use, Tier1EmitBuffer* buffer)
 {
     const IrFunction* function = plan->function;
     const Tier1CfgAllocation* cfg = &emitted->cfg;
@@ -2265,47 +2267,33 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, const Tier
         renamed[k] = ((masks.named >> k) & 1) != 0 ? tier1_emit_cfg_take(&free_masks) : (uint8_t)k;
         error = renamed[k] != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
     }
-    for (uint32_t j = 0; error == TIER1_EMIT_OK && j < row->operand_count; j += 1)
+    // The result's role, which Tier 0 places in its class's first operand's register (tier0_operation_placement and
+    // tier0_operation_mask_place: INTEGER_RESULT at the first integer operand's, FLOATING_RESULT at the first floating
+    // one's, MASK_RESULT at the first mask one's), so that a row may read it as that operand, or that operand as its
+    // result once written: here both are one register, that operand copied into it first. An integer's or a mask's is
+    // its destination where no other operand is there (the allocation gave the destination to the node: it holds nothing
+    // live past it), else a free register moved from last; a floating one's past the floating operands', moved into the
+    // destination last; a vector's VECTOR(0).
+    uint32_t aliased = UINT32_MAX;
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && aliased == UINT32_MAX && j < row->operand_count; j += 1)
     {
         const uint32_t class = row->operand_classes[j];
-        const uint8_t location = sources[j];
-        const bool writes = ((written >> j) & 1) != 0;
-        if (tier0_class_vector(class))
-        {
-            records[count++] = tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j])->move, (uint8_t)(placement.vector + j), (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION));
-        }
-        else if (tier0_class_floating(class))
-        {
-            const uint8_t reg = writes ? next_floating++ : (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
-            records[count] = tier1_select_register_record(tier1_select_vector_forms(16)->move, reg, (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION));
-            count += writes;
-            placement.operands[j] = reg;
-        }
-        else if (tier0_class_mask(class))
-        {
-            const uint8_t reg = writes ? tier1_emit_cfg_take(&free_masks) : (uint8_t)(location - BUSTER_TIER1_EMIT_MASK_LOCATION);
-            error = reg != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
-            records[count] = tier1_select_register_record(tier1_select_mask_forms(row->operand_bytes[j])->move, reg, (uint8_t)(location - BUSTER_TIER1_EMIT_MASK_LOCATION));
-            count += writes;
-            placement.masks[j] = reg;
-        }
-        else
-        {
-            const uint8_t reg = writes ? tier1_emit_cfg_take(&free_general) : location;
-            error = reg != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
-            records[count] = tier1_select_move(8, reg, location);
-            count += writes;
-            placement.operands[j] = reg;
-        }
+        aliased = (tier0_class_integer(result_class) && tier0_class_integer(class)) || (tier0_class_floating(result_class) && tier0_class_floating(class)) ||
+                          (tier0_class_mask(result_class) && tier0_class_mask(class))
+                      ? j
+                      : aliased;
     }
-    // The result's role: an integer's or a mask's its destination where no operand is there (the destination is free
-    // otherwise: the allocation gave it to the node), else a free register moved from last; a floating one's past the
-    // floating operands'; a vector's VECTOR(0), zmm16.
+    // A destination another operand is in can't be the result's: the row may write the result before it reads that one.
+    bool shared = false;
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && result_class != BUSTER_TYPED_CLASS_VOID && j < row->operand_count; j += 1)
+    {
+        shared |= j != aliased && sources[j] == destination;
+    }
     bool result_moves = false;
     uint8_t result_register = UINT8_MAX;
     if (error == TIER1_EMIT_OK && tier0_class_integer(result_class))
     {
-        const bool kept = ((busy_general >> destination) & 1) == 0;
+        const bool kept = !shared && (((busy_general >> destination) & 1) == 0 || (aliased != UINT32_MAX && sources[aliased] == destination));
         result_register = kept ? destination : tier1_emit_cfg_take(&free_general);
         result_moves = !kept;
         placement.integer_result = result_register;
@@ -2313,7 +2301,7 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, const Tier
     else if (error == TIER1_EMIT_OK && tier0_class_mask(result_class))
     {
         const uint8_t k = (uint8_t)(destination - BUSTER_TIER1_EMIT_MASK_LOCATION);
-        const bool kept = ((busy_masks >> k) & 1) == 0 && ((masks.named >> k) & 1) == 0;
+        const bool kept = !shared && ((busy_masks >> k) & 1) == 0 ? ((masks.named >> k) & 1) == 0 : !shared && aliased != UINT32_MAX && sources[aliased] == destination;
         result_register = kept ? k : tier1_emit_cfg_take(&free_masks);
         result_moves = !kept;
         placement.mask_result = result_register;
@@ -2329,7 +2317,45 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, const Tier
         result_register = placement.vector;
         result_moves = true;
     }
-    error = error == TIER1_EMIT_OK && (result_class == BUSTER_TYPED_CLASS_VOID || result_register != UINT8_MAX) && next_floating <= 32 ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
+    error = error == TIER1_EMIT_OK && (result_class == BUSTER_TYPED_CLASS_VOID || result_register != UINT8_MAX) ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && j < row->operand_count; j += 1)
+    {
+        const uint32_t class = row->operand_classes[j];
+        const uint8_t location = sources[j];
+        // The operand the result shares a register with is copied into it, wherever it isn't already.
+        const bool alias = j == aliased;
+        const bool writes = ((written >> j) & 1) != 0 || alias;
+        if (tier0_class_vector(class))
+        {
+            records[count++] = tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j])->move, (uint8_t)(placement.vector + j), (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION));
+        }
+        else if (tier0_class_floating(class))
+        {
+            const uint8_t own = (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
+            const uint8_t reg = alias ? result_register : writes ? next_floating++ : own;
+            records[count] = tier1_select_register_record(tier1_select_vector_forms(16)->move, reg, own);
+            count += reg != own;
+            placement.operands[j] = reg;
+        }
+        else if (tier0_class_mask(class))
+        {
+            const uint8_t own = (uint8_t)(location - BUSTER_TIER1_EMIT_MASK_LOCATION);
+            const uint8_t reg = alias ? result_register : writes ? tier1_emit_cfg_take(&free_masks) : own;
+            error = reg != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
+            records[count] = tier1_select_register_record(tier1_select_mask_forms(row->operand_bytes[j])->move, reg, own);
+            count += reg != own;
+            placement.masks[j] = reg;
+        }
+        else
+        {
+            const uint8_t reg = alias ? result_register : writes ? tier1_emit_cfg_take(&free_general) : location;
+            error = reg != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
+            records[count] = tier1_select_move(8, reg, location);
+            count += reg != location;
+            placement.operands[j] = reg;
+        }
+    }
+    error = error == TIER1_EMIT_OK && next_floating <= 32 ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < reach.scratch; k += 1)
     {
         placement.scratch[k] = tier1_emit_cfg_take(&free_general);
@@ -2364,6 +2390,9 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, const Tier
     {
         error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
     }
+    // The borrowed masks' saves and reloads count as a call's do.
+    emitted->call_stores += error == TIER1_EMIT_OK ? (uint32_t)__builtin_popcount(borrowed) : 0;
+    emitted->call_loads += error == TIER1_EMIT_OK ? (uint32_t)__builtin_popcount(borrowed) : 0;
     return error;
 }
 
