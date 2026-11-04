@@ -873,16 +873,29 @@ name vector registers in EVEX forms alone, so that its vector roles can be zmm16
 and on, which no value takes, its floating roles past them below 32
 (`tier1_select_row_supported`). Its narrow integer result isn't canonical
 (`tier1_select_canonical`): its field's bits past the class are the row's. Only
-the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row as Tier 0
-does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
+the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row at the
+node's definition phase as Tier 0 does (`Tier0Placement`, `tier0_operation_place`)
+but for its vector roles, which it places one at a time (#1283,
+`tier1_emit_cfg_row_place`), so that most rows emit their own records alone:
 
 | Role | Register |
 | --- | --- |
-| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`; an SSE carrier's zero-extended: `tier1_select_carrier_move`), the result moved from zmm16 into the destination last (an SSE carrier's zero-extended too) |
+| `VECTOR(0)` of a vector result | the destination, where nothing else there is read after the role's first write (no value live past the node, no floating operand, and no other vector operand that stays there whose role a later record names, or the first-writing one where its destination can't be a source: a gather's, a complex multiplication's), and every record that writes it is a VEX or EVEX form's (which zero the register past their field; one wider than the result is followed by a move of the destination into itself at the result's width). The first operand is copied in first (no other operand may then be there); or, where the first write is a pure one (no tied operand, no merge into the rest of the register, no merging opmask) and nothing reads the operand past its width up to it, it is read in its own register up to that write, which writes the destination: the two-operand forms' `op V0, V0, V1` with the result in a dying second operand's register is `op d, a, d` |
+| other `VECTOR(j)` of a vector operand | its own register where nothing reads it past its width up to the role's first write (whose bits the move at its width would have zeroed) and no record writes it, or they write it by VEX and EVEX forms alone and it dies at the node, no other operand in its register and not the destination the result is written in |
+| other `VECTOR(j)` | zmm16 + j, which no value takes and an EVEX form names, or for a row with a VEX or legacy form's vector register the lowest run of free xmm registers below 16 (xmm15 among them, the class's scratch), the destination outside it where the result is written there; a vector operand copied in at its width first, a vector result moved into the destination at its width last. An SSE carrier (#1280) is copied and moved zero-extended (`tier1_select_carrier_move`): its value's register may hold anything past its bytes, which every vector field reads past, so it never stays in its own register |
 | `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
 | `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
+
+`tier1_select_row_vectors` reads what the records do with each vector role from
+x86_semantics.c's effects: which they write and by which family, how wide each
+role is read up to its first write and written, which record writes it first and
+whether purely, which names it last, and which records' destinations can't be a
+source. `--tier1-report` counts the rows and the moves around them
+(`machine_rows`, `row_moves`): the machine rows' fixture's unit below took 150
+moves around its 58 rows by Tier 0's placement and takes 18 (13 by the scalar
+path's allocation).
 
 The free registers are the caller-saved general registers (rax, rcx, rdx, rsi,
 rdi, r8, r9, r10 and the scratch r11) and k1 to k7 that hold no value live past
@@ -893,7 +906,8 @@ k and k + 1), which must be free where it is. Short of them, the row is refused 
 (`TIER1_EMIT_UNSUPPORTED`), and its function is Tier 0's: the CFG consumer keeps a
 node's own error rather than the block's owed call saves' (`TIER1_EMIT_INVALID`,
 which a refusal mid-block left owed). A move into place never
-overwrites another's source: its destination is free or a vector role's. Each row
+overwrites another's source: its destination is free, a vector role's or the
+node's destination with no other operand in it. Each row
 node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
 certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
 it doesn't decode the rows' records.
@@ -930,7 +944,8 @@ permutes and shuffles, shifts by immediates, by counts in general registers and 
 vectors, masked loads and stores, a store of no result and a compress, inserts,
 extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
-edge. Its SSE carriers' fixture (#1280) does the same for vectors of 4 and 8
+edge. Its unit takes at most a move into or out of place for every two rows, by
+each path and with and without rematerialization (#1283). Its SSE carriers' fixture (#1280) does the same for vectors of 4 and 8
 bytes:
 - the intrinsics' widening conversions of each width (`cvtepu8`, `cvtepi8`,
   `cvtepu16`, `cvtepi16`);
@@ -963,8 +978,20 @@ without rematerialization: rows beside seven word masks live in k1 to k7, one
 naming k1 and k2 by number and one taking a mask scratch register, which borrow
 live masks' registers and reload them; rows that read their integer and mask
 results as their first operands, as Tier 0 places them; a row of no records, its
-result its operand; and an EVEX floating row, its result read as its first
-operand. Its refusals take a row with a floating role in a VEX form, refused at
+result its operand; an EVEX floating row, its result read as its first
+operand; and vector rows placed one role at a time (#1283), with the moves
+around them counted by each path: a two-operand form's, its result in a dying
+second operand's register; a tied operand's; a merging opmask's; an operand
+written and dying under an integer result; a VEX form's /is4 blend in the run
+below xmm16; a narrow result written at a wider width and a narrow operand read
+at one; and a widening conversion. Two more take the forms whose destination
+can't be a source's register (#1283's review): gathers whose source and index
+are one value dying at the row, and AVX512-FP16's complex multiplications whose
+factors die at it, the allocation giving the result such a register. The test
+checks that every record is valid and that each such destination is none of
+its sources, and runs them against a model, the complex multiplications only
+where the host has AVX512-FP16 (not the 9700X), on a forms table that allows
+that form, which no target of Tier 1's does yet. Its refusals take a row with a floating role in a VEX form, refused at
 selection by both paths; and its random mask programs whose rows the decoders
 refuse run as machine rows against the generator's model.
 

@@ -198,9 +198,10 @@ typedef enum Tier1SelectRule
     // a barrier no load folds past.
     TIER1_RULE_ATOMIC_RMW,
     // A machine row (#141), an IR row call's (IrCall.row): the typed stream's X86 row, x86 records whose registers are Tier
-    // 0's roles, which the CFG consumer places (tier1_emit_cfg_row) as Tier 0 does (Tier0Placement): its vector roles in
-    // zmm16 and on, which no value takes, each vector operand moved there from its register and the result moved from
-    // there into the destination; its integer, mask and floating operands in their own registers where its records don't
+    // 0's roles, which the CFG consumer places (tier1_emit_cfg_row) as Tier 0 does (Tier0Placement) but for its vector
+    // roles, placed one at a time (#1283): a vector result in its destination and a vector operand in its own register
+    // where nothing else there is read after they are written, else in zmm16 and on, which no value takes, moved there
+    // and out of there; its integer, mask and floating operands in their own registers where its records don't
     // write them, else moved into free registers of their classes; its scratch roles and its integer or mask result in
     // free registers, the result in its destination where no operand is. `immediate` is the row's index in
     // IrFunction.rows; its operands are the call's arguments, the node's effective uses, each in a register
@@ -2482,6 +2483,110 @@ static uint32_t tier1_select_row_written(const Tier0Operation* row)
         written |= decorated_operand && (vsib || !covered) ? 1u << (decoration & 7) : 0;
     }
     return written;
+}
+
+// What a machine row's records do with its VECTOR(j) roles (#1283), which tier1_emit_cfg_row places one at a time, a bit
+// or an entry per role:
+//   - `written`: the roles the records write, by the forms' effects as tier1_select_row_written reads them (a form the
+//     tables don't cover reads and writes every field it names); `legacy`: those a legacy form writes, whose write keeps
+//     the register's bits past its field.
+//   - `first_write` and `last_named`: the first record that writes each role and the last that names it, by index plus
+//     one (0 for none).
+//   - `pure`: the roles whose first write is a pure one: one field of that record writes the role, which the form
+//     doesn't read (no tied operand, no merge into the rest of the register, no merging opmask), so that the record's
+//     other fields naming it read the role's earlier value, which may be in another register than its later one; and
+//     `write_position`, that field's (BUSTER_X86_ROLE_REG, _RM or _VVVV).
+//   - `widest_written`: the widest field each is written in, and `widest_early`, the widest each is read in up to its
+//     first write, that one included but for a pure write's field (every naming where nothing writes it), in bytes (an
+//     XMM field's 16, a YMM's 32, a ZMM's 64; an /is4 operand's its reg field's class, which it shares): how much of the
+//     register the operand placed in it is read. A VSIB index is read.
+//   - `exclusive`, a bit per record: those whose destination can't be one of their sources' registers, a gather's
+//     (whose destination, index and mask must differ) and a complex multiplication's (x86_form_has_distinct_destination),
+//     both #UD otherwise.
+typedef struct Tier1SelectRowVectors Tier1SelectRowVectors;
+struct Tier1SelectRowVectors
+{
+    uint32_t written;
+    uint32_t legacy;
+    uint32_t pure;
+    uint32_t exclusive;
+    uint8_t first_write[16];
+    uint8_t last_named[16];
+    uint8_t widest_written[16];
+    uint8_t widest_early[16];
+    uint8_t write_position[16];
+};
+
+static uint8_t tier1_select_vector_class_bytes(uint32_t class)
+{
+    return class == BUSTER_X86_CLASS_ZMM ? 64 : class == BUSTER_X86_CLASS_YMM ? 32 : 16;
+}
+
+static Tier1SelectRowVectors tier1_select_row_vectors(const Tier0Operation* row)
+{
+    Tier1SelectRowVectors vectors;
+    memset(&vectors, 0, sizeof(vectors));
+    for (uint32_t r = 0; r < row->record_count; r += 1)
+    {
+        X86Instruction record = row->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        const X86Effects* effects = x86_effects(record.form);
+        const bool covered = effects->operation != X86_OPERATION_NONE;
+        const X86FormDescription* description = x86_form_description(record.form);
+        const bool legacy = description->family == BUSTER_X86_FAMILY_LEGACY;
+        const bool vsib = record.mode != BUSTER_X86_REGISTER_DIRECT && (description->rm & BUSTER_X86_OPERAND_VSIB) != 0;
+        vectors.exclusive |= vsib || x86_form_has_distinct_destination(description) ? 1u << r : 0;
+        // An opmask that merges: the destination's masked-off elements keep what it held.
+        const uint32_t decorations = record.decorations;
+        const bool merging = ((decorations & BUSTER_X86_DECORATION_MASK) != 0 || (decorations & BUSTER_TIER0_DECORATION_ROLE) != 0) && (decorations & BUSTER_X86_DECORATION_ZEROING) == 0;
+        // The roles this record writes, and those it writes in more than one field or by reading the field too.
+        uint32_t writes_here = 0;
+        uint32_t impure_here = 0;
+        uint8_t positions[16] = { 0 };
+        for (uint32_t k = 0; k < fields.count; k += 1)
+        {
+            const uint8_t role = *fields.bytes[k];
+            // A VECTOR(j) role: a vector field's role below the floating ones (tier0_operation_register's).
+            const bool vector = tier0_vector_register_class(fields.classes[k]) && role < BUSTER_TIER0_ROLE_FLOATING(0);
+            const uint32_t position = fields.bytes[k] == &record.reg ? BUSTER_X86_ROLE_REG : fields.bytes[k] == &record.vvvv ? BUSTER_X86_ROLE_VVVV : BUSTER_X86_ROLE_RM;
+            const bool address = record.mode != BUSTER_X86_REGISTER_DIRECT && (fields.bytes[k] == &record.rm || fields.bytes[k] == &record.index);
+            const uint32_t bits = covered ? x86_effects_role(effects, position) : BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE;
+            const uint32_t rest = (bits & BUSTER_X86_ROLE_REST) >> BUSTER_X86_ROLE_REST_SHIFT;
+            const bool writes = vector && !address && (bits & BUSTER_X86_ROLE_WRITE) != 0;
+            const bool merges = writes && (merging || (bits & BUSTER_X86_ROLE_READ) != 0 || rest == BUSTER_X86_REST_MERGE || rest == BUSTER_X86_REST_MERGE_IF_REGISTER);
+            const bool reads = vector && (address || (bits & BUSTER_X86_ROLE_READ) != 0 || !writes || merges);
+            const uint32_t j = role & 15u;
+            const uint8_t bytes = tier1_select_vector_class_bytes(fields.classes[k]);
+            // Read up to the role's first write: in an earlier record, or in the one that first writes it (whose
+            // first_write is set past its fields).
+            const bool early = vectors.first_write[j] == 0;
+            vectors.widest_early[j] = reads && early && bytes > vectors.widest_early[j] ? bytes : vectors.widest_early[j];
+            vectors.widest_written[j] = writes && bytes > vectors.widest_written[j] ? bytes : vectors.widest_written[j];
+            impure_here |= writes && (merges || ((writes_here >> j) & 1) != 0) ? 1u << j : 0;
+            positions[j] = writes ? (uint8_t)position : positions[j];
+            writes_here |= writes ? 1u << j : 0;
+            vectors.last_named[j] = vector ? (uint8_t)(r + 1) : vectors.last_named[j];
+        }
+        if (fields.is4)
+        {
+            const uint32_t j = (uint32_t)record.immediate >> 4 & 15u;
+            const uint8_t bytes = tier1_select_vector_class_bytes(description->reg & BUSTER_X86_OPERAND_CLASS);
+            const bool early = vectors.first_write[j] == 0;
+            vectors.widest_early[j] = early && bytes > vectors.widest_early[j] ? bytes : vectors.widest_early[j];
+            vectors.last_named[j] = (uint8_t)(r + 1);
+        }
+        // The roles this record writes first.
+        for (uint32_t left = writes_here & ~vectors.written; left != 0; left &= left - 1)
+        {
+            const uint32_t j = (uint32_t)__builtin_ctz(left);
+            vectors.first_write[j] = (uint8_t)(r + 1);
+            vectors.write_position[j] = positions[j];
+            vectors.pure |= ((impure_here >> j) & 1) == 0 && covered ? 1u << j : 0;
+        }
+        vectors.written |= writes_here;
+        vectors.legacy |= legacy ? writes_here : 0;
+    }
+    return vectors;
 }
 
 // Whether a machine row names an opmask register pair (#141, VP2INTERSECT's k and k + 1), which its registers by number
