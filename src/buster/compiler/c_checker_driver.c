@@ -383,6 +383,45 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 #include "c_check_warning_render.c"
 #include "c_check_literal_diagnostic.c"
 
+static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
+
+// The numeric constants a failed parse left unchecked, from `begin` (where the checked prefix or repair ends) to its first
+// error: clang diagnoses each as it parses it, before that error, which is where buster's checker never reaches them
+// (#1127). Each one's publication is its own token, so it sorts before the parse's diagnostics. Numbers in a C23
+// attribute list, whose tokens clang skips, have none.
+static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch)
+{
+    uint32_t end = parser->tokens.count;
+    for (uint32_t d = 0; d < parser->diagnostic_count && end == parser->tokens.count; d += 1)
+    {
+        end = parser->diagnostics[d].error && parser->diagnostics[d].token < end ? parser->diagnostics[d].token : end;
+    }
+    uint32_t t = begin;
+    while (t < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        if (kind == PARSE_KIND_L_SQUARE && t + 1 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_L_SQUARE)
+        {
+            // Past the attribute list's brackets, balanced.
+            uint32_t depth = 0;
+            do
+            {
+                depth += parser->tokens.kinds[t] == PARSE_KIND_L_SQUARE;
+                depth -= depth != 0 && parser->tokens.kinds[t] == PARSE_KIND_R_SQUARE;
+                t += 1;
+            } while (t < end && depth != 0);
+        }
+        else
+        {
+            if (kind == PARSE_KIND_NUMBER)
+            {
+                check_driver_literal(pp, parser, t, parser->tokens.sources[t], parser->tokens.sources[t], scratch);
+            }
+            t += 1;
+        }
+    }
+}
+
 // A numeric constant the checker refused, worded and placed as clang does (c_check_literal_diagnostic.c, #1127): false if
 // clang has no error for it, which leaves the checker's own message.
 static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch)
@@ -967,9 +1006,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             firsts[first_count] = UINT64_MAX;
         }
-        for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
+        const CheckSparseWide attributes = input->attributes;
+        const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
+        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
         {
-            const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
+            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -1658,7 +1699,7 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .types = program->types,
                 .output = output,
                 .scalar = parser->options.scalar,
-                .internal = program->input->linkage[candidate->declaration] == 1,
+                .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
             };
             Scratch work = scratch_begin(output);
             check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);
@@ -2886,7 +2927,7 @@ struct CheckDriverCommand
     bool poison_arenas;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
-    // they took, after the units' diagnostics (c_checker_units.c).
+    // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
@@ -3417,6 +3458,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             if (!pp->fatal)
             {
+                // The checked view's reports covered its tokens: the original ones of a repair, a prefix's whole.
+                const uint32_t checked_end = !ready || !prefix_only ? 0 : repairing ? repair.original_end : checking->tokens.count;
+                check_driver_unparsed_literals(parser, pp, checked_end, scratch);
                 parse_print_diagnostics(parser, pp);
             }
             result = 1;
@@ -3689,6 +3733,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes.budget = &worker_budget;
+    // A test's hook, in every build (#673): the jobserver tokens a growing team's lane 0 supplies itself after its first
+    // part (CheckProgramLanes.grow_supply), read only when it is set.
+    const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
+    lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
     bool invalid_lanes = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
@@ -4183,8 +4231,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
                                worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
-            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tfallback=%u\n", mode,
-                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, (uint32_t)lanes.again);
+            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tgrown=%u\tworked=%u\tfallback=%u\n", mode,
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, lanes.grown, lanes.worked, (uint32_t)lanes.again);
         }
     }
     worker_budget_close(&worker_budget);

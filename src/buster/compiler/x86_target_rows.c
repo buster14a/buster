@@ -477,6 +477,9 @@
     BUSTER_X86_TARGET_ROW(FUCOMP_ST)
     BUSTER_X86_TARGET_ROW(FUCOMPP)
     BUSTER_X86_TARGET_ROW(FFREE_ST)
+    // #1115: FFREEP (DF C0+i), which every x86-64 processor runs (AMD documents it; GNU as takes it from the 686 on),
+    // admitted with the x87's other stack-register forms.
+    BUSTER_X86_TARGET_ROW(FFREEP_ST)
     BUSTER_X86_TARGET_ROW(FLDCW_M16)
     BUSTER_X86_TARGET_ROW(FNSTSW_M16)
     BUSTER_X86_TARGET_ROW(FNSTSW_AX)
