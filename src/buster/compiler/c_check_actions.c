@@ -443,10 +443,11 @@ static bool check_action_source_complete(const TypeTable* table, TypeId type, co
     return complete;
 }
 
+// An enumeration's type is rare among the operands (#1175).
 static bool check_action_integer_type(const TypeTable* table, TypeId type, uint32_t* width, bool* is_signed)
 {
     TypeId base = type_unqualified(type_strip_aligned(table, type));
-    if (type_kind(table, base) == BUSTER_TYPE_KIND_ENUM && type_is_complete(table, base))
+    if (__builtin_expect(type_kind(table, base) == BUSTER_TYPE_KIND_ENUM, 0) && type_is_complete(table, base))
     {
         base = table->types.base[type_index(base)];
     }
@@ -920,13 +921,14 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     }
 }
 
+// A vector's or a complex number's conversion is rare (#1175).
 static void check_action_convert_value(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node)
 {
-    if (check_vector_type(table, value->type) || check_vector_type(table, destination))
+    if (__builtin_expect(check_vector_type(table, value->type) || check_vector_type(table, destination), 0))
     {
         check_vector_convert(value, destination);
     }
-    else if (check_action_kind(table, value->type) == BUSTER_TYPE_KIND_COMPLEX || check_action_kind(table, destination) == BUSTER_TYPE_KIND_COMPLEX)
+    else if (__builtin_expect(check_action_kind(table, value->type) == BUSTER_TYPE_KIND_COMPLEX || check_action_kind(table, destination) == BUSTER_TYPE_KIND_COMPLEX, 0))
     {
         check_complex_convert(table, value, destination, node);
     }
@@ -947,6 +949,8 @@ static void check_action_conversion(const TypeTable* table, CheckValue* value, T
 
 // check_action_operand of `operand`, as operand `index` of `action`, whose context and guards alone the conversion reads of
 // it: a call's argument takes its call's (check_action_call), with no action of its own to copy the argument into (#1050).
+// An operand's decays and its lvalue's exceptions (an incomplete, a volatile or an atomic one, or one the constant
+// evaluation reads) are rare, and the hints say so (#1175).
 static CheckValue check_action_operand_value(TypeTable* table, const CheckAction* action, const CheckValue* operand, CheckActionResult* result, uint32_t index)
 {
     CheckValue value;
@@ -955,7 +959,7 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
     conversion->type = value.type;
     const TypeId plain = type_strip_aligned(table, value.type);
     const uint8_t kind = type_kind(table, plain);
-    if (type_kind_is_array(kind))
+    if (__builtin_expect(type_kind_is_array(kind), 0))
     {
         if ((value.flags & BUSTER_CHECK_REGISTER) != 0)
         {
@@ -979,7 +983,7 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
             conversion->flags |= BUSTER_CHECK_CONVERT_ARRAY;
         }
     }
-    else if (kind == BUSTER_TYPE_KIND_FUNCTION)
+    else if (__builtin_expect(kind == BUSTER_TYPE_KIND_FUNCTION, 0))
     {
         const TypeId pointer = type_pointer(table, plain);
         if (pointer == 0)
@@ -998,14 +1002,14 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
     else if (value.category == CHECK_LVALUE)
     {
         // A void lvalue (*p of a void *) converts as GNU's extension, in every language mode as clang has it.
-        if (!check_action_source_complete(table, value.type, action) && kind != BUSTER_TYPE_KIND_VOID)
+        if (__builtin_expect(!check_action_source_complete(table, value.type, action), 0) && kind != BUSTER_TYPE_KIND_VOID)
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, index);
         }
         const bool volatile_read = (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 ||
                                    (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
         CheckValue loaded = { 0 };
-        const bool known = action->context.constant_evaluated && !volatile_read && value.fault == CHECK_FAULT_NONE &&
+        const bool known = __builtin_expect(action->context.constant_evaluated, 0) && !volatile_read && value.fault == CHECK_FAULT_NONE &&
                            (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
                            (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
                            check_const_load(table, action->context.const_values, value.object, value.offset, value.object_bit_offset,
@@ -1021,7 +1025,7 @@ static CheckValue check_action_operand_value(TypeTable* table, const CheckAction
         {
             value.constant_kind = CHECK_CONSTANT_NONE;
         }
-        if (volatile_read || (kind == BUSTER_TYPE_KIND_ATOMIC && !known))
+        if (__builtin_expect(volatile_read, 0) || (__builtin_expect(kind == BUSTER_TYPE_KIND_ATOMIC, 0) && !known))
         {
             value.flags |= BUSTER_CHECK_SIDE_EFFECT;
             value.constant_kind = CHECK_CONSTANT_NONE;
@@ -2692,7 +2696,8 @@ static inline __attribute__((always_inline)) bool check_action_pointer_pair(cons
            left_kind == BUSTER_TYPE_KIND_FUNCTION || right_kind == BUSTER_TYPE_KIND_FUNCTION || left_kind == BUSTER_TYPE_KIND_NULLPTR || right_kind == BUSTER_TYPE_KIND_NULLPTR;
 }
 
-// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_node_action, once per action.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_node_action, once per action. Its checks of
+// the operands are for errors, and say so (#1175): without it, clang jumped around each check's report.
 static inline __attribute__((always_inline)) void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
 {
     memset(result, 0, sizeof(*result));
@@ -2700,18 +2705,18 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
     {
         memset(pending, 0, sizeof(*pending));
     }
-    if (action->op >= CHECK_OP_COUNT)
+    if (__builtin_expect(action->op >= CHECK_OP_COUNT, 0))
     {
         check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
     }
     const uint32_t count = check_action_operand_count(action);
     for (uint32_t i = 0; i < count; i += 1)
     {
-        if (!type_is_valid(table, action->operands[i].type))
+        if (__builtin_expect(!type_is_valid(table, action->operands[i].type), 0))
         {
             check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, i);
         }
-        if (action->operands[i].overload_head != 0 && action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT && action->op != CHECK_OP_ADDRESS)
+        if (__builtin_expect(action->operands[i].overload_head != 0, 0) && action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT && action->op != CHECK_OP_ADDRESS)
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i);
         }
@@ -2719,12 +2724,12 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
     }
     for (uint32_t i = 0; action->arguments != 0 && i < action->argument_count; i += 1)
     {
-        if (action->arguments[i].overload_head != 0)
+        if (__builtin_expect(action->arguments[i].overload_head != 0, 0))
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, i + 1);
         }
     }
-    if ((action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_SIZEOF_VLA || ((action->op == CHECK_OP_SIZEOF || action->op == CHECK_OP_ALIGNOF) && action->type != 0)) && !type_is_valid(table, action->type))
+    if ((action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_SIZEOF_VLA || ((action->op == CHECK_OP_SIZEOF || action->op == CHECK_OP_ALIGNOF) && action->type != 0)) && __builtin_expect(!type_is_valid(table, action->type), 0))
     {
         check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, 0);
     }

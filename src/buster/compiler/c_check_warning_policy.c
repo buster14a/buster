@@ -38,6 +38,14 @@ static bool check_warning_option(uint32_t id, String8 option)
     {
         matches |= check_diagnostic_option(option, "-Wall");
     }
+    const bool wall = id == CHECK_WARNING_ID_UNUSED_VARIABLE || id == CHECK_WARNING_ID_UNUSED_CONST_VARIABLE ||
+                      id == CHECK_WARNING_ID_UNUSED_FUNCTION ||
+                      id == CHECK_WARNING_ID_UNINITIALIZED || id == CHECK_WARNING_ID_SWITCH || id == CHECK_WARNING_ID_DANGLING_ELSE ||
+                      id == CHECK_WARNING_ID_SELF_ASSIGN || id == CHECK_WARNING_ID_EMPTY_BODY || id == CHECK_WARNING_ID_FORMAT_SECURITY;
+    const bool wextra = id == CHECK_WARNING_ID_UNUSED_PARAMETER || id == CHECK_WARNING_ID_SIGN_COMPARE ||
+                        id == CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER;
+    matches |= wall && check_diagnostic_option(option, "-Wall");
+    matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
     return matches;
 }
 

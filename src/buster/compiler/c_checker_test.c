@@ -6157,6 +6157,7 @@ static int run_checker_tests(int argc, char** argv)
     };
     const char* clang = "clang";
     bool program_initializers = false;
+    bool program_selection = false;
     bool const_values = false;
     bool program_vectors = false;
     bool program_amx = false;
@@ -6184,6 +6185,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--program-initializers") == 0)
         {
             program_initializers = true;
+        }
+        else if (strcmp(argv[i], "--program-selection") == 0)
+        {
+            program_selection = true;
         }
         else if (strcmp(argv[i], "--const-values") == 0)
         {
@@ -6262,9 +6267,9 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -6302,6 +6307,10 @@ static int run_checker_tests(int argc, char** argv)
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
             check_test_check_lanes_benchmark(&test);
+        }
+        else if (initialized && program_selection)
+        {
+            check_test_program_selection(&test, clang);
         }
         else if (initialized && program_initializers)
         {

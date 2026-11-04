@@ -447,6 +447,19 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
 typedef struct CheckInput CheckInput;
+typedef struct CheckInputEnumValue CheckInputEnumValue;
+struct CheckInputEnumValue
+{
+    uint32_t token;
+    unsigned __int128 value;
+};
+typedef struct CheckInputEnumDefinition CheckInputEnumDefinition;
+struct CheckInputEnumDefinition
+{
+    TypeId type;
+    uint32_t open;
+    uint32_t close;
+};
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
 struct CheckInputLiteralTable
 {
@@ -607,6 +620,12 @@ struct CheckInput
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
+    // The unit's enumerator declarations, in source order: their names' tokens and ICE values.
+    CheckInputEnumValue* enum_values;
+    uint32_t enum_value_count;
+    // Each enum tag definition's type and brace range, so a selector finds its own tag rather than a name search.
+    CheckInputEnumDefinition* enum_definitions;
+    uint32_t enum_definition_count;
     uint8_t* function_flags;
     // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
     // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
@@ -2271,10 +2290,11 @@ static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, 
 // Scans of a token column for the reader's passes that act on few tokens (#529): each gives the tokens from `first`
 // (of the next 64, 16 or 8 below `count`, by the column's width) it selects, a bit each, for its pass's vector path to
 // visit in order. The pass's scalar path, its twin, visits every token instead (check_input_scan_all), and its body
-// tests each one, so that both paths act on the same tokens.
+// tests each one, so that both paths act on the same tokens. The count is clamped to 64, which keeps every bit, rather
+// than tested: as a branch, clang jumped on nearly every scan (#1175).
 static uint64_t check_input_scan_all(uint32_t first, uint32_t count)
 {
-    return count - first < 64 ? _bzhi_u64(UINT64_MAX, count - first) : UINT64_MAX;
+    return _bzhi_u64(UINT64_MAX, count - first < 64 ? count - first : 64);
 }
 
 // The tokens whose byte in `column` is `value`.
@@ -7503,7 +7523,8 @@ static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_
         const uint8_t* const visits = reader->visits;
         uint32_t line = next & ~63u;
         uint64_t marked = check_input_scan_nonzero_from(visits, line, next, stop);
-        while (marked == 0 && stop - line > 64)
+        // A third of the tokens are marked, so the next one is nearly always in this line (#1175).
+        while (__builtin_expect(marked == 0, 0) && stop - line > 64)
         {
             line += 64;
             marked = check_input_scan_nonzero(visits, line, stop);
@@ -7520,6 +7541,12 @@ static bool check_input_resolve_tests(uint8_t mark, bool scalar, uint8_t reason)
 {
     return scalar || (mark & reason) != 0;
 }
+
+// check_input_resolve_tests of a reason other than the token's syntax, which few visits' marks give (on sqlite3.c, a
+// scope's end at a sixth of them and the others at fewer), so the hint expects it false (#1175); on a scalar host, whose
+// walk makes every test, true. A macro, since a hint holds only as the first test of its branch's condition: clang drops
+// one that wraps a chain of && but for the chain's last test.
+#define BUSTER_CHECK_RESOLVE_RARE(mark, scalar, reason) __builtin_expect(check_input_resolve_tests((mark), (scalar), (reason)), !BUSTER_HOST_VECTOR)
 
 // Whether the walk in source order arrives at `token` where it acts for a reason that no mark gives the token
 // (CheckInputReader.visits): the vector path would skip the token or the test. The scalar path, which visits every
@@ -7580,6 +7607,11 @@ static bool check_input_starts_implicit_declaration(const CheckInputReader* read
 // tokens marked (check_input_resolve_next): about a third of sqlite3.c's. At each token it visits, the walk first ends the
 // function it has left (function_end), which only a visit reads; and it makes only the tests the token's marks give
 // reasons for (check_input_resolve_tests): those of its syntax, and of the columns it writes ahead of itself.
+//
+// Most of those tests are rarely true at a visit, and each begins with its rare part, hinted (`__builtin_expect`, and
+// BUSTER_CHECK_RESOLVE_RARE for a mark's reason, #1175): without it, clang laid each one's body on the path and jumped
+// around it, 32 taken branches a visit on sqlite3.c's -fsyntax-only, a seventh of the whole run's. The scalar path is
+// expected where it is the host's only one.
 static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
@@ -7588,7 +7620,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
         visits += 1;
-        if (parser->options.scalar)
+        if (__builtin_expect(parser->options.scalar, !BUSTER_HOST_VECTOR))
         {
             reader->output->visit_misses += check_input_resolve_missed(reader, i);
         }
@@ -7603,21 +7635,21 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         // read once and tested for each reason (#889).
         uint8_t mark = reader->visits[i];
         // A lane's opening and the token after its closing are the top level's, which finished their initializers.
-        const bool finishes = !(reader->lane && (i == begin || i == end)) && check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_FINISH);
-        for (uint32_t declaration = finishes ? reader->initializer_finish_heads[i] : BUSTER_CHECK_NONE; declaration != BUSTER_CHECK_NONE;
-             declaration = reader->initializer_finish_next[declaration])
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_FINISH) && !(reader->lane && (i == begin || i == end)))
         {
-            if (!check_input_initializer_finish(reader, declaration))
+            for (uint32_t declaration = reader->initializer_finish_heads[i]; declaration != BUSTER_CHECK_NONE; declaration = reader->initializer_finish_next[declaration])
             {
-                break;
+                if (!check_input_initializer_finish(reader, declaration))
+                {
+                    break;
+                }
             }
         }
         if (reader->output->report_count != 0 || reader->output->resource)
         {
             break;
         }
-        const bool scopes = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SCOPE);
-        while (scopes && reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
+        while (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_SCOPE) && reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
         {
             reader->scope_count -= 1;
             // A scope that declared nothing has nothing to end, and its restore is left out where the stream, which
@@ -7631,16 +7663,17 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 reader->output->resource = true;
             }
         }
-        if (i > reader->function_end)
-        {
-            reader->function_result = 0;
-            reader->function_body = BUSTER_CHECK_NONE;
-        }
+        // Masked rather than branched on: a quarter of the visits are past the function, too many for a hint, and clang
+        // makes a branch of a select of a field or itself (#1175). `outside` is every bit where the token is past it.
+        const uint32_t outside = 0u - (uint32_t)(i > reader->function_end);
+        reader->function_result &= ~outside;
+        reader->function_body |= outside;
         if (i == end)
         {
             break;
         }
-        if (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[i] != 0)
+        // Only the deferred bodies' unit has them (-flazy-system-headers).
+        if (__builtin_expect(reader->output->deferred_tokens != 0, 0) && reader->output->deferred_tokens[i] != 0)
         {
             // The definition's declaration is visible at its ordinary source point. Only its selected-out
             // body is deferred; parameters and the full function declarator were checked before this opening.
@@ -7655,12 +7688,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             i = parser->tree.parents[i];
             continue;
         }
-        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
         {
             break;
         }
         CheckInputSpecifierJob* job = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) ? reader->specifier_finishes[i] : 0;
-        if (job != 0 && !job->ready)
+        if (__builtin_expect(job != 0, 0) && !job->ready)
         {
             CheckValue value = { 0 };
             uint32_t failed_token = BUSTER_CHECK_NONE;
@@ -7702,23 +7735,32 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes. A
             // label's name is right before its colon, whose child it is but after attributes (`[[x]] l:`, #147), whose closer
-            // the parser makes its parent.
-            const bool label_name = role == PARSE_ROLE_OPERAND && parent < parser->tokens.count &&
-                                    (parser->tree.roles[parent] == PARSE_ROLE_LABEL || parser->tokens.kinds[parent] == PARSE_KIND_GOTO ||
-                                     (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_AMPAMP) ||
-                                     (kind == PARSE_KIND_IDENTIFIER && i + 1 < parser->tokens.count && parser->tree.roles[i + 1] == PARSE_ROLE_LABEL));
-            reader->ignored[i] |= label_name || role == PARSE_ROLE_LABEL || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_SWITCH || role == PARSE_ROLE_OPEN_CASE;
+            // the parser makes its parent. Without branches (#1175): a token without a parent reads its own role and kind
+            // instead, and the last token its own role for the next one's, which the tests then ignore.
+            const bool has_parent = parent < parser->tokens.count;
+            const bool has_next = i + 1 < parser->tokens.count;
+            const uint32_t above = has_parent ? parent : i;
+            const uint32_t next = has_next ? i + 1 : i;
+            const uint8_t parent_role = parser->tree.roles[above];
+            const uint8_t parent_kind = parser->tokens.kinds[above];
+            const bool label_name = (role == PARSE_ROLE_OPERAND) & has_parent &
+                                    ((parent_role == PARSE_ROLE_LABEL) | (parent_kind == PARSE_KIND_GOTO) |
+                                     ((parent_role == PARSE_ROLE_PREFIX) & (parent_kind == PARSE_KIND_AMPAMP)) |
+                                     ((kind == PARSE_KIND_IDENTIFIER) & has_next & (parser->tree.roles[next] == PARSE_ROLE_LABEL)));
+            reader->ignored[i] |= label_name | (role == PARSE_ROLE_LABEL) | (kind == PARSE_KIND_GOTO) | (kind == PARSE_KIND_SWITCH) |
+                                  (role == PARSE_ROLE_OPEN_CASE);
         }
-        if (syntactic && !reader->ignored[i] && role == PARSE_ROLE_OPEN_GROUP && i + 1 < parser->tokens.count && parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_BLOCK)
+        if (__builtin_expect(role == PARSE_ROLE_OPEN_GROUP, 0) && syntactic && !reader->ignored[i] && i + 1 < parser->tokens.count &&
+            parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_BLOCK)
         {
             check_input_region_prepare(reader, i);
         }
-        if (syntactic && !reader->ignored[i] && kind == PARSE_KIND_ASM)
+        if (__builtin_expect(kind == PARSE_KIND_ASM, 0) && syntactic && !reader->ignored[i])
         {
             check_input_asm_prepare(reader, i);
         }
         // The names the walk prepares builtins of, whose tests a token without one (most) skips.
-        if (syntactic && (syntax & BUSTER_CHECK_SYNTAX_NAMED) != 0)
+        if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_NAMED) != 0, 0) && syntactic)
         {
             if (!reader->ignored[i] && parser->tokens.names[i] == C_NAME_BUILTIN_VA_ARG)
             {
@@ -7755,28 +7797,31 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
             }
         }
-        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
         {
             check_input_selection_type(reader, i);
         }
-        const bool activations = !(reader->lane && i == begin) && check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_ACTIVATE);
-        for (uint32_t token = activations ? reader->activate[i] : BUSTER_CHECK_NONE; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_ACTIVATE) && !(reader->lane && i == begin))
         {
-            check_input_bind(reader, token, i);
+            for (uint32_t token = reader->activate[i]; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
+            {
+                check_input_bind(reader, token, i);
+            }
         }
-        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
         {
             check_input_vararg_type(reader, i);
         }
-        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
         {
             check_input_builtin_type(reader, i);
         }
-        if (syntactic && !reader->ignored[i] && (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0)
+        if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0, 0) && syntactic && !reader->ignored[i])
         {
             check_input_statement_attributes(reader, i);
         }
-        if (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 && reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 &&
+            reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
             if (check_sparse_get(reader->output->initializer_ends, declaration) > reader->resolve_limit)
@@ -7804,12 +7849,15 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             declaration_first = check_input_declaration_first(reader, i);
         }
-        if ((syntactic && !reader->ignored[i] && (role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
-             kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
-             (kind == PARSE_KIND_EXTENSION && i + 1 < parser->tokens.count && (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER ||
-              parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)))) ||
+        // A declaration's specifiers start at a specifier, a tag's keyword, typeof, _Atomic, an attribute, or __extension__
+        // before one of the first three: a sixteenth of the visits, tested without branches but for __extension__'s.
+        const bool specifier = (role == PARSE_ROLE_SPECIFIER) | (kind == PARSE_KIND_STRUCT) | (kind == PARSE_KIND_ENUM) | (kind == PARSE_KIND_TYPEOF) |
+                               (kind == PARSE_KIND_ATOMIC) | ((syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0);
+        if ((__builtin_expect(specifier, 0) && syntactic && !reader->ignored[i]) ||
+            (__builtin_expect(kind == PARSE_KIND_EXTENSION, 0) && syntactic && !reader->ignored[i] && i + 1 < parser->tokens.count &&
+             (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)) ||
             implicit ||
-            (check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
+            (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
         {
             if (kind == PARSE_KIND_LABEL && !reader->ignored[i])
             {
@@ -7820,7 +7868,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 check_input_declaration(reader, declaration_first);
             }
         }
-        if (syntactic && !reader->ignored[i] && (role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION))
+        if (__builtin_expect((role == PARSE_ROLE_OPEN_BLOCK) | (role == PARSE_ROLE_OPEN_BODY) | (role == PARSE_ROLE_OPEN_FOR) | (role == PARSE_ROLE_OPEN_CONDITION), 0) &&
+            syntactic && !reader->ignored[i])
         {
             const uint32_t parent = parser->tree.parents[i];
             reader->scope_marks[reader->scope_count] = c_bindings_mark(&reader->bindings);
@@ -7862,7 +7911,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 check_input_vla_parameters(reader, i);
             }
         }
-        if (syntactic && role == PARSE_ROLE_RETURN)
+        if (__builtin_expect(role == PARSE_ROLE_RETURN, 0) && syntactic)
         {
             if (kind == PARSE_KIND_RETURN)
             {
@@ -7891,7 +7940,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 reader->ignored[i] = true;
             }
         }
-        if (syntactic && role == PARSE_ROLE_OPEN_FOR)
+        if (__builtin_expect(role == PARSE_ROLE_OPEN_FOR, 0) && syntactic)
         {
             const uint32_t close = parser->tree.parents[i];
             uint32_t separators = 0;
@@ -7904,7 +7953,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
             }
         }
-        if (syntactic && !reader->ignored[i] && (role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND))
+        if (__builtin_expect((role == PARSE_ROLE_OPEN_CAST) | (role == PARSE_ROLE_OPEN_SIZEOF) | (role == PARSE_ROLE_OPEN_COMPOUND), 0) && syntactic && !reader->ignored[i])
         {
             const uint32_t close = parser->tree.parents[i];
             const uint32_t next = i + 1;
@@ -7973,17 +8022,17 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         if (syntactic && !reader->ignored[i] && kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT)
         {
             const uint32_t identifier = parser->tokens.names[i];
-            if (reader->output->overload_heads != 0)
+            if (__builtin_expect(reader->output->overload_heads != 0, 0))
             {
                 const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
                 reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
             }
             const uint16_t builtin = check_input_builtin_id(reader, i);
-            const uint32_t bound = builtin != CBUILTIN_NONE ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
+            const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
             // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
             // function that clang makes the builtin.
             const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
-            if (builtin != CBUILTIN_NONE && role == PARSE_ROLE_OPERAND && claimed)
+            if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
             {
                 // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
                 // are dropped with it.
@@ -8061,7 +8110,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 {
                     reader->output->resource = true;
                 }
-                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && (reader->specifier_query_depth != 0 || i < reader->inference_end))
+                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && __builtin_expect(reader->specifier_query_depth != 0 || i < reader->inference_end, 0))
                 {
                     // The suspended type query consumes this expression before the final batch replay. Capture
                     // its declaration while the source scope is active; the replay still verifies the same event.
@@ -8079,7 +8128,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
             }
         }
-        if (syntactic && !reader->ignored[i] && (syntax & BUSTER_CHECK_SYNTAX_STRING) != 0)
+        if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_STRING) != 0, 0) && syntactic && !reader->ignored[i])
         {
             check_input_string(reader, i);
         }
@@ -8128,11 +8177,13 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_columns(Ch
     {
         reader->value_next[node] = BUSTER_CHECK_NONE;
         reader->output->graph.source_positions[node] = check_input_expression_end(reader, token);
+        // The reader's suppressions are nearly always there, and a floating-point environment of the unit's own rarely
+        // (#1175): without the hints, clang jumped around each once a node.
         if (reader->output->graph.warning_suppressed != 0)
         {
-            reader->output->graph.warning_suppressed[node] = reader->warning_suppressed != 0 ? reader->warning_suppressed[token] : 0;
+            reader->output->graph.warning_suppressed[node] = __builtin_expect(reader->warning_suppressed != 0, 1) ? reader->warning_suppressed[token] : 0;
         }
-        if (reader->output->graph.fp_environments != 0)
+        if (__builtin_expect(reader->output->graph.fp_environments != 0, 0))
         {
             reader->output->graph.fp_environments[node] = reader->constant_contexts[token] == 0 ? reader->output->fp_environments[token] : 0;
         }
@@ -9573,10 +9624,15 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         {
             pp_system_levels(pp, levels);
         }
+        // A token without a source in the output reads the entry past them all, a user file's, rather than a branch's:
+        // as a branch, every token jumped (#1175).
+        const uint32_t* sources = parser->tokens.sources;
+        const uint32_t limit = pp->output.count;
+        levels[limit] = BUSTER_PP_USER_FILE;
         for (uint32_t token = 0; token < count; token += 1)
         {
-            const uint32_t source = parser->tokens.sources[token];
-            const uint8_t level = source < pp->output.count ? levels[source] : BUSTER_PP_USER_FILE;
+            const uint32_t source = sources[token];
+            const uint8_t level = levels[source < limit ? source : limit];
             tokens[token] = level == BUSTER_PP_SYSTEM_FILE || level == BUSTER_PP_EXTERN_C_FILE;
         }
         tokens[count] = 0;
@@ -10734,6 +10790,79 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
             input->resource |= !valid;
+        }
+        if (valid && input->declaration_kinds != NULL)
+        {
+            uint32_t enum_count = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                enum_count += input->declaration_kinds[token] == C_BINDING_ENUMERATOR;
+            }
+            if (enum_count != 0)
+            {
+                CheckInputEnumValue* values = arena_push_array(arena, enum_count, sizeof(CheckInputEnumValue), _Alignof(CheckInputEnumValue));
+                valid = values != NULL;
+                for (uint32_t token = 0, at = 0; valid && token < count; token += 1)
+                {
+                    if (input->declaration_kinds[token] == C_BINDING_ENUMERATOR)
+                    {
+                        values[at++] = (CheckInputEnumValue){ .token = token, .value = reader.enum_values[token] };
+                    }
+                }
+                input->enum_values = values;
+                input->enum_value_count = valid ? enum_count : 0;
+                input->resource |= !valid;
+            }
+        }
+        if (valid)
+        {
+            uint32_t definition_count = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const TypeId tag = reader.tag_types[token];
+                if (tag != 0 && reader.tag_ends[token] != 0 && type_kind(types, type_unqualified(tag)) == BUSTER_TYPE_KIND_ENUM)
+                {
+                    const uint32_t end = reader.tag_ends[token] < count ? reader.tag_ends[token] : count;
+                    for (uint32_t at = token + 1; at < end; at += 1)
+                    {
+                        if (parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
+                        {
+                            definition_count += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (definition_count != 0)
+            {
+                CheckInputEnumDefinition* definitions = arena_push_array(arena, definition_count, sizeof(CheckInputEnumDefinition),
+                                                                          _Alignof(CheckInputEnumDefinition));
+                valid = definitions != NULL;
+                uint32_t at_definition = 0;
+                for (uint32_t token = 0; valid && token < count; token += 1)
+                {
+                    const TypeId tag = reader.tag_types[token];
+                    if (tag != 0 && reader.tag_ends[token] != 0 && type_kind(types, type_unqualified(tag)) == BUSTER_TYPE_KIND_ENUM)
+                    {
+                        const uint32_t end = reader.tag_ends[token] < count ? reader.tag_ends[token] : count;
+                        for (uint32_t at = token + 1; at < end; at += 1)
+                        {
+                            if (parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
+                            {
+                                definitions[at_definition++] = (CheckInputEnumDefinition){
+                                    .type = tag,
+                                    .open = at,
+                                    .close = parser->tree.parents[at],
+                                };
+                                break;
+                            }
+                        }
+                    }
+                }
+                input->enum_definitions = definitions;
+                input->enum_definition_count = valid ? definition_count : 0;
+                input->resource |= !valid;
+            }
         }
     }
     else
