@@ -667,7 +667,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 | `flt-rounds` | floating environment, barrier | none | none |
 | `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
 | `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
-| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | none |
+| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | a statement of register, memory and constant operands whose records name no register but its operands' and whose forms a Tier 0 row takes: an `X86` entry in its caller (`check_asm_row`, [the inline assembly guide](c-inline-assembly.md)'s "Placed in the caller") |
 | `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
 
 A helper's physical effects are `x86_semantics.c`'s, read from its records
@@ -858,7 +858,8 @@ planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
 forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
-`ATOMIC_RMW` or `ATOMIC_CAS` and a fence's `FENCE` (but a seq_cst store's own), `helper`: the
+`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
+asm statement's `X86` entry in its caller, `helper`: the
 lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
 asm statement's alike, and `planned`: helpers emitted) and a line per family
@@ -922,12 +923,12 @@ each, and Tier 1's selection tests keep a load from folding past a fence of any
 order, an atomic load or a read/modify/write, and an atomic load from folding at
 all.
 
-**Pending** (#1059): the other read/modify/writes (compare-exchange, and the
-bitwise, minimum and maximum fetch operations: `lock cmpxchg`, a `lock` form
-where the result is unused, or a compare-exchange loop), C's volatile
-accesses carried to the IR as such, the asm statements' operations placed in
-their callers (slice 4), and the paired 9700X measurements of helper calls,
-save and reload traffic, code size, compile time and runtime.
+**Pending** (#1059): C's volatile accesses carried to the IR as such
+([the IR's guide](ir.md)'s "Effects through the consumers"), asm statements of
+fixed registers, labels, the x87's operands or flag outputs in their callers
+(each keeps its helper), Tier 1's IR for an asm statement's row, and the paired
+9700X measurements of helper calls, save and reload traffic, code size, compile
+time and runtime.
 
 ## Atomic and terminal helper calls
 

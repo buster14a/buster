@@ -138,6 +138,10 @@ struct CheckProgramOptions
     // The blocks' objects' lifetimes (#177, c_check_program_lifetime.c): CHECK_CONTROL_LIFETIME entries, which the
     // lowering turns into its functions' lifetime events, for Tier 1's frame (the C driver's --tier1).
     bool lifetimes;
+    // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
+    // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
+    // statement's row and calls its helper as any function's.
+    bool asm_helpers;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -286,8 +290,9 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands and target.
+    // CheckProgramOptions.unselected_operands, asm_helpers and target.
     bool unselected_operands;
+    bool asm_helpers;
     X86Target target;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
@@ -3382,7 +3387,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .target = options.target, .token = BUSTER_CHECK_NONE,
+                               .asm_helpers = options.asm_helpers, .target = options.target, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     if (options.return_flow_work != NULL)
     {

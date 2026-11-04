@@ -3329,6 +3329,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .scalar = scalar,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
+                        .asm_helpers = lanes != NULL && lanes->tier1,
                     });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&

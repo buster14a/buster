@@ -374,7 +374,7 @@ struct CheckTier1Report
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
 // family's direct forms in the lowered code (an atomic access's LOAD, STORE or SET with its marker, a builtin's or an
 // implicit _Atomic object's; an atomic read/modify/write's ATOMIC_RMW; a fence's FENCE, but a seq_cst store's own after
-// it), its helpers' call sites (a builtin's, an
+// it; an asm statement placed in its caller, its X86 entry), its helpers' call sites (a builtin's, an
 // implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the helpers planned,
 // the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a
 // statement no form takes, which -c and the direct path then refuse whole).
@@ -411,6 +411,11 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE && !store;
             store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
         }
+    }
+    // An asm statement placed in its caller (#1059): its X86 entry, once per statement as its helper's call would be.
+    for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < program->input->asm_count; s += 1)
+    {
+        report->direct[CHECK_PROGRAM_HELPER_ASM] += lowered->asms.plans[s].planned && lowered->asms.plans[s].row != 0;
     }
     for (uint32_t h = 0; lowered_all && h < lowered->helpers.count; h += 1)
     {

@@ -186,6 +186,9 @@ struct CheckProgramAsm
     AsmResult unit;
     bool unit_assembled;
     bool planned;
+    // A statement placed in its caller (#1059, check_asm_row): its X86 entry's row, in the output arena, which the lowering
+    // gives its operands (check_lower_asm) and Tier 0 places, with no helper; 0 for a statement of a helper or of no code.
+    Tier0Operation* row;
 };
 
 // A naked function's code (check_program_asm_plan_naked): its asm statements' templates assembled together, the whole
@@ -1376,6 +1379,260 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
 // Plans statement `s` (its operands from `operands`, check_asms_run's) into `plan`: its places, and its helper's code
 // into `helper`, or the reason the lowering refuses it, its template matched against `index`. False only for an arena
 // without room, with both arenas then as they were.
+static uint8_t check_lower_type_class(const TypeTable* types, TypeId type);
+
+// The general registers a statement placed in its caller assembles its template with (check_asm_row), before its roles
+// replace them: none rax, whose accumulator forms (`addl $1, %eax`, a one-byte xchg) name it implicitly, and none rsp.
+static const uint8_t check_asm_row_registers[14] = {
+    X86_REGISTER_RCX, X86_REGISTER_RDX, X86_REGISTER_RBX, X86_REGISTER_RSI, X86_REGISTER_RDI, X86_REGISTER_R8,  X86_REGISTER_R9,
+    X86_REGISTER_R10, X86_REGISTER_R11, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15, X86_REGISTER_RBP,
+};
+
+// An asm statement placed in its caller (#1059): its template's records as a row of Tier 0's X86 entry (Tier0Operation),
+// which names its registers by role and which Tier 0 places among the caller's values, as it places an x86 builtin's
+// row, with no helper, no call and no frame of its own. Its operands, in clang's order of evaluation (the order a
+// helper's operand block is filled in, and the order check_lower_asm pushes them): each output's address, and a `+`
+// register output's value after it; then each input's value (a matching input's converted to its output's type) or a
+// memory input's address. A register output's register is its `+` value's operand, its matching input's operand, or else
+// a scratch register (SCRATCH(k), or the floating stack's free VECTOR(k)), which no operand is in, as an early clobber
+// needs; after the template, the row stores each register output through its address, at its width, in order. A memory
+// operand's register is its address's operand. The row's result is VOID.
+//
+// Placed where the records name no register but its operands' (as the roles replace them), so that the row reads and
+// writes its operands, its scratch registers, the flags and memory, and nothing else Tier 0 keeps: Tier 0's rule for
+// every row (tier0_operation_valid), whose forms' effects are x86_semantics.c's, a general-purpose form's among them
+// (tier0_operation_general_effects: no implicit register, stack, control flow, direction flag or x87 state). The
+// template is assembled again for this, its operands in registers of check_asm_row_registers and xmm1 to xmm15, so that
+// a literal register, which an extended statement's template writes `%%rax`, would be one no role maps: the template
+// may write none (and so takes no `%%`, nor a syntax switch, which Intel's bare names would need), nor name a high byte
+// register, an /is4 operand or one of the other classes. The clobbers are then the records': `cc` and `memory` need
+// nothing, as Tier 0 keeps no flags and no memory values across an entry, and a register clobber names one the records
+// don't write. The admitted operands are a general register's of any of the sixteen (r, q, g; not a fixed register,
+// a smaller class's or an explicit register variable's), an XMM register's of a float or a double (x and v, not fixed),
+// memory, and constants; the statement is no asm goto and its template has no label, branch or symbol. Returns false,
+// both arenas as they were, for a statement it doesn't place, which keeps its helper; and sets `*valid` false where an
+// arena had no room, so that the plan fails for want of it rather than taking a helper the room decided.
+static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAsmPlace* places, const CheckAsmConstraint* constraints, const X86MatchIndex* index,
+                          bool scalar, Tier0Operation* row, bool* valid, Arena* output, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const CheckInputAsm* statement = input->asm_statements + s;
+    const TypeTable* types = program->types;
+    const uint32_t count = statement->output_count + statement->input_count;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const CheckAsmText text = statement->template_text;
+    bool placed = !statement->is_goto && statement->label_count == 0 && count <= BUSTER_CHECK_ASM_OPERANDS;
+    for (uint32_t at = 0; placed && at + 1 < text.length; at += 1)
+    {
+        const bool literal = !statement->basic && text.bytes[at] == '%' && text.bytes[at + 1] == '%';
+        const bool syntax = text.bytes[at] == '_' && at + 7 <= text.length && memcmp(text.bytes + at, "_syntax", 7) == 0;
+        placed = !literal && !syntax;
+    }
+    // The operands' kinds, and the registers to assemble the template with: a general register's or a memory operand's
+    // from check_asm_row_registers, an XMM register's from xmm1, a matching input its output's.
+    CheckAsmPlace* moved = placed && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmPlace, count) : 0;
+    *valid = !placed || count == 0 || moved != 0;
+    placed = placed && *valid;
+    uint32_t general = 0;
+    uint32_t vector = 1;
+    uint32_t operand_count = 0;
+    for (uint32_t k = 0; placed && k < count; k += 1)
+    {
+        const CheckAsmPlace* place = places + k;
+        const bool output = k < statement->output_count;
+        const bool tied = !output && place->tied != BUSTER_CHECK_NONE;
+        moved[k] = *place;
+        if (place->kind == BUSTER_CHECK_ASM_GENERAL && !tied)
+        {
+            placed = constraints[k].general == BUSTER_CHECK_ASM_GENERAL_ALL && general < BUSTER_ARRAY_LENGTH(check_asm_row_registers);
+            moved[k].reg = placed ? check_asm_row_registers[general] : 0;
+            general += 1;
+        }
+        else if (place->kind == BUSTER_CHECK_ASM_MEMORY)
+        {
+            placed = general < BUSTER_ARRAY_LENGTH(check_asm_row_registers);
+            moved[k].reg = placed ? check_asm_row_registers[general] : 0;
+            general += 1;
+        }
+        else if (place->kind == BUSTER_CHECK_ASM_VECTOR && !tied)
+        {
+            placed = constraints[k].fixed_vector == 0 && vector < 16;
+            moved[k].reg = (uint8_t)vector;
+            vector += 1;
+        }
+        else if (tied)
+        {
+            // Its output's register (assigned above: outputs come first), of one input alone.
+            uint32_t matching = 0;
+            for (uint32_t i = statement->output_count; i < count; i += 1)
+            {
+                matching += places[i].tied == place->tied;
+            }
+            placed = place->tied < statement->output_count && matching == 1 && (place->kind == BUSTER_CHECK_ASM_GENERAL || place->kind == BUSTER_CHECK_ASM_VECTOR);
+            moved[k].reg = placed ? moved[place->tied].reg : 0;
+        }
+        else
+        {
+            placed = place->kind == BUSTER_CHECK_ASM_CONSTANT && !output;
+        }
+        // The row's operands: an output's address (and a `+` register one's value), an input's value or address.
+        operand_count += place->kind == BUSTER_CHECK_ASM_CONSTANT ? 0 : output && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY ? 2 : 1;
+    }
+    placed = placed && operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
+    String8 source = { 0 };
+    if (placed)
+    {
+        const char* reason = check_asm_substitute(statement, moved, program->identifiers, s, scratch, &source, valid);
+        placed = *valid && reason == NULL;
+    }
+    AsmCode code = { 0 };
+    if (placed)
+    {
+        code = asm_assemble_code(source, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
+        *valid = code.error == NULL || strstr(code.error, "arena exhausted") == NULL;
+        placed = code.error == NULL && !code.directive && code.count != 0 && code.branch_count == 0 && code.reference_count == 0 && code.label_count == 0;
+    }
+    // Each operand's row operand, and each register's role: an operand's, or a scratch register's for a register output
+    // that no `+` value or matching input sets.
+    Tier0Operation candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.result_class = BUSTER_TYPED_CLASS_VOID;
+    uint8_t* addresses = placed && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : 0;
+    uint8_t* sources = placed && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : 0;
+    *valid = *valid && (!placed || count == 0 || (addresses != 0 && sources != 0));
+    placed = placed && *valid;
+    uint32_t operand = 0;
+    uint32_t scratch_count = 0;
+    uint32_t vector_count = 0;
+    for (uint32_t k = 0; placed && k < count; k += 1)
+    {
+        const CheckAsmPlace* place = moved + k;
+        const bool output = k < statement->output_count;
+        const bool registered = place->kind == BUSTER_CHECK_ASM_GENERAL || place->kind == BUSTER_CHECK_ASM_VECTOR;
+        const bool floating = place->kind == BUSTER_CHECK_ASM_VECTOR;
+        const TypeId value_type = !output && place->tied != BUSTER_CHECK_NONE ? places[place->tied].type : place->type;
+        const uint8_t class = check_lower_type_class(types, value_type);
+        if (output || place->kind == BUSTER_CHECK_ASM_MEMORY)
+        {
+            addresses[k] = (uint8_t)operand;
+            candidate.operand_classes[operand] = BUSTER_TYPED_CLASS_U64;
+            operand += 1;
+        }
+        if (registered && (!output || place->read))
+        {
+            const uint8_t role = floating ? (uint8_t)BUSTER_TIER0_ROLE_FLOATING(operand) : (uint8_t)BUSTER_TIER0_ROLE_INTEGER(operand);
+            placed = class != UINT8_MAX && (floating ? tier0_class_floating(class) : tier0_class_integer(class));
+            candidate.operand_classes[operand] = class;
+            operand += 1;
+            sources[k] = role;
+            if (!output && place->tied != BUSTER_CHECK_NONE)
+            {
+                // A matching input's operand is its output's register.
+                sources[place->tied] = role;
+            }
+        }
+        else if (registered)
+        {
+            // An output that only the template sets: a scratch register, unless a matching input's operand sets it (the
+            // input's, which comes later, writes its role).
+            bool matched = false;
+            for (uint32_t i = statement->output_count; i < count; i += 1)
+            {
+                matched |= places[i].tied == k;
+            }
+            const uint32_t taken = floating ? vector_count : scratch_count;
+            sources[k] = floating ? (uint8_t)BUSTER_TIER0_ROLE_VECTOR(taken) : (uint8_t)BUSTER_TIER0_ROLE_SCRATCH(taken);
+            vector_count += floating && !matched ? 1 : 0;
+            scratch_count += !floating && !matched ? 1 : 0;
+            placed = (floating ? vector_count <= BUSTER_TIER0_OPERATION_VECTORS : scratch_count <= BUSTER_TIER0_SCRATCH) && class != UINT8_MAX &&
+                     (floating ? tier0_class_floating(class) : tier0_class_integer(class));
+        }
+    }
+    candidate.operand_count = (uint8_t)operand;
+    // The registers' roles, by the moved places: a memory operand's address register, a register operand's value.
+    uint8_t general_roles[16];
+    uint8_t vector_roles[16];
+    memset(general_roles, 0xff, sizeof(general_roles));
+    memset(vector_roles, 0xff, sizeof(vector_roles));
+    for (uint32_t k = 0; placed && k < count; k += 1)
+    {
+        const CheckAsmPlace* place = moved + k;
+        const bool output = k < statement->output_count;
+        if (place->kind == BUSTER_CHECK_ASM_MEMORY)
+        {
+            general_roles[place->reg] = (uint8_t)BUSTER_TIER0_ROLE_INTEGER(addresses[k]);
+        }
+        else if (place->kind == BUSTER_CHECK_ASM_GENERAL && (output || place->tied == BUSTER_CHECK_NONE))
+        {
+            general_roles[place->reg] = sources[k];
+        }
+        else if (place->kind == BUSTER_CHECK_ASM_VECTOR && (output || place->tied == BUSTER_CHECK_NONE))
+        {
+            vector_roles[place->reg] = sources[k];
+        }
+    }
+    // The template's records with their roles, then the outputs' stores.
+    for (uint32_t r = 0; placed && r < code.count; r += 1)
+    {
+        X86Instruction record = code.records[r];
+        Tier0Fields fields = tier0_operation_fields(&record);
+        placed = !fields.is4 && candidate.record_count < BUSTER_TIER0_OPERATION_RECORDS && (record.decorations & BUSTER_TIER0_DECORATION_ROLE) == 0;
+        for (uint32_t f = 0; placed && f < fields.count; f += 1)
+        {
+            const uint8_t reg = *fields.bytes[f];
+            const uint32_t class = fields.classes[f];
+            if (tier0_general_register_class(class))
+            {
+                placed = reg < 16 && general_roles[reg] != 0xff;
+                *fields.bytes[f] = placed ? general_roles[reg] : reg;
+            }
+            else if (class == BUSTER_X86_CLASS_XMM)
+            {
+                placed = reg < 16 && vector_roles[reg] != 0xff;
+                *fields.bytes[f] = placed ? vector_roles[reg] : reg;
+            }
+            else
+            {
+                // An opmask register by number (a row without masks may name k0 to k7, which Tier 0 saves around it);
+                // any other class, a YMM or ZMM register among them, no role takes.
+                placed = class == BUSTER_X86_CLASS_OPMASK && reg < 8;
+            }
+        }
+        candidate.records[candidate.record_count] = record;
+        candidate.record_count += placed ? 1 : 0;
+    }
+    for (uint32_t k = 0; placed && k < statement->output_count; k += 1)
+    {
+        const CheckAsmPlace* place = moved + k;
+        if (place->kind == BUSTER_CHECK_ASM_GENERAL || place->kind == BUSTER_CHECK_ASM_VECTOR)
+        {
+            const bool floating = place->kind == BUSTER_CHECK_ASM_VECTOR;
+            const uint32_t form = floating ? (place->size == 4 ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X)
+                                  : place->size == 1 ? X86_FORM_MOV_RM8_R8
+                                  : place->size == 2 ? X86_FORM_MOV_RM16_R16
+                                  : place->size == 4 ? X86_FORM_MOV_RM32_R32
+                                                     : X86_FORM_MOV_RM64_R64;
+            placed = candidate.record_count < BUSTER_TIER0_OPERATION_RECORDS && (floating ? place->size == 4 || place->size == 8 : place->size != 0);
+            candidate.records[candidate.record_count] = (X86Instruction){
+                .form = (uint16_t)form,
+                .reg = sources[k],
+                .rm = (uint8_t)BUSTER_TIER0_ROLE_INTEGER(addresses[k]),
+                .mode = BUSTER_X86_MEMORY_BASE,
+            };
+            candidate.record_count += placed ? 1 : 0;
+        }
+    }
+    placed = placed && *valid && tier0_operation_valid(&candidate);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    if (placed)
+    {
+        *row = candidate;
+    }
+    return placed;
+}
+
 static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, const CheckAsmCheckedOperand* operands, const X86MatchIndex* index,
                                        bool scalar, CheckProgramAsm* plan, CheckProgramHelper* helper, Arena* output, Arena* scratch)
 {
@@ -1746,6 +2003,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     AsmCode code = { 0 };
     AsmResult unit = { 0 };
     bool unit_assembled = false;
+    const uint64_t code_mark = output->length;
     if (valid && reason == NULL)
     {
         code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
@@ -1883,6 +2141,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     // past a refusal (#929's review).
     // A flag output's object is written whatever the template, as clang's code sets it after one of no instructions too.
     const bool helped = code.count != 0 || x87 || flagged;
+    Tier0Operation row;
     // The held operands (BUSTER_CHECK_ASM_HELD): refused by a statement with a helper, which would read or write their
     // registers, and in one without an output's object or an input's value, which the lowering evaluates alone.
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
@@ -1913,6 +2172,18 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             // Directives alone: no helper, so the lowering evaluates the operands and calls nothing.
             plan->helper = BUSTER_CHECK_NONE;
+        }
+    }
+    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers &&
+             check_asm_row(program, s, places, constraints, index, scalar, &row, &valid, output, scratch))
+    {
+        // Placed in its caller (#1059): the row, and no helper. The helper's assembly is dropped.
+        arena_pop_to(output, code_mark);
+        plan->row = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Operation, 1);
+        valid = plan->row != 0;
+        if (valid)
+        {
+            *plan->row = row;
         }
     }
     else if (valid && reason == NULL && helped)
@@ -1974,6 +2245,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->unit = (AsmResult){ 0 };
         plan->unit_assembled = false;
         plan->label_count = 0;
+        plan->row = 0;
     }
     arena_pop_to(scratch, scratch_mark);
     return valid;
