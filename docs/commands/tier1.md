@@ -88,3 +88,37 @@ requirements. [Command index](README.md).
   one run per build. `correctness.tests` checks its dispatch on every run: an
   incomplete command prints its usage, and one without its inputs fails its
   first build.
+
+## Integer truth round trips (#1218)
+
+The C driver's Tier 1 path runs `ir_truth_simplify` after wide-integer splitting
+and before optimizer preparation. It rewrites an integer comparison's result,
+possibly copied or sign/zero-extended, tested equal or unequal to zero into the
+original comparison or its integer complement. Copies and extensions of the
+zero operand are recognized too. The bounded walks stop at truncations,
+nonzero constants and other producers; they never complement floating-point
+predicates. The pass changes only comparison operands and predicates in the
+lane-owned IR, before use lists and verified-analysis revisions exist. The
+optimizer then removes dead chains and verifies the resulting SSA. Its
+64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+
+`tests/driver/tier1_truth.c` is the standalone native regression, also run by
+`tools/ci/correctness.tests`. From the repository root with a built compiler:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_truth.c -o build/test-driver-tier1-truth && ./build/test-driver-tier1-truth build/compiler "$(command -v clang)"
+```
+
+The supervisor compiles the subject with `--tier1-strict --verify`, by the
+default and scalar host paths. Clang compiles a separate execution oracle.
+All ten integer predicates and their negations, nested and shared truth
+values, truncation, nonzero tests, volatile side effects and unordered floating
+comparisons are checked. GNU `objdump` must find all 21 branch-only functions,
+each with one `cmp`/`test` and no `setcc`; missing functions fail the test.
+Failed commands and execution are fatal, and failure artifacts are retained.
+CI builds the supervisor with its configured sanitizer flags as well.
+
+This regression is not #1218's program-performance acceptance. Folding memory
+operands and changing block layout are separate work; the speedtest1/Lua
+compare-and-branch counts and 9700X runtime evidence remain necessary before
+closing the issue. No runtime improvement is inferred from the peephole alone.
