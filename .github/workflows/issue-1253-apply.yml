@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: issue-1253-apply
+  cancel-in-progress: true
+
 jobs:
   apply:
     if: github.repository_id == '1421805693' && github.ref == 'refs/heads/agent/issue-1253-apply'
@@ -44,7 +48,7 @@ jobs:
           diff --git a/src/buster/compiler/c_parser_test.c b/src/buster/compiler/c_parser_test.c
           --- a/src/buster/compiler/c_parser_test.c
           +++ b/src/buster/compiler/c_parser_test.c
-          @@ -432,6 +432,30 @@ static const ParseTestSnippet parse_test_snippets[] =
+          @@ -432,6 +432,31 @@ static const ParseTestSnippet parse_test_snippets[] =
            {
                // Valid code.
                { "int x;\nint f(int a, int b) { return a + b * 2; }\n", "", 0 },
@@ -70,7 +74,7 @@ jobs:
           +    { "int a[static 3);\n", "1:15: expected ']'", 0 },
           +    { "void f(int a[3);\n", "1:15: expected ']'", 0 },
           +    { "int g(int *p) { return p[); }\n", "1:26: expected expression", 0 },
-          +    { "int g(int *p) { return p[]; }\n", "1:25: expected expression", 0 },
+          +    { "int g(int *p) { return p[]; }\n", "1:26: expected expression", 0 },
           +    // Other empty expression contexts are unchanged.
           +    { "void f(void); void g(void) { f(); for (;;) { return; } }\n", "", 0 },
                { "struct S { int a : 3; char *p; } s = { 1, \"x\" };\n", "", 0 },
