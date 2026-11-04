@@ -21,10 +21,10 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/fix/1239-fp-contract
           if test -f .github/issue-1239.patch; then
-            sed -i '/^ #define BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned)/d' .github/issue-1239.patch
-            git apply --recount --check .github/issue-1239.patch
-            git apply --recount .github/issue-1239.patch
-            git rm -f .github/issue-1239.patch
+            awk '/^ #define BUSTER_CHECK_TEST_PROGRAM_FLAGS/ { print $0 sprintf("%c",92); next } {print}' .github/issue-1239.patch > "$RUNNER_TEMP/core.patch"
+            git apply --check "$RUNNER_TEMP/core.patch"
+            git apply "$RUNNER_TEMP/core.patch"
+            git rm .github/issue-1239.patch
             git add src docs tests
             git diff --cached --check
             git config user.name 'github-actions[bot]'
