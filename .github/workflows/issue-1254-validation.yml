@@ -3,80 +3,45 @@ on:
   push:
     branches: [work/1254-numeric-diagnostics-validation]
     paths:
-      - .github/issue-1254.patch
       - .github/workflows/issue-1254-validation.yml
 permissions:
   contents: write
+  actions: read
 concurrency:
   group: issue-1254-focused-validation
   cancel-in-progress: true
 jobs:
-  validate:
+  evidence:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_DEBUG_INFO: '0'
+    timeout-minutes: 5
     steps:
-      - name: Check out isolated work branch
+      - name: Check out isolated validation branch
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 1
-      - name: Apply focused patch to pinned main and publish clean branch
-        id: patch
+      - name: Extract focused failure evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          base=441db2428d2bd8d28503037b28c1b3740fe4b25a
-          branch=fix/1254-conditional-number-diagnostics
-          cp .github/issue-1254.patch "$RUNNER_TEMP/issue-1254.patch"
-          git fetch --depth=1 origin "$base"
-          git checkout --detach "$base"
-          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-1254.patch"
-          git apply --unidiff-zero "$RUNNER_TEMP/issue-1254.patch"
-          git add src/buster/compiler/c_check_literal_diagnostic.c src/buster/compiler/c_preprocessor_history.c src/buster/compiler/c_preprocessor.c src/buster/compiler/c_preprocessor_literal.c src/buster/compiler/c_preprocessor_directives_test.c docs/commands/preprocessor.md
-          git diff --cached --check
-          git diff --cached --stat
-          test "$(git diff --cached --name-only | wc -l)" -eq 6
-          tree=$(git write-tree)
-          if git ls-remote --exit-code --heads origin "refs/heads/$branch" > "$RUNNER_TEMP/existing-ref"; then
-            git fetch --depth=1 origin "$branch"
-            head=$(git rev-parse FETCH_HEAD)
-            test "$(git rev-parse "$head^{tree}")" = "$tree"
-          else
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            cat > "$RUNNER_TEMP/commit-message" <<'MESSAGE'
-          Fix malformed numeric constant diagnostics in conditional directives
-
-          Reuse the checker's cold classifier, share splice-aware character locations,
-          and retain preprocessor-specific floating and overflow refusals. Add 25
-          fixed diagnostic fixtures with optional full Clang comparisons.
-
-          Fixes #1254.
-
-          Agent session: ChatGPT issue #1254 session (private session URL unavailable)
-          Model: OpenAI / GPT-6 Astra Pro
-
-          Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
-          MESSAGE
-            head=$(git commit-tree "$tree" -p "$base" < "$RUNNER_TEMP/commit-message")
-            git push origin "$head:refs/heads/$branch"
-          fi
-          git checkout --detach "$head"
-          git show -s --format=fuller HEAD
-          printf 'head=%s\n' "$head" >> "$GITHUB_OUTPUT"
-          printf 'Clean fix commit: `%s`\n' "$head" >> "$GITHUB_STEP_SUMMARY"
-      - name: Install pinned hosted Clang and build tools
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build baseline compiler
-        run: ./build.sh --jobs 4
-      - name: Preprocessor fixed and Clang diagnostic regressions
-        run: ./build/compiler test-preprocessor --clang --fuzz 0 --count 64
-      - name: Checker driver regression coverage
-        run: ./build/compiler test-checker-driver
-      - name: Remove only this session's temporary work branch
-        if: success()
-        run: git push origin --delete work/1254-numeric-diagnostics-validation
+          python3 - <<'PY'
+          import os, re, urllib.request
+          url = 'https://api.github.com/repos/buster14a/buster/actions/jobs/126670148991/logs'
+          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          text = urllib.request.urlopen(request, timeout=60).read().decode('utf-8', errors='replace')
+          lines = text.splitlines()
+          selected = set()
+          for i, line in enumerate(lines):
+              if re.search(r'differ|mismatch|expected numeric|fixture|invalid octal|significand', line, re.I):
+                  selected.update(range(max(0, i - 10), min(len(lines), i + 18)))
+          report = '\n'.join(lines[i] for i in sorted(selected))
+          if len(report) > 28000:
+              report = report[-28000:]
+          with open('.github/issue-1254-report.txt', 'w') as output:
+              output.write(report + '\n')
+          print(report)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/issue-1254-report.txt
+          git commit -m 'Record focused issue 1254 validation evidence' -m 'Agent session: ChatGPT issue #1254 session (private session URL unavailable)' -m 'Model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          git push origin HEAD:refs/heads/work/1254-numeric-diagnostics-validation
