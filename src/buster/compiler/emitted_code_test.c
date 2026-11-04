@@ -24,8 +24,8 @@
 //   the loop): proved, lowered to a row program, the fixed reader refusing it, and the same mutations refuted, the loop's
 //   exit rule anchored inside the loop and a single allocation's rule after it (what a fixed writer would say) among
 //   them;
-// - limits (emitted_test_limits): a fixed frame at the events' 32-bit edge, unsupported by name (#1149), beside one
-//   16 bytes smaller; and emitted_unwind_same's same, different and resource answers;
+// - limits (emitted_test_limits): every save mask at and beyond the old signed 32-bit CFA edge (#1149), wide row
+//   encoding and verifier arithmetic, Tier 1 probes and compile-only -c/--verify, and emitted_unwind_same's answers;
 // - uncovered forms (emitted_test_uncovered): code through monitorx, whose conservative record may write rsp, unproven
 //   where a rule fails on a path through it and refuted where one fails off its paths, though after an unproven one;
 //   and the driver's --verify -c -march=znver5 of monitorx's and mwaitx's leaves, by both paths;
@@ -130,12 +130,6 @@ static void emitted_test_rows(EmittedTest* test)
     for (uint32_t f = 0; f < count; f += 1)
     {
         const UnwindFunction* function = &functions[f];
-        // A CFA past int32's offsets is the fixed descriptor's alone: rows' values are signed 32-bit (emitted_cfa_fits).
-        if (!emitted_cfa_fits(function->saved, function->frame_size))
-        {
-            programs[f] = *function;
-            continue;
-        }
         const uint32_t row_count = unwind_function_rows(function, rows[f], BUSTER_EMITTED_TEST_ROWS);
         emitted_test_expect(test, row_count <= BUSTER_EMITTED_TEST_ROWS, "a descriptor's rows fit", f);
         programs[f] = (UnwindFunction){ .size = function->size, .open = BUSTER_UNWIND_ROWS, .rows = rows[f], .row_count = row_count };
@@ -481,47 +475,16 @@ static bool emitted_test_directory(char* directory, uint64_t size, const char* n
     return written > 0 && (uint64_t)written < size && mkdtemp(directory) != 0;
 }
 
-// A fixed frame at the edge of the events' signed 32-bit offsets (#1149): `sub rsp, 0x7ffffff8`, whose CFA offset is
-// 2^31, is EMITTED_FRAME_LIMIT, which the emission reports as unsupported (not as an internal error), and one 16 bytes
-// smaller is described, and emitted (with --verify) as the fixed descriptor of its size. Then emitted_unwind_same's three answers: the same CFI, different CFI, and a scratch arena
-// without room for a fixed shape's rows, which says neither (a resource failure, which the lanes retry on one).
+#include "emitted_code_limits_test.c"
+
+// The widened frame range and emitted_unwind_same's three answers: same CFI, different CFI and insufficient scratch.
 static void emitted_test_limits(EmittedTest* test)
 {
-    const uint32_t sizes[2] = { 0x7ffffff8u, 0x7fffffe8u };
-    for (uint32_t k = 0; k < 2; k += 1)
-    {
-        X86Instruction records[3] = {
-            tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, (int32_t)sizes[k]),
-            tier1_frame_emit_immediate(X86_FORM_ADD_RM64_IMM32, X86_REGISTER_RSP, (int32_t)sizes[k]),
-            { .form = X86_FORM_RET },
-        };
-        const Tier0Code code = {
-            .records = records,
-            .count = 3,
-            .frame_size = sizes[k],
-            .error = TIER0_OK,
-        };
-        const uint64_t mark = test->arena.length;
-        const EmittedCode emitted = emitted_from_tier0(&code, true, false, false, &test->arena);
-        emitted_test_expect(test, emitted.frame_status == (k == 0 ? EMITTED_FRAME_LIMIT : EMITTED_FRAME_DESCRIBED),
-                            k == 0 ? "a frame whose CFA offset is 2^31 is past the events' offsets" : "a frame 16 bytes smaller is described", k);
-        // Each record's start (sub and add of rsp by an imm32 are 7 bytes, ret 1), and room for the events' rows: the
-        // smaller frame's emission, with --verify's proof and Tier 0's analyzer, must give the fixed frame of its size.
-        uint32_t offsets[4] = { 0, 7, 14, 15 };
-        EmissionFrameRow rows[8];
-        UnwindFunction frame = { 0 };
-        const char* reason = 0;
-        const bool room = emitted.frame_count <= BUSTER_ARRAY_LENGTH(rows);
-        const CheckProgramStatus status = room ? check_program_emit_frame(&emitted, offsets, 15, true, false, rows, &test->scratch, &frame, &reason) :
-                                                 CHECK_PROGRAM_RESOURCE;
-        emitted_test_expect(test, k == 0 ? status == CHECK_PROGRAM_UNSUPPORTED && reason != 0 && strstr(reason, "#1149") != 0 && strstr(reason, "internal") == 0 :
-                                           status == CHECK_PROGRAM_OK && reason == 0 && frame.open != BUSTER_UNWIND_ROWS && frame.size == 15 &&
-                                               frame.saved == 0 && frame.frame_size == sizes[k],
-                            k == 0 ? "the emission reports the 2 GB edge as unsupported, naming its follow-up" :
-                                     "the emission writes the frame 16 bytes smaller as its fixed descriptor, verified",
-                            k);
-        arena_pop_to(&test->arena, mark);
-    }
+    emitted_test_large_fixed(test);
+    emitted_test_wide_rows(test);
+    emitted_test_wide_tracking(test);
+    emitted_test_large_tier1(test);
+    emitted_test_large_driver(test);
     const UnwindFunction pushed = { .size = 16, .saved = 1 };
     const UnwindFunction other = { .size = 16, .saved = 2 };
     Arena full = test->scratch;

@@ -146,10 +146,11 @@ CFA in r11 between the loop's bound and its exit, is a row program only.
 offset that isn't a multiple of the data alignment, a negative CFA offset, rsp's
 or the return address's own rule, states remembered deeper than 16), and
 `unwind_rows_canonical` drops rows at a function's end (a closed frame's last
-epilogue's restored state, with its remembering). Rows carry signed 32-bit
-values: a frame whose CFA would pass `INT32_MAX` (within 56 bytes of 2 GB) has no
-events, where the fixed descriptor took it; the emission refuses it as
-unsupported ([#1149](https://github.com/buster14a/buster/issues/1149)).
+epilogue's restored state, with its remembering). Rows carry signed 64-bit
+values (#1149), including CFA offsets past `INT32_MAX` for every supported
+imm32 allocation plus the pushes and return address. Those fixed shapes retain
+the fixed writer's bytes and vector lowering; larger row-only offsets use
+64-bit LEB operands and cannot narrow into a fixed allocation.
 
 ## Format and linker handoff
 
