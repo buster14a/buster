@@ -345,12 +345,12 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         const uint8_t result_class = check_program_result_class(function, program, 0, false);
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_tier1_failure_cases); i += 1)
         {
-            Tier0Code code;
+            EmittedCode code;
             CheckTier1Counts counts;
             memset(&code, 0xa5, sizeof(code));
             memset(&counts, 0xa5, sizeof(counts));
             const CheckTier1FailureCase* test = check_tier1_failure_cases + i;
-            const CheckTier1Outcome outcome = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, test->fault.stage == CHECK_TIER1_VALUE_NUMBERING, true, &output, &code, &counts, &test->fault);
+            const CheckTier1Outcome outcome = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, test->fault.stage == CHECK_TIER1_VALUE_NUMBERING, true, false, &output, &code, &counts, &test->fault);
             bool empty = lane.scratch.length == 0;
             for (uint32_t step = 0; step < BUSTER_CHECK_TIER1_STEPS; step += 1)
             {
@@ -365,16 +365,16 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
                 check_lanes_test_expect(tally, prefix[k] == 0xa5, "refusal leaves the output prefix untouched", NULL);
             }
             // Reuse the same lane after every failure, not merely a fresh lane whose state cannot expose leftovers.
-            const CheckTier1Outcome success = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, true, &output, &code, &counts, NULL);
+            const CheckTier1Outcome success = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, true, false, &output, &code, &counts, NULL);
             check_lanes_test_expect(tally, success.category == CHECK_TIER1_SUCCESS && code.count != 0 && counts.records == code.count,
                                     "a refused lane can subsequently publish a genuine Tier 1 function", NULL);
             arena_pop_to(&output, mark);
         }
         const uint64_t capacity = output.capacity;
         output.capacity = mark;
-        Tier0Code code = { 0 };
+        EmittedCode code = { 0 };
         CheckTier1Counts counts = { 0 };
-        const CheckTier1Outcome full = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+        const CheckTier1Outcome full = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, false, &output, &code, &counts, NULL);
         check_lanes_test_expect(tally, full.stage == CHECK_TIER1_PUBLICATION && full.category == CHECK_TIER1_RESOURCE_FAILURE &&
                                 full.error == BUSTER_CHECK_TIER1_ARENA_OUTPUT && output.length == mark && code.records == NULL && counts.records == 0,
                                 "real publication exhaustion is a resource error, not Tier 0 coverage", NULL);
@@ -386,24 +386,24 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         const Tier0Function* nested_function = function;
         const uint8_t nested_result_class = result_class;
         const uint64_t emitter_capacity = lane.steps[1].capacity;
-        Tier0Code chain_code = { 0 };
+        EmittedCode chain_code = { 0 };
         CheckTier1Counts chain_counts = { 0 };
-        const CheckTier1Outcome chain_full = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &chain_code, &chain_counts, NULL);
+        const CheckTier1Outcome chain_full = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &chain_code, &chain_counts, NULL);
         check_lanes_test_expect(tally, chain_full.category == CHECK_TIER1_SUCCESS && chain_code.count != 0 && chain_counts.records == chain_code.count,
                                 "the chain body fits its full emission arena", NULL);
         const uint64_t peak = lane.steps[1].peak;
         arena_pop_to(&output, mark);
         uint64_t low = 0;
         uint64_t high = peak != 0 ? peak : emitter_capacity;
-        Tier0Code probe_code = { 0 };
+        EmittedCode probe_code = { 0 };
         CheckTier1Counts probe_counts = { 0 };
         lane.steps[1].capacity = high;
-        CheckTier1Outcome probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+        CheckTier1Outcome probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
         if (probe.category != CHECK_TIER1_SUCCESS && high != emitter_capacity)
         {
             high = emitter_capacity;
             lane.steps[1].capacity = high;
-            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
         }
         check_lanes_test_expect(tally, probe.category == CHECK_TIER1_SUCCESS, "the chain body fits the binary search's high bound", NULL);
         arena_pop_to(&output, mark);
@@ -411,7 +411,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         {
             const uint64_t middle = low + (high - low) / 2;
             lane.steps[1].capacity = middle;
-            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
             if (probe.stage == CHECK_TIER1_PROMOTION)
             {
                 low = middle;
@@ -423,7 +423,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
             arena_pop_to(&output, mark);
         }
         lane.steps[1].capacity = high;
-        CheckTier1Outcome nested = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+        CheckTier1Outcome nested = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &code, &counts, NULL);
         arena_pop_to(&output, mark);
         char nested_detail[160];
         snprintf(nested_detail, sizeof(nested_detail), "stage=%u category=%u cause=%u error=%" PRIu32 " emission=%" PRIu32 " capacity=%" PRIu64 " peak=%" PRIu64,
