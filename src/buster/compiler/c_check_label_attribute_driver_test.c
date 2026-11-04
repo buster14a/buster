@@ -991,6 +991,15 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "__attribute__((deprecated)) enum { A = sizeof(D) } e;\n__attribute__((deprecated)) typeof((int){ sizeof(D) }) c;\n",
         "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) int x[sizeof(T)];\n",
         "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) enum { A = sizeof(T) } x;\n",
+        // A tag's body in a marked declarator's bound, parameter list or initializer has its own context, the members'
+        // and enumerators' uses keeping theirs; one in a marked function's body takes the function's.
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) int x[sizeof(struct { T m; })];\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\n__attribute__((deprecated)) int x[sizeof(struct { D m; })];\n"
+        "__attribute__((deprecated)) int y[sizeof(enum { A = sizeof(D) })];\n__attribute__((deprecated)) int z[sizeof((D){0})];\n"
+        "__attribute__((deprecated)) int i = sizeof(struct { D m; });\n__attribute__((deprecated)) int f(struct { D m; } *p);\n"
+        "__attribute__((deprecated)) int j = sizeof(enum { B = sizeof(D) });\n"
+        "__attribute__((deprecated)) void g(void) { struct { D m; } s; enum { C = sizeof(D) }; (void)s; }\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) void f(void) { struct { T m; } s; (void)s; }\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

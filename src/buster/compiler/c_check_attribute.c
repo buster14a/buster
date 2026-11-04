@@ -5862,16 +5862,23 @@ static const CheckInputAttribute* check_input_availability_mark(const CheckInput
 
 // The bit of a context (BUSTER_CHECK_CONTEXT_*) that the declaration at `key` makes, where a deprecated or unavailable
 // attribute marks it by a declaration at `limit` or before (check_input_availability_mark), and the tokens from `first`
-// to `end` (past the last) that take it.
+// to `end` (past the last) that take it. A struct's, a union's or an enum's body among them takes it only with `tags`:
+// clang reads a member's or an enumerator's use in its own context, then its tag's parent's, which is a function whose
+// body holds it but no declarator whose bound, parameter list or initializer does.
 static void check_input_availability_fill(const CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t key,
-                                          uint32_t limit, uint32_t first, uint32_t end)
+                                          uint32_t limit, uint32_t first, uint32_t end, bool tags)
 {
-    const uint32_t count = reader->parser->tokens.count;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
     const CheckInputAttribute* attribute = check_input_availability_mark(reader, marks, chain, key, limit, UINT32_MAX);
     const uint8_t bit = attribute == NULL ? 0 : attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
-    for (uint32_t i = first; bit != 0 && i < end && i < count; i += 1)
+    for (uint32_t i = first; bit != 0 && i < end && i < count;)
     {
-        contexts[i] |= bit;
+        const uint8_t role = parser->tree.roles[i];
+        const uint32_t closer = parser->tree.parents[i];
+        const bool own = !tags && (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM) && closer < count && closer > i;
+        contexts[i] |= own ? 0 : bit;
+        i = own ? closer + 1 : i + 1;
     }
 }
 
@@ -5900,12 +5907,16 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
             if (!inside && function != BUSTER_CHECK_NONE && parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
             {
                 body_end = parser->tree.parents[t];
-                check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, function), function, t, body_end + 1);
+                // Its declarator's tokens before the body, a K&R definition's parameter declarations among them, as a
+                // declarator's; then the body, whose tags have the function for their parent.
+                const uint32_t key = check_input_deprecated_key(reader, function);
+                check_input_availability_fill(reader, contexts, marks, chain, key, function, function + 1, t, false);
+                check_input_availability_fill(reader, contexts, marks, chain, key, function, t, body_end + 1, true);
             }
             const uint32_t initialized = kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] != 0 ? check_sparse_get(reader->output->initializer_ends, t) : BUSTER_CHECK_NONE;
             if (initialized != BUSTER_CHECK_NONE)
             {
-                check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, t), t, t, initialized);
+                check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, t), t, t, initialized, false);
             }
             // A marked declarator's parameter lists and array bounds, at any scope, as clang reads their uses in the
             // declaration's context: those after its name, past its groups' `)` (a function pointer's, a function's that
@@ -5923,7 +5934,7 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
                 const bool bound = next == PARSE_KIND_L_SQUARE && closer < count && closer > at;
                 if (list || bound)
                 {
-                    check_input_availability_fill(reader, contexts, marks, chain, key, t, at, closer + 1);
+                    check_input_availability_fill(reader, contexts, marks, chain, key, t, at, closer + 1, false);
                 }
                 suffix = list || bound || (next == PARSE_KIND_R_PAREN && next_role == PARSE_ROLE_CLOSE_GROUP);
                 at = list || bound ? closer + 1 : at + 1;

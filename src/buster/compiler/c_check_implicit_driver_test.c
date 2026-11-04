@@ -493,6 +493,12 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"
         "int c(void) { int x; return __builtin_choose_expr(1, 0, x); }\n"
         "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n";
+    // A marked K&R definition's parameter declarations take its mark as their context (#147,
+    // check_input_availability_contexts); an unmarked one's keep their uses' warnings.
+    static const char kr_deprecated[] =
+        "typedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((deprecated)) int f(a) D a; { return a; }\n"
+        "int g(b) D b; { return b; }\n";
     static const char self_initialization[] =
         "int a(void) { int x = x; return x; }\n"
         "int b(void) { int x = x + 1; return x; }\n";
@@ -824,6 +830,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         // buster gives no -Wpointer-bool-conversion, which clang gives for `&x ? p : p`.
         { return_stack, { "-Wall", "-Wno-pointer-bool-conversion", NULL, NULL } },
         { generic_selection, { "-Wall", NULL, NULL, NULL } },
+        { kr_deprecated, { NULL, NULL, NULL, NULL } },
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },

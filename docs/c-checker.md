@@ -5593,11 +5593,15 @@ arguments against the function. The checker now gives these as clang does.
   and a block's earlier one does mark a later file-scope redeclaration. As clang's
   context rules have it, a deprecated context drops a deprecated use's
   warning and an unavailable one an unavailable use's error too: the body of
-  a function itself marked (by any declaration before its body), a marked
+  a function itself marked (by any declaration before its body), with a K&R
+  definition's parameter declarations, a marked
   declaration's declarator and initializer, and a marked declarator's
   parameter lists and array bounds at any scope (a prototype's, a
   definition's, a function pointer's, named parameters or not;
-  `check_input_availability_contexts`).
+  `check_input_availability_contexts`). A struct's, a union's or an enum's
+  body in a declarator's bound, parameter list or initializer keeps its own
+  context, as clang reads a member's or an enumerator's use through its tag to
+  the tag's parent; in a function's body it takes the function's.
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
