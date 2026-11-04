@@ -6,11 +6,14 @@
 // This administrative predicate is outside compiler/measurement hot paths.
 //
 // The `evidence` job (tools/ci/nightly.c) must succeed in every run, and says
-// whether the 9700X job was admitted. Its one reuse that passes here is a
-// push's: native correctness of the identical tree from its pull request's
-// newest run, with the 9700X job skipped for it (`skip` and `native-reused`),
-// once the host-identity job found the host as that run recorded it
-// (HOST_MATCH); unconfirmed, the 9700X job runs, as if admitted.
+// whether the 9700X job was admitted. Pull requests never are (#1272;
+// tools/ci/admission.c): a pull request qualifies by its hosted results alone,
+// with the 9700X excluded by policy (`skip` and `pull-request`) and its job
+// skipped, and the context says so rather than claim native correctness. A
+// pull request whose 9700X job ran, or whose exclusion has another reason,
+// fails. Pushes to main and the daily and `full` dispatched runs need hosted
+// and native correctness, fuzzing and the measurements. Merge queues and every
+// other event fail: no pre-merge path but a pull request's is supported.
 // A nightly dispatch (backlog, snapshot) reports through its coverage record,
 // not this context; one that reaches this predicate fails.
 
@@ -56,9 +59,9 @@ typedef enum Hardware Hardware;
 enum Hardware
 {
     HARDWARE_ADMIT,
-    // Skipped for a push whose pull request's run qualified the identical tree.
-    HARDWARE_REUSED,
-    // Skipped for any other reason (a draft, the nightly window, a deferral).
+    // Skipped because the run is a pull request's: the 9700X never runs for one.
+    HARDWARE_EXCLUDED,
+    // Skipped for any other reason (the nightly window, a deferral, a dispatch off main's history).
     HARDWARE_SKIP,
     HARDWARE_INVALID,
     HARDWARE_COUNT
@@ -80,7 +83,6 @@ struct Qualification
 {
     Event event;
     Code code;
-    bool draft;
     Purpose purpose;
     Hardware hardware;
     Result changes;
@@ -114,32 +116,38 @@ static Result qualification_result(const char* name)
     return (Result)qualification_find(getenv(name), names, sizeof(names) / sizeof(names[0]));
 }
 
+// A change the selector found to be documentation alone: no tests, fuzzing or 9700X job ran.
 static bool qualification_no_code(const Qualification* input)
 {
     bool selected = input->event == EVENT_PR || input->event == EVENT_PUSH;
     bool result = selected && input->changes == RESULT_SUCCESS && input->code == CODE_NO;
     result = result && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS;
     result = result && input->tests == RESULT_SKIPPED && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
-    // The evidence job doesn't know the selector's verdict: it admits a ready pull request and skips a draft.
-    result = result && input->hardware == (input->event == EVENT_PR && input->draft ? HARDWARE_SKIP : HARDWARE_ADMIT);
+    // The evidence job doesn't know the selector's verdict: it excludes every pull request and admits every push.
+    result = result && input->hardware == (input->event == EVENT_PR ? HARDWARE_EXCLUDED : HARDWARE_ADMIT);
+    return result;
+}
+
+// A pull request's code change: its hosted rows passed and the 9700X was excluded by policy, never run.
+static bool qualification_hosted_only(const Qualification* input)
+{
+    bool result = input->event == EVENT_PR && input->changes == RESULT_SUCCESS && input->code == CODE_YES;
+    result = result && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS && input->tests == RESULT_SUCCESS;
+    result = result && input->hardware == HARDWARE_EXCLUDED && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
     return result;
 }
 
 static bool qualification_pass(const Qualification* input)
 {
     const Event event = input->event;
-    bool valid = event < EVENT_INVALID && (event == EVENT_PR || !input->draft);
+    bool valid = event < EVENT_INVALID;
     valid = valid && (event == EVENT_DISPATCH ? input->purpose == PURPOSE_FULL : input->purpose == PURPOSE_UNSET);
     valid = valid && input->evidence == RESULT_SUCCESS;
-    bool selected = (event == EVENT_PR || event == EVENT_PUSH) && input->changes == RESULT_SUCCESS && input->code == CODE_YES;
+    bool selected = event == EVENT_PUSH && input->changes == RESULT_SUCCESS && input->code == CODE_YES;
     bool periodic = (event == EVENT_SCHEDULE || event == EVENT_DISPATCH) && input->changes == RESULT_SKIPPED && input->code == CODE_UNSET;
     bool hosted = (selected || periodic) && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS && input->tests == RESULT_SUCCESS;
-    bool native = hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS;
-    native = native && (input->fuzz == RESULT_SUCCESS || (event == EVENT_PR && input->fuzz == RESULT_SKIPPED));
-    native = native && !(event == EVENT_PR && input->draft);
-    // A push whose pull request's newest run qualified its identical tree natively (tools/ci/nightly.c's reuse).
-    bool reused = hosted && event == EVENT_PUSH && input->hardware == HARDWARE_REUSED && input->native == RESULT_SKIPPED && input->fuzz == RESULT_SUCCESS;
-    return valid && (qualification_no_code(input) || native || reused);
+    bool native = hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS && input->fuzz == RESULT_SUCCESS;
+    return valid && (qualification_no_code(input) || qualification_hosted_only(input) || native);
 }
 
 // Each input's place in a mixed-radix index over every combination, for the self-test's table of allowed tuples.
@@ -148,7 +156,6 @@ static uint32_t qualification_index(const Qualification* input)
     const Result results[7] = { input->changes, input->size, input->hooks, input->evidence, input->tests, input->fuzz, input->native };
     uint32_t index = (uint32_t)input->event;
     index = index * CODE_COUNT + (uint32_t)input->code;
-    index = index * 2 + (input->draft ? 1u : 0u);
     index = index * PURPOSE_COUNT + (uint32_t)input->purpose;
     index = index * HARDWARE_COUNT + (uint32_t)input->hardware;
     for (size_t i = 0; i < sizeof(results) / sizeof(results[0]); i += 1)
@@ -161,23 +168,20 @@ static uint32_t qualification_index(const Qualification* input)
 static int qualification_test(void)
 {
     // These are all allowed tuples, independently of the predicate's branches.
-    // The only green draft is the explicit no-code exemption, not native coverage;
-    // the only green skipped 9700X job with code is a push's evidenced reuse.
+    // A pull request's are hosted alone, the 9700X excluded and its job skipped;
+    // every other green tuple with code ran the 9700X job and fuzzing.
     const Qualification allowed[] = {
-        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SUCCESS },
-        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_REUSED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED },
-        { EVENT_SCHEDULE, CODE_UNSET, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_DISPATCH, CODE_UNSET, false, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
-        { EVENT_PR, CODE_NO, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
-        { EVENT_PUSH, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_YES, PURPOSE_UNSET, HARDWARE_EXCLUDED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_NO, PURPOSE_UNSET, HARDWARE_EXCLUDED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PUSH, CODE_YES, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
+        { EVENT_PUSH, CODE_NO, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_SCHEDULE, CODE_UNSET, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
+        { EVENT_DISPATCH, CODE_UNSET, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
     };
-    // Seven job results, five values each (including missing/unknown), and every event, selector output, draft
-    // state, dispatch purpose and hardware decision.
+    // Seven job results, five values each (including missing/unknown), and every event (a merge queue's and any
+    // other unknown one among them), selector output, dispatch purpose and hardware decision.
     const uint32_t results = 78125;
-    const uint32_t total = EVENT_COUNT * CODE_COUNT * 2 * PURPOSE_COUNT * HARDWARE_COUNT * results;
+    const uint32_t total = EVENT_COUNT * CODE_COUNT * PURPOSE_COUNT * HARDWARE_COUNT * results;
     uint8_t* expected = calloc((total + 7) / 8, 1);
     uint32_t checks = 0;
     uint32_t failures = 0;
@@ -199,14 +203,11 @@ static int qualification_test(void)
         remaining /= HARDWARE_COUNT;
         const Purpose purpose = (Purpose)(remaining % PURPOSE_COUNT);
         remaining /= PURPOSE_COUNT;
-        const bool draft = remaining % 2 != 0;
-        remaining /= 2;
         const Code code = (Code)(remaining % CODE_COUNT);
         remaining /= CODE_COUNT;
         Qualification input = {
             .event = (Event)remaining,
             .code = code,
-            .draft = draft,
             .purpose = purpose,
             .hardware = hardware,
             .changes = values[0],
@@ -249,28 +250,22 @@ int main(int argc, char** argv)
     }
     else if (argc == 1)
     {
+        // merge_group, and any other event, is no supported path: it maps to EVENT_INVALID and fails.
         static const char* const events[] = { "pull_request", "push", "schedule", "workflow_dispatch" };
         static const char* const codes[] = { "true", "false", "" };
-        static const char* const drafts[] = { "false", "true" };
         static const char* const purposes[] = { "", "full", "nightly" };
-        const int draft = qualification_find(getenv("PR_DRAFT"), drafts, sizeof(drafts) / sizeof(drafts[0]));
-        // The evidence job's hardware decision and its reason: a skip for a push's reuse is the one green skip.
         const char* hardware = getenv("HARDWARE");
         const char* reason = getenv("HARDWARE_REASON");
-        const char* host_match = getenv("HOST_MATCH");
-        const bool confirmed = host_match != NULL && strcmp(host_match, "true") == 0;
+        const bool admit = hardware != NULL && strcmp(hardware, "admit") == 0;
         const bool skip = hardware != NULL && strcmp(hardware, "skip") == 0;
-        const bool native_reused = skip && reason != NULL && strcmp(reason, "native-reused") == 0;
-        const bool reused = native_reused && confirmed;
-        const bool admit = (hardware != NULL && strcmp(hardware, "admit") == 0) || (native_reused && !confirmed);
+        const bool excluded = skip && reason != NULL && strcmp(reason, "pull-request") == 0;
         const char* purpose = getenv("PURPOSE");
         const char* nightly = purpose != NULL && (strcmp(purpose, "backlog") == 0 || strcmp(purpose, "snapshot") == 0) ? "nightly" : purpose;
         Qualification input = {
             .event = (Event)qualification_find(getenv("EVENT_NAME"), events, sizeof(events) / sizeof(events[0])),
             .code = (Code)qualification_find(getenv("CODE_CHANGED"), codes, sizeof(codes) / sizeof(codes[0])),
-            .draft = draft == 1,
             .purpose = (Purpose)qualification_find(nightly != NULL ? nightly : "", purposes, sizeof(purposes) / sizeof(purposes[0])),
-            .hardware = admit ? HARDWARE_ADMIT : reused ? HARDWARE_REUSED : skip ? HARDWARE_SKIP : HARDWARE_INVALID,
+            .hardware = admit ? HARDWARE_ADMIT : excluded ? HARDWARE_EXCLUDED : skip ? HARDWARE_SKIP : HARDWARE_INVALID,
             .changes = qualification_result("CHANGES_RESULT"),
             .size = qualification_result("SIZE_RESULT"),
             .hooks = qualification_result("DCO_RESULT"),
@@ -279,28 +274,43 @@ int main(int argc, char** argv)
             .fuzz = qualification_result("FUZZ_RESULT"),
             .native = qualification_result("BENCHMARK_RESULT"),
         };
-        bool passed = draft < 2 && qualification_pass(&input);
+        const bool passed = qualification_pass(&input);
         status = passed ? 0 : 1;
+        const char* message = "Qualification failed: required results or selector outputs are missing, skipped, cancelled, failed or inconsistent.";
         if (passed && qualification_no_code(&input))
         {
-            puts("Documentation-only change; explicit no-code exemption, not native qualification.");
+            message = input.event == EVENT_PR ? "Documentation-only change: explicit no-code exemption. Native correctness was not run: pull requests never run on the 9700X (#1272)." : "Documentation-only change: explicit no-code exemption, not native qualification.";
         }
-        else if (passed && input.hardware == HARDWARE_REUSED)
+        else if (passed && qualification_hosted_only(&input))
         {
-            const char* source = getenv("NATIVE_SOURCE");
-            printf("Hosted correctness passed; native correctness reused from run %s, its pull request's newest run of this identical tree, on the host it recorded (confirmed now). Measurements go to the nightly backlog unless that run's were reusable too.\n", source != NULL ? source : "(unknown)");
+            message = "Hosted correctness passed. Native correctness was NOT run: pull requests never run on the 9700X (#1272); it runs after the merge, on main's push and the scheduled runs.";
         }
         else if (passed)
         {
-            puts("Hosted and native correctness and required measurements passed.");
+            message = "Hosted and native correctness and required measurements passed.";
         }
-        else if (input.event == EVENT_PR && input.draft)
+        else if (input.event == EVENT_PR && input.native != RESULT_SKIPPED)
         {
-            fputs("::error::Draft code change: hardware qualification withheld. Mark ready for review to qualify the current revision.\n", stderr);
+            message = "Qualification failed: a pull request's run reached the 9700X job, which pull requests must never do (#1272).";
+        }
+        else if (input.event == EVENT_INVALID)
+        {
+            message = "Qualification failed: this event is no supported qualification path (a merge queue's included); pull requests qualify by their own hosted runs.";
+        }
+        if (passed)
+        {
+            puts(message);
         }
         else
         {
-            fputs("::error::Qualification failed: required results or selector outputs are missing, skipped, cancelled, failed or inconsistent.\n", stderr);
+            fprintf(stderr, "::error::%s\n", message);
+        }
+        const char* summary_path = getenv("GITHUB_STEP_SUMMARY");
+        FILE* summary = summary_path != NULL && summary_path[0] != 0 ? fopen(summary_path, "a") : NULL;
+        if (summary != NULL)
+        {
+            fprintf(summary, "### Qualification\n\n%s\n", message);
+            fclose(summary);
         }
     }
     else

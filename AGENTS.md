@@ -242,14 +242,15 @@ and perf run there** through `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusi
 Set `EXCLUSIVE_TITLE` to the session title and `EXCLUSIVE_LINK` to its private
 session, PR or issue link. The runner hooks take the same lock; sessions and CI
 wait alike, with neither taking priority. Hold it **per run, never around a
-series of runs**: CI times out waiting after 10 minutes. Keep PR jobs short.
-Benchmark timings come from this host under that lock, not from cloud runners
-or the owner's desktop. The `cores` queue below does not replace this lock.
+series of runs**: CI times out waiting after 10 minutes. Keep jobs short; PRs
+never run there. Benchmark timings come from this host under that lock, not
+from cloud runners or the owner's desktop. The `cores` queue below does not
+replace this lock.
 
 Read [CI and benchmark selection](docs/commands/ci.md) before changing gates,
-suite inventory, benchmark steps or harness pins; it retains the full hosted
-correctness, sanitizer, native qualification and measurement rules. For tuning,
-also read [profiling](docs/commands/profiling.md) and [the CI guide](docs/ci.md).
+suite inventory, benchmark steps or harness pins; it has the hosted
+correctness, sanitizer, native admission and measurement rules. For tuning,
+read [profiling](docs/commands/profiling.md) and [the CI guide](docs/ci.md).
 
 ## Sharing the owner's machines' cores
 

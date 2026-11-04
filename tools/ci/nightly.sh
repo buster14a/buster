@@ -91,62 +91,19 @@ evidence()
     local hardware=admit reason=admitted retired=false notes='' native_host='' window_start='' window_deadline='' window_override=false
     case "$event" in
         pull_request)
+            # Pull requests never run on the 9700X (#1272), drafts and ready ones alike: their hosted rows qualify them,
+            # and native correctness runs after the merge, on main's push and the scheduled runs.
             scope=plain
-            if [ "${EVIDENCE_DRAFT:-false}" = true ]; then
-                hardware=skip
-                reason=draft
-            fi
+            hardware=skip
+            reason=pull-request
+            notes='pull requests run no 9700X work: native correctness and measurements run after the merge'
             ;;
         push)
-            local tree parent_tree head='' pulls="$work/pulls.json" facts="$work/reuse.tsv" record="$work/pull-record.tsv"
-            tree=$(git rev-parse 'HEAD^{tree}')
-            parent_tree=$(git rev-parse 'HEAD^1^{tree}')
-            : > "$facts"
-            if "$gh" api "repos/$repository/commits/$commit/pulls" > "$pulls"; then
-                jq -r '.[]? | ["pr", .number, (if .merged_at then 1 else 0 end), .base.ref, (.merge_commit_sha // "-"), .head.sha,
-                    (.head.repo.id // 0)] | @tsv' "$pulls" >> "$facts"
-                head=$(jq -r --arg commit "$commit" '[.[]? | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $commit)
-                    | .head.sha] | if length == 1 then .[0] else empty end' "$pulls")
-            fi
-            if sha "$head"; then
-                # The pull request's run finishes its record job after the merge can happen: wait a little for it.
-                local attempt newest status
-                for attempt in $(seq 1 20); do
-                    "$gh" api "repos/$repository/actions/workflows/9700x.yml/runs?head_sha=$head&event=pull_request&per_page=30" > "$work/pull-runs.json" || break
-                    newest=$(jq -r '[.workflow_runs[]?] | max_by(.id) | .id // empty' "$work/pull-runs.json")
-                    status=$(jq -r '[.workflow_runs[]?] | max_by(.id) | .status // empty' "$work/pull-runs.json")
-                    if [ -z "$newest" ] || [ "$status" = completed ] || [ "${NIGHTLY_NOW:-}" != '' ]; then
-                        break
-                    fi
-                    sleep 15
-                done
-                runs_facts < "$work/pull-runs.json" >> "$facts" || true
-                if [[ "${newest:-}" =~ ^[1-9][0-9]*$ ]]; then
-                    fetch_jobs "$newest" >> "$facts" || true
-                    fetch_record "$newest" "$(jq -r '[.workflow_runs[]?] | max_by(.id) | .run_attempt' "$work/pull-runs.json")" "$record" || true
-                fi
-            fi
-            local verdict
-            if verdict=$("$tool" reuse --commit "$commit" --tree "$tree" --parent-tree "$parent_tree" --now "$(now)" --facts "$facts" --record "$record"); then
-                native=$(awk -F '\t' '$1 == "native" { print $2 }' <<< "$verdict")
-                measurement=$(awk -F '\t' '$1 == "measurement" { print $2 }' <<< "$verdict")
-                notes=$(awk -F '\t' '$1 == "native" { print $4 }' <<< "$verdict")
-                if [ "$native" = reused ]; then
-                    native_source=$(awk -F '\t' '$1 == "native" { print $3 }' <<< "$verdict")
-                    native_host=$(awk -F '\t' '$1 == "host" { print $2 }' <<< "$verdict")
-                fi
-                if [ "$measurement" = reused ]; then
-                    measurement_source=$native_source
-                fi
-            else
-                native=run
-                measurement=run
-                notes='the reuse decision failed; the work runs'
-            fi
-            # Before the nightly mode, a push measures every plain run, after its own native correctness.
-            if [ "${EVIDENCE_NIGHTLY:-}" = on ] && [ "$native" = reused ]; then
-                hardware=skip
-                reason=native-reused
+            # A push to main (the workflow's only push branch): its own native correctness, after its own hosted rows.
+            # It reuses nothing from its pull request, whose run never reaches the 9700X.
+            if [ "${GITHUB_REF:-refs/heads/main}" != refs/heads/main ]; then
+                printf '::error title=Hardware admission::a push to %s is no main revision\n' "$GITHUB_REF"
+                exit 1
             fi
             ;;
         schedule)
@@ -161,7 +118,17 @@ evidence()
         workflow_dispatch)
             local purpose=${EVIDENCE_PURPOSE:-full}
             case "$purpose" in
-                full) ;;
+                full)
+                    # A manual run reaches the 9700X only for a first-parent state of main, so that dispatch is no way
+                    # around the pull-request exclusion (#1272): any other commit gets its hosted rows alone.
+                    local history="$work/history.git"
+                    fetch_main "$history" tree:0
+                    if ! git -C "$history" rev-list --first-parent main | has_line "$commit"; then
+                        hardware=skip
+                        reason=not-main
+                        notes="$commit is not a first-parent state of main: hosted rows alone"
+                    fi
+                    ;;
                 backlog|snapshot)
                     # The commit must be a first-parent state of main, at or before the cycle's pinned snapshot.
                     local history="$work/history.git" snapshot=${EVIDENCE_SNAPSHOT:-}
