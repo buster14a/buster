@@ -18,23 +18,23 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ github.sha }}
-      - name: Apply checked final regressions on the session branch
+      - name: Apply checked rounding fix on the session branch
         id: apply
         shell: bash
         run: |
           set -euo pipefail
-          if test -f .github/issue-176-v3.patch.b64.1; then
-              { cat .github/issue-176-v3.patch.b64.1 .github/issue-176-v3.patch.b64.2; sed -e 's/Qi249wy8/Qi249w8/' -e 's/VanxusFDEG/VanxusDAEG/' -e 's/F61OK/F+OK/' -e 's/VKzFyh/VKzFh/' .github/issue-176-v3.patch.b64.3; } | base64 --decode | gzip --decompress > "$RUNNER_TEMP/issue-176-v3.patch"
-              printf '%s  %s\n' 21d42fc6f71bce3b75c098802fbf7d75fb080a40fe72a9967e3cbf2544c6d2e4 "$RUNNER_TEMP/issue-176-v3.patch" | sha256sum --check
-              git apply --check "$RUNNER_TEMP/issue-176-v3.patch"
-              git apply "$RUNNER_TEMP/issue-176-v3.patch"
+          if test -f .github/issue-176-v4.patch.b64; then
+              base64 --decode .github/issue-176-v4.patch.b64 | gzip --decompress > "$RUNNER_TEMP/issue-176-v4.patch"
+              printf '%s  %s\n' 1980fc111323e311516c0ba3fcd2a532095e796fa1e8d5ea13a1da2fa34289c0 "$RUNNER_TEMP/issue-176-v4.patch" | sha256sum --check
+              git apply --check "$RUNNER_TEMP/issue-176-v4.patch"
+              git apply "$RUNNER_TEMP/issue-176-v4.patch"
               git diff --check
-              git add docs/ir-tools.md src/buster/compiler/interpreter.c src/buster/compiler/interpreter_test.c src/buster/compiler/interpreter_typed_value.c src/buster/compiler/interpreter_value.c src/buster/compiler/interpreter_wide_test.c src/buster/compiler/ir_interpreter.c src/buster/compiler/ir_lower_test.c src/buster/compiler/ir_stack_test.c
-              git rm .github/issue-176-v3.patch.b64.1 .github/issue-176-v3.patch.b64.2 .github/issue-176-v3.patch.b64.3
+              git add src/buster/compiler/interpreter_typed_value.c src/buster/compiler/interpreter_wide_test.c
+              git rm .github/issue-176-v4.patch.b64
               git config user.name 'David Gonzalez Martin'
               git config user.email 'davidgmbb@gmail.com'
               sh .githooks/enable-sign-off.sh --maintainer-session
-              git commit -m 'test(interpreter): exercise wide payloads and exact storage boundaries' -m 'Run generated wide typed programs against the independent fixture machines. Cover f80 exact memory accesses and padding, native two-word returns, conversion pairs and dynamic cleanup. Reject a high-word shift count before narrowing it. Document the remaining issue 176 acceptance boundary.' -m 'Original project code authored for the maintainer by OpenAI / GPT-6 Astra Pro. This ChatGPT environment exposes neither a private session URL nor a session identifier.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+              git commit -m 'fix(interpreter): round wide integers directly to floating destinations' -m 'Avoid an x87 intermediate for i128/u128-to-f32/f64 conversions. Check explicit positive, negative and unsigned midpoint-adjacent payloads in both destination precisions.' -m 'Original project code authored for the maintainer by OpenAI / GPT-6 Astra Pro. This ChatGPT environment exposes neither a private session URL nor a session identifier.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
               test "$(git ls-remote origin refs/heads/chatgpt/176-typed-oracle-continuation | cut -f1)" = "$GITHUB_SHA"
               git push origin HEAD:refs/heads/chatgpt/176-typed-oracle-continuation
           fi
