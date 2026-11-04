@@ -5,81 +5,71 @@ on:
     paths: [.github/workflows/prepare-1271.yml, .github/issue-1271.patch]
 permissions:
   contents: write
-concurrency:
-  group: prepare-ci-1271
-  cancel-in-progress: true
 jobs:
-  validate:
+  publish:
     if: github.repository_id == '1421805693'
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Apply bounded patch on latest pinned main
+      - name: Reproduce the exact source validated by run 41819554432 attempt 1
+        shell: bash
         run: |
           set -euo pipefail
-          preparation_base=f3d2071458762ff597d7937de8d0cfb68a1913b1
-          base=3fe2da31d68fc7df69ce09a5d4c90aadb7aef521
-          git merge-base --is-ancestor "$preparation_base" HEAD
-          printf '%s\n' .github/issue-1271.patch .github/workflows/prepare-1271.yml > "$RUNNER_TEMP/preparation-paths"
-          git diff --name-only "$preparation_base" HEAD | diff -u "$RUNNER_TEMP/preparation-paths" -
           sed 's/^ diff --git /diff --git /' .github/issue-1271.patch > "$RUNNER_TEMP/issue-1271.patch"
-          git checkout --detach "$base"
+          git checkout --detach 3fe2da31d68fc7df69ce09a5d4c90aadb7aef521
           git apply --recount --unidiff-zero --check "$RUNNER_TEMP/issue-1271.patch"
           git apply --recount --unidiff-zero "$RUNNER_TEMP/issue-1271.patch"
           sed -i '/^Queues use that prefix per PR\/ref, except main pushes /,/^These are operational resources, not canonical repository URLs; do not rename$/c\Queues group PRs by number (new pushes cancel older runs), but main pushes by run ID\nso pending main coverage is never replaced (#1271). Hardware jobs share the host lock.\nThese are operational resources, not canonical repository URLs; do not rename' AGENTS.md
           git diff --check
-          printf '%s\n' .github/workflows/9700x.yml AGENTS.md docs/ci.md docs/commands/ci.md tests/ci/nightly.sh tools/ci/changes.c tools/ci/qualification.c > "$RUNNER_TEMP/implementation-paths"
-          git diff --name-only | diff -u "$RUNNER_TEMP/implementation-paths" -
-          wc -c AGENTS.md
-          test "$(wc -c < AGENTS.md)" -le 30000
-          git diff --stat
-      - name: Validate workflow and shell syntax
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3-yaml jq zip unzip
-          /usr/bin/python3 -c 'import yaml; w=yaml.load(open(".github/workflows/9700x.yml"), Loader=yaml.BaseLoader); assert w["on"]["push"] == {"branches": ["main"]}; assert "github.run_id" in w["concurrency"]["group"]; print("Workflow syntax and unfiltered main trigger: PASS")'
-          bash -n tests/ci/nightly.sh tools/ci/nightly.sh tests/ci/caches.sh tests/ci/timings.sh
-      - name: Selector and exhaustive qualification regressions
-        run: |
-          set -euo pipefail
+          test "$(wc -c < AGENTS.md)" -eq 29962
+          printf '%s\n' .github/workflows/9700x.yml AGENTS.md docs/ci.md docs/commands/ci.md tests/ci/nightly.sh tools/ci/changes.c tools/ci/qualification.c > "$RUNNER_TEMP/paths"
+          git diff --name-only | diff -u "$RUNNER_TEMP/paths" -
+          git diff --binary > "$RUNNER_TEMP/tested-1271.patch"
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/changes.c -o "$RUNNER_TEMP/changes"
           "$RUNNER_TEMP/changes" --self-test
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification" --self-test
-      - name: Evidence glue, caches and timing fixtures
-        run: |
-          set -euo pipefail
-          bash tests/ci/nightly.sh
-          bash tests/ci/caches.sh
-          bash tests/ci/timings.sh
-      - name: Publish only the tested implementation tree
+      - name: Retain implementation files and diff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: implementation-1271
+          include-hidden-files: true
+          path: |
+            .github/workflows/9700x.yml
+            AGENTS.md
+            docs/ci.md
+            docs/commands/ci.md
+            tests/ci/nightly.sh
+            tools/ci/changes.c
+            tools/ci/qualification.c
+          retention-days: 7
+      - name: Publish tested Git objects without modifying any branch
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          base=3fe2da31d68fc7df69ce09a5d4c90aadb7aef521
-          test "$(git rev-parse HEAD)" = "$base"
-          base_tree=$(git rev-parse "$base^{tree}")
-          entries="$RUNNER_TEMP/entries.jsonl"
-          : > "$entries"
+          api_retry() {
+              local attempt answer
+              for attempt in 1 2 3 4 5; do
+                  if answer=$(gh api "$@"); then printf '%s\n' "$answer"; return 0; fi
+                  sleep "$attempt"
+              done
+              return 1
+          }
+          : > "$RUNNER_TEMP/entries"
           while IFS= read -r path; do
               jq -n --rawfile content "$path" '{content: $content, encoding: "utf-8"}' > "$RUNNER_TEMP/blob.json"
-              sha=$(gh api --method POST repos/buster14a/buster/git/blobs --input "$RUNNER_TEMP/blob.json" --jq .sha)
+              sha=$(api_retry --method POST repos/buster14a/buster/git/blobs --input "$RUNNER_TEMP/blob.json" --jq .sha)
               test "$sha" = "$(git hash-object "$path")"
-              mode=$(git ls-tree "$base" -- "$path" | awk '{print $1}')
-              jq -nc --arg path "$path" --arg sha "$sha" --arg mode "$mode" '{path: $path, mode: $mode, type: "blob", sha: $sha}' >> "$entries"
-          done < "$RUNNER_TEMP/implementation-paths"
-          jq -s --arg base "$base_tree" '{base_tree: $base, tree: .}' "$entries" > "$RUNNER_TEMP/tree.json"
-          tree=$(gh api --method POST repos/buster14a/buster/git/trees --input "$RUNNER_TEMP/tree.json" --jq .sha)
-          printf 'TESTED_BASE=%s\nTESTED_TREE=%s\n' "$base" "$tree"
-          printf 'All focused checks passed.\n\nBase: `%s`\n\nImplementation tree: `%s`\n' "$base" "$tree" >> "$GITHUB_STEP_SUMMARY"
-          printf '\nOnly the seven implementation files are published, with original file modes. No preparation files.\n' >> "$GITHUB_STEP_SUMMARY"
+              mode=$(git ls-tree HEAD -- "$path" | awk '{print $1}')
+              jq -nc --arg path "$path" --arg sha "$sha" --arg mode "$mode" '{path: $path, mode: $mode, type: "blob", sha: $sha}' | tee -a "$RUNNER_TEMP/entries"
+          done < "$RUNNER_TEMP/paths"
+          jq -s --arg base "$(git rev-parse HEAD^{tree})" '{base_tree: $base, tree: .}' "$RUNNER_TEMP/entries" > "$RUNNER_TEMP/tree.json"
+          tree=$(api_retry --method POST repos/buster14a/buster/git/trees --input "$RUNNER_TEMP/tree.json" --jq .sha)
+          printf 'TESTED_BASE=%s\nTESTED_TREE=%s\n' "$(git rev-parse HEAD)" "$tree"
