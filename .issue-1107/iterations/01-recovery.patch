@@ -1,0 +1,135 @@
+--- a/src/buster/compiler/c_check_constraints_test.c
++++ b/src/buster/compiler/c_check_constraints_test.c
+@@ -3017,6 +3017,8 @@
+     const char* valid;
+     uint32_t column;
+     const char* message;
++    // Tentative definitions complete at translation-unit end, after a later parser error.
++    bool translation_unit_end;
+ };
+ 
+ static const CheckSemanticFixture check_semantic_fixtures[] =
+@@ -3104,6 +3106,7 @@
+         "struct incomplete { int n; }; struct incomplete x;\n",
+         19,
+         "tentative definition has type 'struct incomplete' that is never completed",
++        true,
+     },
+     {
+         "void f(void) { int x; x++++; }\n",
+@@ -3209,6 +3212,10 @@
+         for (uint32_t mode = 0; mode < 3; mode += 1)
+         {
+             const bool violation = mode != 1;
++            const bool late = mode == 2 && fixture->translation_unit_end;
++            const uint32_t expected_line = late ? 2 : 1;
++            const uint32_t expected_column = late ? 12 : fixture->column;
++            const char* expected_message = late ? "expected parameter declarator" : fixture->message;
+             const char* source = violation ? fixture->violation : fixture->valid;
+             char path[4300];
+             snprintf(path, sizeof(path), "%s/semantic-%u-%u.c", directory, i, mode);
+@@ -3227,7 +3234,7 @@
+             char description[1024];
+             snprintf(description, sizeof(description), "semantic %u/%u: recorded clang message and column (%u: %s)", i, mode, oracle.column, oracle.message);
+             check_test_expect(test, ready && oracle.rejected == violation && (!violation ||
+-                              (oracle.line == 1 && oracle.column == fixture->column && strcmp(oracle.message, fixture->message) == 0)), description);
++                              (oracle.line == expected_line && oracle.column == expected_column && strcmp(oracle.message, expected_message) == 0)), description);
+             if (ready)
+             {
+                 oracle.check_diagnostic = violation;
+@@ -3241,7 +3248,7 @@
+                     const int status = check_test_driver_spawn(command, &text);
+                     const char* error = text != NULL ? strstr(text, ": error: ") : NULL;
+                     char expected[4800];
+-                    snprintf(expected, sizeof(expected), "%s:1:%u: error: %s", path, fixture->column, fixture->message);
++                    snprintf(expected, sizeof(expected), "%s:%u:%u: error: %s", path, expected_line, expected_column, expected_message);
+                     const char* located = error;
+                     while (located != NULL && located > text && located[-1] != '\n')
+                     {
+--- a/src/buster/compiler/c_check_enum_input.c
++++ b/src/buster/compiler/c_check_enum_input.c
+@@ -251,7 +251,8 @@
+             valid = old == 0 || reader->bindings.depth[old - 1] != depth;
+             if (!valid)
+             {
+-                check_input_report(reader, name, CHECK_INPUT_REDECLARATION);
++                const CheckInputMessage message = reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR ? CHECK_INPUT_ENUMERATOR_REDEFINITION : CHECK_INPUT_REDECLARATION;
++                check_input_report_subject(reader, name, message, reader->bindings.declaration[old - 1]);
+             }
+             else
+             {
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -221,6 +221,7 @@
+     CHECK_INPUT_BREAK,
+     CHECK_INPUT_CONTINUE,
+     CHECK_INPUT_INCOMPLETE_TENTATIVE,
++    CHECK_INPUT_ENUMERATOR_REDEFINITION,
+ } CheckInputMessage;
+ 
+ static const char* const check_input_messages[] =
+@@ -338,6 +339,7 @@
+     "'break' statement not in loop or switch statement",
+     "'continue' statement not in loop statement",
+     "tentative definition has incomplete type",
++    "redefinition of enumerator",
+ };
+ 
+ // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
+--- a/src/buster/compiler/c_check_repair.c
++++ b/src/buster/compiler/c_check_repair.c
+@@ -439,7 +439,10 @@
+                  (report->message == CHECK_INPUT_REDECLARATION && ((kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_LABEL)) ||
+                  // The source reader proves the absence of an enclosing loop/switch from the original control
+                  // headers. Appending closing braces cannot create such an enclosing statement around this use.
+-                 (report->message == CHECK_INPUT_DECLARATION && ((role == PARSE_ROLE_RETURN && (kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE)) || asm_name)) ||
++                 (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) ||
++                 (role == PARSE_ROLE_RETURN && ((report->message == CHECK_INPUT_BREAK && kind == PARSE_KIND_BREAK) ||
++                                               (report->message == CHECK_INPUT_CONTINUE && kind == PARSE_KIND_CONTINUE))) ||
++                 (report->message == CHECK_INPUT_DECLARATION && asm_name) ||
+                  (report->message == CHECK_INPUT_RETURN && kind == PARSE_KIND_RETURN);
+         // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
+         // cannot supply the non-asm body constraint, which remains outside this whitelist.
+--- a/src/buster/compiler/c_check_repair_test.c
++++ b/src/buster/compiler/c_check_repair_test.c
+@@ -393,6 +393,17 @@
+     kinds[1] = PARSE_KIND_PLUS;
+     input.message = CHECK_INPUT_DECLARATION;
+     check_test_expect(test, !check_repair_input_report(&repair, &input), "repair does not infer declaration diagnostics from synthetic closure");
++    kinds[0] = PARSE_KIND_BREAK;
++    roles[0] = PARSE_ROLE_RETURN;
++    input.message = CHECK_INPUT_BREAK;
++    check_test_expect(test, check_repair_input_report(&repair, &input), "repair retains an original break outside a loop or switch");
++    input.message = CHECK_INPUT_CONTINUE;
++    check_test_expect(test, !check_repair_input_report(&repair, &input), "repair checks the transfer message against its original keyword");
++    kinds[0] = PARSE_KIND_CONTINUE;
++    check_test_expect(test, check_repair_input_report(&repair, &input), "repair retains an original continue outside a loop");
++    roles[0] = PARSE_ROLE_OPERAND;
++    check_test_expect(test, !check_repair_input_report(&repair, &input), "repair requires the original transfer statement role");
++    kinds[0] = PARSE_KIND_IDENTIFIER;
+     input.message = CHECK_INPUT_RESOURCE;
+     check_test_expect(test, !check_repair_input_report(&repair, &input), "repair does not replace a syntax error with a resource failure");
+     input = (CheckInputReport){ .token = 3, .message = CHECK_INPUT_UNDECLARED };
+--- a/src/buster/compiler/c_check_semantic_diagnostic.c
++++ b/src/buster/compiler/c_check_semantic_diagnostic.c
+@@ -50,6 +50,10 @@
+             result = check_warning_text(scratch, "non-void function '%.*s' should return a value [-Wreturn-mismatch]",
+                                         (int)function_name.length, function_name.pointer);
+         }
++    }
++    else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
++    {
++        result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
+     }
+     else if (report->message == CHECK_INPUT_REDECLARATION && token < count && name.length != 0)
+     {
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -61,6 +61,7 @@
+         case CHECK_INPUT_BREAK: result = "'break' statement not in loop or switch statement"; break;
+         case CHECK_INPUT_CONTINUE: result = "'continue' statement not in loop statement"; break;
+         case CHECK_INPUT_INCOMPLETE_TENTATIVE: result = "tentative definition has incomplete type"; break;
++        case CHECK_INPUT_ENUMERATOR_REDEFINITION: result = "redefinition of enumerator"; break;
+         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
+         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
+         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
