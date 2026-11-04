@@ -176,7 +176,10 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
                 batch.forwarded[lane] = ir_optimize_test_random(test) & 1;
                 batch.flags[lane] = ir_optimize_test_random(test) & BUSTER_IR_VOLATILE;
                 const bool memory = batch.position[lane] == 0 && (batch.op[lane] == IR_LOAD || batch.op[lane] == IR_STORE);
-                const bool forward = batch.position[lane] == 0 && (batch.op[lane] == IR_COPY || batch.op[lane] == IR_BITCAST || batch.op[lane] == IR_ADDRESS) && batch.forwarded[lane] != 0;
+                // #1282: an address's integer and its pointer again forward it (their roots come with `flagged` alone).
+                const bool forward = batch.position[lane] == 0 &&
+                                     (batch.op[lane] == IR_COPY || batch.op[lane] == IR_BITCAST || batch.op[lane] == IR_ADDRESS || batch.op[lane] == IR_PTRTOINT || batch.op[lane] == IR_INTTOPTR) &&
+                                     batch.forwarded[lane] != 0;
                 const bool escaped = (!memory && !forward) || (memory && (batch.flags[lane] & BUSTER_IR_VOLATILE) != 0);
                 expected |= (uint16_t)escaped << lane;
             }
