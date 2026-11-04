@@ -15484,8 +15484,18 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     return !error;
 }
 
+// The place and enclosing liveness of an operator. Reductions restore this state before another operator is
+// read, so &&, || and both arms of ?: suppress evaluation warnings without skipping syntax or losing signedness.
+typedef struct PPExpressionContext PPExpressionContext;
+struct PPExpressionContext
+{
+    uint32_t location;
+    uint32_t origin;
+    bool live;
+};
+
 // Applies an operator to the values on top of the stack (two for a binary one, three for ?:, which is COLON here).
-static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location)
+static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location, PPExpressionContext context)
 {
     bool result = true;
     const bool unary = operator == PP_OPERATOR_PLUS || operator == PP_OPERATOR_MINUS || operator == PP_OPERATOR_NOT || operator == PP_OPERATOR_COMPLEMENT;
@@ -15524,6 +15534,24 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
         PPValue r = { .is_unsigned = is_unsigned, .division_by_zero = a.division_by_zero || b.division_by_zero };
         const int64_t sa = (int64_t)a.bits;
         const int64_t sb = (int64_t)b.bits;
+        // Shifts, logical operators and comma do not apply the usual arithmetic conversions. ?: keeps its
+        // common unsigned type above, but clang does not warn for the conversion of its selected arm itself.
+        const bool converts = operator != PP_OPERATOR_SHIFT_LEFT && operator != PP_OPERATOR_SHIFT_RIGHT &&
+                              operator != PP_OPERATOR_LOGICAL_AND && operator != PP_OPERATOR_LOGICAL_OR && operator != PP_OPERATOR_COMMA;
+        if (context.live && is_unsigned && converts && ((!a.is_unsigned && sa < 0) || (!b.is_unsigned && sb < 0)))
+        {
+            const uint32_t saved_origin = pp->diagnostic_origin;
+            pp->diagnostic_origin = context.origin;
+            if (!a.is_unsigned && sa < 0)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
+            }
+            if (!b.is_unsigned && sb < 0)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
+            }
+            pp->diagnostic_origin = saved_origin;
+        }
         switch (operator)
         {
             case PP_OPERATOR_MULTIPLY: r.bits = a.bits * b.bits; break;
@@ -15602,10 +15630,12 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
     const uint32_t saved_origin = pp->diagnostic_origin;
     PPValue values[BUSTER_PP_EXPRESSION_DEPTH];
     uint8_t operators[BUSTER_PP_EXPRESSION_DEPTH];
+    PPExpressionContext contexts[BUSTER_PP_EXPRESSION_DEPTH];
     uint32_t value_count = 0;
     uint32_t operator_count = 0;
     bool valid = true;
     bool expect_operand = true;
+    bool live = true;
     for (uint32_t i = begin; valid && i < end; i += 1)
     {
         const uint8_t kind = tokens->kinds[i];
@@ -15621,11 +15651,13 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             if (kind == C_TOKEN_PLUS || kind == C_TOKEN_MINUS || kind == C_TOKEN_EXCLAIM || kind == C_TOKEN_TILDE)
             {
                 operators[operator_count] = kind == C_TOKEN_PLUS ? PP_OPERATOR_PLUS : kind == C_TOKEN_MINUS ? PP_OPERATOR_MINUS : kind == C_TOKEN_EXCLAIM ? PP_OPERATOR_NOT : PP_OPERATOR_COMPLEMENT;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_L_PAREN)
             {
                 operators[operator_count] = PP_OPERATOR_PAREN;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_NUMERIC_CONSTANT || kind == BUSTER_PP_KIND_INTEGER)
@@ -15692,14 +15724,19 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_PAREN)
             {
                 operator_count -= 1;
-                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                live = contexts[operator_count].live;
+                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
             }
             if (valid && operator_count == 0)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "unbalanced ')' in preprocessor expression");
                 valid = false;
             }
-            operator_count -= valid;
+            if (valid)
+            {
+                live = contexts[operator_count - 1].live;
+                operator_count -= 1;
+            }
         }
         else
         {
@@ -15722,7 +15759,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                         break;
                     }
                     operator_count -= 1;
-                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                    live = contexts[operator_count].live;
+                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                 }
                 // clang parses a #if line from ?:'s precedence on, so a comma is only an operator inside parentheses or
                 // between a '?' and its ':' (`#if 1, 2` is an error, `#if (1, 2)` isn't). Comma binds loosest, so the
@@ -15739,7 +15777,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_QUESTION && operators[operator_count - 1] != PP_OPERATOR_PAREN)
                     {
                         operator_count -= 1;
-                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                        live = contexts[operator_count].live;
+                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                     }
                     if (valid && (operator_count == 0 || operators[operator_count - 1] != PP_OPERATOR_QUESTION))
                     {
@@ -15749,12 +15788,22 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     if (valid)
                     {
                         operators[operator_count - 1] = PP_OPERATOR_COLON;
+                        live = contexts[operator_count - 1].live && value_count >= 2 && values[value_count - 2].bits == 0;
                     }
                 }
                 else if (valid)
                 {
                     operators[operator_count] = (uint8_t)operator;
+                    contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                     operator_count += 1;
+                    if (operator == PP_OPERATOR_LOGICAL_AND || operator == PP_OPERATOR_QUESTION)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits != 0;
+                    }
+                    else if (operator == PP_OPERATOR_LOGICAL_OR)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits == 0;
+                    }
                 }
                 expect_operand = true;
             }
@@ -15776,7 +15825,7 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
         }
         else
         {
-            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location);
+            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location, contexts[operator_count]);
         }
     }
     if (valid && value_count != 1)

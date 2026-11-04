@@ -1423,6 +1423,44 @@ static const PPTestFile pp_test_files_header_tails[] = {
 _Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 static const PPTestCase pp_test_cases[] = {
+    // Negative-to-unsigned conversions (#1291): all converting operators on both sides, live contexts, and
+    // controls. Both kernels check the warning counts; --clang checks the values and warning-policy outcomes.
+    { "#if negative conversions for each arithmetic, comparison and bitwise operator",
+      "#if -3 * 2u\ncase_0\n#endif\n#if 2u * -3\ncase_1\n#endif\n#if -3 / 2u\ncase_2\n#endif\n#if 2u / -3\ncase_3\n#endif\n"
+      "#if -3 % 2u\ncase_4\n#endif\n#if 2u % -3\ncase_5\n#endif\n#if -3 + 2u\ncase_6\n#endif\n#if 2u + -3\ncase_7\n#endif\n"
+      "#if -3 - 2u\ncase_8\n#endif\n#if 2u - -3\ncase_9\n#endif\n#if -3 < 2u\ncase_10\n#endif\n#if 2u < -3\ncase_11\n#endif\n"
+      "#if -3 <= 2u\ncase_12\n#endif\n#if 2u <= -3\ncase_13\n#endif\n#if -3 > 2u\ncase_14\n#endif\n#if 2u > -3\ncase_15\n#endif\n"
+      "#if -3 >= 2u\ncase_16\n#endif\n#if 2u >= -3\ncase_17\n#endif\n#if -3 == 2u\ncase_18\n#endif\n#if 2u == -3\ncase_19\n"
+      "#endif\n#if -3 != 2u\ncase_20\n#endif\n#if 2u != -3\ncase_21\n#endif\n#if -3 & 2u\ncase_22\n#endif\n#if 2u & -3\ncase_23\n"
+      "#endif\n#if -3 ^ 2u\ncase_24\n#endif\n#if 2u ^ -3\ncase_25\n#endif\n#if -3 | 2u\ncase_26\n#endif\n#if 2u | -3\ncase_27\n"
+      "#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_11\ncase_13\ncase_14\ncase_16\ncase_20\ncase_21\ncase_24\ncase_25\ncase_26\ncase_27\n", false, 28 },
+    { "#if signed, nonnegative and already unsigned controls",
+      "#if -3 < 0\ncase_0\n#endif\n#if 3 < 4u\ncase_1\n#endif\n#if 0u < 18446744073709551615u\ncase_2\n#endif\n#if -1u > 0\ncase_3\n"
+      "#endif\n#if -1 + -2 == -3\ncase_4\n#endif\n#if ~0u > 0\ncase_5\n#endif\n#if (-8 >> 1u) == -4\ncase_6\n#endif\n#if (-1 && 1u)\n"
+      "case_7\n#endif\n#if (0u || -1)\ncase_8\n#endif\n#if (-1, 1u)\ncase_9\n#endif\n#if (1u, -1)\ncase_10\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_10\n", false, 0 },
+    { "#if conditional common type without a conversion warning",
+      "#if (1 ? -1 : 0u) > 0\ncase_0\n#endif\n#if (0 ? 0u : -2) > 0\ncase_1\n#endif\n#if (0 ? -1 : 0u) == 0\ncase_2\n#endif\n"
+      "#if (1 ? 0u : -2) == 0\ncase_3\n#endif\n#if (0 ? 0u : (1 ? -1 : -2)) > 0\ncase_4\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\n", false, 0 },
+    { "#if conversions in unevaluated operands stay silent",
+      "#if 0 && (-1 > 0u)\ncase_0\n#endif\n#if 1 || (0u < -2)\ncase_1\n#endif\n#if 0 ? (-1 + 1u) : 1\ncase_2\n#endif\n"
+      "#if 1 ? 1 : (1u + -1)\ncase_3\n#endif\n#if 0 && (1 ? (-1 > 0u) : (0u < -2))\ncase_4\n#endif\n#if 1 || (0 ? (0u < -1) : (-2 > 0u))\n"
+      "case_5\n#endif\n#if 0 && (1 / 0 + (-1 > 0u))\ncase_6\n#endif\n#if 1 || (1 / 0 + (0u < -2))\ncase_7\n#endif\n",
+      0, "c17", "case_1\ncase_2\ncase_3\ncase_5\ncase_7\n", false, 0 },
+    { "#if conversion liveness restored across precedence and conditional nesting",
+      "#if 0 && (-1 > 0u) || (-2 > 0u)\ncase_0\n#endif\n#if (0 && (-1 > 0u)) + (-3 > 0u)\ncase_1\n#endif\n#if 1 ? (-1 > 0u) : (-2 > 0u)\n"
+      "case_2\n#endif\n#if 0 ? (-1 > 0u) : (-2 > 0u)\ncase_3\n#endif\n#if 0 ? (-1 > 0u) : 1 ? (0u < -2) : (-3 > 0u)\ncase_4\n#endif\n"
+      "#if 1 ? (0 ? (-1 > 0u) : (-2 > 0u)) : (-3 > 0u)\ncase_5\n#endif\n#if (1 || (-1 > 0u)) && (0u < -2)\ncase_6\n#endif\n"
+      "#if ((0u < -1) ? -2 : 3) > 0u\ncase_7\n#endif\n#if (-1 > 0u) && (-2 > 0u)\ncase_8\n#endif\n#if -'A' > 0u\ncase_9\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\n", false, 12 },
+    { "#if negative conversions become errors", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", 0, true, 0, "-Werror", .errors = 2 },
+    { "#if negative conversion warnings are suppressed by -w", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 0, "-w -Werror", .errors = 0 },
+    { "#if negative conversion warnings can be demoted", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Werror -Wno-error", .errors = 0 },
+    { "#if negative conversions are not sign-compare warnings", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Wno-sign-compare -Wno-sign-conversion", .errors = 0 },
+    { "#if conversion macros and evaluated #elif", "#define NEG (-1)\n#define GT >\n#define COMPARE(a,b) ((a) > (b))\n#if NEG GT 0u\nmacro_left\n#endif\n#if COMPARE(0u, -2)\nmacro_right\n#endif\n#if 0\n#if -3 > 0u\nskipped\n#endif\n#elif 0u < -4\nelif_taken\n#elif -5 > 0u\nskipped_elif\n#endif\n", 0, "c17", "macro_left\nelif_taken\n", false, 3 },
+    { "#if dead conversion operand still checks syntax", "#if 0 && (-1 > 0u + )\nwrong\n#endif\n", 0, "c17", 0, true, 0 },
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
     // placemarkers, and variadic macros (the expected text is clang's output).
     { "rescanning, redefinitions and painting", "#define n 4\n#define twice(v) twice(n + (v))\n#undef n\n#define n 5\n#define alias twice\n#define box box{1}\n#define open alias(-\n#define call(f) f(k)\n#define k 7,8\n#define id(v) v\n#define kw() long\n#define one(v) v\n#define join(p,q) p ## q\n#define quote(v) # v\ntwice(a-1) * twice(twice(box)) + id(id(alias)(2) - id)(3);\nalias(n*(9,10)-k) & open 6) | call\n(twice)^call(call);\nkw() arr[one()] = { one(4), join(5,6), join(7,), join(,8), join(,) };\nchar s[2][4] = { quote(abc), quote() };\n",
@@ -1614,7 +1652,7 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\nX\n", false, 2 },
     { "#if arithmetic", "#if -1 < 0u\nunsigned\n#endif\n#if (2 || 1/0) && (0 ? 1/0 : 3) == 3 && 0x10 == 16 && 010 == 8 && 0b101 == 5 && 1'000 == 1000 && 'A' == 65 && '\\377' < 0\nok\n#endif\n"
                      "#if (-9223372036854775807 - 1) / -1 == (-9223372036854775807 - 1) && 18446744073709551615u == -1\nwraps\n#endif\n#if 1 ? 2 : 3 ? 4 : 5\nternary\n#endif\n",
-      0, "c23", "ok\nwraps\nternary\n", false },
+      0, "c23", "ok\nwraps\nternary\n", false, 2 },
     { "#elif chains and nesting", "#define A 2\n#if A == 1\none\n#elif A == 2\n#ifdef A\ntwo\n#else\nnot\n#endif\n#elif 1/0\nthree\n#else\nfour\n#endif\n#ifndef B\nb\n#elifdef A\nno\n#endif\n",
       0, "c23", "two\nb\n", false },
     // Argument scanning past its fast path's limits: an argument across two 64-token blocks, parentheses nested 70 deep,
