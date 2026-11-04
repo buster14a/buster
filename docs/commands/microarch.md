@@ -40,7 +40,9 @@ traffic. It changes no host setting and needs no root. It needs
   - **Chunks.** `run.sh` asks `uarch check` about every run of a sweep or metrics
     chunk before running it. A complete chunk is skipped. A chunk with a recorded
     failure fails the step again on every rerun. `RETRY_FAILED=1` removes the
-    failed runs' records first, so that they run again.
+    failed runs' records first, so that they run again. `check --names CATALOG`
+    also compares each recorded entry (`NNNN.event`, `NNNN.metric`) with the
+    catalog's line of its number; a chunk with one that differs fails the step.
 - `run.sh` holds the steps (listed in its header). Each step, or each chunk of a
   long one, takes the host's lock or core grant itself, for that chunk alone.
   Every step returns its real status; the first step that fails stops the run
@@ -50,6 +52,13 @@ traffic. It changes no host setting and needs no root. It needs
     `CSV.done` is written after both succeed. One that is unfinished runs again
     whole. Any fanout batches it measured lose their completion records first, so
     that they run inside the new measurement instead of being skipped under it.
+  - **Catalogs.** `env` writes perf's lists of core events and metrics as
+    `env/core-events.txt` and `env/metrics.txt`. The sweep's and the metrics'
+    results are numbered by those lines, so a catalog is frozen once a result uses
+    it. A perf that lists something else (after an upgrade, say) writes
+    `NAME.live.txt` beside it and fails `env`; `KEEP_CATALOG=1` keeps measuring
+    the frozen catalog, and new results (an empty `results/HOST`) take the new
+    list. A catalog that numbers no result follows perf's list.
 - `hosts/zen4-7940hs.sh` and `hosts/zen5-9700x.sh` hold each host's hold
   functions, CPUs, dispatch width, the event names that differ between
   generations, and chunk sizes. A new host needs a profile like these.
@@ -71,7 +80,14 @@ compilers, a fake perf, a fake tcc and a two-commit fake checkout. It checks:
 - that sweep and metrics chunks report recorded failures, and `RETRY_FAILED`;
 - that a finished `uncore` measurement is kept and an unfinished one is measured
   again with its batches;
-- the commits `build-commit` and `setup` reuse.
+- the commits and dirty states `build-commit` and `setup` reuse, and the
+  `self-main.i` that `setup` refuses (another checkout's, or made from other
+  predefines) and makes again;
+- that `env` keeps a catalog that numbers results when perf's list changes, even
+  to a shifted list of the same length, and that `sweep` refuses results numbered
+  by another catalog;
+- that `summarize` passes a campaign without some steps and fails when a reducer
+  fails.
 
 ```sh
 mkdir -p build/microarch
@@ -88,11 +104,16 @@ prepares it:
 - links the frozen corpus (`CORPUS`, the 9700X's copy, or `tools/ci/fetch-corpus.sh`);
 - builds this checkout (`REPOSITORY`, this one by default) for each of
   `BUILD_ARCHES` (default `znver4 znver5 x86-64`) through the host's build hold,
-  into `bin/compiler-ARCH`. `bin/compiler-ARCH.commit` records the commit, with
-  `-dirty` when tracked files differ from it, and an existing build is reused only
-  when that file names the checkout's commit;
-- writes `predefines-znver5.h` and `self-main.i`, the compiler's `main.c`
-  preprocessed by `bin/compiler-znver4`.
+  into `bin/compiler-ARCH`. `bin/compiler-ARCH.commit` records the commit; when
+  tracked files differ from it, `-dirty-` and the first 16 hex digits of the
+  diff's SHA-256 follow. An existing build is reused only when that file names the
+  checkout's commit and diff;
+- writes `predefines-znver5.h` (kept until removed, like the corpus);
+- writes `self-main.i`, the compiler's `main.c` preprocessed by
+  `bin/compiler-znver4` (`SELF_PREPROCESSOR`), and `self-main.i.source`, its key:
+  the checkout, the preprocessor's build and hash, the predefines' hash and the
+  options. A `self-main.i` whose key differs (another checkout's, or one made
+  from other predefines) fails `setup` until it is removed.
 
 `MICROARCH_TITLE` and `MICROARCH_LINK` (and `MICROARCH_OWNER` on the 9700X) name
 the session in `cores status` and the lock's owner file.
@@ -103,8 +124,9 @@ MICROARCH_TITLE=... MICROARCH_LINK=... tools/microarch/run.sh tools/microarch/ho
 ```
 
 To run identical executables and input everywhere, build once and copy the run
-root's `bin/` and `self-main.i` to the other host before its `setup` (which
-then builds nothing). On the 9700X, start the run detached from a clone in
+root's `bin/`, `predefines-znver5.h`, `self-main.i` and `self-main.i.source` to
+the other host, at the same commit, before its `setup` (which then builds
+nothing). On the 9700X, start the run detached from a clone in
 `~/buster-fast-bench/<task>-<agent>/`, and stop it by its PID file, never by a
 pattern ([benchpress](benchpress.md)):
 
@@ -128,6 +150,7 @@ tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/
 
 | step | what | runs |
 | --- | --- | --- |
+| `env` | the host's settings, tools and hashes, and perf's catalogs (frozen once they number results; see Catalogs) | 1 |
 | `validate` | each build's object, `-E` output, default-lanes object and diagnostics, from fresh outputs; a failed command stops the step, and outputs that differ between builds fail it (diagnostics only warn with `VALIDATE_DIAGNOSTICS=warn`, for #1339) | 1 |
 | `time`, `time-self` | whole processes (wall, rusage), with `--time-stages` runs | 11 / 3 rotated rounds |
 | `groups`, `groups-self` | six perf stat groups of at most five counters: user and kernel cycles and instructions; top-down level 1; level 2 (with the frontend stall at `cmask` = width and microcoded ops); branches; frontend; memory | 5 / 2 per build and workload |
@@ -140,6 +163,7 @@ tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/
 | `uncore` | UMC CAS commands and activates | 8 compiles; 2 batches of 8 |
 | `ab`, `ab-self` | `AB_BUILDS` against each other on `sq-c`/`sq-syn`, or on `self-syn`, with the stage clock and counters, into `AB_NAME` | 11 / 3 rotated rounds |
 | `generic-scaling` | `AB_BUILDS` on generated units of 250 to 4,000 `_Generic` selections | 3 per size |
+| `summarize` | every table from what the run recorded; a step that didn't run is skipped, and a reducer that fails fails the step | 1 |
 
 `build-commit NAME COMMIT ARCH[,ARCH...]` builds `bin/compiler-NAME-ARCH` from
 `git archive COMMIT` under the build hold, for the A/B steps. It resolves `COMMIT`

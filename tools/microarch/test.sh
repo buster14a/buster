@@ -16,7 +16,13 @@
 # - a finished uncore measurement isn't measured again, and an interrupted one
 #   runs its fanout batches again inside the new measurement, one row per batch;
 # - build-commit refuses a name that holds another commit, and setup refuses a
-#   build of another commit than the checkout's.
+#   build of another commit or another dirty state than the checkout's;
+# - setup refuses a self-main.i made from another checkout or other predefines,
+#   and makes it again from the checkout once removed;
+# - env keeps a catalog that numbers results when perf's list changes (a shifted
+#   list of the same length included) unless no result uses it, and sweep refuses
+#   results numbered by another catalog;
+# - summarize passes a campaign without some steps and fails when a reducer fails.
 # uarch.c's own checks are `uarch test`.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -81,6 +87,7 @@ chmod +x "$work/fake/tcc"
 # fails when behaviour/perf says "script"; `report` prints one row. `stat` runs its
 # command and writes one counted line per event or metric; it exits 1, counted,
 # when its events name behaviour/stat-fail's word (a failed run, not a refusal).
+# `list` lists behaviour/events and behaviour/metrics.
 cat > "$work/fake/perf" <<'EOF'
 #!/usr/bin/env bash
 command=$1
@@ -103,6 +110,13 @@ case $command in
             *) echo "  100003 cycles:u:  d822e8 f" ;;
         esac ;;
     report) echo "    100.00%  compiler  [.] f" ;;
+    list)
+        if [[ ${1:-} == --raw-dump ]]; then
+            cat "$FAKE_BEHAVIOUR/events" 2>/dev/null | tr '\n' ' '
+            echo
+        elif [[ ${1:-} == -j && ${2:-} == metrics ]]; then
+            cat "$FAKE_BEHAVIOUR/metrics" 2>/dev/null | sed 's/.*/    "MetricName": "&",/'
+        fi ;;
     stat)
         out=""
         spec=""
@@ -229,6 +243,41 @@ METRIC_WORKLOADS=sq-c run metrics
 METRIC_WORKLOADS=sq-c run metrics
 expect '[[ $status -ne 0 ]]' "metrics: the rerun fails again on the recorded failure"
 
+# The catalogs that number the sweep's and the metrics' results.
+reset
+catalog() { paste -sd ' ' "$results/env/$1.txt"; }
+printf 'e1\ne2\ne3\n' > "$work/behaviour/events"
+printf 'm1\nm2\n' > "$work/behaviour/metrics"
+run env
+expect '[[ $status -eq 0 && $(catalog core-events) == "e1 e2 e3" && $(catalog metrics) == "m1 m2" ]]' "env: writes perf's lists as the catalogs"
+printf 'm0\nm1\nm2\n' > "$work/behaviour/metrics"
+run env
+expect '[[ $status -eq 0 && $(catalog metrics) == "m0 m1 m2" ]]' "env: a catalog that numbers no result follows perf's list"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -eq 0 ]]' "sweep: measures the catalog"
+# A shifted list of the same length: every entry's number changes.
+printf 'e0\ne1\ne2\n' > "$work/behaviour/events"
+run env
+expect '[[ $status -ne 0 && $(catalog core-events) == "e1 e2 e3" ]]' "env: a changed list doesn't replace a catalog that numbers results"
+expect 'grep -q "core-events.txt numbers recorded results" "$results/run.log"' "env: the changed catalog is logged"
+KEEP_CATALOG=1 run env
+expect '[[ $status -eq 0 && $(catalog core-events) == "e1 e2 e3" ]]' "env: KEEP_CATALOG=1 keeps the frozen catalog"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -eq 0 ]]' "sweep: resumes on the frozen catalog"
+cp "$results/env/core-events.live.txt" "$results/env/core-events.txt"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -ne 0 ]] && grep -q "recorded entries aren'"'"'t core-events.txt'"'"'s lines" "$results/run.log"' "sweep: results numbered by another catalog are refused"
+
+# summarize reduces what a partial campaign has, and fails when a reducer fails.
+reset
+run time
+run summarize
+expect '[[ $status -eq 0 && -f $results/time/time-summary.tsv && -f $results/stages-a.tsv ]]' "summarize: a campaign without the self steps passes"
+rm -f -- "$results/time/time-summary.tsv"
+mkdir "$results/time/time-summary.tsv"
+run summarize
+expect '[[ $status -ne 0 ]]' "summarize: a failed reducer fails the step"
+
 # uncore: one measurement with its batches.
 reset
 UNCORE=1 run uncore
@@ -248,9 +297,18 @@ reset
 repository=$work/repository
 mkdir -p "$repository"
 git -C "$repository" init -q
+# Its compiler prints VERSION, or writes "preprocessed VERSION" to its -o file.
 cat > "$repository/build.sh" <<'EOF'
 #!/usr/bin/env bash
-cd "$(dirname "$0")" && mkdir -p build && printf '#!/bin/sh\necho %s\n' "$(cat VERSION)" > build/compiler && chmod +x build/compiler
+cd "$(dirname "$0")" || exit 1
+mkdir -p build
+{
+    echo '#!/usr/bin/env bash'
+    echo "version=$(cat VERSION)"
+    echo 'out=""; while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && out=$2; shift; done'
+    echo 'if [[ -n $out ]]; then echo "preprocessed $version" > "$out"; else echo "$version"; fi'
+} > build/compiler
+chmod +x build/compiler
 EOF
 chmod +x "$repository/build.sh"
 echo first > "$repository/VERSION"
@@ -271,14 +329,42 @@ REPOSITORY=$repository run build-commit candidate "$second" znver4
 expect '[[ $status -ne 0 && $("$ROOT/bin/compiler-candidate-znver4") == first ]]' "build-commit: a build of another commit under the name is refused"
 cp "$ROOT/bin/compiler-candidate-znver4" "$ROOT/bin/compiler-znver4"
 cp "$ROOT/bin/compiler-candidate-znver4.commit" "$ROOT/bin/compiler-znver4.commit"
-touch "$ROOT/self-main.i" "$ROOT/predefines-znver5.h"
-echo x > "$ROOT/self-main.i"
-echo x > "$ROOT/predefines-znver5.h"
-REPOSITORY=$repository CORPUS=$work BUILD_ARCHES=znver4 run setup
+echo '#define FAKE 1' > "$ROOT/predefines-znver5.h"
+setup() { REPOSITORY=$repository CORPUS=$work BUILD_ARCHES=znver4 run setup; }
+setup
 expect '[[ $status -ne 0 ]]' "setup: a build of another commit than the checkout's is refused"
 rm -f -- "$ROOT/bin/compiler-znver4" "$ROOT/bin/compiler-znver4.commit"
-REPOSITORY=$repository CORPUS=$work BUILD_ARCHES=znver4 run setup
+setup
 expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-znver4") == second && $(cat "$ROOT/bin/compiler-znver4.commit") == "$second" ]]' "setup: builds the checkout and records its commit"
+expect '[[ $(cat "$ROOT/self-main.i") == "preprocessed second" && -s $ROOT/self-main.i.source ]]' "setup: the checkout's build preprocesses self-main.i, keyed"
+setup
+expect '[[ $status -eq 0 && $(cat "$ROOT/self-main.i") == "preprocessed second" ]]' "setup: the checkout's own self-main.i is reused"
+
+# Another checkout: its build is made once the old one is removed, as setup says,
+# and the old self-main.i is refused until it is removed too.
+git -C "$repository" checkout -q "$first"
+rm -f -- "$ROOT/bin/compiler-znver4" "$ROOT/bin/compiler-znver4.commit"
+setup
+expect '[[ $status -ne 0 && $("$ROOT/bin/compiler-znver4") == first && $(cat "$ROOT/self-main.i") == "preprocessed second" ]]' "setup: another checkout's self-main.i is refused"
+expect 'grep -q "self-main.i was made from" "$results/run.log"' "setup: the refused self-main.i is logged"
+rm -f -- "$ROOT/self-main.i"
+setup
+expect '[[ $status -eq 0 && $(cat "$ROOT/self-main.i") == "preprocessed first" ]]' "setup: self-main.i is made again from the checkout"
+echo '#define OTHER 1' > "$ROOT/predefines-znver5.h"
+setup
+expect '[[ $status -ne 0 ]]' "setup: a self-main.i made from other predefines is refused"
+echo '#define FAKE 1' > "$ROOT/predefines-znver5.h"
+setup
+expect '[[ $status -eq 0 ]]' "setup: the predefines it was made from are accepted again"
+
+# Dirty states of the checkout: each names its diff.
+echo third > "$repository/VERSION"
+rm -f -- "$ROOT/bin/compiler-znver4" "$ROOT/bin/compiler-znver4.commit" "$ROOT/self-main.i"
+setup
+expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-znver4") == third && $(cat "$ROOT/bin/compiler-znver4.commit") == "$first"-dirty-* ]]' "setup: a dirty checkout's build records the commit and its diff"
+echo fourth > "$repository/VERSION"
+setup
+expect '[[ $status -ne 0 && $("$ROOT/bin/compiler-znver4") == third ]]' "setup: a build of another dirty state is refused"
 
 echo "microarch test.sh: $checks checks, $failures failed"
 [[ $failures -eq 0 ]]

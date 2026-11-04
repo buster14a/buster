@@ -941,20 +941,42 @@ static int command_metrics(int argc, char** argv)
     return result;
 }
 
-// check OUT sweep|metrics FROM TO RUNS [--retry-failed]: the state of a sweep's or
-// a metrics run's entries [FROM, TO) without running anything. Prints each failed
-// run and returns 0 when every run of every entry has its record and none failed,
-// 1 when every run has its record and some failed, 3 when a run has no record.
-// --retry-failed first removes each failed run's record and outputs, so that they
-// count as missing (3) and the next sweep or metrics command runs them again.
+// check OUT sweep|metrics FROM TO RUNS [--retry-failed] [--names CATALOG]: the
+// state of a sweep's or a metrics run's entries [FROM, TO) without running
+// anything. Prints each failed run and returns 0 when every run of every entry has
+// its record and none failed, 1 when every run has its record and some failed, 3
+// when a run has no record. --retry-failed first removes each failed run's record
+// and outputs, so that they count as missing (3) and the next sweep or metrics
+// command runs them again. With --names, every entry already started must be the
+// catalog's line of its index (its NNNN.event or NNNN.metric file): results are
+// kept by index, so a catalog that changed under them returns 4 before anything.
 static int command_check(int argc, char** argv)
 {
     int result = 0;
     bool sweep = argc >= 7 && strcmp(argv[3], "sweep") == 0;
     bool metrics = argc >= 7 && strcmp(argv[3], "metrics") == 0;
+    bool retry = false;
+    const char* names_path = NULL;
+    for (int a = 7; a < argc; a += 1)
+    {
+        if (strcmp(argv[a], "--retry-failed") == 0)
+        {
+            retry = true;
+        }
+        else if (strcmp(argv[a], "--names") == 0 && a + 1 < argc)
+        {
+            names_path = argv[a + 1];
+            a += 1;
+        }
+        else
+        {
+            sweep = false;
+            metrics = false;
+        }
+    }
     if (!sweep && !metrics)
     {
-        fprintf(stderr, "usage: uarch check OUT sweep|metrics FROM TO RUNS [--retry-failed]\n");
+        fprintf(stderr, "usage: uarch check OUT sweep|metrics FROM TO RUNS [--retry-failed] [--names CATALOG]\n");
         result = 2;
     }
     else
@@ -962,10 +984,25 @@ static int command_check(int argc, char** argv)
         size_t from = (size_t)atol(argv[4]);
         size_t to = (size_t)atol(argv[5]);
         int runs = atoi(argv[6]);
-        bool retry = argc > 7 && strcmp(argv[7], "--retry-failed") == 0;
         bool missing = false;
         bool failed = false;
-        for (size_t i = from; i < to; i += 1)
+        bool renamed = false;
+        if (names_path != NULL)
+        {
+            Strings names = read_lines(names_path);
+            for (size_t i = from; i < to; i += 1)
+            {
+                char name_path[BUSTER_UARCH_PATH_BYTES];
+                format_into(name_path, sizeof(name_path), "%s/%s/%04zu.%s", argv[2], argv[3], i, sweep ? "event" : "metric");
+                Strings recorded = read_lines(name_path);
+                if (recorded.count > 0 && (i >= names.count || strcmp(recorded.items[0], names.items[i]) != 0))
+                {
+                    printf("%s: %s, the catalog's line %zu is %s\n", name_path, recorded.items[0], i + 1, i < names.count ? names.items[i] : "missing");
+                    renamed = true;
+                }
+            }
+        }
+        for (size_t i = from; i < to && !renamed; i += 1)
         {
             for (int run = 0; run < runs; run += 1)
             {
@@ -996,7 +1033,7 @@ static int command_check(int argc, char** argv)
                 }
             }
         }
-        result = missing ? 3 : (failed ? 1 : 0);
+        result = renamed ? 4 : (missing ? 3 : (failed ? 1 : 0));
     }
     return result;
 }
@@ -2298,6 +2335,18 @@ static void test_resume(void)
         expect(command_check(8, retry) == 3 && !file_exists(path) && command_check(7, check) == 3, "check: --retry-failed removes the failed run's record");
         write_status(path, good, false);
         expect(command_check(7, check) == 0, "check: every run recorded, none failed");
+        char catalog[BUSTER_UARCH_PATH_BYTES];
+        format_into(catalog, sizeof(catalog), "%s/catalog.txt", directory);
+        write_text_atomic(catalog, "e1\ne2\n");
+        format_into(path, sizeof(path), "%s/sweep/0000.event", directory);
+        write_text_atomic(path, "e1\n");
+        format_into(path, sizeof(path), "%s/sweep/0001.event", directory);
+        write_text_atomic(path, "e2\n");
+        char* named[] = { "uarch", "check", directory, "sweep", "0", "2", "2", "--names", catalog, NULL };
+        expect(command_check(9, named) == 0, "check: entries that are the catalog's lines");
+        write_text_atomic(catalog, "e2\ne1\n");
+        char* reordered[] = { "uarch", "check", directory, "sweep", "0", "2", "2", "--names", catalog, NULL };
+        expect(command_check(9, reordered) == 4, "check: a reordered catalog of the same length is refused");
         nftw(directory, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
     }
 }

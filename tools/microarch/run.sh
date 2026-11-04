@@ -10,9 +10,11 @@
 # self-main.i, predefines-znver5.h, results/HOST and scratch/HOST; `setup`
 # makes it. Steps:
 #   setup        the run root: corpus link, builds of this checkout (BUILD_ARCHES),
-#                predefines-znver5.h, self-main.i and the uarch tool
+#                predefines-znver5.h, self-main.i (keyed by self-main.i.source)
+#                and the uarch tool
 #   build-commit NAME COMMIT ARCH[,ARCH...]  bin/compiler-NAME-ARCH from `git archive COMMIT`
-#   env          the host's identity (no lock: reads sysfs, perf's catalogs, hashes)
+#   env          the host's identity (no lock: reads sysfs, perf's catalogs, hashes);
+#                a catalog that numbers results stays frozen (KEEP_CATALOG)
 #   validate     every variant's outputs, hashed (the objects must be identical)
 #   time         whole-process wall time and rusage, 11 rotated rounds, with the
 #                compiler's --time-stages reports
@@ -37,15 +39,18 @@
 #   ab-self      AB_BUILDS on the main.c workload, 3 rotated rounds
 #   generic-scaling  -fsyntax-only of generated units of 250..4,000 _Generic
 #                selections for AB_BUILDS (#1341)
-#   summarize    the tables of every step's raw files
+#   summarize    the tables of every step's raw files (steps that didn't run are
+#                skipped; a reducer that fails fails the step)
 # SWEEP_WORKLOADS and METRIC_WORKLOADS (default "sq-c sq-syn") and the profile's
 # VARIANTS, SWEEP_VARIANTS and SELF_VARIANTS narrow a run. A sweep or metrics chunk
 # with a recorded failure fails the step again on every rerun; RETRY_FAILED=1 runs
 # its failed entries again. A build is reused only when its .commit file names the
-# commit asked for (build-commit) or the checkout's own (setup). REPOSITORY names
-# the checkout (this one by default). Each step, or each chunk
-# of one, takes the host's lock or core grant itself, for that chunk alone; no step
-# needs another's output except summarize.
+# commit asked for (build-commit) or the checkout's own (setup), and self-main.i only
+# when self-main.i.source names the checkout, preprocessor and predefines. A chunk
+# whose recorded entries aren't its catalog's lines fails the step. REPOSITORY
+# names the checkout (this one by default). Each step, or each chunk of one, takes
+# the host's lock or core grant itself, for that chunk alone; no step needs
+# another's output except summarize.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repository=${REPOSITORY:-$(cd "$here/../.." && pwd)}
@@ -544,21 +549,24 @@ inner_multi()
 # ---------------------------------------------------------------------------
 # Outer steps.
 
-# The checkout's commit, with "-dirty" when tracked files differ from it.
+# The checkout's commit; when tracked files differ from it, "-dirty-" and the
+# first 16 hex digits of the diff's SHA-256, so that two dirty states differ.
 checkout_identity()
 {
-    local head
+    local head diff
     head=$(git -C "$repository" rev-parse HEAD) || return 1
-    if [[ -n $(git -C "$repository" status --porcelain --untracked-files=no) ]]; then
-        head+=-dirty
+    if ! git -C "$repository" diff --quiet HEAD --; then
+        diff=$(git -C "$repository" diff --binary HEAD -- | sha256sum) || return 1
+        head+=-dirty-${diff:0:16}
     fi
     echo "$head"
 }
 
 # The run root from this checkout: the frozen corpus (CORPUS, the 9700X's copy, or
 # fetched into ROOT), each BUILD_ARCHES build of the checkout, the predefines and
-# the preprocessed main.c. Copy bin/ and self-main.i from one host to the others to
-# run identical executables and input everywhere.
+# the preprocessed main.c. Copy bin/, predefines-znver5.h and self-main.i with their
+# records (.commit, .source) from one host to the others to run identical
+# executables and input everywhere.
 step_setup()
 {
     local corpus=${CORPUS:-} arch
@@ -587,12 +595,53 @@ step_setup()
         cp "$repository/build/compiler" "bin/compiler-$arch"
         echo "$identity" > "bin/compiler-$arch.commit"
     done
-    [[ -s predefines-znver5.h ]] || clang -dM -E -march=znver5 -fwrapv -funsigned-char -x c /dev/null > predefines-znver5.h
-    if [[ ! -s self-main.i ]]; then
-        "bin/compiler-${SELF_PREPROCESSOR:-znver4}" --predefines predefines-znver5.h -march=znver5 "-I$repository/src" -fwrapv -funsigned-char \
-            -fno-strict-aliasing -E -o self-main.i "$repository/src/buster/compiler/main.c" || exit 2
+    # The predefines are kept until removed, like the corpus: the self workloads read
+    # them, and a copy from another host stays that host's.
+    if [[ ! -s predefines-znver5.h ]]; then
+        clang -dM -E -march=znver5 -fwrapv -funsigned-char -x c /dev/null > predefines-znver5.h.tmp || exit 2
+        mv -f predefines-znver5.h.tmp predefines-znver5.h || exit 2
+    fi
+    # self-main.i.source keys the preprocessed main.c to what made it: the checkout,
+    # the preprocessor's build and the predefines. One made from anything else is
+    # never measured as this checkout's.
+    local preprocessor=bin/compiler-${SELF_PREPROCESSOR:-znver4} options=(-march=znver5 -fwrapv -funsigned-char -fno-strict-aliasing -E) key binary predefines
+    binary=$(sha256sum < "$preprocessor") && predefines=$(sha256sum < predefines-znver5.h) || exit 2
+    key=$(printf 'checkout %s\npreprocessor %s %s %s\npredefines %s\noptions %s' "$identity" "${preprocessor#bin/}" \
+        "$(cat "$preprocessor.commit" 2>/dev/null)" "${binary%% *}" "${predefines%% *}" "${options[*]}")
+    if [[ -e self-main.i ]]; then
+        if [[ $(cat self-main.i.source 2>/dev/null) != "$key" ]]; then
+            log "setup: self-main.i was made from {$(paste -sd ';' self-main.i.source 2>/dev/null)}, this checkout's is {$(paste -sd ';' <<< "$key")}: remove it to make it again"
+            exit 2
+        fi
+    else
+        "$preprocessor" --predefines predefines-znver5.h "-I$repository/src" "${options[@]}" -o self-main.i.tmp "$repository/src/buster/compiler/main.c" || exit 2
+        [[ -s self-main.i.tmp ]] || { log "setup: $preprocessor wrote no self-main.i"; exit 2; }
+        # The key first: an interrupted setup leaves no self-main.i, and the next one makes it.
+        printf '%s\n' "$key" > self-main.i.source.tmp && mv -f self-main.i.source.tmp self-main.i.source && mv -f self-main.i.tmp self-main.i || exit 2
     fi
     log "setup: $(ls bin | tr '\n' ' ')"
+}
+
+# The sweep's and the metrics' results are numbered by the lines of their catalog,
+# NAME.txt, so a catalog is frozen once results use it. This perf's list
+# (NAME.live.txt) replaces it only while no result does (RESULTS, a glob, matches
+# nothing); otherwise a changed list fails the step, and KEEP_CATALOG=1 keeps
+# measuring the frozen catalog.
+freeze_catalog()
+{
+    local name=$1 results=$2 status=0
+    if [[ ! -f $name.txt ]] || cmp -s "$name.live.txt" "$name.txt"; then
+        mv -f "$name.live.txt" "$name.txt" || status=1
+    elif ! compgen -G "$results" > /dev/null; then
+        log "env: ${name##*/}.txt replaced by this perf's list; no results used it"
+        mv -f "$name.live.txt" "$name.txt" || status=1
+    elif [[ ${KEEP_CATALOG:-0} == 1 ]]; then
+        log "env: ${name##*/}.txt differs from this perf's list (${name##*/}.live.txt); KEEP_CATALOG=1 keeps measuring it"
+    else
+        log "env: ${name##*/}.txt numbers recorded results and differs from this perf's list (${name##*/}.live.txt): KEEP_CATALOG=1 keeps measuring it, or start new results"
+        status=1
+    fi
+    return $status
 }
 
 # bin/compiler-NAME-ARCH for each ARCH, built from `git archive COMMIT`. COMMIT is
@@ -631,7 +680,7 @@ step_build_commit()
 
 step_env()
 {
-    local dir="$OUT/env" c
+    local dir="$OUT/env" c status=0
     mkdir -p "$dir"
     uname -a > "$dir/uname.txt"
     lscpu > "$dir/lscpu.txt"
@@ -666,27 +715,35 @@ step_env()
     # perf lists tool and sensor names beside the core events; they don't count per thread.
     perf list --raw-dump pmu 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v / | grep -v '^drm-' \
         | grep -v -x -E 'core_wide|duration_time|has_pmem|num_cores|num_cpus|num_cpus_online|num_dies|num_packages|slots|smt_on|system_time|user_time' \
-        | sort -u > "$dir/core-events.txt"
-    perf list -j metrics 2>/dev/null | sed -n 's/.*"MetricName": "\([^"]*\)".*/\1/p' | sort -u > "$dir/metrics.txt"
+        | sort -u > "$dir/core-events.live.txt"
+    perf list -j metrics 2>/dev/null | sed -n 's/.*"MetricName": "\([^"]*\)".*/\1/p' | sort -u > "$dir/metrics.live.txt"
+    freeze_catalog "$dir/core-events" "$OUT/sweep-*/sweep/*.event" || status=1
+    freeze_catalog "$dir/metrics" "$OUT/metrics-*/metrics/*.metric" || status=1
     log "env: $(wc -l < "$dir/core-events.txt") core events, $(wc -l < "$dir/metrics.txt") metrics"
+    return $status
 }
 
 # Runs the chunks of a sweep or metrics step that aren't complete. uarch check reads
 # every run's record of the chunk: a complete chunk is skipped, a chunk with a
 # recorded failure fails the step (RETRY_FAILED=1 removes the failed runs' records
-# and runs them again), and an incomplete one is run under the hold.
+# and runs them again), and an incomplete one is run under the hold. A chunk whose
+# recorded entries aren't the catalog's lines of their numbers fails the step.
 run_chunks()
 {
-    local kind=$1 directory=$2 count=$3 chunk=$4 variant=$5 workload=$6 from to state retry=()
+    local kind=$1 directory=$2 count=$3 chunk=$4 variant=$5 workload=$6 from to state retry=() catalog=$OUT/env/core-events.txt
+    [[ $kind == metrics ]] && catalog=$OUT/env/metrics.txt
     [[ ${RETRY_FAILED:-0} == 1 ]] && retry=(--retry-failed)
     for ((from = 0; from < count; from += chunk)); do
         to=$((from + chunk < count ? from + chunk : count))
-        "$UARCH" check "$directory" "$kind" "$from" "$to" 2 "${retry[@]}" > "$SCRATCH/check.txt"
+        "$UARCH" check "$directory" "$kind" "$from" "$to" 2 "${retry[@]}" --names "$catalog" > "$SCRATCH/check.txt"
         state=$?
         case $state in
             0) continue ;;
             1)
                 log "$kind $variant $workload $from: $(grep -c . "$SCRATCH/check.txt") runs failed before (RETRY_FAILED=1 runs them again)"
+                return 1 ;;
+            4)
+                log "$kind $variant $workload $from: $(grep -c . "$SCRATCH/check.txt") recorded entries aren't ${catalog##*/}'s lines, first $(head -1 "$SCRATCH/check.txt")"
                 return 1 ;;
             3)
                 log "$kind $variant $workload $from"
@@ -716,18 +773,27 @@ step_metrics()
     done
 }
 
+# Reduces whatever the campaign recorded: a step that didn't run is no failure, a
+# reducer that fails is.
 step_summarize()
 {
-    local d v
+    local d v status=0
     for d in "$OUT"/time "$OUT"/time-self "$OUT"/groups "$OUT"/sweep-* "$OUT"/metrics-* "$OUT"/scaling "$OUT"/ab*; do
-        [[ -d $d ]] && "$UARCH" summarize "$d"
+        if [[ -d $d ]]; then
+            "$UARCH" summarize "$d" || { log "summarize: $d failed"; status=1; }
+        fi
     done
     for v in $VARIANTS; do
-        compgen -G "$OUT/time/logs/stages-$v.r*.log" > /dev/null && "$UARCH" stages "$OUT"/time/logs/stages-"$v".r*.log > "$OUT/stages-$v.tsv"
+        if compgen -G "$OUT/time/logs/stages-$v.r*.log" > /dev/null; then
+            "$UARCH" stages "$OUT"/time/logs/stages-"$v".r*.log > "$OUT/stages-$v.tsv" || { log "summarize: stages-$v failed"; status=1; }
+        fi
     done
     for v in $SELF_VARIANTS; do
-        compgen -G "$OUT/time-self/logs/stages-self-$v.r*.log" > /dev/null && "$UARCH" stages "$OUT"/time-self/logs/stages-self-"$v".r*.log > "$OUT/stages-self-$v.tsv"
+        if compgen -G "$OUT/time-self/logs/stages-self-$v.r*.log" > /dev/null; then
+            "$UARCH" stages "$OUT"/time-self/logs/stages-self-"$v".r*.log > "$OUT/stages-self-$v.tsv" || { log "summarize: stages-self-$v failed"; status=1; }
+        fi
     done
+    return $status
 }
 
 if [[ ${1:-} == --inner ]]; then
