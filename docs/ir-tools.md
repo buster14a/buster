@@ -221,8 +221,11 @@ file and runs no transformation the normal test would not.
 Both fronts use `InterpreterValue` with low/high 64-bit words, explicit frame
 stacks, a caller-owned scratch arena, symbol bindings and resource limits.
 Program recursion creates interpreter frames without recursive C calls. The IR
-front handles integer widths through 128 bits and host x87 extended precision;
-the current typed input only expresses its existing integer widths and f32/f64.
+front and typed front handle integer widths through 128 bits and host x87
+extended precision. Typed execution does not lower to IR: only scalar payload
+helpers, memory checks and the native-call bridge are shared. Typed local cells
+retain both words; x87 constants read the typed function's two-word constant
+pool, and x87 loads/stores touch exactly ten bytes, not the six padding bytes.
 Phi operands are snapshotted before any phi destination is written. The IR
 front verifies each function once per execution, at its first frame, since its
 IR can't change while it runs (#134: a recursion's every call verified its
@@ -272,12 +275,35 @@ value: it carries the source's definedness, or defines the destination when the
 source has no tracked map, accepts identical or disjoint ranges only, refuses
 partial overlap, and leaves both bytes and metadata unchanged when either range
 fails its bound or permission check. Typed object locals (`local_classes ==
-VOID` with `local_sizes`, the C producer's struct-assignment path) are still
-refused by `interpreter_typed_function_valid`, so this covers value locals and
-global bindings only; the object-local path remains part of #176. Later typed
-reads retain undefined-byte diagnostics; `memset` defines its written bytes. This is the oracle's checking policy, with the language-level questions
+VOID`, nonzero `local_sizes`, address-taken and with a validated alignment) own
+separate frame storage. Their registered extents exclude alignment padding,
+and their defined-byte maps start empty. Scalar views use the same object
+width rules as Tier 0. A callee's objects are reclaimed on return; failed frame
+entry rolls back both the arena and memory registry without removing caller
+objects. Dynamic-stack restore cannot discard the static objects preceding it.
+Later typed reads retain undefined-byte diagnostics; `memset` defines its
+written bytes. This is the oracle's checking policy, with the language-level questions
 about indeterminate values and padding discussed separately in
 [WG14 DR451](https://open-std.org/jtc1/sc22/wg14/www/docs/dr_451.htm).
+
+### Typed-front coverage and remaining acceptance
+
+`test-interpreter` includes aligned object storage/COPY, exact extent and
+undefined-padding checks, allocation rollback, repeated calls and expired
+callee addresses. Its wide scalar cases cover full-word arithmetic and shifts,
+signed division boundaries, checked floating-to-integer conversions, x87
+constants and payloads across interpreted and native calls. The existing
+Tier 0 comparison also copies actual object locals through the typed oracle.
+`test-ir-lowering` additionally runs each generated 128-bit/x87 program through
+the production typed front, checking its outputs against the independent
+fixture machine as well as checking the lowered IR.
+
+These are typed-stream fixtures, not the source acceptance required to close
+[#176](https://github.com/buster14a/buster/issues/176). Typed by-value aggregate
+parameters/results, variadic definitions, indirect calls/jumps and the
+source-facing c-testsuite/#142 integration remain unsupported. The IR front's
+aggregate/variadic support below does not imply support in the typed front.
+The native scalar bridge already accepts outgoing promoted variadic calls.
 
 ### Aggregates by value and variadic definitions
 
