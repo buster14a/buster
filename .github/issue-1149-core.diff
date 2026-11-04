@@ -1,0 +1,189 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 55ba315..ac1997d 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -803,2 +803,2 @@
+-// (unwind_tier0, which reads them alone), its frame must be the same CFI. A frame past the events' 32-bit offsets
+-// (EMITTED_FRAME_LIMIT, #1149) or code past 2 GB is unsupported, not an internal error; no room is a resource failure,
++// (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
++// internal error; no room is a resource failure,
+@@ -812 +812 @@
+-                                frame_status == EMITTED_FRAME_LIMIT || length > INT32_MAX ? CHECK_PROGRAM_UNSUPPORTED :
++                                length > INT32_MAX ? CHECK_PROGRAM_UNSUPPORTED :
+@@ -815 +814,0 @@
+-              frame_status == EMITTED_FRAME_LIMIT ? "a frame within 56 bytes of 2 GB, past the 32-bit offsets of its unwind events (#1149)" :
+diff --git a/src/buster/compiler/emission_metadata.c b/src/buster/compiler/emission_metadata.c
+index 57bef23..a3623e9 100644
+--- a/src/buster/compiler/emission_metadata.c
++++ b/src/buster/compiler/emission_metadata.c
+@@ -112 +112 @@
+-// CFA/CFA_OFFSET and OFFSET carry signed byte offsets. This protocol does not assume eight-byte slots. A target
++// CFA/CFA_OFFSET and OFFSET carry signed 64-bit byte offsets. This protocol does not assume eight-byte slots. A target
+@@ -131 +131 @@
+-    int32_t value;
++    int64_t value;
+@@ -165,0 +166 @@
++// Keep the resolved row padding-free: fixed-shape recognition compares complete rows.
+@@ -169 +169,0 @@
+-    int32_t value;
+@@ -172,0 +173 @@
++    int64_t value;
+@@ -173,0 +175 @@
++_Static_assert(sizeof(EmissionFrameRow) == 16, "resolved frame rows have no padding");
+@@ -364 +366 @@
+-                        valid &= event.reg < registers && event.value >= 0 && (uint32_t)event.value < registers;
++                        valid &= event.reg < registers && event.value >= 0 && event.value < registers;
+diff --git a/src/buster/compiler/emitted_code.c b/src/buster/compiler/emitted_code.c
+index aab4f1e..026d493 100644
+--- a/src/buster/compiler/emitted_code.c
++++ b/src/buster/compiler/emitted_code.c
+@@ -33,2 +33,2 @@
+-// EMITTED_FRAME_UNDESCRIBED, which the emission reports as the backend's failure at the function, and a fixed frame
+-// whose CFA offset passes the events' signed 32-bit values EMITTED_FRAME_LIMIT, which it reports as unsupported (#1149).
++// EMITTED_FRAME_UNDESCRIBED, which the emission reports as the backend's failure at the function. Signed 64-bit frame
++// values cover every fixed imm32 allocation plus the return address and callee-saved pushes (#1149).
+@@ -36 +36 @@
+-#define BUSTER_EMITTED_UNKNOWN INT32_MIN
++#define BUSTER_EMITTED_UNKNOWN INT64_MIN
+@@ -51,3 +50,0 @@
+-    // A fixed frame whose CFA offset passes the events' signed 32-bit values (emitted_cfa_fits): within 56 bytes of 2 GB,
+-    // which the fixed descriptor alone described (#1149).
+-    EMITTED_FRAME_LIMIT,
+@@ -129,7 +125,0 @@
+-// Whether a fixed frame's largest CFA offset, its pushes' and its allocation's, is one the events' signed 32-bit values
+-// carry: a frame within 56 bytes of 2 GB isn't, which the fixed descriptor alone could describe.
+-static bool emitted_cfa_fits(uint32_t saved, uint32_t frame_size)
+-{
+-    return 8 + 8 * (uint64_t)__builtin_popcount(saved & 63) + frame_size <= INT32_MAX;
+-}
+-
+@@ -148,2 +138 @@
+-// EMITTED_FRAME_UNDESCRIBED; one whose CFA offset the events' values can't carry, EMITTED_FRAME_LIMIT; no room,
+-// EMITTED_FRAME_MEMORY, with nothing left in `arena`.
++// EMITTED_FRAME_UNDESCRIBED; no room, EMITTED_FRAME_MEMORY, with nothing left in `arena`.
+@@ -182,2 +171 @@
+-        // Each transition at its record's boundary: unwind_tier0_frame_tails without final offsets. A CFA past the
+-        // events' offsets (emitted_cfa_fits) is one no event carries.
++        // Each transition at its record's boundary: unwind_tier0_frame_tails without final offsets.
+@@ -187,2 +175 @@
+-            result.frame_status = !read ? EMITTED_FRAME_UNDESCRIBED : !emitted_cfa_fits(boundaries.saved, boundaries.frame_size) ? EMITTED_FRAME_LIMIT :
+-                                                                                                                                   EMITTED_FRAME_DESCRIBED;
++            result.frame_status = read ? EMITTED_FRAME_DESCRIBED : EMITTED_FRAME_UNDESCRIBED;
+@@ -306 +293 @@
+-    int32_t value[16];
++    int64_t value[16];
+@@ -308 +295 @@
+-    int32_t slots[BUSTER_EMITTED_TRACKED];
++    int64_t slots[BUSTER_EMITTED_TRACKED];
+@@ -327 +314 @@
+-    int32_t cfa_offset;
++    int64_t cfa_offset;
+@@ -329 +316 @@
+-    int32_t values[BUSTER_EMITTED_TRACKED];
++    int64_t values[BUSTER_EMITTED_TRACKED];
+@@ -403 +390 @@
+-static int32_t emitted_add(int32_t value, int64_t amount)
++static int64_t emitted_add(int64_t value, int64_t amount)
+@@ -405,2 +392,3 @@
+-    const int64_t sum = (int64_t)value + amount;
+-    return value == BUSTER_EMITTED_UNKNOWN || sum <= INT32_MIN || sum > INT32_MAX ? BUSTER_EMITTED_UNKNOWN : (int32_t)sum;
++    int64_t sum;
++    const bool overflow = __builtin_add_overflow(value, amount, &sum);
++    return value == BUSTER_EMITTED_UNKNOWN || overflow || sum == BUSTER_EMITTED_UNKNOWN ? BUSTER_EMITTED_UNKNOWN : sum;
+@@ -410 +398 @@
+-static void emitted_clobber_slots(EmittedState* state, int32_t at, uint32_t bytes)
++static void emitted_clobber_slots(EmittedState* state, int64_t at, uint32_t bytes)
+@@ -415 +403,3 @@
+-        state->slots[h] = slot != BUSTER_EMITTED_UNKNOWN && slot < (int64_t)at + bytes && (int64_t)at < slot + 8 ? BUSTER_EMITTED_UNKNOWN : state->slots[h];
++        // Compare distances, not interval ends: neither at + bytes nor slot + 8 need fit int64_t.
++        const bool overlaps = slot <= at ? (uint64_t)at - (uint64_t)slot < 8 : (uint64_t)slot - (uint64_t)at < bytes;
++        state->slots[h] = slot != BUSTER_EMITTED_UNKNOWN && bytes != 0 && overlaps ? BUSTER_EMITTED_UNKNOWN : slot;
+@@ -422 +412 @@
+-    const int32_t rsp = state->value[X86_REGISTER_RSP];
++    const int64_t rsp = state->value[X86_REGISTER_RSP];
+@@ -484 +474 @@
+-        const int32_t at = state->value[rsp];
++        const int64_t at = state->value[rsp];
+@@ -505 +495 @@
+-        const int32_t base = state->value[record->rm];
++        const int64_t base = state->value[record->rm];
+@@ -513 +503 @@
+-        const int32_t value = state->value[record->rm];
++        const int64_t value = state->value[record->rm];
+@@ -541 +531 @@
+-        const int32_t address = frame_store ? emitted_add(state->value[record->rm], record->displacement) : BUSTER_EMITTED_UNKNOWN;
++        const int64_t address = frame_store ? emitted_add(state->value[record->rm], record->displacement) : BUSTER_EMITTED_UNKNOWN;
+@@ -655 +645,2 @@
+-    bool valid = cfa < 16 && state->value[cfa] != BUSTER_EMITTED_UNKNOWN && (int64_t)state->value[cfa] + rules->cfa_offset == 0;
++    const int64_t offset = rules->cfa_offset;
++    bool valid = cfa < 16 && offset >= 0 && state->value[cfa] != BUSTER_EMITTED_UNKNOWN && state->value[cfa] == -offset;
+@@ -667 +658 @@
+-                valid = state->slots[g] == rules->values[d];
++                valid = state->slots[g] != BUSTER_EMITTED_UNKNOWN && state->slots[g] == rules->values[d];
+diff --git a/src/buster/compiler/tier1_frame_emit.c b/src/buster/compiler/tier1_frame_emit.c
+index 769b923..4390e34 100644
+--- a/src/buster/compiler/tier1_frame_emit.c
++++ b/src/buster/compiler/tier1_frame_emit.c
+@@ -190 +190 @@
+-        .value = (int32_t)value,
++        .value = value,
+@@ -199,2 +199 @@
+-// CFA no rule describes (a realignment while the CFA is rsp's, rbp pointed or rsp reset from an unknown depth, a CFA
+-// past int32's offsets).
++// CFA no rule describes (a realignment while the CFA is rsp's, or rbp pointed or rsp reset from an unknown depth).
+@@ -290 +289,2 @@
+-    valid = valid && cfa->offset >= 0 && cfa->offset <= INT32_MAX && (!cfa->depth_known || (cfa->depth >= 8 && cfa->depth <= INT32_MAX));
++    // The bounded plan has at most BUSTER_TIER1_FRAME_STEP_CAPACITY imm32 adjustments, so these sums fit int64_t.
++    valid = valid && cfa->offset >= 0 && (!cfa->depth_known || cfa->depth >= 8);
+diff --git a/src/buster/compiler/unwind.c b/src/buster/compiler/unwind.c
+index 58692c2..f904140 100644
+--- a/src/buster/compiler/unwind.c
++++ b/src/buster/compiler/unwind.c
+@@ -243 +243 @@
+-static void unwind_uleb(UnwindWriter* writer, uint32_t value)
++static void unwind_uleb(UnwindWriter* writer, uint64_t value)
+@@ -247 +247 @@
+-        const uint32_t byte = (value & 0x7f) | (value > 0x7f ? 0x80 : 0);
++        const uint32_t byte = (uint32_t)(value & 0x7f) | (value > 0x7f ? 0x80 : 0);
+@@ -576 +576 @@
+-    int32_t cfa_offset = 8;
++    int64_t cfa_offset = 8;
+@@ -578 +578 @@
+-    int32_t saved_offsets[BUSTER_UNWIND_ROW_STATES];
++    int64_t saved_offsets[BUSTER_UNWIND_ROW_STATES];
+@@ -597 +597 @@
+-                    unwind_uleb(writer, (uint32_t)row.value);
++                    unwind_uleb(writer, (uint64_t)row.value);
+@@ -608 +608 @@
+-                    unwind_uleb(writer, (uint32_t)row.value);
++                    unwind_uleb(writer, (uint64_t)row.value);
+@@ -616 +616 @@
+-                unwind_uleb(writer, (uint32_t)row.value);
++                unwind_uleb(writer, (uint64_t)row.value);
+@@ -622 +622 @@
+-                const int32_t factored = -(row.value / 8);
++                const int64_t factored = -(row.value / 8);
+@@ -626 +626 @@
+-                    unwind_uleb(writer, (uint32_t)factored);
++                    unwind_uleb(writer, (uint64_t)factored);
+@@ -639 +639 @@
+-                unwind_uleb(writer, (uint32_t)row.value);
++                unwind_uleb(writer, (uint64_t)row.value);
+@@ -690 +690 @@
+-static void unwind_row(EmissionFrameRow* rows, uint32_t* count, uint32_t capacity, uint32_t offset, uint32_t kind, uint32_t reg, int32_t value)
++static void unwind_row(EmissionFrameRow* rows, uint32_t* count, uint32_t capacity, uint32_t offset, uint32_t kind, uint32_t reg, int64_t value)
+@@ -709 +709 @@
+-    int32_t cfa = 8;
++    int64_t cfa = 8;
+@@ -740 +740 @@
+-        unwind_row(rows, &count, capacity, function->offsets[event], EMISSION_FRAME_CFA_OFFSET, 0, cfa + (int32_t)function->frame_size);
++        unwind_row(rows, &count, capacity, function->offsets[event], EMISSION_FRAME_CFA_OFFSET, 0, cfa + function->frame_size);
+@@ -866 +866 @@
+-        int32_t largest = 8;
++        int64_t largest = 8;
+@@ -871,2 +871,3 @@
+-        const int32_t pushed = 8 + 8 * __builtin_popcount(simple.saved);
+-        candidate = largest >= pushed;
++        const int64_t pushed = 8 + 8 * __builtin_popcount(simple.saved);
++        // Rows can express more than the fixed imm32 allocation: check before narrowing.
++        candidate = largest >= pushed && largest - pushed <= INT32_MAX;
