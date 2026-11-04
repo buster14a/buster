@@ -23,7 +23,8 @@ requirements. [Command index](README.md).
   each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
   "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
   an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
-  "The sparse output columns", #628); `c_check_binding.c` publishes each use's retained answer from those events
+  "The sparse output columns", #628), and `attributes` as a wide one, of 64-bit
+  values ("The attributes column", #1167); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
@@ -43,12 +44,11 @@ requirements. [Command index](README.md).
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
   `benchmark-checker-source` measures checking of real
   source bodies by the scalar schedule, the vector path's postorder batches (`vector`), its level order
-  (`levels`, `CheckOptions.level_order`), its memoized transitions in node order (`transitions`,
-  `CheckOptions.transitions`, #1050, `c_check_transitions.c`) and its transitions keyed in 16-lane windows
-  (`windows`, `CheckOptions.transition_windows`): #133's question of which order wins, which the postorder
-  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder"), and #1050's ("Memoized
-  transitions"), opt-in (the driver's `--check-transitions`) since they saved 4% of `sqlite3.c`'s graph run
-  there. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
+  (`levels`, `CheckOptions.level_order`) and its memoized transitions in node order (`transitions`,
+  `CheckOptions.transitions`, #1050, `c_check_transitions.c`, keyed by interned value classes): #133's question
+  of which order wins, which the postorder batches did on the 9700X (`docs/c-checker.md`, "Level order or
+  postorder"), and #1050's ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they don't
+  save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
   `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
@@ -66,7 +66,7 @@ requirements. [Command index](README.md).
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
-  `--transitions` selects the memoized transitions' fixtures, keys and table limits alone (`c_check_transitions_test.c`).
+  `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.

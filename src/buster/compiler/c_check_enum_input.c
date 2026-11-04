@@ -240,7 +240,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 reader->declaration_kinds[name] = C_BINDING_ENUMERATOR;
                 reader->enum_values[name] = bits;
                 reader->output->declarations[name] = name;
-                reader->output->attributes[name] = attributes;
+                check_input_set_attributes_at(reader->output, name, attributes);
                 valid = c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_ENUMERATOR, name, i, depth) != 0;
                 reader->output->resource |= !valid;
                 if (valid)

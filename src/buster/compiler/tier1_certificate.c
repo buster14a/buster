@@ -11,7 +11,9 @@
 // marks BUSTER_CERT_RECIPE may instead be its value's integer recipe itself (an
 // immediate, or a definition no location keeps): location BUSTER_CERT_NONE. Equal-width aliases at
 // the same location are supported, as are arbitrary copies after entry. Each
-// byte carries an identity and lane. Definitions change the value's identity,
+// byte carries an identity and lane. A move needs its source's first byte
+// known, and copies its other bytes as they are, unknown ones as unknown; a
+// vector location may be a register's scalar view of 4 or 8 bytes. Definitions change the value's identity,
 // not every old home. A frame recipe binds the base incarnation current when
 // its value's incarnation was established, so a later base definition cannot
 // retarget a rematerialization. Blocks use epochs; edges use a stamped sparse
@@ -371,7 +373,9 @@ static bool tier1_cert_valid(const Tier1CertProgram* program)
         }
         else if (l.class == TIER1_CERT_VECTOR)
         {
-            valid = valid && (l.width == 16 || l.width == 32 || l.width == 64);
+            // A register's whole width, or a scalar view of its low 4 or 8 bytes (movss's and movsd's), which writes its
+            // extent: a load zeroes the rest of the register.
+            valid = valid && (l.width == 4 || l.width == 8 || l.width == 16 || l.width == 32 || l.width == 64);
         }
         else if (l.class == TIER1_CERT_MASK)
         {
@@ -829,6 +833,9 @@ static bool tier1_cert_exit_shape(Tier1CertState* state)
     return valid;
 }
 
+// A move reads its source's first byte known: the source isn't uninitialized storage. Its other bytes are copied as they
+// are, unknown ones as unknown, which no fact relies on: a 4-byte value's register moved whole by its 8 bytes, or a
+// scalar float's by its 16 (#939's emitted moves). An exchange reads both sides' every byte known.
 static bool tier1_cert_copy(Tier1CertState* state, uint32_t destination, uint32_t source, bool exchange)
 {
     const Tier1CertLocation a = state->program->locations[destination];
@@ -839,7 +846,7 @@ static bool tier1_cert_copy(Tier1CertState* state, uint32_t destination, uint32_
     for (uint32_t i = 0; i < a.width; i += 1)
     {
         right[i] = tier1_cert_read(state, b.unit + i);
-        valid = valid && right[i].token != 0;
+        valid = valid && (right[i].token != 0 || (!exchange && i != 0));
         if (exchange)
         {
             left[i] = tier1_cert_read(state, a.unit + i);

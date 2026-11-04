@@ -28,7 +28,9 @@ requirements. [Command index](README.md).
   information";
   `--tier1-strict` fails qualification on an unsupported body rather than
   falling back, while resource and internal failures fail either mode;
-  `--tier1-report` and `--tier1-refusals` say which step refused the others,
+  `--tier1-report` and `--tier1-refusals` say which step refused the others
+  (and with `--verify`, how many functions' code its certificate proved,
+  `code_certified`, or left for a shape it doesn't decode, `code_uncertified`),
   and `--tier1-no-rematerialize` compiles them without rematerialization and
   `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure

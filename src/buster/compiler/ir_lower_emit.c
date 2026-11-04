@@ -316,6 +316,40 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 // Its order and scope as they are (#1059): tier0_validate took the value.
                 ir_typed_emit(&sink, IR_FENCE, IR_VOID, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 break;
+            case BUSTER_TYPED_ATOMIC_RMW:
+            {
+                // Its operation and its order as an atomic access's flags and its class's natural alignment, which the
+                // checker's direct form proved (#1059): tier0_validate took the value.
+                const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 2], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                const uint32_t operation = (value & BUSTER_TYPED_RMW_ADD) != 0 ? BUSTER_IR_RMW_ADD : BUSTER_IR_RMW_EXCHANGE;
+                const uint32_t rmw = ir_typed_emit(&sink, IR_ATOMIC_RMW, type, address, stack[depth - 1], BUSTER_IR_NONE, ir_typed_alignment(class));
+                if (sink.output != 0)
+                {
+                    sink.output->flags[rmw] = (uint8_t)(BUSTER_IR_ATOMIC | (value & BUSTER_TYPED_FENCE_ORDER) << BUSTER_IR_ORDER_SHIFT | operation);
+                }
+                depth -= 1;
+                stack[depth - 1] = rmw;
+                classes[depth - 1] = class;
+                break;
+            }
+            case BUSTER_TYPED_ATOMIC_CAS:
+            {
+                // A compare-exchange read/modify/write (#1059): its address loaded from its local, its expected value the
+                // IR's `b` and its desired one its `c`, its order as an atomic access's flags and its class's natural
+                // alignment, which the checker's plan proved: tier0_validate took the value.
+                const uint32_t local = (uint32_t)(value >> BUSTER_TYPED_CAS_LOCAL_SHIFT);
+                const uint32_t bits = ir_typed_emit(&sink, IR_LOAD, IR_I64, local, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+                const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                const uint32_t rmw = ir_typed_emit(&sink, IR_ATOMIC_RMW, type, address, stack[depth - 2], stack[depth - 1], ir_typed_alignment(class));
+                if (sink.output != 0)
+                {
+                    sink.output->flags[rmw] = (uint8_t)(BUSTER_IR_ATOMIC | (value & BUSTER_TYPED_FENCE_ORDER) << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE);
+                }
+                depth -= 1;
+                stack[depth - 1] = rmw;
+                classes[depth - 1] = class;
+                break;
+            }
             case BUSTER_TYPED_COPY:
                 ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
                 depth -= 2;

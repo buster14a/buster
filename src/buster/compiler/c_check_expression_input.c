@@ -185,8 +185,8 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     const bool enumeration = type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
     const uint64_t category = enumeration ? CHECK_RVALUE : type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     const uint64_t flags = (enumeration ? BUSTER_CHECK_ICE : 0) |
-                           (type != 0 && reader->static_objects[declaration] && !input->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                           (type != 0 && reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0);
+                           (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
+                           (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0);
     const uint64_t kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS;
     const uint64_t head = input->overload_heads != NULL ? input->overload_heads[token] : 0;
     identifiers->types[at] = (uint64_t)type | category << 32;
@@ -239,9 +239,7 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         const __mmask16 typed = _mm512_mask_test_epi32_mask(lanes, type, type);
         const __m512i declaration = _mm512_mask_i32gather_epi32(zero, typed, token, input->declarations, 4);
         const __m512i kinds = check_input_gather_bytes(typed, declaration, reader->declaration_kinds);
-        const __m512i statics = check_input_gather_bytes(typed, declaration, reader->static_objects);
-        const __m512i locals = check_input_gather_bytes(typed, declaration, input->thread_local);
-        const __m512i registers = check_input_gather_bytes(typed, declaration, reader->registers);
+        const __m512i bits = check_input_gather_bytes(typed, declaration, reader->declaration_bits);
         const __m512i declared = check_input_gather_bytes(typed, declaration, reader->declaration_flags);
         const __m512i type_kinds = check_input_gather_bytes(typed, _mm512_srli_epi32(type, BUSTER_TYPE_INDEX_SHIFT), reader->types->types.kind);
         const __m512i objects = _mm512_mask_i32gather_epi32(zero, typed, declaration, reader->objects, 4);
@@ -252,8 +250,9 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         const __mmask16 acted = input->kr_parameter_count == 0 ? (__mmask16)(lanes & ~constexprs) : 0;
         __m512i category = _mm512_mask_mov_epi32(_mm512_set1_epi32(CHECK_LVALUE), function, _mm512_set1_epi32(CHECK_FUNCTION));
         category = _mm512_mask_mov_epi32(category, enumeration, _mm512_set1_epi32(CHECK_RVALUE));
-        const __mmask16 static_object = _mm512_mask_test_epi32_mask(typed, statics, statics) & _mm512_mask_testn_epi32_mask(typed, locals, locals);
-        const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, registers, registers);
+        const __mmask16 static_object = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_STATIC)) &
+                                        _mm512_mask_testn_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_THREAD_LOCAL));
+        const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_REGISTER));
         const __m512i flags = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(enumeration, _mm512_set1_epi32(BUSTER_CHECK_ICE)),
                                                               _mm512_maskz_mov_epi32(static_object, _mm512_set1_epi32(BUSTER_CHECK_STATIC_OBJECT))),
                                               _mm512_maskz_mov_epi32(in_register, _mm512_set1_epi32(BUSTER_CHECK_REGISTER)));

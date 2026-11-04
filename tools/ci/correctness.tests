@@ -595,6 +595,18 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 ./build/test-sanitizer-resources
 == Test the profiling tools
 "$BUSTER_COMPILER" test-profile
+== Dispatch Tier 1's program measurement and refuse its incomplete commands
+# #1189's measure-tier1-programs runs on the 9700X only where `tier1_programs` changes (Tier 1's input and pipeline, and
+# the measurement), so its dispatch in main.c is checked here, on every run, without timing anything: a command without
+# its inputs must print the command's usage and fail, and one whose inputs aren't there must fail its first build.
+errors=$(mktemp)
+directory=$(mktemp -d)
+if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$directory/none" --speedtest "$directory/none" --lua "$directory/none" \
+    --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
+rm -rf "$errors" "$directory"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
@@ -610,6 +622,12 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 # The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
 # print their natural alignment.
 test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
+# Each compare-exchange of the fixture's (GNU's, __sync's, C11's and the generic one, twice each, and three implicit
+# objects' loops) is the typed stream's ATOMIC_CAS and the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atomics.c | grep -c ' cas ')" -eq 26
+# Each bitwise, minimum and maximum read/modify/write of the fixture's (twelve, GNU's, __sync's and C11's) is a loop of
+# compare-exchanges, the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomics.c | grep -c ' cas ')" -eq 24
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution

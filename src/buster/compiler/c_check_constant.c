@@ -1155,7 +1155,7 @@ static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t
             *job = (CheckConstantAttributes)
             {
                 .owner = owner,
-                .publish = !input->cached && reader->output->attributes[owner] == 0,
+                .publish = !input->cached && check_input_attributes_at(reader->output, owner) == 0,
             };
             valid = check_input_attributes(reader, cursor, input->end, &job->parsed);
         }
@@ -1306,9 +1306,9 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
         if (valid)
         {
             const CheckInputAttributes empty = { 0 };
-            CheckInputAttributes* previous = reader->output->attributes[job->owner];
+            CheckInputAttributes* previous = check_input_attributes_at(reader->output, job->owner);
             valid = check_input_attribute_merge(reader, previous != 0 ? previous : &empty, &job->parsed, combined);
-            reader->output->attributes[job->owner] = valid ? combined : previous;
+            check_input_set_attributes_at(reader->output, job->owner, valid ? combined : previous);
             job->publish = !valid;
         }
     }
@@ -1978,7 +1978,7 @@ static TypeId check_constant_object_alignment(CheckInputReader* reader, uint32_t
     if (first + 1 == end && end <= parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER)
     {
         const uint32_t declaration = reader->output->declarations[first];
-        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? reader->output->attributes[declaration] : 0;
+        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? check_input_attributes_at(reader->output, declaration) : 0;
         if (attributes != 0 && attributes->alignment_log2 > type_alignment_log2(reader->types, type) + 1 &&
             type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
         {
@@ -2455,14 +2455,14 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         {
             // A compound literal's object (check_constant_bind), as the expression walk's leaf at this `}` has it.
             const uint32_t declaration = reader->initializer_declarations[token];
-            valid = declaration < parser->tokens.count && reader->output->compound_objects[declaration] && reader->declared_types[declaration] != 0;
+            valid = declaration < parser->tokens.count && check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && reader->declared_types[declaration] != 0;
             if (valid)
             {
                 input->values[index] = (CheckValue)
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
-                    .flags = reader->static_objects[declaration] ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .flags = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };
@@ -2490,8 +2490,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -3217,8 +3217,8 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],

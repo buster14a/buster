@@ -118,8 +118,8 @@ static bool check_program_emit_taken(const Link* link, const CheckProgramNames* 
 // compound literal's, and a block-scope static's without a label of its own.
 static bool check_program_emit_makes_name(const CheckInput* input, uint32_t declaration, String8 renamed)
 {
-    return input->compound_objects[declaration] ||
-           (renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+    return check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ||
+           (renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 0);
 }
 
 // Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
@@ -343,6 +343,10 @@ struct CheckTier1Counts
     uint32_t open_frames;
     uint32_t return_tails;
     uint32_t red_zones;
+    // With --verify (#939), whether its code passed the certificate decoded from its records, or was left uncertified
+    // for a shape the decoding doesn't take yet (Tier1EmitResult.code_reason).
+    uint32_t code_certified;
+    uint32_t code_uncertified;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -371,11 +375,14 @@ struct CheckTier1Report
     uint64_t open_frames;
     uint64_t return_tails;
     uint64_t red_zones;
+    uint64_t code_certified;
+    uint64_t code_uncertified;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
 // family's direct forms in the lowered code (an atomic access's LOAD, STORE or SET with its marker, a builtin's or an
-// implicit _Atomic object's; a fence's FENCE, but a seq_cst store's own after it), its helpers' call sites (a builtin's, an
+// implicit _Atomic object's; an atomic read/modify/write's ATOMIC_RMW; a fence's FENCE, but a seq_cst store's own after
+// it), its helpers' call sites (a builtin's, an
 // implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the helpers planned,
 // the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a
 // statement no form takes, which -c and the direct path then refuse whole).
@@ -408,6 +415,7 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             const bool access = (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && class >= BUSTER_TYPED_CLASS_I8 &&
                                 class <= BUSTER_TYPED_CLASS_U64 && (function->values[e] & BUSTER_TYPED_ACCESS_ATOMIC) != 0;
             report->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += access;
+            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
             report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE && !store;
             store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
         }
@@ -940,15 +948,17 @@ static void check_program_emit_commons(const CheckProgram* program, uint8_t* com
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
         const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
-                                        check_input_scan_nonzero(input->static_objects, first, input->token_count);
+                                        check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            const bool declares = input->declarations[token] == token && (input->defined[token] || input->tentative[token]);
+            const bool defined = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+            const bool declares = input->declarations[token] == token &&
+                                  (defined || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE));
             const uint32_t object = declares ? input->objects[token] : 0;
             const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
             const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
-            commons[symbol] |= symbol == 0 ? 0 : input->defined[token] ? BUSTER_CHECK_EMIT_COMMON_DEFINED : BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
+            commons[symbol] |= symbol == 0 ? 0 : defined ? BUSTER_CHECK_EMIT_COMMON_DEFINED : BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
         }
     }
 }
@@ -1562,8 +1572,8 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
         const String8 renamed = symbol_names[s + 1];
         // The names the source gives (check_program_emit_given_name's): not a literal's, a compound literal's or a
         // block-scope static's, which the emission makes.
-        const bool given = declaration != BUSTER_CHECK_NONE && !input->compound_objects[declaration] &&
-                           !(renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+        const bool given = declaration != BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
+                           !(renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 0);
         const uint32_t identifier = given ? parser->tokens.names[declaration] : 0;
         const String8 spelling = !given ? (String8){ 0 } : renamed.length != 0 ? renamed :
                                  (String8){ .pointer = (char*)intern_bytes(identifiers, identifier), .length = intern_length(identifiers, identifier) };
@@ -1884,13 +1894,13 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
         const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
-                                        check_input_scan_nonzero(input->static_objects, first, input->token_count);
+                                        check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
             const uint32_t object = input->objects[token];
-            if (input->static_objects[token] && input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (input->defined[token] || input->tentative[token]))
+            if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
             {
                 defined[object] = 1;
             }
@@ -1905,14 +1915,14 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     {
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
-        const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
+        const bool literal = declaration == BUSTER_CHECK_NONE || check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         // A weakref's own symbol (one without a target in the unit) is a weak reference to another's name, and so is a
         // weakref's target of internal linkage that the unit doesn't define and refers to through weakrefs alone.
-        const bool internal = !literal && !defined[object] && program->input->linkage[declaration] != 2;
+        const bool internal = !literal && !defined[object] && check_input_linkage(program->input->declaration_bits, declaration) != 2;
         const bool external = internal && program->alias_count != 0 &&
                               (check_program_alias_external(program, object) || check_program_alias_weak_target(program, object));
-        const bool own = literal || defined[object] || (program->input->linkage[declaration] != 2 && !external);
-        const bool thread_local = !literal && program->input->thread_local[declaration];
+        const bool own = literal || defined[object] || (check_input_linkage(program->input->declaration_bits, declaration) != 2 && !external);
+        const bool thread_local = !literal && check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
         access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
     }
 }
@@ -2447,16 +2457,20 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(retained, 0, (uint64_t)program->symbol_count + 1);
         memset(commons, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
-        // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
-        // declaration's attributes and keeps parameters' retain obligations as well as static declarations'.
+        // Find the tokens with attributes first, 16 at a time, then keep the declaring tokens. This avoids reading every
+        // declaration's attributes and keeps parameters' retain obligations as well as static declarations'. The input's
+        // columns are complete here, after the bodies' lanes, and the scan writes `declared` alone.
         uint32_t attributed = 0;
-        for (uint32_t first = 0; first < program->input->token_count; first += 8)
+        const CheckInput* input = program->input;
+        const uint32_t tokens = input->token_count;
+        const uint32_t* declarations = input->declarations;
+        const CheckSparseWide attributes = input->attributes;
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
         {
-            const uint32_t lanes = check_input_asm_attributed(program->input, first, program->input->token_count, scalar);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                if (program->input->declarations[token] == token && program->input->attributes[token] != NULL)
+                if (declarations[token] == token)
                 {
                     declared[attributed++] = token;
                 }
@@ -2477,7 +2491,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         for (uint32_t d = 0; valid && d < attributed && declared[d] <= placed; d += 1)
         {
             const uint32_t token = declared[d];
-            const CheckInputAttributes* attributes = program->input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(program->input, token);
             const uint32_t object = program->input->objects[token];
             if (object != 0 && object < program->object_count)
             {
@@ -2488,7 +2502,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 for (uint32_t i = 0; valid && i < attributes->count; i += 1)
                 {
                     const CheckInputAttribute* attribute = attributes->records + i;
-                    if (symbol != 0 && !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !program->input->registers[token])
+                    if (symbol != 0 && !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !check_input_bit(program->input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
                     {
                         const String8 previous = symbol_names[symbol];
                         valid = previous.length == 0 || (previous.length == attribute->text.length &&
@@ -2598,8 +2612,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == base ? taken : 0;
         const uint32_t declaration = symbol != 0 ? program->object_declarations[base] : BUSTER_CHECK_NONE;
         const CheckInput* input = program->input;
-        const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] != C_BINDING_FUNCTION && !input->thread_local[declaration] &&
-                              input->linkage[declaration] == 2 && !weak[symbol] && (symbol_aliases == 0 || symbol_aliases[symbol] == 0);
+        const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] != C_BINDING_FUNCTION &&
+                              !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) && check_input_linkage(input->declaration_bits, declaration) == 2 && !weak[symbol] && (symbol_aliases == 0 || symbol_aliases[symbol] == 0);
         if (variable && check_program_emit_common(commons[symbol], input->common_tentatives))
         {
             result->status = CHECK_PROGRAM_UNSUPPORTED;
@@ -2645,7 +2659,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 mangle_scratch = scratch_begin(scratch);
             }
-            mangling.internal = program->input->linkage[candidate->declaration] == 1;
+            mangling.internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1;
             const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
                                                                mangle_scratch.arena, &symbol_names[symbol]);
             valid = status == CHECK_MANGLE_OK;
@@ -2750,8 +2764,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // A weakref's own symbol (#147) refers to its name, which symbol_names holds, and a weakref's target referred to
         // through weakrefs alone is weak whatever its linkage.
         const bool weakref = symbol_aliases != 0 && symbol_aliases[s + 1] != 0 && program->aliases[symbol_aliases[s + 1] - 1].kind == CHECK_PROGRAM_WEAKREF;
-        if (declaration != BUSTER_CHECK_NONE && !program->input->compound_objects[declaration] && !defined[object] &&
-            (program->input->linkage[declaration] == 2 || weakref || weak[s + 1]))
+        if (declaration != BUSTER_CHECK_NONE && !check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && !defined[object] &&
+            (check_input_linkage(program->input->declaration_bits, declaration) == 2 || weakref || weak[s + 1]))
         {
             const uint32_t identifier = parser->tokens.names[declaration];
             externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
@@ -2897,11 +2911,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint32_t identifier = parser->tokens.names[declaration];
             const String8 renamed = symbol_names[s + 1];
             const uint32_t opening = check_sparse_get(input->declaration_bodies, declaration);
-            if (input->compound_objects[declaration])
+            if (check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND))
             {
                 name = check_program_emit_made_name(&result->link, &names, (const uint8_t*)".compoundliteral", sizeof(".compoundliteral") - 1, scratch);
             }
-            else if (renamed.length == 0 && opening != BUSTER_CHECK_NONE && input->linkage[declaration] == 0)
+            else if (renamed.length == 0 && opening != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 0)
             {
                 // The function's name: its symbol's asm label, or its identifier (--lower-all selects the statics of
                 // an inline-only function, which has no symbol, and then no label).
@@ -2933,14 +2947,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                                              link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
-                                 program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+                                 check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
             // Weak where a weak attribute makes it so, or a weakref's target that the unit doesn't define is referred to
             // through weakrefs alone (#147), whatever linkage its own declarations give it (the reader refuses weak on
             // one of internal linkage).
-            flags = kind | (program->input->linkage[declaration] != 2 && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
+            flags = kind | (check_input_linkage(program->input->declaration_bits, declaration) != 2 && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
                             weak[s + 1]                                      ? BUSTER_LINK_SYMBOL_WEAK :
                                                                                BUSTER_LINK_SYMBOL_GLOBAL);
-            if (program->input->linkage[declaration] == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
+            if (check_input_linkage(program->input->declaration_bits, declaration) == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
             {
                 flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
             }
@@ -3072,7 +3086,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint32_t object = program->symbol_objects[symbol - 1];
             const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
             const bool external = declaration != BUSTER_CHECK_NONE && declaration < program->input->token_count &&
-                                  program->input->linkage[declaration] == 2;
+                                  check_input_linkage(program->input->declaration_bits, declaration) == 2;
             if ((name->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK && (*flags & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION &&
                 object < program->object_count && defined[object] != 0 && external)
             {
@@ -3550,6 +3564,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
         lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
         lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
+        lanes->tier1_report.code_certified += compiled ? counts->code_certified : 0;
+        lanes->tier1_report.code_uncertified += compiled ? counts->code_uncertified : 0;
     }
     if (!valid)
     {

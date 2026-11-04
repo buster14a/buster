@@ -28,8 +28,12 @@ patterns are:
   3, 5 or 9; add/shift and three-operand addition through `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
-  into registers, while stores write exactly one/two bytes. Larger displacements
-  return an unsupported result until materialization is implemented. An
+  into registers, while stores write exactly one/two bytes. An address whose
+  constant index, scaled, and offset don't fit a disp32 (#141: `p[1ull << 30]`,
+  a struct array's element past 2 GB) is its own `lea`, the constant in a
+  register (its node's `mov`) as the index and the offset the displacement,
+  which no user folds; one whose offset alone doesn't fit 32 bits is still
+  refused. An
   access's address is walked (`tier1_select_address`, #140) through the nodes
   only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
   typed stream's integers put around every address, addresses (one after
@@ -103,21 +107,27 @@ patterns are:
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
-  to the consumer (#141). It moves past the nodes between them that don't write
-  memory, call, access a volatile or atomic object, fence or move rsp
-  (arithmetic, constants, addresses, other nonvolatile loads) and past none that
-  do: a store to any address, a call, a volatile or atomic load (#1059:
-  `BUSTER_IR_OBSERVABLE`) or store, a fence of any order or scope (a signal
-  fence's too), an allocation or a restore of the dynamic stack; an atomic load
-  folds into nothing. A pass of its own after the plan's pass over
+  to the consumer (#141). It moves past the nodes between them that don't touch
+  memory, call, fence or move rsp (arithmetic, constants, addresses) and past
+  none that do: a store to any address, a call, any other load (#1059's audit:
+  the typed stream doesn't carry a C access's volatility, so that a load the IR
+  doesn't flag `BUSTER_IR_VOLATILE` may still be a volatile object's, and two
+  volatile reads keep their order: `tier1_select_fold_barrier`), an atomic
+  read/modify/write, a fence of any order or scope (a signal fence's too), an
+  allocation or a restore of the dynamic stack; a volatile or atomic load (#1059:
+  `BUSTER_IR_OBSERVABLE`) folds into nothing. On `main.c`'s `--tier1` build the
+  rule costs 6 records of 239,884 and 32 bytes of code. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
   (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
   order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
-  gives their orders, with a seq_cst store's `fence` after it; other atomic operations reach it as calls of the unit's
-  leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
+  gives their orders, with a seq_cst store's `fence` after it. An exchange, an addition or a subtraction of a constant
+  order reaches it as the IR's `rmw` (`TIER1_RULE_ATOMIC_RMW`): the operand copied to the scratch register, `xchg` or
+  `lock xadd` of the object's width (a byte's and a short's at their own, never their 32-bit register's, which
+  `test-tier1-select` runs on guard bytes), and the old value zero-extended into its register as a load's is, a barrier
+  no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
@@ -273,10 +283,14 @@ patterns are:
   was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
   which only a vector type makes, and a call whose parts in registers take more
   than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
-  bytes' (`tier1_select_part_slots`). Every function and
-  call with records goes to the CFG consumer. Before a call's moves, it copies
-  the call's aggregates from their addresses into their stack slots, or into the
-  red zone's staging slots, whose registers it loads after the moves. An address
+  bytes' (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
+  register past xmm15, and only an AVX-512F target passes a zmm one), so that a
+  call takes all eight of its vector registers' 64-byte vectors. Every function
+  and call with records goes to the CFG consumer. Before a call's moves, it
+  copies the call's aggregates from their addresses into their stack slots, or
+  into the red zone's staging slots or a 64-byte part's zmm register, whose
+  argument registers it loads or moves after the moves. An address
   in a slot, or recomputed, goes through the scratch register, with rax saved
   below rsp, so its use needn't be required: a call may pass more aggregates than
   its first allocation gives its uses registers. The consumer stores an
@@ -950,9 +964,10 @@ cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 
-Issue #141 remains open. The 9700X measurements its Done-when asks for are
-recorded in [buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01), at #1001's
-heads and at its merge with main, `cc3387f`:
+Issue #141's Done-when is met; whether it closes is the owner's call. The 9700X
+measurements its Done-when asks for are recorded in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01),
+at #1001's heads and at its merge with main, `cc3387f`:
 
 - **Programs**, by the driver's `--tier1` (each function Tier 1's pipeline
   takes by Tier 1, the others by Tier 0), against Tier 0, clang -O0 and clang
@@ -989,8 +1004,15 @@ heads and at its merge with main, `cc3387f`:
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-The remaining scalar/ABI/spill consumers and whole-C integration are
-outstanding. `sqlite3.c`'s `sqlite3Multiply128` and `sqlite3Multiply160`,
-which selection refused whole for a 128-bit constant each, are Tier 1's since
-the 128-bit integers' split (#141, [the Tier 1 guide](tier1.md)'s "The 128-bit
-integers"): every function of `sqlite3.c` compiles by `--tier1 --tier1-strict`.
+Whole C is Tier 1's: every function of `sqlite3.c` compiles by `--tier1
+--tier1-strict` (`sqlite3Multiply128` and `sqlite3Multiply160`, which selection
+refused whole for a 128-bit constant each, since the 128-bit integers' split,
+[the Tier 1 guide](tier1.md)'s "The 128-bit integers"), as does every function
+of Lua 5.4.8 (#1204's runs, at `c1f08986`), and every function of c-testsuite's
+subset. Since #1204's merge, Tier 1 also takes thread-locals' addresses, calls
+of up to eight 64-byte vectors in registers, and addresses whose constant index
+doesn't fit a disp32 (#141); the compiler's own `main.c` by `--tier1
+-march=native` then compiles 983 of its 1,100 functions by Tier 1, and the
+others stop before selection: one naked, and 115 at the lowering to the IR, for
+vectors and x86 builtins it doesn't represent (the Tier 1 guide's list). What
+Tier 1 still refuses is that list's. The run-time gap to clang -O2 is #1189's.

@@ -10,8 +10,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-// IR_FENCE (#1059) uses no value: the default case's. IR_MULHU (#141), the last added, uses two, as IR_MUL does.
-_Static_assert(IR_OP_COUNT == 63, "audit the independent dataflow operand oracle for a new IR operation");
+// IR_FENCE (#1059) uses no value: the default case's. IR_MULHU (#141) uses two, as IR_MUL does. IR_ATOMIC_RMW (#1059),
+// the last added, uses its address and its operand, as a store does, and a compare-exchange's desired value too.
+_Static_assert(IR_OP_COUNT == 64, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests
@@ -53,6 +54,15 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
         {
             values[count++] = f->a[node];
             values[count++] = f->b[node];
+        } break;
+        case IR_ATOMIC_RMW:
+        {
+            values[count++] = f->a[node];
+            values[count++] = f->b[node];
+            if (f->c[node] != BUSTER_IR_NONE)
+            {
+                values[count++] = f->c[node];
+            }
         } break;
         case IR_SELECT: case IR_VSELECT:
         {

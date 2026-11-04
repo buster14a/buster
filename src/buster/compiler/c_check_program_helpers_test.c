@@ -26,6 +26,9 @@ struct CheckProgramHelperRmwCase
     uint32_t operands;
     bool rmw;
     CheckProgramStatus status;
+    // Taken directly (#1059: check_program_direct_rmw, the typed stream's ATOMIC_RMW, or check_program_direct_fetch, a
+    // loop of its ATOMIC_CAS), with no leaf.
+    bool direct;
 };
 
 static void check_test_program_math_helpers(CheckTest* test)
@@ -290,10 +293,10 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
 }
 
 // #1059's inventory, against the helpers' code: every family has its contract, its effects apart from what a direct
-// form needs of its function, only the fences and the atomic accesses a direct form, a helper no family names
-// UNMODELED's, and every helper each emitter makes (the atomic loads and stores of every width, the fences, every
-// read/modify/write of every width and format, the terminal builtins, FLT_ROUNDS, every math builtin and every x86
-// leaf), each family's exact count of them, keeps its family's contract (check_test_helper_contract), and an unnamed
+// form needs of its function, only the fences, the atomic accesses and the read/modify/writes a direct form, a helper no
+// family names UNMODELED's, and every helper each emitter makes (the atomic loads and stores of every width, the fences,
+// every read/modify/write of every width and format, the terminal builtins, FLT_ROUNDS, every math builtin and every
+// x86 leaf), each family's exact count of them, keeps its family's contract (check_test_helper_contract), and an unnamed
 // helper with others' code UNMODELED's bounds.
 // An asm statement's helper is its template's, which UNMODELED covers whole.
 static void check_test_program_helper_contracts(CheckTest* test)
@@ -302,8 +305,9 @@ static void check_test_program_helper_contracts(CheckTest* test)
     {
         const CheckProgramHelperContract* contract = &check_program_helper_contracts[f];
         check_test_expect(test, contract->name != NULL && contract->helper != NULL && contract->effects != 0 && (contract->effects & ~BUSTER_CHECK_HELPER_EFFECTS) == 0 &&
-                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE || f == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS),
-                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences and the atomic accesses a direct form");
+                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE || f == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS || f == CHECK_PROGRAM_HELPER_ATOMIC_RMW),
+                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences, the atomic accesses and "
+                          "the read/modify/writes a direct form");
     }
     // The family of each helper by what names it, and a helper no family names (a load or a store of another id, a
     // read/modify/write without its rule) UNMODELED's, with every effect; a load reads and a store writes, each alone.
@@ -950,14 +954,19 @@ static void check_test_program_helpers(CheckTest* test)
         }
         // A read/modify/write's effect at the load's node, with the call's fixed arguments and a long object: only a
         // well-formed one, its rule's fixed arguments evaluated and its rmw bit as its operation has it, is planned, its
-        // helper the builtin's leaf; any other is invalid.
+        // helper the builtin's leaf; any other is invalid. The effects have no known order, so that the __atomic_ ones keep
+        // their leaf; a well-formed legacy addition or or, seq_cst, is taken directly (#1059) and plans none, and a
+        // malformed one is the planner's to refuse.
         static const CheckProgramHelperRmwCase rmw_cases[] = {
             { CBUILTIN_ATOMIC_FETCH_ADD, 7, true, CHECK_PROGRAM_OK },
             { CBUILTIN_ATOMIC_FETCH_ADD, 0, true, CHECK_PROGRAM_INVALID },
             { CBUILTIN_ATOMIC_FETCH_ADD, 3, true, CHECK_PROGRAM_INVALID },
             { CBUILTIN_ATOMIC_FETCH_ADD, 7, false, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_SYNC_FETCH_AND_ADD, 3, true, CHECK_PROGRAM_OK },
+            { CBUILTIN_SYNC_FETCH_AND_OR, 3, true, CHECK_PROGRAM_OK, true },
+            { CBUILTIN_SYNC_FETCH_AND_OR, 7, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_FETCH_AND_ADD, 3, true, CHECK_PROGRAM_OK, true },
             { CBUILTIN_SYNC_FETCH_AND_ADD, 7, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_FETCH_AND_ADD, 3, false, CHECK_PROGRAM_INVALID },
             { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 63, true, CHECK_PROGRAM_OK },
             { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 7, true, CHECK_PROGRAM_INVALID },
             { CBUILTIN_SYNC_LOCK_RELEASE, 1, false, CHECK_PROGRAM_OK },
@@ -995,9 +1004,17 @@ static void check_test_program_helpers(CheckTest* test)
                 leaf |= helper->id == rmw->id && helper->rmw && helper->bytes == 8 && helper->parameter_count == rule->fixed_count &&
                         helper->code.count != 0;
             }
+            // Taken directly: the plan gives the node no use, and so no helper.
+            bool used = false;
+            for (uint32_t u = 0; accepted && u < plan.use_count; u += 1)
+            {
+                used |= plan.uses[u].node == atomics[1].node;
+            }
+            const bool direct = accepted && !used && !leaf;
             check_test_expect(test, accepted == (rmw->status == CHECK_PROGRAM_OK) && plan.status == rmw->status && plan.reason == NULL &&
-                                   (accepted ? leaf : plan.count == 0 && plan.items == 0 && bounded.length == 64) && scratch.length == 64,
-                              "a read/modify/write's effect is planned as its leaf only when its shape is its rule's");
+                                   (accepted ? leaf != rmw->direct && direct == rmw->direct : plan.count == 0 && plan.items == 0 && bounded.length == 64) &&
+                                   scratch.length == 64,
+                              "a read/modify/write's effect is planned as its leaf only when its shape is its rule's, or taken directly");
             atomics[1] = saved;
             members[1] = saved_member;
             argument_counts[1] = 0;
