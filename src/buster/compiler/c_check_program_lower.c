@@ -2184,13 +2184,60 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
     }
 }
 
-// Pending overload leaves carry a lexical placeholder. Only the checked consuming edge supplies an address.
+// Pending overload leaves carry a lexical placeholder. Only the checked consuming edge supplies an address. In a unit
+// without overload sets, the operand is pushed here, as check_lower_expression pushes it: its void context's tests only in
+// a void context, its conversion's test in place and its EXPRESSION task packed directly (#1048: 0.23 ms of sqlite3.c's
+// statements on the 9700X, docs/c-lowering.md's "The operands' push").
 static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_t operand, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckOverloadResult* selected = writer->overloads ? check_program_overload_address(program, node, operand) : NULL;
-    if (selected != NULL)
+    if (!writer->overloads)
+    {
+        const CheckStream* stream = program->stream;
+        const uint32_t child = operand == 0 ? graph->operand0[node] : operand == 1 ? graph->operand1[node] : operand == 2 ? graph->operand2[node] :
+                               operand - 3 < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + operand - 3] : BUSTER_CHECK_NONE;
+        if (child < stream->count)
+        {
+            // check_lower_expression's discard: a statement's aggregate assignment, a bit-field's store or update, a comma.
+            bool discard = false;
+            if (!address && target == BUSTER_TYPE_VOID)
+            {
+                const CheckOp op = graph->ops[child];
+                const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
+                const uint32_t destination = graph->operand0[child];
+                const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && destination < stream->count &&
+                                       (check_stream_flags(stream, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
+                discard = (store && check_lower_aggregate(writer, check_stream_type(stream, child))) || bit_field || op == CHECK_OP_COMMA;
+            }
+            if (!address && !discard && target != 0)
+            {
+                const TypeId from = check_stream_type(stream, child);
+                if (from != target && !check_lower_conversion_empty(writer, from, target))
+                {
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target });
+                }
+            }
+            if (writer->depth < writer->capacity)
+            {
+                // check_lower_task_pack's EXPRESSION task.
+                writer->tasks[writer->depth++] = (CheckLowerTaskPacked){
+                    .control = child | (uint64_t)CHECK_LOWER_EXPRESSION << 32 | (uint64_t)address << 40 | (uint64_t)discard << 42,
+                    .payload = 0,
+                };
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    else if (selected != NULL)
     {
         if (!check_program_overload_valid(program, selected))
         {

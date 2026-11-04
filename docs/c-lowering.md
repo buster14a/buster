@@ -1005,6 +1005,33 @@ compound literal's first evaluation, and the handlers of the task kinds past
 `lower.statements` 7.007 ms against the base's 6.970 (6.912 to 7.047), and
 `lower` 10.832 against 10.799: no gain, so it isn't kept.
 
+## The operands' push (#1048)
+
+An operand's push cost about 115 instructions on the baseline host (callgrind
+on `sqlite3.c`): `check_lower_operand`'s overload lookup, a tail call to
+`check_lower_expression`, its overload and count tests, its void context's
+loads (the op, the destination and its flags), `check_lower_convert`, and a
+`CheckLowerTask` built and packed. In a unit without overload sets the
+operand is now pushed in `check_lower_operand` itself, as
+`check_lower_expression` pushes it: the void context's tests only in a void
+context, the conversion's test in place, the `EXPRESSION` task packed
+directly. Its code is the operand function's, not the tasks' loop's, which
+inlines none of it.
+
+#1235's run at `4b9d236a`
+([run](https://github.com/buster14a/buster/actions/runs/41782206254/job/126419182825)),
+five rounds in turn on `sqlite3.c` (the variant's object was the base's):
+
+| row | the base | the push in place |
+| --- | ---: | ---: |
+| `lower` | 10.704 [10.658 to 10.764] | 10.543 [10.491 to 10.566] |
+| `lower.statements` | 6.963 [6.854 to 7.021] | 6.729 [6.685 to 6.822] |
+
+Every round of the push in place was below every round of the base. Copying
+the expansion's value at the two cases that take its address, so that clang
+could keep it in registers elsewhere, took 0.8 M of 207.4 M instructions on
+the baseline host (callgrind), and wasn't measured further.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
