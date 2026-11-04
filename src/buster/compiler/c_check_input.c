@@ -198,6 +198,13 @@ typedef enum CheckInputMessage
     CHECK_INPUT_LOADER_EXTERN,
     CHECK_INPUT_LOADER_REDECLARATION,
     CHECK_INPUT_INTERNAL_LINKAGE_FIRST,
+    // The thread-safety attributes' handlers' errors (#147, c_check_thread_safety_input.c): capability's name no string
+    // literal, at it (the report's attribute its first token); a trylock's first argument no int or bool, and a lock
+    // function's parameter index out of bounds (`detail` the argument's place from 1, the parameters' count in bits 16 and
+    // up), at the attribute.
+    CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT,
+    CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL,
+    CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -307,6 +314,9 @@ static const char* const check_input_messages[] =
     "variable cannot be declared both 'extern' and with the 'loader_uninitialized' attribute",
     "redeclaration cannot add 'loader_uninitialized' attribute",
     "attribute does not appear on the first declaration",
+    "expected string literal as argument of attribute",
+    "attribute requires parameter 1 to be int or bool",
+    "attribute parameter is out of bounds",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -2297,6 +2307,11 @@ static bool check_input_noreturn_attribute(const CheckInputAttributes* attribute
     return noreturn;
 }
 static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous);
+
+struct CheckTagFrame;
+struct CheckTagMember;
+static bool check_input_thread_names(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
+                                     uint32_t depth, const struct CheckTagMember* members, uint32_t member_count);
 
 // The first attribute of `kind` among a declaration's that isn't ignored, or NULL (#147).
 static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttributes* attributes, CheckInputAttributeKind kind)
@@ -4634,7 +4649,9 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         // A parameter's subjects as clang's attributes name them (#147), function-like by its adjusted type.
                         const uint32_t subjects = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_PARAMETER | (valid ? check_input_type_subjects(reader->types, adjusted) : 0);
                         const uint32_t begin = check_input_attribute_begin(parser, frame->start, frame->end);
-                        valid = valid && check_input_attribute_subjects(reader, frame->common_attributes, subjects, adjusted, begin, frame->name) &&
+                        valid = valid && check_input_thread_names(reader, frame->common_attributes, BUSTER_CHECK_NONE, NULL, 0, NULL, 0) &&
+                                check_input_thread_names(reader, frame->attributes, BUSTER_CHECK_NONE, NULL, 0, NULL, 0) &&
+                                check_input_attribute_subjects(reader, frame->common_attributes, subjects, adjusted, begin, frame->name) &&
                                 check_input_attribute_subjects(reader, frame->attributes, subjects, adjusted, begin, frame->name);
                         if (valid)
                         {
@@ -4831,6 +4848,7 @@ struct CheckTagMember
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
 #include "c_check_counted_by_input.c"
+#include "c_check_thread_safety_input.c"
 
 // The first of the function specifier inline's tokens in [first, end), a declaration's specifiers, or BUSTER_CHECK_NONE.
 static uint32_t check_input_inline_token(const Parser* parser, uint32_t first, uint32_t end)
@@ -5174,7 +5192,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         const uint32_t subjects = BUSTER_CHECK_SUBJECT_FIELD |
                                                   (width != BUSTER_TYPE_NOT_BIT_FIELD ? BUSTER_CHECK_SUBJECT_BIT_FIELD : BUSTER_CHECK_SUBJECT_NON_BIT_FIELD) |
                                                   check_input_type_subjects(reader->types, type);
-                        valid = check_input_attribute_subjects(reader, attributes, subjects, type, check_input_attribute_begin(parser, frame->member_begin, frame->close), name);
+                        valid = check_input_thread_names(reader, attributes, BUSTER_CHECK_NONE, frames, depth, members, member_count) &&
+                                check_input_attribute_subjects(reader, attributes, subjects, type, check_input_attribute_begin(parser, frame->member_begin, frame->close), name);
                     }
                     // A member's _Noreturn keyword is an error at it, as clang has it ("type name does not allow function
                     // specifier").
@@ -6283,6 +6302,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             {
                 check_input_attribute_gcc_position(reader, reader->declarator_attributes);
             }
+            valid = valid && check_input_thread_names(reader, attributes, function ? parameters : BUSTER_CHECK_NONE, NULL, 0, NULL, 0);
             valid = valid && check_input_attribute_subjects(reader, attributes, subjects, type, check_input_attribute_begin(parser, declaration_group, count), name);
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
             // clang's lifetimebound on a parameter of a function that returns void (#147, checkLifetimeBoundAttr), at the

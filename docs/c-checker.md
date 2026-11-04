@@ -5452,10 +5452,25 @@ arguments against the function. The checker now gives these as clang does.
   - `nocf_check` is clang's "ignored; use -fcf-protection" warning wherever it
     is, whatever its arguments: the driver refuses `-fcf-protection`.
 
+  clang's thread-safety analysis's attributes (`guarded_by`,
+  `requires_capability`, `acquire_capability`, `capability` and the others,
+  `check_input_thread_rows`) change nothing here past their handlers'
+  checks (`c_check_thread_safety_input.c`). Their arguments are
+  expressions that clang's parser reads where the attribute is, so each of
+  their names must be the scope's there: an earlier declaration (not the
+  one being declared), a struct's earlier member, or a function
+  declarator's own parameter; one that names nothing is clang's "use of
+  undeclared identifier", before any of the declaration's attributes is
+  applied. Then, after their subjects and counts (with the handlers' "at
+  least 1 argument"): `capability`'s name a string literal; a trylock's
+  first argument an int or a bool; a lock function's integer literal
+  argument an index of its function's parameters, with clang's "out of
+  bounds" error and its extra information.
+
   The rest stay refused by name: `selectany` (a COMDAT),
   `no_caller_saved_registers` (a calling convention), and the attributes
-  whose handlers clang has its own (the thread-safety analysis's,
-  `pass_object_size`, `ms_struct`, `interrupt` and others).
+  whose handlers clang has its own (`pass_object_size`, `ms_struct`,
+  `interrupt` and others).
 - **Argument counts.** An attribute's count of arguments other than clang's
   is clang's error, worded as clang's three messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at
@@ -5482,6 +5497,11 @@ arguments against the function. The checker now gives these as clang does.
     of the same declaration are missing: a second list's, and its parser's
     recovery errors and their "to match this '('" notes.
   - GNU's `noderef` is refused by name.
+  - A thread-safety attribute's argument is checked for its names alone: an
+    expression of other errors (`g.x` of an `int`) is taken, where clang
+    gives its error; a trylock's first argument's type is worked out from a
+    literal or a name alone. Their `-Wthread-safety-attributes` warnings,
+    off by default, aren't made.
   - A `loader_uninitialized` variable's incomplete type is the generic
     "object has incomplete type", and a definition after one the generic
     "conflicting declaration", as every incomplete object's and redefinition's

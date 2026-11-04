@@ -113,6 +113,9 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_LOADER_UNINITIALIZED,
     CHECK_ATTRIBUTE_WEAK_IMPORT,
     CHECK_ATTRIBUTE_INTERNAL_LINKAGE,
+    // An attribute of clang's thread-safety analysis (#147, check_input_thread_attribute), which changes nothing here past
+    // its handler's checks.
+    CHECK_ATTRIBUTE_THREAD_SAFETY,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -1623,12 +1626,82 @@ static uint8_t check_input_attribute_count_check(const CheckInputFactRow* fact, 
     return result;
 }
 
+// clang's thread-safety analysis's attributes (#147), whose handlers (SemaDeclAttr.cpp's handleGuardedByAttr and the others)
+// check, past their subjects and argument counts: at least one argument (LEAST_ONE); capability's name, a string literal
+// (STRING); a trylock's first argument, an int or a bool (TRYLOCK); and a lock function's integer literal argument, an index
+// of its parameters (INDEXED). Their arguments are expressions, which clang's parser reads where the attribute is: their names
+// are the scope's there (check_input_thread_names). Their other warnings (-Wthread-safety-attributes) are off by default
+// and aren't made here. Linear: an attribute is rare.
+#define BUSTER_CHECK_THREAD_LEAST_ONE 0x1u
+#define BUSTER_CHECK_THREAD_TRYLOCK 0x2u
+#define BUSTER_CHECK_THREAD_INDEXED 0x4u
+#define BUSTER_CHECK_THREAD_STRING 0x8u
+
+typedef struct CheckInputThreadRow CheckInputThreadRow;
+struct CheckInputThreadRow
+{
+    const char* name;
+    uint8_t flags;
+};
+
+static const CheckInputThreadRow check_input_thread_rows[] =
+{
+    { "acquire_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "acquire_shared_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "acquired_after", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "acquired_before", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "assert_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "assert_exclusive_lock", BUSTER_CHECK_THREAD_INDEXED },
+    { "assert_shared_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "assert_shared_lock", BUSTER_CHECK_THREAD_INDEXED },
+    { "capability", BUSTER_CHECK_THREAD_STRING },
+    { "exclusive_lock_function", BUSTER_CHECK_THREAD_INDEXED },
+    { "exclusive_locks_required", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "exclusive_trylock_function", BUSTER_CHECK_THREAD_LEAST_ONE | BUSTER_CHECK_THREAD_TRYLOCK },
+    { "guarded_by", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "guarded_var", 0 },
+    { "lock_returned", 0 },
+    { "lockable", 0 },
+    { "locks_excluded", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "no_thread_safety_analysis", 0 },
+    { "pt_guarded_by", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "pt_guarded_var", 0 },
+    { "reentrant_capability", 0 },
+    { "release_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "release_generic_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "release_shared_capability", BUSTER_CHECK_THREAD_INDEXED },
+    { "requires_capability", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "requires_shared_capability", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "scoped_lockable", 0 },
+    { "shared_capability", BUSTER_CHECK_THREAD_STRING },
+    { "shared_lock_function", BUSTER_CHECK_THREAD_INDEXED },
+    { "shared_locks_required", BUSTER_CHECK_THREAD_LEAST_ONE },
+    { "shared_trylock_function", BUSTER_CHECK_THREAD_LEAST_ONE | BUSTER_CHECK_THREAD_TRYLOCK },
+    { "try_acquire_capability", BUSTER_CHECK_THREAD_LEAST_ONE | BUSTER_CHECK_THREAD_TRYLOCK },
+    { "try_acquire_shared_capability", BUSTER_CHECK_THREAD_LEAST_ONE | BUSTER_CHECK_THREAD_TRYLOCK },
+    { "unlock_function", BUSTER_CHECK_THREAD_INDEXED },
+};
+
+static bool check_input_thread_attribute(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t declaration, TypeId type);
+
+// The thread-safety row of an attribute's name without a keyword's underscores, or NULL.
+static const CheckInputThreadRow* check_input_thread_row(String8 name)
+{
+    const CheckInputThreadRow* result = NULL;
+    for (uint32_t i = 0; result == NULL && i < BUSTER_ARRAY_LENGTH(check_input_thread_rows); i += 1)
+    {
+        result = check_input_attribute_equal(name, check_input_thread_rows[i].name) ? check_input_thread_rows + i : NULL;
+    }
+    return result;
+}
+
 // Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
 // handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT) and
 // no_caller_saved_registers (a calling convention), which stay refused by name;
 // and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
 // (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
-// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency.
+// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency; and the
+// thread-safety analysis's (check_input_thread_rows).
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact)
 {
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
@@ -1637,7 +1710,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
                          check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
                          check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
                          check_input_attribute_equal(name, "no_sanitize_memory") || check_input_attribute_equal(name, "analyzer_noreturn") ||
-                         check_input_attribute_equal(name, "carries_dependency");
+                         check_input_attribute_equal(name, "carries_dependency") || check_input_thread_row(name) != NULL;
     return fact != NULL && ((simple && !effect) || handled);
 }
 
@@ -1874,9 +1947,16 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // One clang's generated handler applies with nothing more, which changes nothing here (#147): kept for its
             // subject's check, then its argument count's against clang's.
             const uint32_t count = check_input_attribute_count(parser, &attribute);
-            attribute.kind = CHECK_ATTRIBUTE_UNKNOWN;
+            const CheckInputThreadRow* thread = check_input_thread_row(name);
+            attribute.kind = thread != NULL ? CHECK_ATTRIBUTE_THREAD_SAFETY : CHECK_ATTRIBUTE_UNKNOWN;
             attribute.argument_count = count;
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
+            // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs).
+            if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && thread != NULL && (thread->flags & BUSTER_CHECK_THREAD_LEAST_ONE) != 0 && count == 0)
+            {
+                attribute.count_check = BUSTER_CHECK_COUNT_LEAST;
+                attribute.count_bound = 1;
+            }
             // annotate's first argument is a string literal (handleAnnotateAttr), clang's error at it otherwise.
             if (count != 0 && check_input_attribute_equal(name, "annotate") && parser->tokens.kinds[attribute.argument_first] != PARSE_KIND_STRING)
             {
@@ -3001,6 +3081,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
             valid = false;
+        }
+        else if (kept && attribute->kind == CHECK_ATTRIBUTE_THREAD_SAFETY)
+        {
+            valid = check_input_thread_attribute(reader, attribute, declaration, type);
         }
     }
     // optnone takes over always_inline and minsize, wherever they are: clang's warning at each, with a note at optnone.

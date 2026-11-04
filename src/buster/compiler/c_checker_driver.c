@@ -177,6 +177,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOADER_EXTERN: result = "variable cannot be declared both 'extern' and with the 'loader_uninitialized' attribute"; break;
         case CHECK_INPUT_LOADER_REDECLARATION: result = "redeclaration cannot add 'loader_uninitialized' attribute"; break;
         case CHECK_INPUT_INTERNAL_LINKAGE_FIRST: result = "attribute does not appear on the first declaration"; break;
+        case CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT: result = "expected string literal as argument of attribute"; break;
+        case CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL: result = "attribute requires parameter 1 to be int or bool"; break;
+        case CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS: result = "attribute parameter is out of bounds"; break;
     }
     return result;
 }
@@ -1291,7 +1294,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         }
                         else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ||
                                   kind == CHECK_INPUT_ATTRIBUTE_SUBJECT || kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_TYPES ||
-                                  kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT || kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION) && named)
+                                  kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT || kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION || kind == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL ||
+                                  kind == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS) && named)
                         {
                             // An attribute on a label or a statement that clang refuses there (#147), from its first token
                             // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
@@ -1322,8 +1326,18 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             snprintf(subjects, sizeof(subjects), "only applies to %s", row != NULL ? row->message : "other declarations");
                             // An index of a function's parameters past them (#147, clang's checkFunctionOrMethodParameterIndex),
                             // by its place among the attribute's arguments.
-                            char bounds[64];
+                            char bounds[128];
                             snprintf(bounds, sizeof(bounds), "parameter %u is out of bounds", input->reports[index].detail);
+                            // A thread-safety lock function's parameter index (#147, checkAttrArgsAreCapabilityObjs), with clang's
+                            // extra information: the argument's place, then the parameters' count.
+                            const uint32_t place = input->reports[index].detail & 0xffffu;
+                            const uint32_t parameters = input->reports[index].detail >> 16;
+                            if (kind == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS)
+                            {
+                                snprintf(bounds, sizeof(bounds), parameters == 0 ? "parameter %u is out of bounds: no parameters to index into" :
+                                         parameters == 1 ? "parameter %u is out of bounds: can only be 1, since there is one parameter" :
+                                                           "parameter %u is out of bounds: must be between 1 and %u", place, parameters);
+                            }
                             // An argument count other than clang's (#147, BUSTER_CHECK_COUNT_*), as its three messages word it.
                             const uint32_t detail = input->reports[index].detail;
                             const uint32_t bound = detail >> 8;
@@ -1352,7 +1366,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
                                                  kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT ? arguments :
                                                  kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION ? excluded :
-                                                 kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS ? bounds :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS ? bounds :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL ? "requires parameter 1 to be int or bool" :
                                                  kind == CHECK_INPUT_ATTRIBUTE_TYPES ? "cannot be applied to types" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
                                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? subjects :
@@ -1672,6 +1687,17 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                         label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
                                                         label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)
+                        {
+                            // capability's name that is no string literal (#147), at the argument: the attribute by its name
+                            // without a keyword's underscores, as clang's message names it (its scope's token first where it has one).
+                            const uint32_t first = input->reports[index].attribute;
+                            const bool scoped = first + 2 < count && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON;
+                            const uint32_t at = !scoped ? first : parser->tokens.kinds[first + 2] == PARSE_KIND_COLON && first + 3 < count ? first + 3 : first + 2;
+                            const String8 written = check_driver_attribute_spelling(parser, pp, at, false);
+                            const String8 bare = check_warning_attribute_normalized(written);
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "expected string literal as argument of '%.*s' attribute", (int)bare.length, bare.pointer);
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_LOADER_EXTERN || input->reports[index].message == CHECK_INPUT_LOADER_REDECLARATION ||
                                                 input->reports[index].message == CHECK_INPUT_INTERNAL_LINKAGE_FIRST) && token < count)
