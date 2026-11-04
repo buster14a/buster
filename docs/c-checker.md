@@ -5992,7 +5992,8 @@ arguments against the function. The checker now gives these as clang does.
     types; type here is 'void'".
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
-    recovery errors and their "to match this '('" notes.
+    recovery errors and their notes (a first error's "to match this '('" is
+    the parser's: `docs/c-parser.md`).
   - GNU's `noderef` is refused by name.
   - A thread-safety attribute's argument is checked for its names alone: an
     expression of other errors (`g.x` of an `int`) is taken, where clang
