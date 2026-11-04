@@ -44,7 +44,6 @@ jobs:
       - name: Focused debug regressions
         run: |
           set -uo pipefail
-          ./build/compiler cores
           status=0
           ./build/compiler test-debug --cross-check 2>&1 | tee "$RUNNER_TEMP/test-debug.log" || status=1
           ./build/compiler test-check-debug --cross-check --keep 2>&1 | tee "$RUNNER_TEMP/test-check-debug.log" || status=1
