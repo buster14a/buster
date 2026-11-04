@@ -36,6 +36,13 @@
 // instead, its epilogues' resets moved to match, p6's load at 16 past rbp and the rows below rbp are elsewhere: it is
 // refused.
 //
+// A realigned frame (#1284's review): r(p0, p1) stores p0 into a 64-byte object aligned to 64, calls g(), and returns
+// the object's value plus x = p1 + 7 and g's result, x living across the call in a callee-saved register, so that its
+// prologue pushes one past rbp before its allocation and realignment. Its code is certified. Then the allocation moved before the pushes, its epilogue matched
+// (its pops from where the moved pushes put the registers, and rsp reset from rbp before rbp's pop), every register and
+// the return address still come back, is refused: the pushes' slots are below the allocation, among the bytes the rows
+// may take once the realignment moves rsp, which the certificate keeps apart from the rows.
+//
 // A compare-exchange (#1059): c(p, e, d, k) compare-exchanges the i64 at p in one branch, with p, e, d and k live
 // across it and rax among the four allocatable registers. Its kernel saves rax in the scratch register and restores it
 // after, which gives the value in rax back: its code is certified. Then the restore made rax's move into itself, or a
@@ -73,6 +80,10 @@ struct Tier1CodeCertificateCounts
     uint32_t narrow_register_refused;
     uint32_t narrow_stack;
     uint32_t narrow_stack_refused;
+    // The realigned frame's compiles certified, those whose allocation was moved before their pushes, and those refused.
+    uint32_t realigned;
+    uint32_t late;
+    uint32_t late_refused;
     // The compare-exchange's compiles certified, those with a live value in rax across it, and its restore of rax left
     // out or taken from another register, and those refused.
     uint32_t exchange;
@@ -247,6 +258,48 @@ static bool tier1_code_certificate_narrow_function(Arena* input, IrFunction* fun
     return created;
 }
 
+// r(p0, p1): one block, p0 stored into a 64-byte object aligned to 64, x = p1 + 7, g() called, the object's value loaded
+// back plus x and g's result.
+static bool tier1_code_certificate_realigned_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 12,
+        .block_count = 1,
+        .constant_count = 1,
+        .slot_count = 1,
+        .call_count = 1,
+        .parameter_count = 2,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 2;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 2 };
+        function->slots[0] = (IrSlot){ .size = 64, .alignment = 64, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function->calls[0] = (IrCall){ .result_type = IR_I64 };
+        function->constants[0].low = 7;
+        uint32_t next = 0;
+        const uint32_t p0 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t p1 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t address = tier1_select_test_append(function, &next, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_STORE, IR_VOID, address, p0, BUSTER_IR_NONE);
+        const uint32_t seven = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t x = tier1_select_test_append(function, &next, IR_ADD, IR_I64, p1, seven, BUSTER_IR_NONE);
+        const uint32_t called = tier1_select_test_append(function, &next, IR_CALL, IR_I64, 1, 0, BUSTER_IR_NONE);
+        const uint32_t again = tier1_select_test_append(function, &next, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t loaded = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, again, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, loaded, x, BUSTER_IR_NONE);
+        const uint32_t total = tier1_select_test_append(function, &next, IR_ADD, IR_I64, sum, called, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, total, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->instruction_count = next;
+        function->block_offsets[1] = next;
+    }
+    return created;
+}
+
 // c(p, e, d, k): b0 branches on k's low bit to b1 or b2; b1 compare-exchanges the i64 at p from e to d and returns its
 // old value plus p's address, e, d and k, which live across it; b2 returns k.
 static bool tier1_code_certificate_exchange_function(Arena* input, IrFunction* function)
@@ -398,6 +451,89 @@ static bool tier1_code_certificate_pointer_moved(Tier1EmitTest* test, const Tier
     }
     records[m] = pointer;
     return refused;
+}
+
+// The realigned frame's allocation moved before its pushes (#1284's review): the prologue `push rbp; mov rbp, rsp; sub
+// rsp, N; push ...; and rsp, -A`, and its return's epilogue to match: its reset from rbp N lower, so that its pops take
+// each register from where the moved pushes put it, then `mov rsp, rbp` inserted before rbp's pop. Every register and the
+// return address come back, but the pushes' slots are below the allocation. Into `*refused`, whether the code's
+// certificate refuses it; false where the code isn't that shape (one block, its references before rbp's pop, a prologue of
+// pushes past rbp's before its allocation and realignment, an epilogue whose reset from rbp precedes its pops).
+static bool tier1_code_certificate_pushed_late(Tier1EmitTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, bool* refused)
+{
+    const uint32_t prologue = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    const uint32_t epilogue = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+    const X86Instruction* records = emitted->code.records;
+    const uint32_t count = emitted->code.count;
+    uint32_t end = 0;
+    while (end < count && emitted->origins[end] == prologue)
+    {
+        end += 1;
+    }
+    // The prologue: rbp's push and set, its pushes [2, sub), its allocation, its realignment.
+    const uint32_t sub = end >= 5 ? end - 2 : 0;
+    const bool allocation = records[sub].form == X86_FORM_SUB_RM64_IMM8 || records[sub].form == X86_FORM_SUB_RM64_IMM32;
+    const bool realignment = end >= 5 && (records[end - 1].form == X86_FORM_AND_RM64_IMM8 || records[end - 1].form == X86_FORM_AND_RM64_IMM32);
+    bool shaped = emitted->cfg_input.block_count == 1 && end >= 5 && records[0].form == X86_FORM_PUSH_R64 && records[0].rm == X86_REGISTER_RBP &&
+                  records[1].form == X86_FORM_MOV_RM64_R64 && allocation && realignment;
+    for (uint32_t r = 2; shaped && r < sub; r += 1)
+    {
+        shaped = records[r].form == X86_FORM_PUSH_R64;
+    }
+    // The epilogue's reset of rsp from rbp, and rbp's pop after it.
+    uint32_t reset = UINT32_MAX;
+    uint32_t last = UINT32_MAX;
+    for (uint32_t r = end; shaped && r < count; r += 1)
+    {
+        const bool frame = emitted->origins[r] == epilogue;
+        reset = frame && reset == UINT32_MAX && records[r].form == X86_FORM_LEA_R64_M && records[r].reg == X86_REGISTER_RSP && records[r].rm == X86_REGISTER_RBP ? r : reset;
+        last = frame && records[r].form == X86_FORM_POP_R64 && records[r].rm == X86_REGISTER_RBP ? r : last;
+    }
+    shaped = shaped && reset != UINT32_MAX && last != UINT32_MAX && reset < last;
+    // Its references (the call's) all before the inserted record, which leaves their records where they are.
+    for (uint32_t k = 0; shaped && k < emitted->reference_count; k += 1)
+    {
+        shaped = emitted->references[k].instruction < last;
+    }
+    X86Instruction* moved = shaped ? arena_push_array(&test->output, (uint64_t)count + 1, sizeof(X86Instruction), _Alignof(X86Instruction)) : 0;
+    uint32_t* origins = shaped ? arena_push_array(&test->output, (uint64_t)count + 1, 4, 4) : 0;
+    uint32_t* values = shaped ? arena_push_array(&test->output, (uint64_t)count + 1, 4, 4) : 0;
+    uint32_t blocks[2] = { 0 };
+    uint32_t stubs[1] = { 0 };
+    shaped = shaped && moved != 0 && origins != 0 && values != 0;
+    if (shaped)
+    {
+        // Record `last` is the inserted one; the others keep their order, those from `last` on one later.
+        for (uint32_t r = 0; r <= count; r += 1)
+        {
+            const uint32_t from = r <= last ? r : r - 1;
+            moved[r] = records[from];
+            origins[r] = emitted->origins[from];
+            values[r] = emitted->origin_values[from];
+        }
+        moved[2] = records[sub];
+        for (uint32_t r = 2; r < sub; r += 1)
+        {
+            moved[r + 1] = records[r];
+        }
+        moved[reset].displacement -= records[sub].immediate;
+        moved[last] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RBP, .rm = X86_REGISTER_RSP };
+        origins[last] = epilogue;
+        for (uint32_t b = 0; b < 2; b += 1)
+        {
+            blocks[b] = emitted->block_records[b] > last ? emitted->block_records[b] + 1 : emitted->block_records[b];
+        }
+        stubs[0] = emitted->stub_records[0] > last ? emitted->stub_records[0] + 1 : emitted->stub_records[0];
+        Tier1EmitResult mutant = *emitted;
+        mutant.code.records = moved;
+        mutant.code.count = count + 1;
+        mutant.origins = origins;
+        mutant.origin_values = values;
+        mutant.block_records = blocks;
+        mutant.stub_records = stubs;
+        *refused = tier1_code_certificate_refused(test, plan, &mutant);
+    }
+    return shaped;
 }
 
 // Block 0's tail `je b1; [edge 0's move]; jne b2`, b1 and b2 next, walked for edge 0 (to b2, the condition true): the
@@ -672,6 +808,37 @@ static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier
     arena_pop_to(&test->input, 0);
 }
 
+// The realigned frame (#1284's review): its code certified, its prologue pushing a register past rbp before its
+// allocation; then that allocation moved before the pushes, its epilogue matched, refused.
+static void tier1_code_certificate_realigned(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+{
+    IrFunction function;
+    const bool created = tier1_code_certificate_realigned_function(&test->input, &function);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the code certificate's realigned-frame fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the code certificate's realigned-frame fixture selects");
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.realigned &&
+                           emitted.frame.saved_registers != 0;
+    tier1_emit_test_expect(test, certified, "the realigned-frame fixture's code, a register pushed past rbp, passes its certificate");
+    counts->realigned += certified;
+    bool refused = false;
+    const bool shaped = certified && tier1_code_certificate_pushed_late(test, &plan, &emitted, &refused);
+    counts->late += shaped;
+    counts->late_refused += shaped && refused;
+    tier1_emit_test_expect(test, !certified || (shaped && refused), "a realigned frame whose pushes follow its allocation, its epilogue matched, fails the code's certificate: their slots are among the rows' bytes");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 // The compare-exchange (#1059's TIER1_RULE_ATOMIC_RMW) saves rax in the scratch register, takes the expected value in
 // it, and restores it after: the value that lives across it in rax is still there. With rax among the few allocatable
 // registers, its code is certified; then the restore made rax's move into itself, or a move from another register, is
@@ -734,6 +901,11 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_exchange(test, variant != 0, &counts);
     }
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        tier1_code_certificate_realigned(test, variant != 0, &counts);
+    }
+    tier1_emit_test_expect(test, counts.realigned == 2 && counts.late == 2, "the realigned-frame fixture's compiles push a register past rbp, and their allocation moves before it");
     tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
     tier1_emit_test_expect(test, counts.exchange == 2 && counts.exchange_live == 2, "the compare-exchange fixture's compiles each restore rax around the exchange");
     const bool kept = tier1_code_certificate_walked(false);
@@ -745,8 +917,9 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
            "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused; a conditional jump after an edge's "
            "flag-writing move %s; narrow parameters %u of 2 certified, their extensions corrupted in a register %u of %u and from a slot %u of %u refused; compare-exchanges %u of 2 certified, "
-           "their restores of rax corrupted %u of %u refused\n",
+           "their restores of rax corrupted %u of %u refused; realigned frames %u of 2 certified, their allocation moved before their pushes %u of %u refused\n",
            counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
            counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved, kept && !clobbered ? "refused" : "accepted", counts.narrow,
-           counts.narrow_register_refused, counts.narrow_register, counts.narrow_stack_refused, counts.narrow_stack, counts.exchange, counts.exchange_restores_refused, counts.exchange_restores);
+           counts.narrow_register_refused, counts.narrow_register, counts.narrow_stack_refused, counts.narrow_stack, counts.exchange, counts.exchange_restores_refused, counts.exchange_restores, counts.realigned,
+           counts.late_refused, counts.late);
 }
