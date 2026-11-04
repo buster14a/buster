@@ -11,58 +11,37 @@ concurrency:
   group: issue-1107-nov4
   cancel-in-progress: true
 jobs:
-  oracle:
+  validate:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 441db2428d2bd8d28503037b28c1b3740fe4b25a
+          fetch-depth: 0
+      - name: Prepare clean implementation tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/validation"
+          base64 -d .issue-1107/implementation.patch.xz.b64 | xz -d > "$RUNNER_TEMP/validation/implementation.patch"
+          if test -d .issue-1107/iterations; then cp -r .issue-1107/iterations "$RUNNER_TEMP/iterations"; fi
+          git checkout --detach 441db2428d2bd8d28503037b28c1b3740fe4b25a
+          git apply --check "$RUNNER_TEMP/validation/implementation.patch"
+          git apply "$RUNNER_TEMP/validation/implementation.patch"
+          if test -d "$RUNNER_TEMP/iterations"; then for patch in "$RUNNER_TEMP/iterations/"*.patch; do git apply "$patch"; done; fi
+          git diff --check
+          git add -N src/buster/compiler/c_check_semantic_diagnostic.c
+          git diff > "$RUNNER_TEMP/validation/combined.patch"
       - name: Install qualified compiler
         run: bash tools/ci/setup-hosted.sh
-      - name: Record exact clang diagnostics
-        run: |
-          mkdir -p "$RUNNER_TEMP/diagnostics"
-          cat > "$RUNNER_TEMP/cases" <<'CASES'
-          int f(void) { return; }
-          void g(void) { return 1; }
-          int main(void) { int x = "s"; }
-          struct s { int a; }; int f(struct s v) { return v.b; }
-          void f(void) { const int c = 1; c = 2; }
-          void f(void) { int a[2]; a = 0; }
-          int f(int); int f(long);
-          int main(void) { break; }
-          int f(int x) { switch(x) { case 1: case 1: return 0; } return 1; }
-          static int s; int s;
-          int main(void); int (*fp)(int) = main;
-          void f(void) { _Static_assert(1 == 2, "nope"); }
-          enum e { A, B, A };
-          struct incomplete x;
-          void f(void) { int x; x++++; }
-          void f(void) { continue; }
-          void f(int x) { switch(x) { default: break; default: break; } }
-          void f(int x) { switch(x) { case -1: break; case -1: break; } }
-          void f(unsigned x) { switch(x) { case -1: break; case 4294967295u: break; } }
-          _Static_assert(0, "hello " "world");
-          _Static_assert(1 == 2, "hello\nworld");
-          _Static_assert(0, "");
-          _Static_assert(1 == 2);
-          void f(void) { int x; const int *p = &x; *p = 1; }
-          CASES
-          i=0
-          while IFS= read -r source; do i=$((i+1)); printf '%s\n' "$source" > "$RUNNER_TEMP/diagnostics/$i.c"; clang --no-default-config --target=x86_64-linux-gnu -std=gnu17 -nostdinc -fsyntax-only -fno-color-diagnostics "$RUNNER_TEMP/diagnostics/$i.c" > "$RUNNER_TEMP/diagnostics/$i.clang" 2>&1 || test "$?" -eq 1; done < "$RUNNER_TEMP/cases"
-          clang --version > "$RUNNER_TEMP/diagnostics/version.txt"
-      - name: Build baseline checker
+      - name: Build checker
         env:
           BUSTER_HOST_ARCH: x86-64
           BUSTER_DEBUG_INFO: '0'
-        run: ./build.sh --config Debug --jobs 4 > "$RUNNER_TEMP/diagnostics/build.txt" 2>&1
-      - name: Record baseline checker diagnostics
-        run: |
-          for source in "$RUNNER_TEMP/diagnostics/"*.c; do ./build/compiler -fsyntax-only -std=gnu17 -nostdinc "$source" > "$source.buster" 2>&1 || test "$?" -eq 1; done
+        run: ./build.sh --config Debug --jobs 4 > "$RUNNER_TEMP/validation/build.txt" 2>&1
+      - name: Exact semantic diagnostics, valid twins and parser recovery
+        run: ./build/compiler test-checker --semantic-diagnostics --clang clang > "$RUNNER_TEMP/validation/semantic.txt" 2>&1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue-1107-diagnostics
-          path: ${{ runner.temp }}/diagnostics
+          name: issue-1107-validation
+          path: ${{ runner.temp }}/validation
           retention-days: 1
