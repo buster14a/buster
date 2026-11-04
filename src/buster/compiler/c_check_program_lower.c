@@ -816,12 +816,27 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 8: the initializers' map not
+    // cleared, its reads validated against initializer_nodes (check_lower_initializer_of).
+    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
 static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t object)
 {
     return writer->locals == NULL || check_program_bit(writer->locals, object) ? writer->local_map[object] : BUSTER_CHECK_NONE;
+}
+
+// The declaration whose initializer `node` is, or none (CheckLowerWriter.initializer_declarations). #1048's experiment,
+// temporary (#1235, bit 8): the preparation writes the map only at the initializers' nodes, without clearing it first,
+// and a read validates its token against initializer_nodes, which a stale slot's can't pass: every token whose
+// initializer is a node is among the declaring tokens that write the map (check_program_declaring).
+static inline uint32_t check_lower_initializer_of(const CheckLowerWriter* writer, uint32_t node)
+{
+    const uint32_t token = writer->initializer_declarations[node];
+    const bool valid = (writer->experiment & 8) == 0 ||
+                       (token < writer->program->input->token_count && check_sparse_get(writer->program->input->initializer_nodes, token) == node);
+    return valid ? token : BUSTER_CHECK_NONE;
 }
 
 
@@ -10166,7 +10181,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const TypeId destination = op == CHECK_OP_ASSIGN ? check_stream_type(stream, a) :
                                    declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
         const bool volatile_copy = check_lower_copy_node_volatile(writer, op == CHECK_OP_INITIALIZE ? a : b, destination) ||
@@ -10188,7 +10203,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE)
     {
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
         const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
         const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
@@ -12340,7 +12355,11 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     if (valid)
     {
-        memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
+        const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+        if (experiment == NULL || (strtoul(experiment, NULL, 10) & 8) == 0)
+        {
+            memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
+        }
         memset(shared->locals, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
         // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
@@ -12626,6 +12645,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
+    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
