@@ -16,22 +16,130 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 944f83cc167452c54caeeafc6e2a7a7e58e085ab
+          ref: e2cbd2905a15374daf7114e510cdd9cc11322629
           fetch-depth: 1
-      - name: Correct the new test's byte-pointer type
+      - name: Apply the driver boundary prerequisite
         shell: bash
         run: |
           set -euo pipefail
-          file=src/buster/compiler/emitted_code_limits_test.c
-          test "$(git hash-object "$file")" = 6e35d60b6f151a7cafd023ea40dc3176b8e10a24
-          sed -i 's/x86_elf_section(bytes.pointer, bytes.length/x86_elf_section((const uint8_t*)bytes.pointer, bytes.length/' "$file"
-          test "$(git hash-object "$file")" = 64dda668e4609df61787442d2e9834b3c9367450
-          git diff --check
+          cat > "$RUNNER_TEMP/driver.diff" <<'PATCH'
+          diff --git a/src/buster/compiler/emitted_code_limits_test.c b/src/buster/compiler/emitted_code_limits_test.c
+          --- a/src/buster/compiler/emitted_code_limits_test.c
+          +++ b/src/buster/compiler/emitted_code_limits_test.c
+          @@ -203,8 +203,8 @@
+                   snprintf(source, sizeof(source), "%s/frame.c", directory);
+                   snprintf(object, sizeof(object), "%s/frame.o", directory);
+                   snprintf(errors, sizeof(errors), "%s/frame.err", directory);
+          -        // One escaping object, no values live across the call: the fixed allocation is 2^31 - 8, the CFA 2^31.
+          -        static const char text[] = "extern void sink(void *); void large_frame(void) { char bytes[2147483640]; sink(bytes); }\n";
+          +        // One escaping object within the rounded object budget; call alignment adds 8 bytes for a CFA of 2^31.
+          +        static const char text[] = "extern void sink(void *); void large_frame(void) { char bytes[2147483632]; sink(bytes); }\n";
+                   const bool written = debug_test_write_file(source, (const uint8_t*)text, sizeof(text) - 1);
+                   emitted_test_expect(test, written, "write the compile-only near-limit frame", 0);
+                   String8 first = { 0 };
+          diff --git a/src/buster/compiler/tier0.c b/src/buster/compiler/tier0.c
+          --- a/src/buster/compiler/tier0.c
+          +++ b/src/buster/compiler/tier0.c
+          @@ -411,7 +411,8 @@
+           
+           // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
+           // size rounded up to 16 and, aligned past 16, its alignment less 16 (the most its place may move by), so that every frame
+          -// displacement fits a disp32. An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
+          +// displacement can fit a disp32; layout still checks the complete allocation and each displacement before emission.
+          +// An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
+           // most 2^30: past 16 bytes, the function's frame is realigned to the most any of them needs (Tier0Frame.alignment_log2).
+           #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
+           // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
+          @@ -420,7 +421,8 @@
+           #define BUSTER_TIER0_MAX_MASK_DEPTH 240
+           // The ABI row's bound is independent of the number of values live across nested calls.
+           #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 239
+          -#define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
+          +// The largest multiple of the validation rounding unit below INT32_MAX, not an unrelated 1 GB object cap (#1149).
+          +#define BUSTER_TIER0_MAX_OBJECT_BYTES ((1u << 31) - 16)
+           #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
+           // The alignment an ordinary frame keeps (rsp's at every call, as the convention has it), past which it is realigned.
+           #define BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 4
+          diff --git a/src/buster/compiler/tier0_test.c b/src/buster/compiler/tier0_test.c
+          --- a/src/buster/compiler/tier0_test.c
+          +++ b/src/buster/compiler/tier0_test.c
+          @@ -2212,25 +2212,23 @@
+                       function.count = 3;
+                       break;
+                   case 7:
+          -            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+          -            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2 + 1;
+          +            local_sizes[0] = (BUSTER_TIER0_MAX_OBJECT_BYTES / 2) & ~15u;
+          +            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - local_sizes[0] + 1;
+                       break;
+                   case 8:
+          -            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+          -            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+          +            local_sizes[0] = (BUSTER_TIER0_MAX_OBJECT_BYTES / 2) & ~15u;
+          +            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - local_sizes[0];
+                       break;
+                   case 9:
+          -            // Its size rounded up to 16, and its alignment less 16: the limit, exactly. (Not compiled: its frame is 1 GB.)
+          +            // Its rounded size and alignment slack plus the second object reach the limit. Do not execute it.
+                       local_sizes[0] = 16;
+                       local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+          -            local_sizes[1] = 0;
+          -            function.local_count = 1;
+          +            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - (1u << BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2);
+                       break;
+                   case 10:
+                       local_sizes[0] = 17;
+                       local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+          -            local_sizes[1] = 0;
+          -            function.local_count = 1;
+          +            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - (1u << BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2);
+                       break;
+                   default:
+                       break;
+          diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+          --- a/src/buster/compiler/c_check_program_lower.c
+          +++ b/src/buster/compiler/c_check_program_lower.c
+          @@ -2620,7 +2620,7 @@
+               const uint32_t local = writer->local_count;
+               if (size > BUSTER_TIER0_MAX_OBJECT_BYTES || alignment_log2 > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+               {
+          -        check_lower_unsupported(writer, "local objects aligned past 1 GB or larger than 1 GB");
+          +        check_lower_unsupported(writer, "local objects aligned past 1 GB or larger than INT32_MAX - 15 bytes");
+               }
+               else if (local < writer->local_capacity && local < BUSTER_TIER0_MAX_LOCALS)
+               {
+          diff --git a/docs/tier0.md b/docs/tier0.md
+          --- a/docs/tier0.md
+          +++ b/docs/tier0.md
+          @@ -118,8 +118,9 @@
+               class may name one too, of at least the class's bytes (a memory class's slot's 16: `tier0_value_object`), whose
+               first bytes they read or write, its home a memory operand as a slot's is: a front end's value that must live in
+               memory, which it then reads and writes as it would a value's local;
+          -  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), each counted as its size rounded up to 16
+          -    and, aligned past 16, its alignment less 16, so that every frame displacement fits a disp32.
+          +  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (`INT32_MAX - 15` bytes, #1149), each counted as its size rounded up to 16
+          +    and, aligned past 16, its alignment less 16. Frame layout still checks the complete allocation and every
+          +    displacement before emission; a large object combined with other slots can therefore remain unsupported.
+           
+             A function without objects leaves both columns 0.
+           - **The parameters' locations** at entry, and the result's.
+          PATCH
+          git apply --check --index "$RUNNER_TEMP/driver.diff"
+          git apply --index "$RUNNER_TEMP/driver.diff"
+          while read -r expected path; do
+            test "$(git hash-object "$path")" = "$expected" || { echo "Source mismatch: $path"; exit 1; }
+          done <<'BLOBS'
+          62843a330dd462d7a0df842d8cf8a398ee8a4b1e src/buster/compiler/emitted_code_limits_test.c
+          9163dc196c9b0100e8f86ce907b58033e1a8e63f src/buster/compiler/tier0.c
+          dfa207da692880a67ffacb816fcff9be1a58a347 src/buster/compiler/tier0_test.c
+          2096e87b3cf3cfe8273a18324f27cf0d06d1c1fa src/buster/compiler/c_check_program_lower.c
+          31fb3883eb1cd64707d1fb37625bbe95045ef794 docs/tier0.md
+          BLOBS
+          git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           sh .githooks/enable-sign-off.sh --maintainer-session
-          git add -- "$file"
-          git commit -m 'test: pass an unsigned byte pointer to the ELF section reader'
+          git commit -m 'fix: admit local objects within the signed-32-bit frame budget' -m 'The driver regression for #1149 was blocked before frame emission by a conservative 1 GB object budget. Use the largest 16-byte-rounded budget below INT32_MAX while retaining all complete-frame and displacement checks. Update exact/over-budget validator tests, including alignment slack.'
           git log -1 --format=fuller
           git push origin HEAD:refs/heads/fix/1149-wide-cfa
       - name: Install the existing hosted test toolchain
@@ -52,6 +160,13 @@ jobs:
           set -euo pipefail
           compiler=$(./build.sh print-output --config Release)
           "$compiler" test-emitted-code --count 8 --cross-check
+      - name: Tier 0 object budget and cross-check suite
+        if: success() || failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          compiler=$(./build.sh print-output --config Release)
+          "$compiler" test-tier0 --count 8 --cross-check --cross-count 8
       - name: Unwind and Tier 1 frame suites
         if: success() || failure()
         shell: bash
