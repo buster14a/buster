@@ -967,7 +967,10 @@ static IrCheck ir_check(IrError error, uint32_t instruction, uint32_t detail)
     return result;
 }
 
-static bool ir_constant_fits(IrConstant value, uint8_t type)
+// Inlined into the verifier's per-instruction oracle, which every constant takes: as a call, its growth past the
+// inliner's budget cost --tier1 -c of sqlite3.c 0.47% more instructions (#141's intrinsics, buster-performance's
+// tier1-intrinsics-141-2026-11-03).
+static inline __attribute__((always_inline)) bool ir_constant_fits(IrConstant value, uint8_t type)
 {
     const uint32_t bits = ir_type_bits[type];
     bool result = true;

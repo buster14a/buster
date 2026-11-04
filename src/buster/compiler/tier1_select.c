@@ -3619,21 +3619,15 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_MULHU && type == IR_I64)
+    else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c < BUSTER_IR_INTRINSIC_COUNT && integer))
     {
-        base.rule = TIER1_RULE_MULTIPLY_HIGH;
+        // One test in the chain for both rules, as mulhu's alone was: its mul, or the others' VEX instruction.
+        const bool high = c == BUSTER_IR_INTRINSIC_MULHU;
+        base.rule = high ? TIER1_RULE_MULTIPLY_HIGH : TIER1_RULE_INTRINSIC;
         base.values[0] = a;
         base.values[1] = b;
-        base.intrinsic_cost = 4;
-        tier1_select_add_candidate(forest, node, &candidates, base);
-    }
-    else if (op == IR_INTRINSIC && c > BUSTER_IR_INTRINSIC_MULHU && c < BUSTER_IR_INTRINSIC_COUNT && integer)
-    {
-        base.rule = TIER1_RULE_INTRINSIC;
-        base.values[0] = a;
-        base.values[1] = b;
-        base.immediate = c;
-        base.intrinsic_cost = 1;
+        base.immediate = high ? 0 : c;
+        base.intrinsic_cost = high ? 4 : 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_LIFETIME)
