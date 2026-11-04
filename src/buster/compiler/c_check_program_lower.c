@@ -816,6 +816,9 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 32768: an operand's push in a unit
+    // without overload sets by check_lower_operand's own lean path.
+    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -2189,8 +2192,53 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
+    const bool lean = !writer->overloads && (writer->experiment & 32768) != 0;
     const CheckOverloadResult* selected = writer->overloads ? check_program_overload_address(program, node, operand) : NULL;
-    if (selected != NULL)
+    if (lean)
+    {
+        // #1048's experiment (bit 32768): check_lower_expression's push of the operand, in a unit without overload sets,
+        // with its void context's tests only in a void context and its tasks packed in place.
+        const CheckStream* stream = program->stream;
+        const uint32_t child = operand == 0 ? graph->operand0[node] : operand == 1 ? graph->operand1[node] : operand == 2 ? graph->operand2[node] :
+                               operand - 3 < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + operand - 3] : BUSTER_CHECK_NONE;
+        if (child < stream->count)
+        {
+            bool discard = false;
+            if (!address && target == BUSTER_TYPE_VOID)
+            {
+                const CheckOp op = graph->ops[child];
+                const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
+                const uint32_t destination = graph->operand0[child];
+                const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && destination < stream->count &&
+                                       (check_stream_flags(stream, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
+                discard = (store && check_lower_aggregate(writer, check_stream_type(stream, child))) || bit_field || op == CHECK_OP_COMMA;
+            }
+            if (!address && !discard && target != 0)
+            {
+                const TypeId from = check_stream_type(stream, child);
+                if (from != target && !check_lower_conversion_empty(writer, from, target))
+                {
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target });
+                }
+            }
+            if (writer->depth < writer->capacity)
+            {
+                writer->tasks[writer->depth++] = (CheckLowerTaskPacked){
+                    .control = child | (uint64_t)CHECK_LOWER_EXPRESSION << 32 | (uint64_t)address << 40 | (uint64_t)discard << 42,
+                    .payload = 0,
+                };
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    else if (selected != NULL)
     {
         if (!check_program_overload_valid(program, selected))
         {
@@ -12579,6 +12627,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
+    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
