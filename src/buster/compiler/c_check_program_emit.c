@@ -378,6 +378,9 @@ struct CheckTier1Counts
     // for a shape the decoding doesn't take yet (Tier1EmitResult.code_reason).
     uint32_t code_certified;
     uint32_t code_uncertified;
+    // Its machine rows (#141) and the moves around them into their roles' registers and out of them (#1283).
+    uint32_t machine_rows;
+    uint32_t row_moves;
     // The calls of always_inline functions it expanded (#1282, c_check_tier1_inline.c).
     uint32_t inlined_calls;
 };
@@ -412,6 +415,8 @@ struct CheckTier1Report
     uint64_t red_zones;
     uint64_t code_certified;
     uint64_t code_uncertified;
+    uint64_t machine_rows;
+    uint64_t row_moves;
     uint64_t inlined_calls;
 };
 
@@ -3796,6 +3801,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
         lanes->tier1_report.code_certified += compiled ? counts->code_certified : 0;
         lanes->tier1_report.code_uncertified += compiled ? counts->code_uncertified : 0;
+        lanes->tier1_report.machine_rows += compiled ? counts->machine_rows : 0;
+        lanes->tier1_report.row_moves += compiled ? counts->row_moves : 0;
         lanes->tier1_report.inlined_calls += compiled ? counts->inlined_calls : 0;
     }
     if (!valid)

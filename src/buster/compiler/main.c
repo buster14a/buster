@@ -362,7 +362,16 @@ int run_type_benchmark(int argc, char** argv);
 // the driver's time depends on where its hot loops fall in the instruction caches, and code compiled before them, in
 // their unit or in another, moved them by any number of bytes. In their section, only the checker's own code moves
 // them. Its tests and the builtins' actions, which the driver seldom runs, stay in .text.
-__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text");
+// BUSTER_CHECKER_OFFSET (0 unless BUSTER_BUILD_DEFINES sets it: a multiple of 16 below a page) starts the checker's
+// code that many bytes into its page, after int3 padding. Builds of one tree at several offsets sample where its hot
+// loops fall, which ./build.sh shifts can't: it moves units' .text, never this section (#1233, docs/profiling.md).
+#ifndef BUSTER_CHECKER_OFFSET
+#define BUSTER_CHECKER_OFFSET 0
+#endif
+_Static_assert(BUSTER_CHECKER_OFFSET >= 0 && BUSTER_CHECKER_OFFSET < 4096 && BUSTER_CHECKER_OFFSET % 16 == 0, "BUSTER_CHECKER_OFFSET must be a multiple of 16 below 4096");
+#define BUSTER_CHECKER_OFFSET_TEXT_(offset) #offset
+#define BUSTER_CHECKER_OFFSET_TEXT(offset) BUSTER_CHECKER_OFFSET_TEXT_(offset)
+__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip " BUSTER_CHECKER_OFFSET_TEXT(BUSTER_CHECKER_OFFSET) ", 0xcc\n\t.text");
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_environment.c"
 #include "buster/compiler/c_check_body_bindings.c"
@@ -671,6 +680,9 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a rotating order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
+// measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
+// own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
+#include "buster/compiler/tier1_rows_measure.c"
 // measure-helpers (#1059): the direct forms against the helpers they replace (--helper-forms=all), by both tiers, as
 // whole processes in a rotating order: the primitives' kernels and speedtest1.
 #include "buster/compiler/helpers_measure.c"
@@ -1603,6 +1615,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-programs") == 0)
     {
         result = run_tier1_programs_measure(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-rows") == 0)
+    {
+        result = run_tier1_rows_measure(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-helpers") == 0)
     {

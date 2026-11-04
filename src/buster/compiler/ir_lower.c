@@ -444,17 +444,31 @@ static const uint8_t ir_typed_types[16] = {
     IR_I128,
 };
 
-// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
-// out the memory classes (I128 signed, F80 floating), which it compiles apart.
+// A vector's type is its width's container: v4i32, v8i32 or v16i32, and for an SSE carrier of 4 or 8 bytes (#1280: the
+// narrow vectors of shuffles and conversions, MMX's __m64) f32 or f64, its bits in the vector class's registers. No new
+// type for them: the f32 and f64 values' loads, stores, constants, copies, phis and spills are bit moves already (movss
+// and movsd, movaps, xorps, vmovd and vmovq), the IR's passes have no floating arithmetic to fold them by, and the
+// lowering gives them no floating operation (only a row reads one), so their bits stay exact. A new type would have
+// taken its own moves and spills, and a place in the type masks and the SIMD model's shapes. A row reads one
+// zero-extended into its role, as Tier 0's (tier1_emit_cfg_row), whatever made it.
 static IrType ir_typed_stack_type(uint8_t class)
 {
+    static const uint8_t vectors[17] = {
+        [1] = IR_F32,
+        [2] = IR_F64,
+        [4] = IR_V4I32,
+        [8] = IR_V8I32,
+        [16] = IR_V16I32,
+    };
     // A mask's (#179) m8 to m64 by its bytes, 1 to 8 (tier0_stack_mask's order).
-    const IrType type = tier0_stack_is_mask(class)            ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
-                        class >= BUSTER_TYPED_CLASS_LIMIT     ? class == BUSTER_TIER0_STACK_VECTOR(16) ? IR_V4I32 : class == BUSTER_TIER0_STACK_VECTOR(32) ? IR_V8I32 : IR_V16I32 :
-                                                                (IrType)ir_typed_types[class];
+    const IrType type = tier0_stack_is_mask(class)        ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
+                        class >= BUSTER_TYPED_CLASS_LIMIT ? (IrType)vectors[class - BUSTER_TYPED_CLASS_LIMIT] :
+                                                            (IrType)ir_typed_types[class];
     return type;
 }
 
+// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
+// out the memory classes (I128 signed, F80 floating), which it compiles apart.
 static const uint8_t ir_typed_signed_classes[16] = {
     [BUSTER_TYPED_CLASS_I8] = 1,
     [BUSTER_TYPED_CLASS_I16] = 1,
@@ -863,7 +877,7 @@ static uint8_t ir_typed_alignment(uint8_t class)
     const bool mask = tier0_stack_is_mask(class);
     const bool vector = class >= BUSTER_TYPED_CLASS_LIMIT && !mask;
     const uint32_t bytes = vector ? (class - BUSTER_TYPED_CLASS_LIMIT) * 4u : mask ? 0 : tier0_class_bytes(class);
-    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
+    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : bytes == 8 ? 3 : bytes == 4 ? 2 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
 }
 
 // A conversion between an integer class and a mask's stack class (#179), as Tier 0's CONVERT is: to a mask, the integer
@@ -1318,10 +1332,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         {
             const uint32_t bytes = ir_typed_vector_bytes(input, i);
             const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
-            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. All real
-            // transports must be full 128/256/512-bit values. In particular, the 4/8-byte SSE carrier forms refuse.
+            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. Every real
+            // transport is a full 128/256/512-bit value or an SSE carrier of 4 or 8 bytes (#1280), an f32 or f64 of its
+            // bits (ir_typed_stack_type).
             const bool inherited = kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE;
-            if (!inherited && bytes != 16 && bytes != 32 && bytes != 64)
+            if (!inherited && bytes != 4 && bytes != 8 && bytes != 16 && bytes != 32 && bytes != 64)
             {
                 check.error = IR_ERROR_UNSUPPORTED;
                 check.detail = IR_SIMD_TYPED_UNSUPPORTED;

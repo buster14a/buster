@@ -1858,6 +1858,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_certified, unit_report->code_certified, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->machine_rows, unit_report->machine_rows, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);

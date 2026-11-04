@@ -184,8 +184,13 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
             case BUSTER_TYPED_CONST:
                 // An __int128's low 64 bits, sign-extended (I128) or zero-extended (U128); a long double's an index into
-                // x87_constants, its 64-bit significand then its sign and exponent; any other's, its bits.
-                if (class >= BUSTER_TYPED_CLASS_LIMIT)
+                // x87_constants, its 64-bit significand then its sign and exponent; an SSE carrier's (#1280) its first
+                // word's bits, the f32's or f64's constant; any other's, its bits.
+                if (class >= BUSTER_TYPED_CLASS_LIMIT && (type == IR_F32 || type == IR_F64))
+                {
+                    stack[depth] = ir_typed_wide_constant(&sink, type, input->vector_constants[value * 8], 0);
+                }
+                else if (class >= BUSTER_TYPED_CLASS_LIMIT)
                 {
                     stack[depth] = ir_typed_vector_constant(&sink, type, input->vector_constants + value * 8);
                 }

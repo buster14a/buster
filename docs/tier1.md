@@ -141,8 +141,10 @@ contract. The report also sums Tier 1's code: its records, its spills' stores
 and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
 definitions of them it left out, its edges' moves, its spill slots, its
-frames' bytes, and its unwind tables' shapes: open frames, returns published as
-tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`).
+frames' bytes, its unwind tables' shapes: open frames, returns published as
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`),
+and its machine rows and the moves around them into their roles' registers and
+out of them (`machine_rows`, `row_moves`, #1283).
 Its `requested`, `admitted`, `compiled`, `unsupported`, `resource_failures`,
 `resource_retries`, `internal_failures` and `fallbacks` fields count the
 selected, admitted and compiled bodies and the disposition of the rest.
@@ -305,10 +307,11 @@ Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and
 64-bit integers, which `__m512i`'s intrinsics are) and the x86 builtins' rows of
 vectors are the IR's machine rows (#141, [the IR guide](ir.md)'s "Machine rows"),
 which Tier 1 places as Tier 0 does ([the selection guide](tier1-selection.md)'s
-"Machine rows"). Functions with what the IR doesn't represent stop before Tier 1,
-at the lowering to the IR: any vector at a target without AVX-512 (#775), and a
-row of a vector of 4 or 8 bytes (an SSE carrier's, `_mm256_cvtepu8_epi32`'s
-operand). The scalar ones, BMI2's
+"Machine rows"); a vector of 4 or 8 bytes (an SSE carrier, #1280: the operand of
+`_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. Functions with
+what the IR doesn't represent stop before Tier 1, at the lowering to the IR: any
+vector at a target without AVX-512 (#775). By `--tier1 -march=native`, main.c
+compiles every function by Tier 1 but its naked one. The scalar ones, BMI2's
 `pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
 [the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
 instruction of selection's `TIER1_RULE_INTRINSIC`.
