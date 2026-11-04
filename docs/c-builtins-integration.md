@@ -948,28 +948,53 @@ source's `-c` compile and each program's run in rotating rounds, as
 direct forms' admission, the helpers' planning or the measurement changes (the
 `helpers` gate), and on the daily and dispatched runs.
 
-On this session's 4-CPU cloud container (indicative; the 9700X's are the
-record), 3 rounds: the helpers' builds of the primitives make 25 helper calls
-where the direct ones make none (Tier 1's: 4, the asm statements', which keep
-their helpers under `--tier1`), 2,947 executable bytes where Tier 0's direct
-ones take 2,275, and Tier 1's 27 call stores and loads each where its direct
-code has 5. A helper strengthens every order to `seq_cst`, so that the runs
-measure that as much as the call: the sequence lock's helpers took 20.8 times
-its direct forms' time by Tier 0 (a release or acquire fence is no instruction,
-its helper an `mfence`), the spin lock's 3.5 times (its release store a plain
-`mov`, its helper an `xchg`), the reference counts' 1.40 times, the asm
-statements' 1.72, the maximum's 1.15, and the flags' compare-exchange loops
-0.98: those loops are no faster than their helpers' here. What they save is the
-call and its leaf (the executable bytes' column), and the IR sees their
-compare-exchanges as `rmw` operations rather than calls; whether that justifies
-them is the 9700X's record's question.
+On the 9700X ([buster-performance's
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/helpers-direct-1059-2026-11-04),
+#1264's run 41764205497, `znver5`, medians of 11 runs and 5 compiles), every
+direct form is faster than its helper by both tiers. Run time, helpers / direct:
+
+| Program | Tier 0 | `--tier1` |
+| --- | ---: | ---: |
+| `sequence` (fences, acquire and release accesses) | 46.8 | 101.6 |
+| `lock` (acquire exchange, release store) | 4.37 | 4.84 |
+| `swaps` (inline asm) | 3.06 | 1.00 (helpers either way) |
+| `counts` (`lock xadd`) | 1.12 | 1.12 |
+| `maximum` (weak compare-exchange) | 1.07 | 1.65 |
+| `flags` (compare-exchange fetch loops) | 1.03 | 1.05 |
+| speedtest1 (38 relaxed accesses) | 1.00 | 1.02 |
+
+A helper strengthens every order to `seq_cst`, so the runs measure that as well
+as the call: a release or acquire fence is no instruction where its helper is an
+`mfence`, and a release store is a `mov` where its helper is an `xchg`. The
+fetch loops gain least, since each iteration is a `lock cmpxchg` either way:
+Tier 0's direct loop runs more instructions than the helper's leaf (510 M against
+465 M) but takes 3% fewer cycles. So no family keeps its helper for want of a
+gain. Every range of 11 runs is apart from its pair's, except two: speedtest1 by
+Tier 0, and `swaps` by `--tier1`, which runs the same code either way.
+
+The objects' facts:
+- **Helper calls.** The primitives' helpers builds make 25 calls where the
+  direct ones make none (Tier 1's make 4: the asm statements keep their helpers
+  under `--tier1`). speedtest1's make 38 where the direct ones make none.
+- **Code size.** The primitives' text is 2,275 bytes against 2,947 by Tier 0,
+  and 1,875 against 2,579 by `--tier1`. speedtest1's is 687 bytes smaller by
+  Tier 0 and 2,346 by `--tier1` (1,415,994).
+- **Save and reload traffic.** The primitives' Tier 1 code has 5 call stores
+  and 5 loads, where the helpers' has 27 of each. speedtest1's has 47 fewer of
+  each, and 14 fewer spill stores and 16 fewer spill loads.
+- **Run time.** speedtest1 by `--tier1` runs 1.6% faster, in time and in
+  cycles (203.5 against 206.9 ms), and by Tier 0 the same.
+- **Compile time.** speedtest1's `-c` is unchanged: 112.4 against 113.7 ms by
+  Tier 0, and 464.7 against 464.8 by `--tier1`. Instructions are equal to
+  within 0.03%.
+- **The primitives' compile.** At 2 ms its times follow the rotation's order,
+  not the compile's cost: a helpers build runs right after its direct build in
+  4 of the 5 rounds, and takes the same time in the round where it runs first.
 
 **Pending** (#1059): C's volatile accesses carried to the IR as such
 ([the IR's guide](ir.md)'s "Effects through the consumers"), asm statements of
 fixed registers, labels, the x87's operands or flag outputs in their callers
-(each keeps its helper), Tier 1's IR for an asm statement's row, and the paired
-9700X measurements of helper calls, save and reload traffic, code size, compile
-time and runtime.
+(each keeps its helper), and Tier 1's IR for an asm statement's row.
 
 ## Atomic and terminal helper calls
 
