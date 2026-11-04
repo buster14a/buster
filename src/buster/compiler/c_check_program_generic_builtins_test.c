@@ -336,7 +336,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         // parentheses and casts, data of less than 256 bytes each; the buffer's size a size_t integer constant expression of
         // the layout, whatever its data's types; __builtin_os_log_format's format checks refusing a struct or a complex
         // value a specifier takes and a mask of other than 1 to 8 bytes, one after a %P without its length too (the checks go
-        // on past it, as the layout doesn't).
+        // on past it, as the layout doesn't); escaped percent signs, and specifiers past the format's NUL, of no items (#1329);
+        // and a %P without its length whose positional width has no argument, the pointer's item alone (#1335's review).
         { .name = "generic: os_log", .source =
           "struct S { int a; };\n_Static_assert(__builtin_os_log_format_buffer_size(\"%d %s\", 1, \"x\") == 18, \"\");\n"
           "enum { E = __builtin_os_log_format_buffer_size(\"%{mask.ab}d %m\", 1) };\n_Static_assert(E == 20, \"\");\n"
@@ -347,7 +348,10 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void* f(void* b, char* c, int i, struct S s)\n{\nunsigned long n = __builtin_os_log_format_buffer_size(\"%d\", i++);\n"
           "(void)__builtin_os_log_format(c, (\"%d\"), i);\n(void)__builtin_os_log_format(b, (const char*)\"%s %f\", \"x\", 1.5f);\n"
           "(void)__builtin_os_log_format(b, \"%d\", 1, s);\n(void)__builtin_os_log_format(b, \"%P %{mask.ab}d\", n, 1);\n"
-          "return __builtin_os_log_format(b, \"%{private}s %%\", \"x\");\n}\n" },
+          "return __builtin_os_log_format(b, \"%{private}s %%\", \"x\");\n}\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%%%%%% %d\\0%d%s\", 1) == 8, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"\\0%d%d%d%d\") == 2 && __builtin_os_log_format_buffer_size(\"%% %5% %{public}% %%%%\") == 2, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%1$*2$P\", (void*)0) == 12, \"\");\n" },
         { .name = "generic: os_log of an int buffer", .source = "void* f(int b)\n{\nreturn __builtin_os_log_format(b, \"%d\", 1);\n}\n", .rejected = true },
         { .name = "generic: os_log of a pointer format", .source = "void* f(void* b, const char* s)\n{\nreturn __builtin_os_log_format(b, s);\n}\n", .rejected = true },
         { .name = "generic: os_log of a wide format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size(L\"x\");\n}\n", .rejected = true },
@@ -788,8 +792,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
     // __builtin_os_log_format's buffers against clang's build (#148, the bytes of clang's helper's stores): privacy
     // annotations (sensitive over a later public), scalars of each promoted size, %m and %%, a string's count from its
     // precision's argument and from a constant, %.8P, masks, a field width and a precision of arguments, a double, a
-    // pointer, and an array (its address, compared in place, since the two builds place it apart); and buffer sizes of
-    // positions, of a %P without its length and of missing data.
+    // pointer, and an array (its address, compared in place, since the two builds place it apart); buffer sizes of
+    // positions, of a %P without its length and of missing data; and escaped percent signs, with specifiers past the
+    // format's NUL that take nothing (#1329).
     check_test_program_source(test,
         "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
         "static unsigned char buffer[512]; static char arr[4] = { 1, 2, 3, 4 };\n"
@@ -808,6 +813,7 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix(v == (unsigned long)arr); bytes(size - 8);\n"
         "mix(__builtin_os_log_format_buffer_size(\"plain\") + __builtin_os_log_format_buffer_size(\"%2$d %1$s\", s, n) * 100 +\n"
         "__builtin_os_log_format_buffer_size(\"%P %d\", n, n) * 10000 + __builtin_os_log_format_buffer_size(\"%d %d\", n) * 1000000);\n"
+        "__builtin_os_log_format(buffer, \"%%%% %{public}d %%\\0%s %d\", n); bytes(__builtin_os_log_format_buffer_size(\"%%%% %{public}d %%\\0%s %d\", n));\n"
         "return (int)(h ^ (h >> 32)); }\n",
         "generic-os-log", clang);
     // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument

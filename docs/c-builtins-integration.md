@@ -1789,12 +1789,21 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   - Length modifiers include C23's `H`, `D`, `DD`, `wN` and `wfN`.
 - **The layout.** The layout pass stops where clang's handler stops: at a
   value without its data, or after a `%P` without its length. Each
-  specifier gives up to five items, in this order: its mask (8 bytes of its
-  name), its field width and precision when they are arguments, a string's
-  or pointer's count (from the precision's argument, or its constant as 4
-  bytes), and its value (none for `%m`). A data argument's size is its
-  promoted type's: arrays and functions as pointers, float and half as
-  double.
+  specifier gives up to four items, in this order: its mask (8 bytes of its
+  name), its field width when it is an argument, a string's or pointer's
+  count (from the precision's argument, or its constant as 4 bytes) or any
+  other's precision when it is an argument, and its value (none for `%m`).
+  A data argument's size is its promoted type's: arrays and functions as
+  pointers, float and half as double.
+  - The pass pushes each item on the checker's arena as it finds it, 16
+    bytes each and nothing else (`check_os_log_format`, #1329). Escaped
+    `%%`, bytes past the format's NUL and specifiers of fewer items take no
+    room. An arena that can't hold the items is a resource failure, and the
+    arena is left as it was.
+  - `test-check-builtins-misc` checks the items of fixed formats of each
+    kind, 64 KiB formats of escaped percent signs and of percent signs past
+    a NUL in arenas of no room, and generated formats. Each runs in arenas
+    exactly as large as its items and a byte short of them.
 - **The checks.** The checking pass goes on past a `%P` without its length,
   as clang's `CheckFormatArguments` does. Each data argument is under 256
   bytes, promoted ("argument N is too big"). For `__builtin_os_log_format`,
