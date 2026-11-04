@@ -244,6 +244,8 @@ static const char* const check_input_messages[] =
     "parameter references not allowed in naked functions",
     "parameter was not declared; ISO C99 and later do not support implicit int",
     "initializer element is not a compile-time constant",
+    "array initializer must be an initializer list or string literal",
+    "initializer for a variable with deduced type contains multiple expressions",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
     "cannot jump from this goto statement to its label",
