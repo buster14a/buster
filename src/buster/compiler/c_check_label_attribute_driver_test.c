@@ -925,6 +925,19 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "struct S *q;\nstruct __attribute__((unavailable)) U { int a; };\nstruct U *r;\n",
         "enum __attribute__((unavailable(\"gone\"))) E { A };\nenum __attribute__((deprecated(\"old\"), unavailable(\"gone\"))) F { B };\n"
         "typedef int T __attribute__((deprecated(\"old\")));\ntypedef int T __attribute__((unavailable(\"gone\")));\nint x = A + B;\nT t;\n",
+        // A marked declaration's specifiers by its worst mark: a deprecated one drops a deprecated typedef's or tag's use,
+        // not an unavailable one's, whose error stays (at file scope, an attribute before or after the declarator, by both
+        // marks or a redeclaration); an unavailable one drops both.
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) T x;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S { int a; };\n__attribute__((deprecated)) struct S s;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\nT x __attribute__((deprecated)), y;\n",
+        "typedef int T __attribute__((deprecated(\"old\"), unavailable(\"gone\")));\n__attribute__((deprecated)) T x, y;\n"
+        "typedef int U __attribute__((deprecated(\"old\")));\ntypedef int U __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) U z;\n",
+        "typedef int T __attribute__((deprecated(\"old\")));\n__attribute__((deprecated)) T x;\n"
+        "typedef int U __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) U y;\n"
+        "typedef int V __attribute__((deprecated(\"old\")));\n__attribute__((unavailable)) V z;\nT w __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated(\"old\"))) S { int a; };\n__attribute__((deprecated)) struct S s;\n"
+        "struct __attribute__((unavailable(\"gone\"))) R { int a; };\n__attribute__((unavailable)) struct R r;\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

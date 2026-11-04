@@ -6002,9 +6002,10 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             const uint32_t limit = by_tag ? t - 1 : declared;
             const uint32_t marking = key < count ? marks[key] : 0;
             const bool marked = marking != 0 && marking - 1 <= limit && marking - 1 < t;
-            // A use in the declaration of something itself deprecated, as clang's delayed diagnostics drop it: one before
-            // the declaration's first declarator, which a deprecated attribute marks by its own token. Looked for only at a
-            // marked use, which are few.
+            // A use in the specifiers of a declaration itself marked, which clang's delayed diagnostics read in that
+            // declaration's context: one before its first declarator, which an attribute marks by its own token. Its worst
+            // mark is a context as check_input_availability_contexts' are: a deprecated one drops a deprecated use, an
+            // unavailable one an unavailable use too. Looked for only at a marked use, which are few.
             uint32_t declarator = marked && !inside ? t + 1 : count;
             while (declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
                    parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
@@ -6012,10 +6013,11 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                 declarator += 1;
             }
             const uint32_t declarator_key = declarator < count && reader->declaration_kinds[declarator] != 0 ? check_input_deprecated_key(reader, declarator) : count;
-            const bool deprecated_declaration = declarator_key < count && marks[declarator_key] != 0 && marks[declarator_key] - 1 <= declarator;
-            const CheckInputAttribute* candidate = marked && !deprecated_declaration ? check_input_availability_mark(reader, marks, chain, key, limit, by_tag ? t : UINT32_MAX) : NULL;
+            const CheckInputAttribute* enclosing = declarator_key < count ? check_input_availability_mark(reader, marks, chain, declarator_key, declarator, UINT32_MAX) : NULL;
+            const uint8_t specified = enclosing == NULL ? 0 : enclosing->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
+            const CheckInputAttribute* candidate = marked ? check_input_availability_mark(reader, marks, chain, key, limit, by_tag ? t : UINT32_MAX) : NULL;
             // A deprecated context drops a deprecated use's warning, an unavailable one an unavailable use's error too.
-            const uint8_t context = contexts != NULL ? contexts[t] : 0;
+            const uint8_t context = (contexts != NULL ? contexts[t] : 0) | specified;
             const bool unavailable = candidate != NULL && candidate->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
             const bool dropped = (context & BUSTER_CHECK_CONTEXT_UNAVAILABLE) != 0 || (!unavailable && (context & BUSTER_CHECK_CONTEXT_DEPRECATED) != 0);
             const CheckInputAttribute* attribute = dropped ? NULL : candidate;

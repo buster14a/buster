@@ -5595,8 +5595,10 @@ arguments against the function. The checker now gives these as clang does.
   warning and an unavailable one an unavailable use's error too: the body of
   a function itself marked (by any declaration before its body) and a marked
   declaration's declarator and initializer (`check_input_availability_contexts`).
-  There is none either in the specifiers of a declaration whose declarator is
-  deprecated, or in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
+  A file-scope declaration's specifiers take its declarator's worst mark as
+  their context too: a deprecated declaration's drop a deprecated typedef's or
+  tag's use but keep an unavailable one's error, and an unavailable
+  declaration's drop both. There is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
   the declaration its uses count by (its object's first, its tag's first),
