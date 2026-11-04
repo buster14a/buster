@@ -352,6 +352,39 @@ So a units lane does four things:
   and its context switches from about 100,000 to 43,000. Pooling the three big
   arenas too, rather than keeping them, made the same units take 0.64 s and
   0.38 s: their pages are cleared again for each unit.
+
+  Then the arenas of tables (#1128, [the arenas' guide](arena-memory.md)). A
+  lane's first unit still reserved about 100 arenas, each with its `mmap`,
+  `mprotect` and page advice, and each unit discarded 68 with `MADV_DONTNEED`,
+  each a TLB flush sent to the other lanes. 42 of those were the
+  preprocessor's tables and token columns and 11 the parser's columns, now an
+  arena per group: a unit discards 24. Lua's link makes 891 `madvise` calls
+  rather than 2,389 on one lane, and 1,461 rather than 3,272 on 8, with 481
+  `mmap` and 443 `munmap` calls rather than 818 and 786. On the 9700X (CPUs 0
+  to 7, medians of 11 runs, main `703ae9f5` interleaved; [the
+  record](https://github.com/buster14a/buster-performance/tree/6427b61d795d171e7a053418e565f7320865f62a/docs/measurements/arena-tables-1128-2026-11-03))
+  it takes 74.7 ms where main took 75.9 (1 lane), 46.1 against 46.7 (2), 33.1
+  against 34.6 (4) and 30.4 against 33.7 (8): 1.6, 1.3, 4.4 and 9.6% less,
+  with 55.7 ms of system time on 8 lanes rather than 67.0. Synth's link took
+  1,572 ms against 1,597 on one lane and 442.5 against 453.1 on 8; `-c` of the
+  frozen `sqlite3.c` on CPU 2 took 110.7 ms against 111.2. Keeping a pooled
+  arena's pages and clearing what its next pushes take, rather than discarding
+  them, gained nothing up to 1 MB of them and lost 22 to 25% at 4 MB: the
+  tables pushed whole but touched sparsely make every pushed byte one to clear.
+  `benchmark-check-units`, which the 9700X job runs, reports each lane count's
+  system time against one lane's: on 8 lanes, synth's shape still takes 3.6
+  times one lane's system time for 3.1 times its speed.
+  #1203's review found that this first layout, which rounded each table's
+  huge pages out to a whole huge page, mapped more address space than the
+  tables' own arenas: under a 512 MiB `RLIMIT_AS` a one-line unit's replay
+  for its expansion history no longer fitted. A table now ends at its own
+  end, and a group maps no more than its tables' own arenas did. Against main
+  `a4a2182a` ([the record's review
+  section](https://github.com/buster14a/buster-performance/tree/af6767ef8bfc3f1927f4d75d689eabf1f1525324/docs/measurements/arena-tables-1128-2026-11-03/review)),
+  Lua's link took 75.0 ms against 76.6 on one lane and 30.2 against 33.3 on 8,
+  synth's 428.0 against 449.4 on 8 lanes, and `sqlite3.c`'s `-c` 110.1
+  against 109.7 on nearly the same instructions (21,368 more of 1,184
+  million).
 - **A small unit's other arenas start with base pages** (`arena_small_floor`,
   which only the units' lanes set): the first 16 MB of each arena that a unit
   of less than 1 MB of source reserves (`BUSTER_CHECK_UNITS_SMALL_BYTES` and
@@ -380,7 +413,11 @@ So a units lane does four things:
   memory with the rest of the address space, as it frees a command of one
   file's. Before a link it releases it as the others do, so that the link's
   peak stays the units': kept through synth's link by one lane, it took the
-  peak from 328 MB to 386.
+  peak from 328 MB to 386. The run counts the lanes still taking units
+  itself (`CheckUnitsRun`'s `taking`), apart from the board's count, which
+  gates the help: the board's allocation may fail on several lanes, and each
+  lane read none still taking units from a missing board, so each one took
+  itself for the last and left its memory to the exit (#1165's review).
 
 ## The link
 
@@ -399,7 +436,11 @@ in the command line's order, as the emission builds one unit's
 1. **Symbols.** Each unit's symbols in its order. A global name is one symbol
    for all the units, found in a table of the names' hashes; a local symbol is
    its unit's own. A name that two units define is an error ("multiple
-   definition of 'x'"); a weak definition yields to a strong one. The symbol
+   definition of 'x'"); a weak definition yields to a strong one, and a common
+   one (GNU's `common` attribute or `-fcommon`, `BUSTER_LINK_SYMBOL_COMMON`, #147)
+   to a strong one too, while it takes a weak one's place and a smaller common
+   one's (by its size, then its alignment: `check_units_merge_replaces`, which
+   both merges share), as a linker keeps the largest of a name's commons. The symbol
    takes its definition's flags, the most constraining visibility any unit
    gives it, and for a reference a weak binding only when every unit's
    reference is weak. The units' definitions are the program's
@@ -645,8 +686,12 @@ driver as a process, in a directory of its own:
 - **A few large units** (#777): a unit of 800 functions beside a small one's
   `main`, with `-c` by 8 lanes and `--shared-parts` (a test option: a sharing
   emission pauses after each part it takes itself, and the command reports how
-  many parts the other lanes took), each object its own alone, the six lanes
-  without a unit having taken parts of the large one's; and linked by
+  many parts the other lanes took and how many lanes left their memory to the
+  exit), each object its own alone, the six lanes without a unit having taken
+  parts of the large one's and one lane alone leaving its memory to the exit;
+  again without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that
+  stands for its allocation failing), with no part shared and still one lane
+  alone leaving its memory; and linked, where no lane leaves it, by
   `--lanes` 1, by 8 and by the scalar path on 8, the same bytes, a program
   whose sum is the test's.
 - **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8

@@ -38,6 +38,13 @@ struct Tier1EmitBuffer
     uint32_t* targets;
     uint32_t branch_count;
     uint32_t branch_capacity;
+    // #939: each record's origin and value where the CFG consumer's certificate asks for them (tier1_emit_mark), and the
+    // records marked so far; null columns where it doesn't.
+    uint32_t* origins;
+    uint32_t* origin_values;
+    uint32_t marked;
+    // The position of node 0's use phase, which a node's saves' origins count from (the CFG consumer's added blocks').
+    uint32_t origin_base;
 };
 
 typedef enum Tier1FrameEmitError

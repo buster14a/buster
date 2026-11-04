@@ -216,8 +216,7 @@ static void check_test_program_batch(CheckTest* test)
     for (uint32_t count = 1; ready && count <= BUSTER_CHECK_BATCH_TEST_NODES; count += 1)
     {
         CheckInput input = {
-            .compound_objects = object_flags,
-            .static_objects = object_flags,
+            .declaration_bits = object_flags,
         };
         CheckGraph* graph = &input.graph;
         graph->count = count;
@@ -405,8 +404,7 @@ static void check_test_program_batch(CheckTest* test)
             20,
         };
         Arena sparse = arena_reserve(UINT64_C(1) << 16);
-        uint8_t flags[2] = { 0 };
-        uint8_t static_flags[2] = { 0 };
+        uint8_t declaration_bits[2] = { 0 };
         SymbolId object_symbols[3] = { 0 };
         CheckValue source_values[2] = {
             {
@@ -430,8 +428,7 @@ static void check_test_program_batch(CheckTest* test)
                 .count = 2,
             },
             .token_count = 2,
-            .compound_objects = flags,
-            .static_objects = static_flags,
+            .declaration_bits = declaration_bits,
             .declaration_bodies = check_sparse_from_values(&sparse, bodies, 2),
         };
         CheckStream stream = {
@@ -474,7 +471,7 @@ static void check_test_program_batch(CheckTest* test)
         const bool lowered = check_lower_value(&writer, 0, false, false);
         check_test_expect(test, lowered && writer.count == 1 && kinds[0] == BUSTER_TYPED_LOCAL && classes[0] == BUSTER_TYPED_CLASS_I32 && values[0] == 0,
                           "a window across bodies never reads another lane's mutable local map");
-        flags[0] = 1;
+        declaration_bits[0] = BUSTER_CHECK_BITS_COMPOUND;
         source_values[0].category = CHECK_RVALUE;
         source_values[0].constant_kind = CHECK_CONSTANT_INTEGER;
         source_values[0].integer = 7;

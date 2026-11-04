@@ -196,7 +196,15 @@ It reports:
   memory written);
 - isolated pieces on the run's retained events: the reader's stack replay and
   batch sort, the parser's grammar replay, and its two resolutions, each with
-  its own footprint past its arenas' lengths (exact for what it writes).
+  its own footprint past its arenas' lengths (exact for what it writes);
+- on the plain run alone (not `--only`, `--after-scalar` or `--pipeline`), the
+  expressions' walk by class, from runs of `direct` of their own after the
+  samples, with `PPOptions.expression_timing` and `expression_numbering` (#1038,
+  the checker guide's "The coded walk"): an `expression-classes` line, an
+  `expression-class` line per class with whether it is above the timing's
+  resolution, and an `expression-numbering` line, the graph by passes'
+  numbering of the same runs and its check against the walk's graph. They are
+  warm, as every pass of the benchmark is.
 
 The 9700X job runs it on every pull request on the small and header-heavy
 inputs and with 5 passes on frozen SQLite; where the handoff's timed path

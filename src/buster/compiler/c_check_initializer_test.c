@@ -407,7 +407,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     CheckInitializer strict = { 0 };
                     const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
                                                                  input.declared_types[declaration], check_sparse_get(input.initializer_begins, declaration), check_sparse_get(input.initializer_ends, declaration),
-                                                                 input.static_objects[declaration] != 0, &output, &scratch, &strict);
+                                                                 check_input_bit(input.declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0, &output, &scratch, &strict);
                     check_test_expect(test, !accepted && strict.status == CHECK_INIT_INVALID && strict.parts == 0 && strict.count == 0 && output.length == 0 && scratch.length == 0,
                                       "direct strict planner still rejects source-compatible excess elements transactionally");
                     check_test_expect(test, initializers.warning_count != 0 && initializers.plans[i].warning_token < check_sparse_get(input.initializer_ends, declaration),
@@ -440,7 +440,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     CheckInitializer rejected = { 0 };
                     const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
                                                                 input.declared_types[declaration], check_sparse_get(input.initializer_begins, declaration), check_sparse_get(input.initializer_ends, declaration),
-                                                                input.static_objects[declaration] != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
+                                                                check_input_bit(input.declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
                     check_test_expect(test, !partial && rejected.status == CHECK_INIT_RESOURCE && rejected.parts == 0 && rejected.count == 0 && tiny.length == 0 && scratch.length == 0,
                                       "partially planned source initializer rolls back all parts on output exhaustion");
                     break;

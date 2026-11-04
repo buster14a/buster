@@ -394,6 +394,328 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, added && runtime.memory_count == 0, "heap allocation removal");
 }
 
+// #1059's atomic read/modify/writes as one thread runs them: an addition and an exchange of an int return its old values
+// and leave the sum and the operand, a byte's exchange returns its old value as its class normalizes it, and the object
+// is checked as a load's and a store's: reading its undefined bytes, a misaligned object and a value that is no
+// ATOMIC_RMW's are refused.
+static void interpreter_test_atomic_rmw(InterpreterTestTally* tally, Arena* scratch)
+{
+    // x = 5; old = atomic x += 3 (5, x 8); old += atomic x <- 40 (8, x 40); c = -1; old += atomic c <- 1 (-1); x + old.
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_CONVERT,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    uint64_t values[] = {
+        0,
+        5,
+        0,
+        0,
+        3,
+        BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST,
+        0,
+        40,
+        0,
+        0,
+        1,
+        (uint64_t)-1,
+        0,
+        1,
+        1,
+        BUSTER_TYPED_FENCE_SEQ_CST,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I8,
+    };
+    Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = local_classes,
+        .local_count = 2,
+    };
+    InterpreterResult result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 52, "atomic addition and exchanges return old values and leave the sum and the operands");
+    values[5] = 0x40;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "an atomic read/modify/write of no operation rejected");
+    values[5] = BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST;
+    // The int's read/modify/write before any store: its bytes are undefined.
+    const uint8_t undefined_kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t undefined_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    const uint64_t undefined_values[] = {
+        0,
+        3,
+        BUSTER_TYPED_RMW_ADD,
+        0,
+    };
+    function.kinds = undefined_kinds;
+    function.classes = undefined_classes;
+    function.values = undefined_values;
+    function.count = BUSTER_ARRAY_LENGTH(undefined_kinds);
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_UNDEFINED, "an atomic read/modify/write of undefined bytes diagnosed");
+    InterpreterOptions options = interpreter_default_options();
+    options.check_undefined = false;
+    result = interpreter_test_run(&function, scratch, &options);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK, "an atomic read/modify/write's undefined-byte check can be disabled");
+    // An int's addition at a long's address plus one, inside its object but misaligned.
+    const uint8_t misaligned_kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_PTR_ADD,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t misaligned_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    const uint64_t misaligned_values[] = {
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        7,
+        BUSTER_TYPED_RMW_ADD,
+        0,
+    };
+    const uint8_t long_class = BUSTER_TYPED_CLASS_U64;
+    function.kinds = misaligned_kinds;
+    function.classes = misaligned_classes;
+    function.values = misaligned_values;
+    function.count = BUSTER_ARRAY_LENGTH(misaligned_kinds);
+    function.local_classes = &long_class;
+    function.local_count = 1;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_MEMORY, "a misaligned atomic read/modify/write rejected");
+}
+
+// #1059's atomic compare-exchanges as one thread runs them: x = 5; cas x, 5, 9 (5, x 9); cas x, 5, 7 (9, x 9); their
+// old values plus x, 23 (21 had the second stored, 15 had the first not), the address in a U64 local the entry names; and
+// an address local of another class refused.
+static void interpreter_test_atomic_cas(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_CAS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_CAS,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_LOAD,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    uint64_t values[] = {
+        0,
+        5,
+        0,
+        0,
+        1,
+        5,
+        9,
+        BUSTER_TYPED_FENCE_SEQ_CST | UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT,
+        5,
+        7,
+        2 | UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+    };
+    Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = local_classes,
+        .local_count = 2,
+    };
+    InterpreterResult result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 23,
+                            "atomic compare-exchanges return old values and store the desired one where the old one is the expected one alone");
+    // The address in local 0, the int itself: no U64's.
+    values[10] = 2;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "an atomic compare-exchange whose address's local isn't a U64's rejected");
+}
+
+// The memories' disjoint prefix (InterpreterRuntime.disjoint_count, #1229) never changes which memory an access finds,
+// the first that holds it: a memory that overlaps one in the prefix stays past it, and the prefix's one, found first,
+// decides; a last-match hint that a removal left pointing at another memory isn't taken; the prefix stops growing at
+// BUSTER_INTERPRETER_DISJOINT_PREFIX memories, past which the lookup still finds each; and a removal keeps from the
+// prefix exactly the memories it kept from it.
+static void interpreter_test_lookup(InterpreterTestTally* tally)
+{
+    static InterpreterMemory memories[BUSTER_INTERPRETER_DISJOINT_PREFIX + 8];
+    static uint8_t cells[BUSTER_INTERPRETER_DISJOINT_PREFIX + 8];
+    uint8_t first[16] = { 0 };
+    uint8_t second[16] = { 0 };
+    uint8_t third[16] = { 0 };
+    InterpreterRuntime runtime = {
+        .memories = memories,
+        .memory_capacity = BUSTER_ARRAY_LENGTH(memories),
+        .check_memory = true,
+    };
+    const uint64_t at_first = (uint64_t)(uintptr_t)first;
+    const uint64_t at_second = (uint64_t)(uintptr_t)second;
+    const uint64_t at_third = (uint64_t)(uintptr_t)third;
+    // 0: first, read-only, and 1: second, writable, are the prefix. 2: a writable view of first's bytes 4 to 8 overlaps
+    // it, and from it on nothing joins the prefix: 3: third, and 4: a writable view of first's bytes 8 to 12.
+    bool added = interpreter_memory_add(&runtime, first, sizeof(first), 0, false, 1);
+    added = added && interpreter_memory_add(&runtime, second, sizeof(second), 0, true, 2);
+    added = added && interpreter_memory_add(&runtime, first + 4, 4, 0, true, 3);
+    added = added && interpreter_memory_add(&runtime, third, sizeof(third), 0, true, 4);
+    added = added && interpreter_memory_add(&runtime, first + 8, 4, 0, true, 5);
+    interpreter_test_expect(tally, added && runtime.memory_count == 5 && runtime.disjoint_count == 2, "lookup: from an overlapping memory on, none joins the prefix");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_second, 4, true) == INTERPRETER_OK, "lookup: the prefix's newest memory");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 4, 4, true) == INTERPRETER_MEMORY,
+                            "lookup: the first memory that holds a range decides, not a later overlapping one");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_third, 8, true) == INTERPRETER_OK && runtime.last_match == 3,
+                            "lookup: a memory past the prefix, found in order, is the hint");
+    // With second removed, index 3, the hint, is the view of first's bytes 8 to 12, past the prefix: first, still
+    // before it, decides.
+    interpreter_memory_remove(&runtime, second);
+    interpreter_test_expect(tally, runtime.memory_count == 4 && runtime.disjoint_count == 1, "lookup: a removal keeps the prefix's memories it kept");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
+                            "lookup: a hint past the prefix isn't taken over an earlier memory that holds the range");
+    // With first removed, its views decide for its bytes 4 to 12, and nothing for its others.
+    interpreter_memory_remove(&runtime, first);
+    interpreter_test_expect(tally, runtime.memory_count == 3 && runtime.disjoint_count == 0, "lookup: no prefix once its memories are gone");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 4, 4, true) == INTERPRETER_OK &&
+                                   interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_OK,
+                            "lookup: the views a removal uncovered are found");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first, 4, false) == INTERPRETER_MEMORY &&
+                                   interpreter_memory_access(&runtime, at_second, 1, false) == INTERPRETER_MEMORY,
+                            "lookup: a removed memory's bytes");
+    for (uint32_t owner = 1; owner <= 5; owner += 1)
+    {
+        interpreter_memory_remove_owner(&runtime, owner);
+    }
+    interpreter_test_expect(tally, runtime.memory_count == 0 && runtime.disjoint_count == 0, "lookup: no memories, no prefix");
+    // A memory each cell, owner 1 to the prefix's end and 2 past it: the prefix stops at its limit, and every cell is
+    // found, before and past it, the last ones by the in-order search.
+    bool registered = true;
+    for (uint32_t i = 0; registered && i < BUSTER_ARRAY_LENGTH(cells); i += 1)
+    {
+        registered = interpreter_memory_add(&runtime, cells + i, 1, 0, i % 2 == 0, i < BUSTER_INTERPRETER_DISJOINT_PREFIX ? 1 : 2);
+    }
+    interpreter_test_expect(tally, registered && runtime.disjoint_count == BUSTER_INTERPRETER_DISJOINT_PREFIX, "lookup: the prefix stops at its limit");
+    bool found = registered;
+    for (uint32_t i = 0; found && i < BUSTER_ARRAY_LENGTH(cells); i += 1)
+    {
+        const InterpreterStatus expected = i % 2 == 0 ? INTERPRETER_OK : INTERPRETER_MEMORY;
+        found = interpreter_memory_access(&runtime, (uint64_t)(uintptr_t)(cells + i), 1, true) == expected;
+    }
+    interpreter_test_expect(tally, found, "lookup: each memory found, in the prefix and past it");
+    interpreter_memory_remove_owner(&runtime, 2);
+    interpreter_test_expect(tally, runtime.memory_count == BUSTER_INTERPRETER_DISJOINT_PREFIX && runtime.disjoint_count == runtime.memory_count,
+                            "lookup: removing the memories past the prefix leaves it whole");
+    interpreter_memory_remove_owner(&runtime, 1);
+}
+
 static void interpreter_test_limits(InterpreterTestTally* tally, Arena* scratch)
 {
     uint8_t kind = BUSTER_TYPED_JUMP;
@@ -1215,6 +1537,9 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_atomic_rmw(&tally, &scratch);
+        interpreter_test_atomic_cas(&tally, &scratch);
+        interpreter_test_lookup(&tally);
         interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);

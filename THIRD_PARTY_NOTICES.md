@@ -170,7 +170,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/branch_sizing.c`, `src/buster/compiler/branch_sizing_benchmark.c`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/) | Original branch-sizing integration, lengths-only SIMD implementation, scalar reference, tests, timing and scaling harnesses, and generated observations for #305; Default. Existing repository generators supply the inputs. AMD's Zen 5 guide supplies architectural guidance, not copied implementation. Clang, GNU as and Linux perf run externally; no tool implementation or external fixture corpus is imported. The measurement record identifies source revisions, compiler/CPU identities, exact commands, hashes and qualification limits. |
 | `src/buster/compiler/x86_semantics.c`, `src/buster/compiler/x86_semantics_test.c`, `src/buster/compiler/x86_semantics_benchmark.c`, `docs/x86-semantics.md` | Original form-effects tables, immediate contracts, form choice, tests, benchmark and documentation; Default. Intel and AMD manuals supply architectural facts, not copied implementation. The existing encoder catalogue and branch-sizing generator are reused; original fixtures execute on the processor, and GNU as runs externally as a byte oracle. The benchmark's measurement helpers are original to the module. No external implementation or fixture corpus is imported. |
 | `src/buster/compiler/assembler.c`, `src/buster/compiler/assembler_words.c`, `src/buster/compiler/assembler_test.c`, `src/buster/compiler/assembler_benchmark.c`, `src/buster/compiler/x86_match.c`, `docs/assembler.md` | Original assembly frontend, register classifier, matcher, tests, benchmark and documentation; Default. Encoder form facts and the project's validation and ELF interfaces are reused. GNU as and Clang run externally on original fixtures; their implementation is not imported. uops.info supplies measured instruction costs. The digit pair/quartet multiply-add reduction is implemented from the arithmetic, without copied source. |
-| `src/buster/compiler/assembler_sections.c`, `src/buster/compiler/assembler_cfi.c`, `src/buster/compiler/assembler_compat_test.c`, `src/buster/compiler/assembler_corpus_test.c`, `examples/assembler/compiler-corpus.c`, `examples/assembler/compiler-caller.c` | Original GNU assembly section/CFI adapters, differential fixtures and independent executable/unwind corpus; Default. GNU as documentation and observed output supply syntax/encoding behavior; ELF and DWARF describe format facts. GCC 16.2.1 and Clang 23.1.1 generate assembly at test time from the original C corpus, and GNU as runs externally as its object oracle. No external implementation or fixture corpus is incorporated. The recovered syntax/corpus work is this same repository's original stopped #233 attempt; its source and recovery boundaries are recorded with the qualification evidence. |
+| `src/buster/compiler/assembler_sections.c`, `src/buster/compiler/assembler_cfi.c`, `src/buster/compiler/assembler_compat_test.c`, `src/buster/compiler/assembler_corpus_test.c`, `src/buster/compiler/assembler_programs_test.c`, `examples/assembler/compiler-corpus.c`, `examples/assembler/compiler-caller.c`, `examples/assembler/program-floating.c`, `examples/assembler/program-storage.c`, `examples/assembler/program-strings.c` | Original GNU assembly section/CFI adapters, differential fixtures and independent executable/unwind corpus, and #1115's original whole-program corpus, whose assembly GCC and Clang generate at test time (GCC 13.3 and Clang 23.1.5 when it was written) and whose objects GNU as's are compared with; Default. GNU as documentation and observed output supply syntax/encoding behavior; ELF and DWARF describe format facts. GCC 16.2.1 and Clang 23.1.1 generate assembly at test time from the original C corpus, and GNU as runs externally as its object oracle. No external implementation or fixture corpus is incorporated. The recovered syntax/corpus work is this same repository's original stopped #233 attempt; its source and recovery boundaries are recorded with the qualification evidence. |
 | `src/buster/compiler/x86_zen5.c`, `src/buster/compiler/x86_zen5_measure.c`, `src/buster/compiler/x86_zen5_test.c`, `docs/x86-zen5.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/) | Original partial instruction-cost model, C microbenchmark generator, tests and hardware observations; Default. Inputs are this repository's encoder forms and original operand fixtures executed on the owner's Ryzen 7 9700X. No external timing dataset or benchmark implementation is imported. Clang and Linux perf are external tools; PMCx0C1 is the architectural retired-macro-op event, not executed micro-ops. The guide records the generation procedure and evidence. |
 | `src/buster/compiler/x86_target.c`, `src/buster/compiler/x86_target_forms.c`, `src/buster/compiler/x86_target_test.c`, `docs/x86-target.md` | Original target policy, form requirement rows, tests, benchmark and documentation; Default. CPUID fields and psABI levels are architectural facts. Macro/profile and builtin-query data were checked against Clang 23.1.3; the live tests rerun Clang as an external oracle. LLVM's target parser, target macro and host-detection sources were consulted for behavior, not copied. The existing encoder's original form-family macros are reused. Sources and reproduction are recorded in `docs/x86-target.md`. |
 | `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembly.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
@@ -582,3 +582,44 @@ Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
 and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
 `CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
 as behavior references. No LLVM implementation or test fixtures were copied.
+
+### The CPU model's names and values (#148)
+
+`src/buster/compiler/c_builtin_cpu.inc` is derived LLVM data, not first-party
+material: the names `__builtin_cpu_supports` and `__builtin_cpu_is` take, and
+the CPU model's bits and values clang's code tests them against. It keeps the
+LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Input:** `llvm/include/llvm/TargetParser/X86TargetParser.def`, as
+  installed by apt.llvm.org's `llvm-23-dev`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92` (LLVM
+  23.1.5, built from llvm-project commit `a738f2737189`), at
+  `/usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def`, sha256
+  `cc59e275156d08b658cf23bc950237ee288a54477b16c08b4cbb00242fa60f50`.
+- **Rows taken:** the strings and ABI values of its `X86_FEATURE_COMPAT` and
+  `X86_MICROARCH_LEVEL` rows (a feature's word is the value divided by 32, its
+  bit the remainder), and of its `X86_VENDOR`, `X86_CPU_TYPE` and
+  `X86_CPU_SUBTYPE` rows, aliases included. The rows keep the input's order,
+  the features' first, and nothing else of it is copied.
+- **Generator:** `tools/generate_x86_cpu_model.c`, which is original project
+  code under the default terms. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_model.c -o build/generate_x86_cpu_model
+  build/generate_x86_cpu_model --self-test
+  build/generate_x86_cpu_model /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def "llvm-23-dev 1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92 (apt.llvm.org)" "$(sha256sum /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def | cut -d' ' -f1)" > c_builtin_cpu.inc.new
+  ```
+
+  The generator succeeds only when it has read the whole input and written
+  and flushed the whole table. `--self-test` checks this against a synthetic
+  input, a write to `/dev/full`, an unreadable input and a malformed row.
+  The output's sha256 is
+  `fe9cf559b3168f24d27e2a228c980af2c0a4b0bab8d552b37422f9ffb47588d7`. Its 183
+  rows are byte-identical to the table that first came in with #148. That
+  table was read from an earlier clang 23.1's code for a call of each name,
+  with no record of its exact inputs.
+- **Oracle:** clang runs externally in `test-checker-driver`
+  (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
+  every row's test against clang's code over every bit and value of the
+  model. Its use as an oracle copies none of its code.

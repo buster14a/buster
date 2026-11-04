@@ -167,8 +167,77 @@ typedef enum Tier1SelectRule
     // A memory fence (IR_FENCE, #1059) of the order and scope `immediate`: mfence for a thread fence of seq_cst, the one
     // x86-64 needs an instruction for, and no records for the others. No value; no pass moved an access across it.
     TIER1_RULE_FENCE,
+    // The high 64 bits of values[0] times values[1], unsigned (IR_MULHU, #141's 128-bit integers): one operand in rax,
+    // mul of the other, the result in rdx, which the consumers save around it as TIER1_RULE_DIVIDE_RECIPROCAL's.
+    TIER1_RULE_MULTIPLY_HIGH,
+    // Long double (F80, #141), whose values the CFG consumer keeps in frame objects of their own, one per value, 16 bytes
+    // each, and computes on the x87 stack between them, leaving it empty after each node (tier1_emit_cfg_x87): its kind
+    // in `scale` (BUSTER_TIER1_X87_*), and in `values` the node's operands that aren't long doubles alone (a load's or a
+    // store's address, a conversion's integer or floating operand), its long double operands read from the IR's
+    // operands, which no register holds. Only the CFG consumer takes it.
+    TIER1_RULE_X87,
+    // The IR's vectors (#141), v4i32, v8i32 and v16i32, in the vector class's registers that the CFG consumer's
+    // allocation gives them as it gives the floating values (xmm0 to xmm14, a node's register its location's low four
+    // bits, xmm15 the class's scratch), by AVX-512's EVEX forms of `width` 16, 32 or 64 bytes, the xmm, ymm or zmm one
+    // (tier1_select_vector_forms): its kind in `scale` (BUSTER_TIER1_VECTOR_*). A vector's loads and stores are
+    // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32), and its phis
+    // TIER1_RULE_PHI's. Only the CFG consumer takes it.
+    TIER1_RULE_VECTOR,
+    // An atomic read/modify/write (IR_ATOMIC_RMW, #1059) of the object at the address in values[0], of values[1], by
+    // the operation `immediate` (BUSTER_IR_RMW_OPERATION's: an exchange, an addition or a compare-exchange): the operand
+    // copied to the scratch register, xchg or lock xadd of it with the object, a full barrier every order takes, and its
+    // old value zero-extended into the destination, as a load's is; a compare-exchange's, with values[1] the expected
+    // value and values[2] the desired one, rax saved in the scratch register (and an operand in rax read from there),
+    // the expected value moved into rax, lock cmpxchg of the desired one with the object, the old value zero-extended
+    // from rax into the destination, and rax restored where the destination isn't it. Never folded into a consumer, and
+    // a barrier no load folds past.
+    TIER1_RULE_ATOMIC_RMW,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
+
+// TIER1_RULE_VECTOR's kinds, its pattern's `scale` (#141):
+// - ZERO (a constant of zeros, or undef): vpxord of the destination with itself;
+// - ONES (every bit): vpternlogd of the destination with itself, 0xff;
+// - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
+// - CONSTANT (any other, its index in `immediate`): its words as immediates into the red zone below rsp and a load, which
+//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload;
+// - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
+// - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
+//   vpmulld, vpandq, vporq, vpxord: unmasked, a quadword's and and or are the doublewords' bits): three operands, so the
+//   destination may be either;
+// - NOT of values[0]: vpternlogd with 0x55, the complement of its third operand;
+// - COMPARE of values[0] and values[1] into a mask, `condition` its IR predicate: vpcmpd, or vpcmpud for an unsigned
+//   one, into the mask's opmask register (the destination's low three bits, class 2's);
+// - SELECT of values[1] where the mask values[0] is set and of values[2] where it isn't: vpblendmd under the mask.
+#define BUSTER_TIER1_VECTOR_ZERO 0
+#define BUSTER_TIER1_VECTOR_ONES 1
+#define BUSTER_TIER1_VECTOR_SPLAT 2
+#define BUSTER_TIER1_VECTOR_CONSTANT 3
+#define BUSTER_TIER1_VECTOR_COPY 4
+#define BUSTER_TIER1_VECTOR_BINARY 5
+#define BUSTER_TIER1_VECTOR_NOT 6
+#define BUSTER_TIER1_VECTOR_COMPARE 7
+#define BUSTER_TIER1_VECTOR_SELECT 8
+
+// TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
+// - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
+// - LOAD and STORE of the 10 bytes through the address in values[0], the stored value the IR's b;
+// - COPY; BINARY, `operation` its index among IR_FADD to IR_FDIV; NEGATE;
+// - COMPARE, `condition` its IR predicate, the truth value into the destination as a floating compare's;
+// - FROM_FLOAT and TO_FLOAT, a float's or a double's (`source_width` or `width` 4 or 8) in an xmm register;
+// - FROM_INT and TO_INT, an integer's (`source_width` or `width` its memory width), signed where `operation` is 1.
+#define BUSTER_TIER1_X87_CONSTANT 0
+#define BUSTER_TIER1_X87_UNDEF 1
+#define BUSTER_TIER1_X87_LOAD 2
+#define BUSTER_TIER1_X87_STORE 3
+#define BUSTER_TIER1_X87_COPY 4
+#define BUSTER_TIER1_X87_BINARY 5
+#define BUSTER_TIER1_X87_NEGATE 6
+#define BUSTER_TIER1_X87_COMPARE 7
+#define BUSTER_TIER1_X87_FROM_FLOAT 8
+#define BUSTER_TIER1_X87_TO_FLOAT 9
+#define BUSTER_TIER1_X87_FROM_INT 10
+#define BUSTER_TIER1_X87_TO_INT 11
 
 // TIER1_RULE_FLOAT_CONVERT's kinds, its pattern's `scale` (#141):
 // - FROM_SIGNED, an integer's sitofp: cvtsi2ss or cvtsi2sd of its 32 or 64 bits, an I8's or an I16's sign-extended into
@@ -647,7 +716,7 @@ struct Tier1SelectFloatForms
     uint16_t resize;
 };
 
-static const Tier1SelectFloatForms tier1_select_float_forms_table[3] =
+static const Tier1SelectFloatForms tier1_select_float_forms_table[6] =
 {
     {
         X86_FORM_MOVSS_X_XM32, X86_FORM_MOVSS_XM32_X, { X86_FORM_ADDSS_X_XM32, X86_FORM_SUBSS_X_XM32, X86_FORM_MULSS_X_XM32, X86_FORM_DIVSS_X_XM32 }, X86_FORM_UCOMISS_X_XM32,
@@ -663,11 +732,79 @@ static const Tier1SelectFloatForms tier1_select_float_forms_table[3] =
         X86_FORM_NONE, X86_FORM_NONE, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, { X86_FORM_NONE, X86_FORM_NONE },
         { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
     },
+    // A vector's (#141), 16, 32 and 64 bytes: its loads, stores, spills and reloads, vmovdqu32 at its width.
+    {
+        X86_FORM_VMOVDQU32_X_XM128, X86_FORM_VMOVDQU32_XM128_X, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
+    {
+        X86_FORM_VMOVDQU32_Y_YM256, X86_FORM_VMOVDQU32_YM256_Y, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
+    {
+        X86_FORM_VMOVDQU32_Z_ZM512, X86_FORM_VMOVDQU32_ZM512_Z, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
 };
 
 static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
 {
-    return &tier1_select_float_forms_table[width == 4 ? 0 : width == 8 ? 1 : 2];
+    return &tier1_select_float_forms_table[width == 4 ? 0 : width == 8 ? 1 : width == 16 ? 3 : width == 32 ? 4 : width == 64 ? 5 : 2];
+}
+
+// A vector's EVEX forms at its width (#141, TIER1_RULE_VECTOR's): xmm's, ymm's and zmm's, each AVX512F's and the narrower
+// two AVX512VL's too, which a target without them refuses at emission as any record's.
+typedef struct Tier1SelectVectorForms Tier1SelectVectorForms;
+struct Tier1SelectVectorForms
+{
+    uint16_t move;
+    uint16_t binary[6];
+    uint16_t ternary;
+    uint16_t compare[2];
+    uint16_t blend;
+    uint16_t broadcast;
+};
+
+static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
+{
+    {
+        X86_FORM_VMOVDQA64_X_XM128,
+        { X86_FORM_VPADDD_X_X_XM128_EVEX, X86_FORM_VPSUBD_X_X_XM128_EVEX, X86_FORM_VPMULLD_X_X_XM128_EVEX, X86_FORM_VPANDQ_X_X_XM128, X86_FORM_VPORQ_X_X_XM128, X86_FORM_VPXORD_X_X_XM128 },
+        X86_FORM_VPTERNLOGD_X_X_XM128_IMM8,
+        { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_X_XM128_IMM8 },
+        X86_FORM_VPBLENDMD_X_X_XM128,
+        X86_FORM_VPBROADCASTD_X_R32,
+    },
+    {
+        X86_FORM_VMOVDQA64_Y_YM256,
+        { X86_FORM_VPADDD_Y_Y_YM256_EVEX, X86_FORM_VPSUBD_Y_Y_YM256_EVEX, X86_FORM_VPMULLD_Y_Y_YM256_EVEX, X86_FORM_VPANDQ_Y_Y_YM256, X86_FORM_VPORQ_Y_Y_YM256, X86_FORM_VPXORD_Y_Y_YM256 },
+        X86_FORM_VPTERNLOGD_Y_Y_YM256_IMM8,
+        { X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8 },
+        X86_FORM_VPBLENDMD_Y_Y_YM256,
+        X86_FORM_VPBROADCASTD_Y_R32,
+    },
+    {
+        X86_FORM_VMOVDQA64_Z_ZM512,
+        { X86_FORM_VPADDD_Z_Z_ZM512, X86_FORM_VPSUBD_Z_Z_ZM512, X86_FORM_VPMULLD_Z_Z_ZM512, X86_FORM_VPANDQ_Z_Z_ZM512, X86_FORM_VPORQ_Z_Z_ZM512, X86_FORM_VPXORD_Z_Z_ZM512 },
+        X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8,
+        { X86_FORM_VPCMPD_K_Z_ZM512_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 },
+        X86_FORM_VPBLENDMD_Z_Z_ZM512,
+        X86_FORM_VPBROADCASTD_Z_R32,
+    },
+    {
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        X86_FORM_NONE,
+    },
+};
+
+// A width no vector has gets no form (X86_FORM_NONE), which no target allows, rather than another width's.
+static const Tier1SelectVectorForms* tier1_select_vector_forms(uint32_t width)
+{
+    return &tier1_select_vector_forms_table[width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3];
 }
 
 // movaps between two xmm registers: a whole register's copy, which unlike movss's and movsd's doesn't merge into its
@@ -675,6 +812,13 @@ static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
 static X86Instruction tier1_select_float_move(uint8_t destination, uint8_t source)
 {
     return tier1_select_register_record(X86_FORM_MOVAPS_X_XM, destination, source);
+}
+
+// A copy of the vector class's value of `width` bytes between two of its registers (#141): a floating value's and a
+// 16-byte vector's movaps, and a wider vector's vmovdqa64 of its ymm or zmm register.
+static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width)
+{
+    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width)->move, destination, source);
 }
 
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
@@ -884,6 +1028,35 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_MFENCE });
         }
         break;
+    case TIER1_RULE_ATOMIC_RMW:
+        if (holes->immediate == BUSTER_IR_RMW_COMPARE)
+        {
+            const uint8_t scratch = BUSTER_TIER1_SELECT_SCRATCH;
+            const uint8_t address = holes->left == X86_REGISTER_RAX ? scratch : holes->left;
+            const uint8_t expected = holes->right == X86_REGISTER_RAX ? scratch : holes->right;
+            const uint8_t desired = holes->third == X86_REGISTER_RAX ? scratch : holes->third;
+            tier1_select_append(&result, tier1_select_move(8, scratch, X86_REGISTER_RAX));
+            tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RAX, expected));
+            const uint32_t form = width == 1 ? X86_FORM_LOCK_CMPXCHG_M8_R8 : width == 2 ? X86_FORM_LOCK_CMPXCHG_M16_R16 : width == 8 ? X86_FORM_LOCK_CMPXCHG_M64_R64 : X86_FORM_LOCK_CMPXCHG_M32_R32;
+            tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = desired, .rm = address, .mode = BUSTER_X86_MEMORY_BASE });
+            const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+            tier1_select_append(&result, tier1_select_register_record(extension, destination, X86_REGISTER_RAX));
+            if (destination != X86_REGISTER_RAX)
+            {
+                tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RAX, scratch));
+            }
+        }
+        else
+        {
+            const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+            const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
+                                      : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+            tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
+            const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+            tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        }
+        break;
     case TIER1_RULE_PHI:
         break;
     case TIER1_RULE_ALLOCA:
@@ -1011,6 +1184,78 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     // A floating value's registers are xmm registers (#141): a node's register is its location (class 1's), whose low
     // four bits are the xmm register; a memory operand's base and index, an integer's and the scratch register are
     // general registers.
+    // A vector's (#141): its EVEX forms at its width, three operands, the destination any of the class's registers.
+    case TIER1_RULE_VECTOR:
+    {
+        const Tier1SelectVectorForms* forms = tier1_select_vector_forms(width);
+        const uint8_t x = destination & 15;
+        const uint8_t left = holes->left & 15;
+        const uint8_t right = holes->right & 15;
+        const uint32_t kind = holes->scale;
+        if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
+        {
+            const X86Instruction record = {
+                .form = kind == BUSTER_TIER1_VECTOR_ZERO ? forms->binary[5] : forms->ternary,
+                .reg = x,
+                .vvvv = x,
+                .rm = x,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = kind == BUSTER_TIER1_VECTOR_ZERO ? 0 : 0xff,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_SPLAT)
+        {
+            tier1_select_request(&result, X86_OPERATION_MOV, 4, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(uint32_t)holes->immediate, 0);
+            tier1_select_append(&result, tier1_select_register_record(forms->broadcast, x, BUSTER_TIER1_SELECT_SCRATCH));
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_COPY && x != left)
+        {
+            tier1_select_append(&result, tier1_select_class_move(x, left, width));
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_BINARY || kind == BUSTER_TIER1_VECTOR_NOT)
+        {
+            const bool complement = kind == BUSTER_TIER1_VECTOR_NOT;
+            const X86Instruction record = {
+                .form = complement ? forms->ternary : forms->binary[holes->operation < 6 ? holes->operation : 0],
+                .reg = x,
+                .vvvv = left,
+                .rm = complement ? left : right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = complement ? 0x55 : 0,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_COMPARE)
+        {
+            // vpcmp's predicates: 0 ==, 1 <, 2 <=, 4 !=, 5 >= (not <) and 6 > (not <=); vpcmpud's the unsigned ones.
+            static const uint8_t predicates[IR_PREDICATE_COUNT] = { [IR_EQ] = 0, [IR_NE] = 4, [IR_LT] = 1, [IR_LE] = 2, [IR_GT] = 6, [IR_GE] = 5, [IR_ULT] = 1, [IR_ULE] = 2, [IR_UGT] = 6, [IR_UGE] = 5 };
+            const uint32_t condition = holes->condition < IR_PREDICATE_COUNT ? holes->condition : IR_EQ;
+            const X86Instruction record = {
+                .form = forms->compare[condition >= IR_ULT],
+                .reg = (uint8_t)(destination & 7),
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = predicates[condition],
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_SELECT)
+        {
+            // vpblendmd's destination is its third operand (rm) where the mask is set, its second (vvvv) where it isn't.
+            const X86Instruction record = {
+                .form = forms->blend,
+                .reg = x,
+                .vvvv = (uint8_t)(holes->third & 15),
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = (uint8_t)(holes->left & BUSTER_X86_DECORATION_MASK),
+            };
+            tier1_select_append(&result, record);
+        }
+        break;
+    }
     case TIER1_RULE_FLOAT_CONSTANT:
     {
         const uint8_t x = destination & 15;
@@ -1209,7 +1454,8 @@ static uint32_t tier1_select_fixed_registers(uint32_t rule)
     const uint32_t divide = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX);
     // An unsigned I64's conversion (#141) writes the scratch register alone, which no value lives in: nothing is saved for
     // it, but its sequence takes the path's room.
-    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX : rule == TIER1_RULE_FLOAT_CONVERT_WIDE ? 1u << BUSTER_TIER1_SELECT_SCRATCH : 0;
+    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL || rule == TIER1_RULE_MULTIPLY_HIGH ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX :
+           rule == TIER1_RULE_FLOAT_CONVERT_WIDE ? 1u << BUSTER_TIER1_SELECT_SCRATCH : 0;
 }
 
 // TIER1_RULE_DIVIDE_RECIPROCAL's records (Tier1SelectReciprocal), the high product in rdx: the multiplier in rax, or in rdx
@@ -1351,6 +1597,22 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
     {
         count = tier1_select_reciprocal_records(holes, records);
+    }
+    else if (holes->rule == TIER1_RULE_MULTIPLY_HIGH)
+    {
+        // The product is commutative: an operand already in rax stays there, and mul reads its other operand, which may
+        // be rdx, before it writes rdx:rax.
+        const uint8_t rax = X86_REGISTER_RAX;
+        const uint8_t multiplier = holes->left == rax ? holes->right : holes->right == rax ? holes->left : holes->right;
+        if (holes->left != rax && holes->right != rax)
+        {
+            records[count++] = tier1_select_move(8, rax, holes->left);
+        }
+        records[count++] = (X86Instruction){ .rm = multiplier, .form = X86_FORM_MUL_RM64 };
+        if (holes->destination != X86_REGISTER_RDX)
+        {
+            records[count++] = tier1_select_move(8, holes->destination, X86_REGISTER_RDX);
+        }
     }
     else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
     {
@@ -1497,12 +1759,16 @@ struct Tier1SelectForest
     const uint32_t* blocks;
     const uint32_t* uses;
     const uint32_t* costs;
-    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a volatile access, a fence or
-    // a move of rsp, which a load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no
-    // atomic access of its own: C's atomic operations reach it as calls of the unit's leaves, and its fences as IR_FENCE.
+    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a volatile or atomic load
+    // (BUSTER_IR_OBSERVABLE), a fence or a move of rsp, which a load isn't folded past (tier1_select_load_folds;
+    // tier1_select_barriers). An atomic access is never folded itself, and a load moved past a fence would leave the place
+    // its order keeps (#1059).
     const uint32_t* barriers;
     // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
     const uint8_t* canonical;
+    // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
+    // one pays no node's vector checks (tier1_select_candidates).
+    bool vectors;
 };
 
 static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
@@ -1510,9 +1776,19 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     const uint32_t op = function->op[node];
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
-    // past it, so that the access stays on the fence's side the program put it.
-    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE ||
-           (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+    // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
+    // an atomic read/modify/write. These are the nodes with an effect, which the plan materializes whatever their uses.
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
+           (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+}
+
+// Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
+// doesn't carry a C access's volatility, so that an IR load without BUSTER_IR_VOLATILE may still be a volatile object's,
+// and two volatile reads must keep their order. A load still folds into its own consumer (tier1_select_load_folds:
+// the last of these before the consumer the load itself), but past no other load.
+static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
+{
+    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD;
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -1524,11 +1800,11 @@ static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t co
     for (uint32_t node = 0; node < count; node += 1)
     {
         barriers[node] = barrier;
-        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
+        barrier = tier1_select_fold_barrier(function, node) ? node + 1 : barrier;
     }
 }
 
-// The same, 16 nodes at a time: their kinds and flags compared at once, each barrier's lane its position plus one, the
+// The same, 16 nodes at a time: their kinds compared at once, each barrier's lane its position plus one, the
 // running maximum by four shifts of the lanes and the vectors' before, and each node's entry its lane before's. The
 // columns are read, and the entries written, with masked loads and stores.
 static void tier1_select_barriers(const IrFunction* function, uint32_t count, uint32_t* barriers)
@@ -1541,12 +1817,10 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const uint32_t left = count - first;
         const __mmask16 active = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
         const __m512i op = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->op + first));
-        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
-        const __mmask16 volatile_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) | volatile_load) &
-                                  active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -1575,6 +1849,12 @@ static uint32_t tier1_select_mask_width(uint32_t type)
     return type == IR_M8 ? 1 : type == IR_M16 ? 2 : type == IR_M32 ? 4 : type == IR_M64 ? 8 : 0;
 }
 
+// A vector's bytes (#141): v4i32's 16, v8i32's 32 and v16i32's 64, its xmm, ymm or zmm register's; 0 for any other type.
+static uint32_t tier1_select_vector_width(uint32_t type)
+{
+    return type == IR_V4I32 ? 16 : type == IR_V8I32 ? 32 : type == IR_V16I32 ? 64 : 0;
+}
+
 // A floating value's bytes (#141): F32's 4 and F64's 8, the ss and sd forms' widths; 0 for any other type. F80, the x87's,
 // isn't taken.
 static uint32_t tier1_select_float_width(uint32_t type)
@@ -1582,11 +1862,27 @@ static uint32_t tier1_select_float_width(uint32_t type)
     return type == IR_F32 ? 4 : type == IR_F64 ? 8 : 0;
 }
 
-// Whether a function has vectors, which the selector doesn't take (#141): ir_function_has_vectors_path's answer. Masks
-// (#179) it takes, as ir_function_has_simd doesn't.
-static bool tier1_select_has_vectors(const IrFunction* function, bool vector)
+// Whether a node computes on long doubles (#141, TIER1_RULE_X87's): one of type F80, a store of one, or a comparison of
+// them or a conversion from one; a phi of them and a call returning one too, which their own rules take.
+static bool tier1_select_x87_node(const IrFunction* function, uint32_t node)
 {
-    return ir_function_has_vectors_path(function, vector);
+    const uint32_t op = function->op[node];
+    const uint32_t a = function->a[node];
+    const uint32_t b = function->b[node];
+    const bool from = (op == IR_FCMP || op == IR_FTRUNC || op == IR_FPTOSI || op == IR_FPTOUI || op == IR_RET) && a < function->instruction_count && function->type[a] == IR_F80;
+    return function->type[node] == IR_F80 || (op == IR_STORE && b < function->instruction_count && function->type[b] == IR_F80) || from;
+}
+
+// Whether a function takes or returns a vector (#141), which no convention's place Tier 1 has: its vectors are its own
+// values otherwise, and a call's vector argument or result tier1_select_call_supported refuses.
+static bool tier1_select_vector_signature(const IrFunction* function)
+{
+    bool found = tier1_select_vector_width(function->result_type) != 0;
+    for (uint32_t p = 0; !found && p < function->parameter_count; p += 1)
+    {
+        found = tier1_select_vector_width(function->parameter_types[p]) != 0;
+    }
+    return found;
 }
 
 // The width a narrow source's copy reads: I1's canonical storage is its 32 bits, I8 one byte and I16 two. Zero says the
@@ -1703,7 +1999,8 @@ static uint32_t tier1_select_argument_type(const IrFunction* function, const IrC
 #define BUSTER_TIER1_PLACE_GENERAL 0
 #define BUSTER_TIER1_PLACE_VECTOR 1
 #define BUSTER_TIER1_PLACE_STACK 2
-// A by-value aggregate's place (#789): its ABI record says where its bytes go (tier1_select_parts, or its stack slots).
+// A by-value aggregate's place (#789): its ABI record says where its bytes go (tier1_select_location_parts, or its stack
+// slots).
 #define BUSTER_TIER1_PLACE_AGGREGATE 3
 
 typedef struct Tier1SelectPlace Tier1SelectPlace;
@@ -1724,8 +2021,11 @@ struct Tier1SelectPlaces
 
 static Tier1SelectPlace tier1_select_next_place(Tier1SelectPlaces* places, uint32_t type)
 {
+    // A long double (#141) is MEMORY's: on the stack always, its 16 bytes in two slots aligned to 16.
+    const bool x87 = type == IR_F80;
     const bool floating = type == IR_F32 || type == IR_F64;
-    const bool registered = floating ? places->vector < BUSTER_ABI_VECTOR_ARGUMENTS : places->general < BUSTER_ABI_INTEGER_ARGUMENTS;
+    const bool registered = !x87 && (floating ? places->vector < BUSTER_ABI_VECTOR_ARGUMENTS : places->general < BUSTER_ABI_INTEGER_ARGUMENTS);
+    places->stack = x87 ? (places->stack + 1) & ~1u : places->stack;
     const uint32_t index = !registered ? places->stack : floating ? places->vector : places->general;
     const Tier1SelectPlace place = {
         .kind = (uint8_t)(!registered ? BUSTER_TIER1_PLACE_STACK : floating ? BUSTER_TIER1_PLACE_VECTOR : BUSTER_TIER1_PLACE_GENERAL),
@@ -1733,7 +2033,7 @@ static Tier1SelectPlace tier1_select_next_place(Tier1SelectPlaces* places, uint3
     };
     places->general += registered && !floating;
     places->vector += registered && floating;
-    places->stack += !registered;
+    places->stack += !registered ? (x87 ? 2u : 1u) : 0u;
     return place;
 }
 
@@ -1749,12 +2049,18 @@ static const IrPassed* tier1_select_argument_record(const IrFunction* function, 
     return call->abi != 0 ? &function->passed[function->abi_calls[call->abi - 1].passed + argument] : 0;
 }
 
-// Whether parameter `parameter` is a by-value aggregate (#789): its record's bytes aren't 0, and its IR value is a ptr
-// to them, the function's own copy (tier1_emit_cfg.c's frame object, or its stack slots in the incoming area).
+// Whether an ABI record is a by-value aggregate's (#789): its bytes aren't 0, or (#141) it is passed in no place at all
+// (IGNORE: an empty struct, or one of unnamed bit-fields), which only an aggregate is.
+static bool tier1_select_aggregate_record(const IrPassed* record)
+{
+    return record != 0 && (record->size != 0 || record->location.kind == BUSTER_ABI_LOCATION_IGNORE);
+}
+
+// Whether parameter `parameter` is a by-value aggregate (#789, tier1_select_aggregate_record), whose IR value is a ptr to
+// its bytes, the function's own copy (tier1_emit_cfg.c's frame object, or its stack slots in the incoming area).
 static bool tier1_select_aggregate_parameter(const IrFunction* function, uint32_t parameter)
 {
-    const IrPassed* record = tier1_select_parameter_record(function, parameter);
-    return record != 0 && record->size != 0;
+    return tier1_select_aggregate_record(tier1_select_parameter_record(function, parameter));
 }
 
 // Whether node `node` is a parameter where the entry puts it, in its incoming register or slot: IR_PARAM, but a by-value
@@ -1775,7 +2081,7 @@ static Tier1SelectPlace tier1_select_record_place(const IrPassed* record)
         index += 1;
     }
     const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
-    const uint8_t kind = record->size != 0                                       ? BUSTER_TIER1_PLACE_AGGREGATE
+    const uint8_t kind = tier1_select_aggregate_record(record)                   ? BUSTER_TIER1_PLACE_AGGREGATE
                          : record->location.kind == BUSTER_ABI_LOCATION_STACK ? BUSTER_TIER1_PLACE_STACK
                          : vector                                              ? BUSTER_TIER1_PLACE_VECTOR
                                                                                : BUSTER_TIER1_PLACE_GENERAL;
@@ -1818,8 +2124,10 @@ static uint32_t tier1_select_call_stack_bytes(const IrFunction* function, const 
     return call->abi != 0 ? function->abi_calls[call->abi - 1].call.stack_bytes : BUSTER_ABI_SLOT_BYTES * places.stack;
 }
 
-// An aggregate's part in a register (#789): its register, an ABI one (a general register's number, or an xmm one's plus
-// BUSTER_ABI_REGISTER_VECTOR), and the bytes it holds from its offset in the aggregate.
+// An aggregate's part (#789): its register, an ABI one (a general register's number, or an xmm one's plus
+// BUSTER_ABI_REGISTER_VECTOR), or BUSTER_ABI_REGISTER_NONE for its location's stack slot (#141: a SPLIT location's part
+// with no register, or a STACK location's high or low eightbyte alone), and the bytes it holds from its offset in the
+// aggregate.
 typedef struct Tier1SelectPart Tier1SelectPart;
 struct Tier1SelectPart
 {
@@ -1840,35 +2148,115 @@ struct Tier1SelectPart
 // The largest constant size an allocation folds (#141): rounded up to any frame's alignment, it fits a sub's imm32.
 #define BUSTER_TIER1_SELECT_MAX_ALLOCA_IMMEDIATE (UINT64_C(1) << 30)
 
-// An aggregate of `size` bytes in `registers` (a location's two, or a result's first two) as its parts (#789): eightbyte
-// k in registers[k], 8 bytes or what is left of the aggregate. Returns how many, into `parts`, or 0 for a shape Tier 1
-// doesn't take: no first register, a second one for 8 bytes or less, none past them, more than 16 bytes (a value in one
-// vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
+// An aggregate of `size` bytes in `registers` (a location's two, or a result's first two) as its parts (#789), as Tier 0's
+// tier0_parts_of has them: eightbyte k in registers[k], 8 bytes or what is left of the aggregate, and none for a
+// register that is none, the high eightbyte past 8 bytes being padding; with `high` (#141) eightbyte 1 alone in
+// registers[0], its low one padding; with `slot` (#141) a SPLIT location's two eightbytes, one in a register and the other
+// in its stack slot, or with `high` or `low` a STACK location's one eightbyte in its slot (the low one alone of a larger
+// value), each part with no register its slot's. Returns how many, into `parts`, or 0 for a shape Tier 1 doesn't take: no
+// part in a register (a whole STACK location's), a second register for 8 bytes or less, more than 16 bytes (a value in
+// one vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
 // and the first `vectors` xmm ones.
-static uint32_t tier1_select_parts(const uint8_t* registers, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
+static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool low, bool slot, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
 {
+    const bool one = high || low;
+    const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
+    const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
+    const bool shape = one ? !(high && low) && !second && size > 8 && first != slot : slot ? first != second && size > 8 : first && (!second || size > 8);
+    // A vector register alone of 16 bytes or more holds the aggregate whole (#141), as Tier 0's tier0_parts_of has it: a
+    // vector's (SSE then SSEUP), 16 bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's registers
+    // are that wide; a struct's whose high eightbyte is padding too, whose bytes past the low eightbyte it carries, and its
+    // copy keeps them as padding.
+    const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
+    bool valid = size != 0 && (size <= 16 || (whole != 0 && whole == size)) && shape;
     uint32_t count = 0;
-    bool valid = size != 0 && size <= 16 && registers[0] != BUSTER_ABI_REGISTER_NONE && (registers[1] != BUSTER_ABI_REGISTER_NONE) == (size > 8);
-    for (uint32_t k = 0; valid && k < 2; k += 1)
+    for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
     {
         const uint8_t reg = registers[k];
-        if (reg != BUSTER_ABI_REGISTER_NONE)
+        if (reg != BUSTER_ABI_REGISTER_NONE || slot)
         {
-            const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
-            const uint32_t left = size - 8 * k;
-            valid = vector ? (reg & 0x1fu) < vectors : reg < 16 && ((general >> reg) & 1) != 0;
-            parts[count] = (Tier1SelectPart){ .reg = reg, .offset = (uint8_t)(8 * k), .bytes = (uint8_t)(left < 8 ? left : 8) };
+            const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+            const uint32_t offset = high ? 8 : 8 * k;
+            const uint32_t left = size - offset;
+            valid = reg == BUSTER_ABI_REGISTER_NONE || (vector ? (reg & 0x1fu) < vectors : reg < 16 && ((general >> reg) & 1) != 0);
+            parts[count] = (Tier1SelectPart){ .reg = reg, .offset = (uint8_t)offset, .bytes = (uint8_t)(whole != 0 ? whole : left < 8 ? left : 8) };
             count += 1;
         }
     }
     return valid ? count : 0;
 }
 
+// Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
+// first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot.
+static bool tier1_select_location_whole(AbiLocation location)
+{
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+}
+
+// The parts of an aggregate argument or parameter of `size` bytes at `location` (#789, #141): in argument registers, a
+// SPLIT location's register and stack slot, or a STACK location's high or low eightbyte alone in its slot
+// (tier1_select_parts_of); none on the stack whole or ignored.
+static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
+{
+    const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
+    const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low;
+    const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low;
+    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low);
+    const bool taken = registers || split || slot;
+    return taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+}
+
+// The 8-byte staging slots a part of `bytes` takes below rsp (#789, tier1_emit_staging): one an eightbyte's, and a whole
+// vector register's (#141) its bytes'.
+static uint32_t tier1_select_part_slots(uint32_t bytes)
+{
+    return bytes <= 8 ? 1 : bytes / 8;
+}
+
+// A call argument's whole 64-byte vector register part (#141) waits in zmm16 and on rather than in the red zone, whose 14
+// staging slots two such parts would overflow: Tier 1 allocates nothing to registers past xmm15, a call clobbers them all,
+// and only a target with AVX-512F, which has them, passes a vector in a zmm register. The first of them, by the call's
+// parts in order.
+#define BUSTER_TIER1_SELECT_PART_ZMM 16u
+
+static bool tier1_select_part_in_zmm(uint32_t bytes)
+{
+    return bytes == 64;
+}
+
+// The red zone's staging slots a call argument's part takes (tier1_select_part_slots), none for one in zmm16 and on.
+static uint32_t tier1_select_argument_part_slots(uint32_t bytes)
+{
+    return tier1_select_part_in_zmm(bytes) ? 0 : tier1_select_part_slots(bytes);
+}
+
+// The form that loads (`load`) or stores a vector register's part of `bytes` (#789, #141) whole: an eightbyte's or less
+// movsd (its bytes past the part's padding), and a whole register's movups, vmovdqu (AVX's) or vmovdqu64 (AVX512F's), as
+// the convention passes it at the target's width, whose forms the target then has.
+static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
+{
+    return bytes <= 8 ? (load ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOVSD_XM64_X) : bytes == 16 ? (load ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOVUPS_XM_X) :
+           bytes == 32                                                        ? (load ? X86_FORM_VMOVDQU_Y_YM256 : X86_FORM_VMOVDQU_YM256_Y) :
+           bytes == 64                                                        ? (load ? X86_FORM_VMOVDQU64_Z_ZM512 : X86_FORM_VMOVDQU64_ZM512_Z) :
+                                                                                X86_FORM_NONE;
+}
+
+// The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
+// (#141); none for any other result.
+static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
+{
+    const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
+    return registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
+}
+
 // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
 // register of its class (a general argument register for an integer or a pointer, xmm0 to xmm7 for a floating value) or
-// in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, in registers (tier1_select_parts)
-// or on the stack whole. Not the convention's rarer shapes: a part LLVM put in a stack slot (SPLIT), a value's high or low
-// eightbyte alone (HIGH, LOW), an ignored one.
+// in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, on the stack whole or in its
+// parts (tier1_select_location_parts): in registers, and since #141 a part LLVM put in a stack slot (SPLIT) and a
+// value's high or low eightbyte alone (HIGH, LOW); or one passed in no place (IGNORE, #141), which a call copies
+// nothing for and a function's copy of has no bytes it must keep.
 static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
 {
     const AbiLocation location = record->location;
@@ -1878,31 +2266,58 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
     const bool stacked = location.kind == BUSTER_ABI_LOCATION_STACK && location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && location.stack_offset < BUSTER_TIER1_SELECT_MAX_STACK_OFFSET;
     Tier1SelectPart parts[2];
     bool supported = false;
-    if (record->size == 0)
+    if (location.kind == BUSTER_ABI_LOCATION_IGNORE)
+    {
+        // Whatever its IR type: an empty struct's argument, of no bytes, is its class's value (ir_typed_call).
+        supported = location.flags == 0;
+    }
+    else if (record->size == 0)
     {
         const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
                                 (floating ? vector && (reg & 0x1fu) < BUSTER_ABI_VECTOR_ARGUMENTS : reg < 16 && ((BUSTER_TIER1_SELECT_ARGUMENT_GENERAL >> reg) & 1) != 0);
-        supported = (floating || type == IR_I32 || type == IR_I64 || type == IR_PTR) && (location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0 && (registered || stacked);
+        // A long double (#141) on the stack alone, its object's bytes copied into its 16 (tier1_emit_cfg_stack_argument).
+        supported = (((floating || type == IR_I32 || type == IR_I64 || type == IR_PTR) && (registered || stacked)) || (type == IR_F80 && stacked)) &&
+                    (location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
     }
     else
     {
-        const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier1_select_parts(location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) != 0;
-        supported = type == IR_PTR && location.flags == 0 && (registered || (stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
+        // A part in a stack slot has it where a whole one's first slot would be.
+        const bool slotted = location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && location.stack_offset < BUSTER_TIER1_SELECT_MAX_STACK_OFFSET;
+        const bool whole = tier1_select_location_whole(location);
+        const uint32_t count = tier1_select_location_parts(location, record->size, parts);
+        bool placed = count != 0;
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
+        }
+        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0 && (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;
 }
 
+// An aggregate result of `size` bytes in the x87's registers (#141): st0, a struct of a long double's, and st1 too, a
+// _Complex long double's, each part 16 bytes of the aggregate (part_bytes 16: a vector of long doubles, whose parts LLVM
+// packs into 10 bytes, isn't one). How many parts, or 0.
+static uint32_t tier1_select_x87_parts(AbiReturn result, uint32_t size)
+{
+    const bool first = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[0] == BUSTER_ABI_REGISTER_X87 && result.part_bytes == 16 && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
+                       result.registers[3] == BUSTER_ABI_REGISTER_NONE;
+    const uint32_t count = !first ? 0 : result.registers[1] == (BUSTER_ABI_REGISTER_X87 | 1) ? 2 : result.registers[1] == BUSTER_ABI_REGISTER_NONE ? 1 : 0;
+    return count != 0 && size > 16 * (count - 1) && size <= 16 * count ? count : 0;
+}
+
 // Whether Tier 1 takes a result as the convention returns it (#789): a scalar's (`size` 0) as the IR's result type says,
-// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts (tier1_select_parts), or through the
-// hidden pointer (MEMORY). Not an x87 register's, a high eightbyte's alone, or one LLVM returns through a hidden pointer
-// that clang doesn't count (DEMOTED).
+// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts, a high eightbyte's alone among them
+// (tier1_select_result_parts, #141), in st0 and st1 (tier1_select_x87_parts, #141), or through the hidden pointer
+// (MEMORY), or nowhere (IGNORE, #141: an empty struct's, which neither the call nor the return copies). Not one LLVM
+// returns through a hidden pointer that clang doesn't count (DEMOTED), which only a vector makes.
 static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
 {
     Tier1SelectPart parts[2];
-    const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
-    const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
-                           tier1_select_parts(result.registers, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) != 0;
-    return flags && (size == 0 || registers || result.kind == BUSTER_ABI_RESULT_MEMORY);
+    const uint32_t high = size != 0 ? BUSTER_ABI_FLAG_HIGH : 0;
+    const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO | high)) == 0;
+    const bool registers = tier1_select_result_parts(result, size, parts) != 0;
+    return flags && (size == 0 || registers || tier1_select_x87_parts(result, size) != 0 || result.kind == BUSTER_ABI_RESULT_MEMORY || result.kind == BUSTER_ABI_RESULT_IGNORE);
 }
 
 static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot);
@@ -1920,7 +2335,8 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // A variadic call's unnamed arguments are promoted ones, an F32 among them never: its al counts the vector
         // registers its arguments take (tier1_emit_call). A narrow result is zero-extended after the call, and a floating
         // one (#141) comes in xmm0.
-        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0;
+        // A long double's (#141) comes in st0, which the CFG consumer stores into the call's object.
+        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0 || type == IR_F80;
         supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
         // A call with ABI records (#789) passes each argument where its record says: its aggregates' bytes in registers
         // or in its stack slots, and its aggregate result's into the frame object its into operand (c) is the address of,
@@ -1930,13 +2346,25 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         const bool object = into != BUSTER_IR_NONE && into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_select_stack_object(function, function->a[into]);
         supported &= abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (type == IR_VOID && object)) &&
                                   abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
+        // The aggregates' parts in registers wait in the red zone's staging slots, 14 of them (#789), a whole vector
+        // register's taking its bytes' (#141, tier1_select_part_slots), but a 64-byte one's, which waits in zmm16 and on
+        // (tier1_select_argument_part_slots).
+        uint32_t staged = 0;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
             const IrPassed* record = tier1_select_argument_record(function, &call, argument);
+            // A long double (#141) in its stack slots, from its object.
             supported = record != 0 ? tier1_select_record_supported(record, argument_type)
-                                    : argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0;
+                                    : argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0 || argument_type == IR_F80;
+            Tier1SelectPart parts[2];
+            const uint32_t count = supported && record != 0 && record->size != 0 && !tier1_select_location_whole(record->location) ? tier1_select_location_parts(record->location, record->size, parts) : 0;
+            for (uint32_t k = 0; k < count; k += 1)
+            {
+                staged += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_argument_part_slots(parts[k].bytes) : 0;
+            }
         }
+        supported &= staged <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS;
     }
     return supported;
 }
@@ -1988,12 +2416,14 @@ static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t pa
     return value != BUSTER_IR_NONE && value < parent && forest->uses[value] == 1 && forest->blocks[value] == forest->blocks[parent];
 }
 
-// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory,
-// call nor access a volatile object (no barrier between them), and itself not volatile.
+// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory, call,
+// fence nor load (no barrier between them: the last before the consumer the load itself, a barrier of its own), and itself
+// neither volatile nor atomic.
 static inline __attribute__((always_inline)) bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
 {
     const IrFunction* function = forest->function;
-    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load;
+    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) &&
+           forest->barriers[consumer] <= load + 1;
 }
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
@@ -2306,7 +2736,85 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t float_width = tier1_select_float_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type);
     // The operand's width where it is a floating value: a comparison's, a conversion's from one or a return's.
     const uint32_t operand_float = a < function->instruction_count ? tier1_select_float_width(function->type[a]) : 0;
-    if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
+    // A vector's (#141): the stored vector's width for a store, the result's for the others, and a comparison's operands';
+    // none in a function without vectors.
+    const uint32_t vector_width = forest->vectors ? tier1_select_vector_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type) : 0;
+    const uint32_t compare_width = forest->vectors && op == IR_VCMP && a < function->instruction_count ? tier1_select_vector_width(function->type[a]) : 0;
+    // The vector class's value's width, a floating value's or a vector's: its loads', stores' and phis' rules are one.
+    const uint32_t class_width = float_width != 0 ? float_width : vector_width;
+    // A vector's operations (#141), behind one test: a function without vectors pays no other here.
+    const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
+                                                   op == IR_OR || op == IR_XOR || op == IR_VSELECT)) ||
+                             compare_width != 0;
+    if (vector_node)
+    {
+        if (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF))
+        {
+            // A constant's lanes: all zeros, every bit or one lane in all, which no memory needs; any other, the CFG
+            // consumer's from its payload. An undefined vector is any: zeros.
+            const IrSimdValue* payload = op == IR_VCONST && a < function->vector_constant_count ? &function->vector_constants[a] : 0;
+            const uint32_t first = payload != 0 ? (uint32_t)payload->words[0] : 0;
+            bool zero = true;
+            bool ones = true;
+            bool splat = true;
+            for (uint32_t lane = 0; payload != 0 && lane < vector_width / 4; lane += 1)
+            {
+                const uint32_t bits = (uint32_t)(payload->words[lane / 2] >> (32 * (lane & 1)));
+                zero &= bits == 0;
+                ones &= bits == UINT32_MAX;
+                splat &= bits == first;
+            }
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = (uint8_t)(zero ? BUSTER_TIER1_VECTOR_ZERO : ones ? BUSTER_TIER1_VECTOR_ONES : splat ? BUSTER_TIER1_VECTOR_SPLAT : BUSTER_TIER1_VECTOR_CONSTANT);
+            base.immediate = zero || ones ? 0 : splat ? first : a;
+            base.intrinsic_cost = zero || ones ? 1 : 2;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = op == IR_COPY ? BUSTER_TIER1_VECTOR_COPY : BUSTER_TIER1_VECTOR_NOT;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR))
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_BINARY;
+            base.operation = (uint8_t)(op == IR_ADD ? 0 : op == IR_SUB ? 1 : op == IR_MUL ? 2 : op == IR_AND ? 3 : op == IR_OR ? 4 : 5);
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)compare_width;
+            base.scale = BUSTER_TIER1_VECTOR_COMPARE;
+            base.condition = (uint8_t)c;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_VSELECT)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_SELECT;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = c;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
     {
         // An undefined mask is any mask: zero, kxor's.
         base.rule = TIER1_RULE_MASK_CONSTANT;
@@ -2386,6 +2894,34 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)mask_width;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    // Long double (#141): each value a frame object of its own, which the CFG consumer's x87 records read and write
+    // (TIER1_RULE_X87); a phi of them its edges' copies, and a call's result and a return's operand st0.
+    else if (op != IR_PHI && op != IR_CALL && op != IR_CALL_INDIRECT && op != IR_RET && tier1_select_x87_node(function, node))
+    {
+        const uint32_t operand = a < function->instruction_count ? function->type[a] : IR_VOID;
+        base.rule = TIER1_RULE_X87;
+        base.width = (uint8_t)width;
+        base.intrinsic_cost = 3;
+        base.scale = op == IR_CONST ? BUSTER_TIER1_X87_CONSTANT : op == IR_UNDEF ? BUSTER_TIER1_X87_UNDEF : op == IR_LOAD ? BUSTER_TIER1_X87_LOAD : op == IR_STORE ? BUSTER_TIER1_X87_STORE :
+                     op == IR_COPY ? BUSTER_TIER1_X87_COPY : op == IR_FNEG ? BUSTER_TIER1_X87_NEGATE : op == IR_FCMP ? BUSTER_TIER1_X87_COMPARE :
+                     op == IR_FEXT ? BUSTER_TIER1_X87_FROM_FLOAT : op == IR_FTRUNC ? BUSTER_TIER1_X87_TO_FLOAT : op == IR_SITOFP || op == IR_UITOFP ? BUSTER_TIER1_X87_FROM_INT :
+                     op == IR_FPTOSI || op == IR_FPTOUI ? BUSTER_TIER1_X87_TO_INT : BUSTER_TIER1_X87_BINARY;
+        base.operation = op >= IR_FADD && op <= IR_FDIV ? (uint8_t)(op - IR_FADD) : op == IR_SITOFP || op == IR_FPTOSI ? 1 : 0;
+        base.immediate = op == IR_CONST ? a : 0;
+        base.condition = op == IR_FCMP ? (uint8_t)c : 0;
+        // The operands no register holds aren't values: the address of a load and a store, the floating or integer
+        // operand of a conversion to a long double, are.
+        base.values[0] = op == IR_LOAD || op == IR_STORE || op == IR_FEXT || op == IR_SITOFP || op == IR_UITOFP ? a : BUSTER_IR_NONE;
+        base.source_width = (uint8_t)(op == IR_FEXT ? tier1_select_float_width(operand) : op == IR_SITOFP || op == IR_UITOFP ? tier1_select_memory_width(operand) : 0);
+        base.width = (uint8_t)(op == IR_FTRUNC ? tier1_select_float_width(type) : op == IR_FPTOSI || op == IR_FPTOUI ? tier1_select_memory_width(type) : width);
+        const bool supported = op == IR_CONST || op == IR_UNDEF || op == IR_LOAD || op == IR_STORE || op == IR_COPY || (op >= IR_FADD && op <= IR_FDIV) || op == IR_FNEG || op == IR_FCMP ||
+                               (op == IR_FEXT && base.source_width != 0) || (op == IR_FTRUNC && base.width != 0) || ((op == IR_SITOFP || op == IR_UITOFP) && base.source_width != 0) ||
+                               ((op == IR_FPTOSI || op == IR_FPTOUI) && base.width != 0);
+        if (supported)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
     // Floating values (#141): an undefined one is any value, zero's xorps.
     else if (float_width != 0 && (op == IR_CONST || op == IR_UNDEF))
     {
@@ -2436,11 +2972,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (float_width != 0 && (op == IR_LOAD || op == IR_STORE))
+    else if (class_width != 0 && (op == IR_LOAD || op == IR_STORE))
     {
         const bool store = op == IR_STORE;
         base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
-        base.width = (uint8_t)float_width;
+        base.width = (uint8_t)class_width;
         base.values[0] = a;
         base.values[2] = store ? b : BUSTER_IR_NONE;
         base.intrinsic_cost = 1;
@@ -2457,10 +2993,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
-    else if (float_width != 0 && op == IR_PHI)
+    else if (class_width != 0 && op == IR_PHI)
     {
         base.rule = TIER1_RULE_PHI;
-        base.width = (uint8_t)float_width;
+        base.width = (uint8_t)class_width;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (float_width != 0 && op == IR_PARAM && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
@@ -2867,6 +3403,23 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             }
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
+        else if (constant_index && operand.offset == (int64_t)(int32_t)operand.offset)
+        {
+            // A constant index whose scaled value doesn't fit the displacement (#141: `p[1ull << 30]`, a struct array's
+            // element past 2 GB): the constant in a register, its own node's mov, as an index the lea scales, and the
+            // offset the displacement. No walk: nothing folds into it, nor it into a user, whose walk stops at it (the
+            // displacement doesn't fit there either), and the bottom-up path's class for it is the REG leaf's
+            // (tier1_burs_displacement), whose pattern is maximal munch's, this one.
+            base.rule = TIER1_RULE_ADDRESS;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.stack_object = BUSTER_IR_NONE;
+            base.displacement = (int32_t)operand.offset;
+            base.scale = (uint8_t)tier1_select_log2(operand.scale);
+            base.fold_count = 0;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
     }
     else if ((op == IR_LOAD && tier1_select_memory_width(type) != 0) || (op == IR_STORE && tier1_select_memory_width(function->type[b]) != 0))
     {
@@ -3002,10 +3555,12 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // Tier 0's do, the psABI leaving the bits past its width unspecified. An aggregate result's address (#789) moves
     // nothing here: the CFG consumer loads its parts, or copies its bytes through the hidden pointer, before the epilogue.
     else if (op == IR_RET && (a == BUSTER_IR_NONE || function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32 ||
-                              function->type[a] == IR_I64 || function->type[a] == IR_PTR))
+                              function->type[a] == IR_I64 || function->type[a] == IR_PTR || function->type[a] == IR_F80))
     {
+        // A long double's (#141): its object's value into st0, which the CFG consumer loads before the epilogue; no value
+        // of its own.
         base.rule = TIER1_RULE_RETURN;
-        base.values[0] = a;
+        base.values[0] = a != BUSTER_IR_NONE && function->type[a] == IR_F80 ? BUSTER_IR_NONE : a;
         base.width = a == BUSTER_IR_NONE || function->result_size != 0 ? 0 : (uint8_t)tier1_select_width(function->type[a]);
         base.intrinsic_cost = a == BUSTER_IR_NONE ? 1 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -3016,7 +3571,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_PHI && width != 0)
+    else if (op == IR_PHI && (width != 0 || type == IR_F80))
     {
         base.rule = TIER1_RULE_PHI;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -3035,6 +3590,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    else if (op == IR_MULHU && type == IR_I64)
+    {
+        base.rule = TIER1_RULE_MULTIPLY_HIGH;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_LIFETIME)
     {
         base.rule = TIER1_RULE_LIFETIME;
@@ -3046,6 +3609,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_FENCE;
         base.immediate = a;
         base.intrinsic_cost = a == BUSTER_IR_FENCE_SEQ_CST ? 1 : 0;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_ATOMIC_RMW && tier1_select_memory_width(type) != 0)
+    {
+        // The object's bytes, as a load's, never the narrow value's 32-bit register: a byte's or a short's xchg or lock
+        // xadd of 4 bytes would write past its object.
+        base.rule = TIER1_RULE_ATOMIC_RMW;
+        base.width = (uint8_t)tier1_select_memory_width(type);
+        base.values[0] = a;
+        base.values[1] = b;
+        base.immediate = function->flags[node] & BUSTER_IR_RMW_OPERATION;
+        base.values[2] = base.immediate == BUSTER_IR_RMW_COMPARE ? c : BUSTER_IR_NONE;
+        base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;
@@ -3216,6 +3792,18 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
             pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
         }
     }
+    // A long double operand (#141), which the CFG consumer's records read from its object, no pattern's value: the IR's a
+    // and b of a long double node, and a return's.
+    const uint32_t operands[2] = { function->a[node], function->b[node] };
+    for (uint32_t operand = 0; (pattern->rule == TIER1_RULE_X87 || pattern->rule == TIER1_RULE_RETURN) && operand < 2; operand += 1)
+    {
+        const uint32_t value = operands[operand];
+        const bool used = (ir_value_mask(function, node) >> operand & 1) != 0 && value < function->instruction_count && function->type[value] == IR_F80;
+        if (used)
+        {
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+        }
+    }
     return pending_count;
 }
 
@@ -3246,7 +3834,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
             failed_node = check.instruction;
         }
-        else if (tier1_select_has_vectors(function, vector))
+        else if (tier1_select_vector_signature(function))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -3410,6 +3998,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .costs = plan.costs,
         .barriers = barriers,
         .canonical = canonical,
+        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
     // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
     // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
@@ -3698,7 +4287,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
             tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
-            tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE ||
+            tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].rule == TIER1_RULE_VECTOR ||
+            plan->patterns[node].stack_object != BUSTER_IR_NONE ||
             plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT || (plan->patterns[node].rule >= TIER1_RULE_ALLOCA && plan->patterns[node].rule <= TIER1_RULE_STACK_RESTORE))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;

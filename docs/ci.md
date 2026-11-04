@@ -66,9 +66,10 @@ their paths in line markers even when Clang is staged outside `/usr/lib/clang`.
 The self-host qualification is a separate workflow,
 `.github/workflows/selfhost.yml`, and also runs only on GitHub-hosted runners.
 It builds the compiler with the compiler, runs a bounded smoke subset, and
-compares deterministic probe objects and executables. It is not part of the
-required correctness or benchmark path; see [the self-host guide](self-hosting-ci.md)
-for its hosted vector-path limitation and #1108.
+compares deterministic probe objects and executables, once for each host path:
+`native` (the vector path, skipped on a runner without it) and `x86-64` (the
+scalar path, #1193). It is not part of the required correctness or benchmark
+path; see [the self-host guide](self-hosting-ci.md).
 
 The hosted tests fetch the frozen corpus from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).
@@ -79,11 +80,15 @@ the old Clang binary hash remain provenance records; the active oracle is the
 installed Clang 23 toolchain. A missing or changed input fails setup.
 
 The `benchmarks` job runs native correctness followed by benchmarks. It has
-`needs: [changes, test, fuzz]` and explicitly requires successful `test` and
-`fuzz` results. GitHub applies these results to their entire matrices.
-A failure, cancellation or skipped suite prevents the physical job from
-being queued, including scheduled and manual runs whose change selector is
-skipped. The hardware job checks out the same `github.sha`, verifies the Ryzen
+`needs: [changes, evidence, test, fuzz]` and explicitly requires successful
+`test` and `fuzz` results, and the `evidence` job's success and admission.
+GitHub applies these results to their entire matrices. A failure, cancellation
+or skipped suite prevents the physical job from being queued, including
+scheduled and manual runs whose change selector is skipped. The one skipped
+suite that admits it is a nightly dispatch's: its `evidence` job found the
+commit's own earlier run had passed the plain rows. A nightly backlog run and
+an admitted snapshot run are in the *plain* scope, as a pull request is: plain
+rows only, and no fuzzing (see "Nightly main measurements"). The hardware job checks out the same `github.sha`, verifies the Ryzen
 7 9700X identity and vector eligibility, and retains the existing host lock,
 CPU placements and benchmark selection. Native tests use eight CPUs under the
 lock, and benchmarks reuse that tested executable. A native test failure stops
@@ -97,11 +102,55 @@ self-contained `libclang-cpp`, avoiding the release's Ubuntu-specific static
 system-library paths on the Arch host. Frozen inputs use the same verified
 archive as hosted tests. No system packages are modified.
 
+The job keeps its verified setup inputs in the runner's private cache
+(`BUSTER_CI_CACHE`). Each one is kept under a key that identifies it, checked
+on every use, published atomically, and replaced when stale or corrupt:
+
+- **Frozen corpus:** the archive, under its SHA-256
+  (`tools/ci/cached-download.sh`). Every extracted file is still verified
+  against the manifests.
+- **c-testsuite:** a bare mirror holding the pinned commit
+  (`tools/ci/fetch-c-testsuite.sh`). The checkout fetches it through Git's pack
+  protocol, which checks every object's hash.
+
+The pragma oracle is not cached. Its 2.3 s build finishes while the compiler
+build's longest unit (35 s) still runs, so a cached oracle would save no time.
+And a key exact enough to reuse it safely would have to cover everything the
+build reads outside the staged tree: the system C++ headers, the linker and
+its inputs, and environment variables such as `CPLUS_INCLUDE_PATH`.
+
+The staged Clang release itself has a content manifest
+(`tools/ci/tree-manifest.sh`): the SHA-256 of every file and the target of
+every link, written when `setup-benchpress.sh` publishes the tree. Every use
+checks the tree against it (about 0.15 s for 600 MB, in 8 processes) and
+stages it afresh from the verified archive when anything differs. A tree
+staged before the manifest is staged afresh once.
+
+On 2026-11-03 PR jobs, the setup before native tests took about 45 s, nearly
+all of it the 40 s build. The corpus and c-testsuite fetches took 0 to 1 s, and
+the oracle's 2.3 s ran beside the build (#1183). So these caches remove the
+host's network dependence more than they save time.
+
+The build's critical path is one unit, `main_unit_checker.c` (35 s). Only a
+content-addressed object cache could take time off it, and only when that
+unit's preprocessed input repeats. That needs a compiler launcher, which
+`build.sh` deliberately clears, so it is left as an open item. Native
+correctness (about 110 s) and the runner hook (1 to 92 s, including lock waits)
+are the other costs. `tests/ci/caches.sh` tests each cache's hit, miss,
+corruption and changed input.
+
 The hosted `qualification` job retains the ruleset's existing required context,
-`Build and execute on Ryzen 7 9700X`. It requires successful hosted tests and
-fuzzing and the hardware job, including native correctness, so a skipped hardware job after
-hosted failure cannot accidentally satisfy the merge gate. Documentation-only
-changes retain their explicit no-code path.
+`Build and execute on Ryzen 7 9700X`. It requires the `evidence` job's success,
+successful hosted tests and fuzzing, and the hardware job, including native
+correctness. A skipped hardware job after a hosted failure therefore cannot
+satisfy the merge gate. Documentation-only changes keep their explicit no-code
+path.
+
+One skipped hardware job does pass: a push to main in the nightly mode whose
+`evidence` job reused its pull request's native qualification of the identical
+tree (see "Nightly main measurements"). The context's message then names the
+source run. A nightly dispatch reports through its coverage record and has no
+such context, and neither does a scheduled run the nightly mode retired.
 
 Draft PRs still run hosted correctness, but do not queue the 9700X. Both
 `ready_for_review` and `converted_to_draft` trigger the workflow, using the
@@ -114,8 +163,10 @@ coverage. Performance-document/harness exceptions remain selector-controlled.
 
 `tools/ci/qualification.c` is the aggregate's fail-closed predicate. It checks
 selector/event consistency as well as every required result; missing, invalid,
-failed or cancelled results cannot pass. Its `--self-test` enumerates 625,000
-result/event/draft/selection combinations against the explicit allowed tuples.
+failed or cancelled results cannot pass. Its `--self-test` enumerates
+50,000,000 combinations against the explicit allowed tuples. They span the
+event, draft state, selection, dispatch purpose, the `evidence` job's hardware
+decision, and seven job results.
 The hosted selector job runs that test before any hardware admission, and the
 selector's own policy mutants pin the draft guard and ready/draft triggers.
 
@@ -144,9 +195,18 @@ Benchpress.
 Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
 `9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
 median and nearest-rank 95th percentile of successful hardware jobs' queue,
-execution, runner-hook, setup/build, native-test and benchmark-step durations.
-PR, main-push and scheduled/manual event classes stay separate; those classes
-are not claims of targeted/full measurement coverage. The raw API responses,
+execution, runner-hook, setup/build, native-test, benchmark-step and
+host-occupation durations. Host occupation runs from the job's first step,
+after the runner hook took the lock, to the job's end. Four classes stay
+separate:
+
+- PR;
+- main push;
+- nightly targeted: backlog dispatches, recognized by their run name;
+- full: the daily run, full dispatches and the nightly snapshot's run.
+
+The classes say how a run was started, not what it covered: the coverage
+records do that. The raw API responses,
 normalized observations and summary are retained as 14-day workflow artifacts.
 This adds no benchmark work and changes no hardware scheduling or merge gate.
 
@@ -166,6 +226,241 @@ both without API credentials or network calls:
 bash tests/ci/timings.sh
 cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o /tmp/qualification && /tmp/qualification --self-test
 ```
+
+## Nightly main measurements
+
+Main's first-parent states (#1207) are measured on the 9700X between 04:00 and
+07:00 Europe/Madrid. A branch's internal commits are not states; a merge of
+them is. Each state needs **targeted** coverage: the selector's choice against
+its own first parent, with native correctness first in the same job. A state
+whose first-parent change is documentation alone (push's paths-ignore) needs
+none, and the ledger says so. The cycle's snapshot also needs **full**
+coverage, which adds every benchmark, the isolated samples and the oracle-cache
+audit. Plain coverage, every plain run as pushes measured before the nightly
+mode, satisfies neither.
+
+A state is measured behind its own plain hosted rows (both architectures,
+every shard), the gate a pull request needs before the 9700X. Its sanitizer and
+fuzz results come from its pushes and the snapshot's daily run. They are
+reported, but they don't block measurement, which was the owner's choice on
+2026-11-03.
+
+### Evidence and reuse (`tools/ci/nightly.c`)
+
+Every `9700x.yml` run has an `evidence` job, which must succeed:
+
+- **Pull request:** its draft state alone.
+- **Push:** the one merged pull request of this repository whose merge commit
+  it is. That pull request's newest run of the workflow must have completed
+  within a day, with the 9700X job, the aggregate and every plain row green.
+  The run's own coverage record must name that run, the head and a completed
+  targeted measurement of the identical tree.
+
+  Tree identity carries everything the repository pins: the workflow, the
+  inventory, the toolchain's and corpus's digests, and the harnesses'
+  commits. The build and the inventory read no Git metadata; the self-test
+  fails if they start to.
+
+  What the repository doesn't pin is the host. Every 9700X job records it as
+  its host identity, made of:
+
+  - the kernel, the microcode, GCC's version and glibc;
+  - a digest of the software the native inventory runs, which covers:
+    - the package database's every package and version;
+    - the contents of each external tool the inventory calls, and of every
+      shared library those load. The tools are GCC with its `cc1`, `cc1plus`
+      and `collect2`, binutils, `gdb`, `perf`, `valgrind`, `mold`, `wild`,
+      `make`, `file` and the shell;
+    - the runtime GCC links a static program with (`libc.a`, `crt1.o` and the
+      rest, as `test-static`'s `cc -static` resolves them);
+    - every file of the packages that own any of those, and of the C
+      toolchain's packages (`gcc`, `gcc-libs`, `glibc`, `binutils`,
+      `linux-api-headers`): their headers, static libraries, startup
+      objects, linker scripts and configuration, by content.
+
+  So an oracle, runtime or header replaced under the same version changes the
+  identity. In the nightly mode, such a push runs a
+  `host-identity` job on the 9700X. It takes the lock for seconds and reads
+  the identity with the same steps as the 9700X job: the host's check, then
+  the identity. The self-test keeps both pairs identical. The 9700X job is skipped only when that identity
+  equals the one the pull request's run recorded. A component that can't be
+  read leaves no identity at all, never a placeholder that another unread
+  one would match. The cases are:
+
+  - a host without a package database;
+  - a file that can't be hashed;
+  - a package query that fails or prints anything on stderr;
+  - an ownership query that doesn't account for every file. Each file needs
+    an owner, at the version the package list gives, or pacman's "No package
+    owns" and no other message;
+  - an owners' file listing that lacks a file the ownership query attributed
+    to them.
+
+  A file no package owns is hashed like any other, but a failed query is
+  never taken for one. The warning names the check that failed.
+
+  The reuse accepts only an identity with every component present. A
+  different identity, an incomplete one, a record without one, or a failed
+  `host-identity` job runs native correctness after all. The record then says
+  `host-unconfirmed`.
+
+  Measurements are reused too only when the first-parent tree is also
+  identical; otherwise they are the backlog's. Missing, ambiguous, stale or
+  mismatched evidence, including an API failure, runs the work.
+- **Nightly dispatch:** the commit must be a first-parent state of main at or
+  before the pinned snapshot, or the job fails and nothing runs. The newest
+  conclusive push or dispatch run of that commit decides its hosted rows: a
+  pass is reused and a later failure isn't hidden. The window must also admit
+  the run.
+
+Every run's `record` job writes `coverage-record-ATTEMPT`, kept 90 days. It
+holds the commit, tree, first parent and first-parent tree; the blobs of the
+workflow, selector, inventory, toolchain and corpus scripts; the selection; what
+the run ran, reused, admitted and deferred; the 9700X job's window, native
+correctness and host identity; and the outcome. Outcomes are `complete`,
+`not-required`, `deferred` (no hardware admitted), `pending` (a push qualified
+by reuse whose measurements weren't reusable), `blocked-hosted`,
+`blocked-native`, `failed` (a measurement after native correctness),
+`interrupted` (cancelled or timed out) and `rejected`. Only the 9700X job's
+success, or a push's evidenced reuse, completes.
+
+### The coordinator (`.github/workflows/nightly-backfill.yml`)
+
+**Scope.** The backlog's states start at the epoch: the first-parent commit of
+main that added the nightly worker (`tools/ci/nightly.c`). The worker is each
+state's own `9700x.yml`, dispatched with a `backlog` or `snapshot` purpose and
+checking its window after the lock. Earlier commits' workflows have neither, so
+the coordinator can't measure them within the window, and they are out of
+scope. Their coverage is what their pushes and the old daily run measured. The
+report counts the fortnight's first-parent states before the epoch.
+
+The coordinator is hosted, and only main's scheduled and dispatched runs write.
+They create and delete `nightly/SHA` branches, and dispatch and cancel
+`9700x.yml` runs on them, so that each run, its checks and its definition are
+that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
+[REQUEST]`, correlates it with the ledger.
+
+1. **Harvest.** Each step reads a fortnight's runs (later steps a day's) and
+   harvests the records of completed runs the ledger lacks. A record that
+   disagrees with the API's job conclusions counts as nothing.
+2. **Pin.** The cycle (the night ahead, from noon) pins main's head as its
+   snapshot once. Every dispatch of the cycle names that pin, not main's head
+   at dispatch, which may have moved on. The worker checks the state's
+   first-parent ancestry against the pin and records it.
+3. **Prepare.** Before the window, the coordinator dispatches the snapshot's
+   deferred run: every hosted row and the 100,000-input fuzz campaigns, the
+   daily diagnostics the old schedule ran. It also dispatches the plain rows of
+   the oldest states that have none, three at a time and forty a cycle. A
+   prepare job that waits for the window plans again every five minutes until
+   it opens, so each completed preparation frees its slot for the next. It
+   never admits hardware, even when a step lands at 04:00 or carries an
+   override: admission is the window job's alone. The window job starts from
+   the prepare job's ledger and its pending dispatches, so a dispatch the API
+   doesn't show yet isn't repeated. The pending dispatches come as a job
+   output, with their count, not with the ledger's artifact. A valid empty list
+   is still a list. A window job without a valid one plans nothing and fails,
+   and the next coordinator run plans once the runs show the dispatches. The
+   ledger's own fallbacks are safe: harvest reads its rows from the records
+   again, and the pin comes as an output too.
+4. **Measure.** Inside the window it admits one 9700X run at a time: the
+   snapshot's comprehensive run first, then the oldest ready state. While the
+   snapshot's hosted rows are in flight, it keeps room for the snapshot. If
+   the snapshot is ineligible, it measures the newest eligible earlier state
+   and says so. The comprehensive run is a daily requirement: only one
+   completed in this cycle meets it. An unchanged main still gets its daily
+   full run and oracle audit, though an earlier cycle measured the same
+   commit.
+
+States move between `not-required`, `complete`, `in-flight`, `ready`,
+`preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and
+`failed` (three failed or interrupted measurements) are reported and skipped,
+and never block later states. A rerun keeps its run's ID and takes the next
+attempt. So a state's hosted and native verdicts are its latest run's latest
+attempt's, whatever order the ledger holds them in. Each failed attempt counts
+toward the three, since each one occupied the 9700X. The cycle's report counts
+each run once, by its latest attempt. Nothing depends on dates but the cycle, so
+unfinished states carry over, and a completion never moves a cursor past an
+earlier gap. Pending dispatches that aren't yet visible as runs prevent
+duplicates. A step whose run listing fails, even partly, plans nothing until a
+full listing succeeds; otherwise a run in flight it hid would be dispatched
+again. An admitted run older than two hours is cancelled.
+
+**Time.** The tz database's Europe/Madrid is checked at three points:
+
+- at dispatch, by the coordinator's planner;
+- at admission, by the `evidence` job;
+- after the 9700X job's hook took the lock, by its first step after the host's
+  own check. That check reads only the operating system, the architecture and
+  the CPU model. The window step compares the clock with the cycle's 04:00 and
+  07:00, which the `evidence` job computed as instants. It runs before the host
+  identity's package queries and hashing, and before the checkout, the cache
+  and the toolchain's staging. So a job that took the lock too late does
+  nothing but refuse. The self-test pins that order, and the glue test runs
+  the job's first steps in order with the window closed to check that no
+  package is queried and nothing is hashed.
+
+If the database is unavailable, nothing is admitted. The self-test checks the
+database against the EU's rule every hour from 2026 to 2030. A run is admitted
+only if its whole bound still ends by 07:00: the job's timeout (20 minutes for
+backlog runs, 25 for the snapshot) plus 5 minutes, and the coordinator adds
+the hosted jobs' time. A refusal after the lock fails the job before any work,
+which the record reads as a deferral. The job's timeout ends anything that
+runs over, and the hook then releases the lock. The lock's protocol and its
+fairness to agent sessions are unchanged; nightly work is kept out of the day
+rather than given priority.
+
+**Late schedules.** GitHub starts scheduled runs late. In the week before this,
+the daily run's 07:23 UTC never started before 12:39 UTC. So the coordinator
+has six schedules, from 22:07 to 07:17. A run that prepares before the window
+waits for it when it opens within 5 hours 55 minutes of the job's start. Any
+other run waits in the concurrency group, or reports.
+
+**Override.** Both workflows' manual dispatches take an `override` reason for
+deliberate out-of-window work. The window checks report the reason and never
+pass it silently. Through the coordinator, `mode: run` with a reason
+behaves as follows:
+
+- the planner admits as if inside the window, and its report says why;
+- the prepare job starts the window job at once;
+- the loop ends when nothing more is admissible;
+- each dispatch passes the reason on, and the run's 9700X job honours it after
+  the lock.
+
+**The ledger** carries over through the coordinator's artifacts: this run's
+prepare job's, then the newest from main's previous runs. It is published to
+`buster14a/buster-performance`'s `nightly-ledger` branch (`nightly/main-coverage.tsv`
+and `nightly/reports/CYCLE.md`) when the `nightly-ledger` environment holds
+`BUSTER_PERFORMANCE_LEDGER_TOKEN`. That token needs contents write access to
+that repository alone, and the environment should allow main only. Each run's
+own record is the source the ledger is rebuilt from, so a lost ledger costs
+only the re-harvest.
+
+**The report** gives each status's count; this cycle's selected, completed,
+failed and deferred runs and hosted preparations; reuse; the oldest carried-over
+state; the remaining states; and evidence links. It warns when the week's
+arrivals exceed the completions observed per cycle, or when the oldest pending
+state is over three days old.
+
+**Capacity.** In late October main gained 31 to 82 first-parent commits a day.
+Nightly runs are bounded at 25 minutes, but PR jobs took 4 to 5 minutes. A
+three-hour window holds about 25 to 30 such runs, so the backlog drains only
+where pushes and reuse measure most states during the day. The report's alert
+shows when they don't.
+
+**Rollout.** The switch is `vars.BUSTER_NIGHTLY`. Until it is `on`, scheduled
+coordinator runs are dry runs: they harvest, plan and report. Pushes measure
+every plain run, and the daily `23 7 * * *` run of `9700x.yml` runs as before.
+A dispatch with `mode: run` can try the coordinator first. With the switch on,
+pushes measure targeted, the coordinator dispatches, and the daily run's
+`evidence` job retires it.
+
+**Open items** this repository can't close:
+
+- exact lock-wait and lock-hold times, which need the host's runner hooks to
+  record their acquisition;
+- the ledger's publication token;
+- whether the coordinator's capacity drains the observed arrivals, which only
+  enabled cycles will tell.
 
 ## Sanitizer builds and detection policy
 
