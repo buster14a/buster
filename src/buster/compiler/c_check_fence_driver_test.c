@@ -483,12 +483,160 @@ static void check_test_driver_volatile_order(CheckTest* test, const char* execut
     unlink(source);
 }
 
+// An asm statement placed in its caller (#1059, check_asm_row): -c's object of a function of a placed bswap and lfence
+// has their instructions among the function's own records, and no call, by both paths; under --tier1, whose IR has no
+// operation for a placed statement's row, both keep their helpers (CheckProgramOptions.asm_helpers), which Tier 1's
+// code of the function calls, none refused.
+static void check_test_driver_asm_placed(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "unsigned placed(unsigned x, unsigned y)\n"
+                                  "{\n"
+                                  "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+                                  "    __asm__ volatile(\"lfence\" ::: \"memory\");\n"
+                                  "    return x + y;\n"
+                                  "}\n";
+    char source[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/asm-placed.c", directory);
+    snprintf(object, sizeof(object), "%s/asm-placed.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "asm placed: the source is written");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        const bool scalar = (run & 1) != 0;
+        const bool tier1 = (run & 2) != 0;
+        char* arguments[12] = { (char*)executable };
+        uint32_t count = 1;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (tier1)
+        {
+            arguments[count++] = "--tier1";
+            arguments[count++] = "--tier1-refusals";
+        }
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = object;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        X86Decoded records[64];
+        uint32_t offsets[64];
+        uint32_t types[64];
+        uint32_t relocations = 0;
+        const uint32_t decoded = status == 0 ? check_test_tier1_function(object, "placed", records, 64, offsets, types, &relocations) : 0;
+        uint32_t swaps = 0;
+        uint32_t fences = 0;
+        uint32_t calls = 0;
+        for (uint32_t r = 0; r < decoded; r += 1)
+        {
+            const uint32_t form = records[r].instruction.form;
+            swaps += form == X86_FORM_BSWAP_R32;
+            fences += form == X86_FORM_LFENCE;
+            calls += form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64;
+        }
+        const bool taken = !tier1 || (text != NULL && strstr(text, "tier1-refused\tplaced\t") == NULL);
+        const bool placed = tier1 ? swaps == 0 && fences == 0 && calls == 2 && relocations == 2 : swaps == 1 && fences == 1 && calls == 0 && relocations == 0;
+        char message[256];
+        snprintf(message, sizeof(message), "asm placed (%s path%s): the function's own records hold bswap (%u) and lfence (%u), with %u calls%s", scalar ? "scalar" : "vector",
+                 tier1 ? ", --tier1" : "", swaps, fences, calls, tier1 ? ": Tier 1's, of the two helpers" : "");
+        check_test_expect(test, status == 0 && decoded != 0 && placed && taken, message);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        unlink(object);
+    }
+    unlink(source);
+}
+
+// A function's frame and unwind entry with templates placed in it (#1059): an executable the driver builds whole, by
+// each path and with --tier1 too (whose statements keep their helpers), whose callee between two placed statements
+// counts its stack by glibc's backtrace, through the function's own unwind entry: one frame more than main's own count,
+// and the placed statements' values right.
+static void check_test_driver_asm_unwind(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "int printf(const char* format, ...);\n"
+                                  "int backtrace(void** buffer, int size);\n"
+                                  "static int __attribute__((noinline)) frames(void)\n"
+                                  "{\n"
+                                  "    void* buffer[64];\n"
+                                  "    return backtrace(buffer, 64);\n"
+                                  "}\n"
+                                  "static int __attribute__((noinline)) placed(int n, int* inner)\n"
+                                  "{\n"
+                                  "    unsigned x = (unsigned)n;\n"
+                                  "    long a = n, b = 2L * n, c = 3L * n;\n"
+                                  "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+                                  "    *inner = frames();\n"
+                                  "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+                                  "    return (int)(x == (unsigned)n) + (int)(a + b + c);\n"
+                                  "}\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    const int outer = frames();\n"
+                                  "    int inner = 0;\n"
+                                  "    const int result = placed(5, &inner);\n"
+                                  "    printf(\"outer=%d inner=%d result=%d\\n\", outer, inner, result);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[512];
+    char output[512];
+    snprintf(source, sizeof(source), "%s/asm-unwind.c", directory);
+    snprintf(output, sizeof(output), "%s/asm-unwind", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "asm unwind: the source is written");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        const bool scalar = (run & 1) != 0;
+        const bool tier1 = (run & 2) != 0;
+        char* arguments[12] = { (char*)executable, "--verify" };
+        uint32_t count = 2;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (tier1)
+        {
+            arguments[count++] = "--tier1";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = output;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        char captured[128] = { 0 };
+        const bool ran = status == 0 && check_test_driver_capture(output, captured, sizeof(captured));
+        int outer = -1;
+        int inner = -1;
+        int result = -1;
+        const bool read = ran && sscanf(captured, "outer=%d inner=%d result=%d", &outer, &inner, &result) == 3;
+        char message[256];
+        snprintf(message, sizeof(message), "asm unwind (%s path%s): backtrace through the placed statements' function counts %d frames, main %d; result %d",
+                 scalar ? "scalar" : "vector", tier1 ? ", --tier1" : "", inner, outer, result);
+        check_test_expect(test, read && outer > 1 && inner == outer + 1 && result == 31, message);
+        unlink(output);
+    }
+    unlink(source);
+}
+
 // --helper-report's counts (#1059) of a unit with every kind of direct form and helper call: an implicit _Atomic store,
 // load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store, compare-exchange (its
-// ATOMIC_CAS) and load, a fence, and an asm statement with instructions. Its `direct` columns are the lowered code's
-// direct forms (four accesses, two read/modify/writes, one fence: a seq_cst store's own isn't one), its `helper` columns
-// its call sites of each family's helpers, every call in the object (the statement's), and `planned` the signatures (the
-// statement's helper alone: neither read/modify/write takes a leaf). By both paths.
+// ATOMIC_CAS) and load, a fence, an asm statement placed in its caller (a nop's) and one of fixed registers (rdtsc's),
+// which keeps its helper. Its `direct` columns are the lowered code's direct forms (four accesses, two read/modify/writes,
+// one fence: a seq_cst store's own isn't one; the placed statement's X86 entry), its `helper` columns its call sites of
+// each family's helpers, every call in the object (rdtsc's statement's), and `planned` the signatures (that statement's
+// helper alone: neither read/modify/write takes a leaf). By both paths, and by --helper-forms.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "_Atomic int a;\n"
@@ -502,15 +650,38 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    __atomic_compare_exchange_n(&counter, &expected, 4, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);\n"
                                   "    __atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
                                   "    __asm__ volatile(\"nop\" ::: \"memory\");\n"
-                                  "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE);\n"
+                                  "    unsigned lo, hi;\n"
+                                  "    __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));\n"
+                                  "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE) + (int)((lo ^ hi) & 1);\n"
                                   "}\n";
-    static const char* const lines[] = {
-        "helpers\tunits=1\trefused=0\tdirect=7\thelper=1\tplanned=1\n",
-        "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
-        "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
-        "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
-        "helpers.asm\tdirect=0\thelper=1\tplanned=1\n",
-        "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+    // By --helper-forms too (#1059's paired measurements): every family's direct forms take their helpers but the
+    // implicit _Atomic object's (its store, load and update, which have none), and two families' alone.
+    static const char* const options[3] = { NULL, "--helper-forms=all", "--helper-forms=atomic-rmw,asm" };
+    static const char* const lines[3][6] = {
+        {
+            "helpers\tunits=1\trefused=0\tdirect=8\thelper=1\tplanned=1\n",
+            "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+            "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
+            "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+            "helpers.asm\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
+        {
+            "helpers\tunits=1\trefused=0\tdirect=3\thelper=6\tplanned=6\n",
+            "helpers.atomic-access\tdirect=2\thelper=2\tplanned=2\n",
+            "helpers.atomic-rmw\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.fence\tdirect=0\thelper=1\tplanned=1\n",
+            "helpers.asm\tdirect=0\thelper=2\tplanned=2\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
+        {
+            "helpers\tunits=1\trefused=0\tdirect=6\thelper=3\tplanned=3\n",
+            "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+            "helpers.atomic-rmw\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+            "helpers.asm\tdirect=0\thelper=2\tplanned=2\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
     };
     char source[512];
     char object[512];
@@ -518,24 +689,56 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
     snprintf(object, sizeof(object), "%s/helper-report.o", directory);
     const bool written = parse_test_write(source, program, sizeof(program) - 1);
     check_test_expect(test, written, "helper report: the source is written");
-    for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+    for (uint32_t run = 0; written && run < 6; run += 1)
     {
-        char* vector_arguments[] = { (char*)executable, "--helper-report", "-c", "-o", object, source, NULL };
-        char* scalar_arguments[] = { (char*)executable, "--scalar", "--helper-report", "-c", "-o", object, source, NULL };
-        char* text = NULL;
-        const int status = check_test_driver_spawn(scalar != 0 ? scalar_arguments : vector_arguments, &text);
-        bool reported = status == 0 && text != NULL;
-        for (uint32_t l = 0; reported && l < BUSTER_ARRAY_LENGTH(lines); l += 1)
+        const bool scalar = run % 2 != 0;
+        const uint32_t variant = run / 2;
+        char* arguments[8] = { (char*)executable };
+        uint32_t count = 1;
+        if (scalar)
         {
-            reported = strstr(text, lines[l]) != NULL;
+            arguments[count++] = "--scalar";
+        }
+        if (options[variant] != NULL)
+        {
+            arguments[count++] = (char*)options[variant];
+        }
+        arguments[count++] = "--helper-report";
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = object;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        bool reported = status == 0 && text != NULL;
+        for (uint32_t l = 0; reported && l < 6; l += 1)
+        {
+            reported = strstr(text, lines[variant][l]) != NULL;
         }
         if (!reported && text != NULL)
         {
             fprintf(stderr, "%s", text);
         }
         free(text);
-        check_test_expect(test, reported, scalar != 0 ? "helper report (scalar path): every direct form and helper call counted, an implicit update's and an asm statement's among them"
-                                                      : "helper report (vector path): every direct form and helper call counted, an implicit update's and an asm statement's among them");
+        char message[256];
+        snprintf(message, sizeof(message), "helper report (%s path%s%s): every direct form and helper call counted, an implicit update's and two asm statements' among them",
+                 scalar ? "scalar" : "vector", options[variant] != NULL ? ", " : "", options[variant] != NULL ? options[variant] : "");
+        check_test_expect(test, reported, message);
+        unlink(object);
+    }
+    // A family of no direct form, an unknown name and an empty one are refused by name, before any output.
+    static const char* const refused[3] = { "--helper-forms=math", "--helper-forms=fences", "--helper-forms=fence," };
+    for (uint32_t r = 0; written && r < 3; r += 1)
+    {
+        char* arguments[] = { (char*)executable, (char*)refused[r], "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        const bool named = status != 0 && text != NULL && strstr(text, "error: --helper-forms= takes") != NULL && access(object, F_OK) != 0;
+        free(text);
+        char message[256];
+        snprintf(message, sizeof(message), "helper report: %s refused by name, before any output", refused[r]);
+        check_test_expect(test, named, message);
         unlink(object);
     }
     unlink(source);

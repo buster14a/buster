@@ -221,6 +221,17 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     }
 }
 
+// Whether the object lists an undefined symbol though no relocation may refer to it (#1115), as GNU as lists every one
+// the source names (`.globl x`, `.size x, 4`, `.hidden x`, an alias's target, `_GLOBAL_OFFSET_TABLE_`), but a weak
+// one nothing uses (`.weak x` alone): one a relocation refers to is listed first, and once.
+static bool asm_object_declares(const AsmSymbol* symbol)
+{
+    const bool weak = (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    // A section's name (`.long .debug_abbrev`, as clang's DWARF writes it) is the section's own symbol, not undefined.
+    return symbol->link != 0 && !symbol->defined && !symbol->section_start && !symbol->absolute && !symbol->alias && symbol->common == 0 && !symbol->internal &&
+           (!weak || symbol->used);
+}
+
 static void asm_object_options(AsmParser* parser)
 {
     Link* link = &parser->result.link;
@@ -246,7 +257,8 @@ static void asm_object_options(AsmParser* parser)
             const AsmSymbol* symbol = &parser->symbols[i];
             if (symbol->link != 0 && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL)
             {
-                temporary[symbol->link] = symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0);
+                // A section's name too: its references are the section symbol's, as GNU as writes no other (#1115).
+                temporary[symbol->link] = symbol->internal || symbol->section_start || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0);
             }
         }
         parser->result.object_options = (ObjectOptions){
@@ -254,44 +266,36 @@ static void asm_object_options(AsmParser* parser)
             .atom_section_count = link->atoms.count,
             .temporary_symbols = temporary,
             .temporary_symbol_count = link->symbols.count,
+            .undefined_types = true,
         };
     }
-    // The undefined symbols GNU as lists without a relocation (#1115): the common ones, with their alignments, and the
-    // _GLOBAL_OFFSET_TABLE_ that a GOT or TLS modifier declares.
-    const uint32_t declared_count = parser->common_count + (parser->got_symbol != 0 && parser->symbols[parser->got_symbol].link != 0 ? 1 : 0);
+    // The undefined symbols GNU as lists without a relocation (#1115), every one the source names (asm_object_declares),
+    // as the _GLOBAL_OFFSET_TABLE_ a GOT or TLS modifier declares. (A global .comm is a common symbol of its own atom,
+    // which the object writer lists as SHN_COMMON's.)
+    uint32_t declared_count = 0;
+    for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+    {
+        declared_count += asm_object_declares(&parser->symbols[i]);
+    }
     if (parser->result.error == 0 && declared_count != 0)
     {
         SymbolId* declared = BUSTER_ARENA_PUSH_ARRAY(parser->arena, SymbolId, declared_count);
-        uint32_t* alignments = parser->common_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, link->symbols.count) : 0;
-        if (declared == 0 || (parser->common_count != 0 && alignments == 0))
+        if (declared == 0)
         {
             asm_fail(parser, 0, "arena exhausted publishing object metadata");
         }
         else
         {
             uint32_t count = 0;
-            if (alignments != 0)
-            {
-                memset(alignments, 0, link->symbols.count * sizeof(uint32_t));
-            }
             for (uint32_t i = 1; i < parser->symbol_count; i += 1)
             {
-                const AsmSymbol* symbol = &parser->symbols[i];
-                if (symbol->common == ASM_COMMON_GLOBAL && symbol->link != 0)
+                if (asm_object_declares(&parser->symbols[i]))
                 {
-                    alignments[symbol->link] = symbol->common_alignment;
-                    declared[count++] = symbol->link;
+                    declared[count++] = parser->symbols[i].link;
                 }
-            }
-            if (parser->got_symbol != 0 && parser->symbols[parser->got_symbol].link != 0 && parser->symbols[parser->got_symbol].common == 0 &&
-                !parser->symbols[parser->got_symbol].defined)
-            {
-                declared[count++] = parser->symbols[parser->got_symbol].link;
             }
             parser->result.object_options.declared_symbols = declared;
             parser->result.object_options.declared_symbol_count = count;
-            parser->result.object_options.common_alignments = alignments;
-            parser->result.object_options.common_alignment_count = alignments != 0 ? link->symbols.count : 0;
         }
     }
     // The object's st_size of each symbol whose size reaches past its section's end; the others keep the Link's.
@@ -366,4 +370,47 @@ static void asm_partition_append(AsmParser* parser, uint32_t id)
             parser->fragment_begin[i] += 1;
         }
     }
+}
+
+// Whether a section holds bytes, as GNU as's seg_not_empty_p sees them: an instruction or data, not only labels, fill
+// or alignment.
+static bool asm_section_holds(const AsmParser* parser, uint32_t section)
+{
+    bool result = false;
+    for (uint32_t i = 0; section != 0 && !result && i < parser->fragment_count; i += 1)
+    {
+        const AsmFragment* fragment = &parser->fragments[i];
+        result = fragment->section == section &&
+                 (fragment->kind == ASM_INSTRUCTION || fragment->kind == ASM_ULEB || fragment->kind == ASM_SLEB ||
+                  ((fragment->kind == ASM_VALUE || fragment->kind == ASM_BYTES) && fragment->size != 0));
+    }
+    return result;
+}
+
+// A debug section the assembler writes, as GNU as makes it when the source has none: the line table's .debug_line, and
+// CFI's .debug_frame (#1115), of no flags, and DWARF 5's .debug_line_str of merged strings.
+static uint32_t asm_debug_section(AsmParser* parser, const char* name, bool strings)
+{
+    const String8 spelling = { .pointer = (char*)name, .length = strlen(name) };
+    uint32_t id = asm_find_section(parser, spelling);
+    if (id == 0 && parser->section_count >= parser->section_capacity)
+    {
+        asm_fail(parser, 0, "section capacity exhausted");
+    }
+    else if (id == 0)
+    {
+        id = parser->section_count++;
+        parser->sections[id] = (AsmSection){
+            .object = {
+                .name = spelling,
+                .type = SHT_PROGBITS,
+                .flags = strings ? SHF_MERGE | SHF_STRINGS : 0,
+                .entry_size = strings ? 1 : 0,
+            },
+            .class = strings ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA,
+            .declared = true,
+        };
+        asm_section_index(parser, id);
+    }
+    return id;
 }

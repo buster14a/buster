@@ -1643,27 +1643,29 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     if (scalar_valid && recorded_room)
     {
         check_graph_record_finish(&recorded);
-        for (uint32_t path = 0; path < 6; path += 1)
+        for (uint32_t path = 0; path < 8; path += 1)
         {
-            const CheckOptions options = { .scalar = path % 3 == 0, .verify = path >= 3, .level_order = path % 3 == 2 };
+            const CheckOptions options = { .scalar = path % 4 == 0, .verify = path >= 4, .level_order = path % 4 == 2, .regions = path % 4 == 3 };
             CheckStream stream;
             const uint64_t recorded_mark = scratch->length;
             const bool checked = check_graph_run(table, &recorded, output, scratch, &options, &stream);
             check_test_expect(test, checked && check_test_stream_equal(&scalar, &stream, graph->argument_count),
-                              "recorded graph facts agree with both validators and all three schedules");
+                              "recorded graph facts agree with both validators and all four schedules");
             check_test_expect(test, scratch->length == recorded_mark, "recorded graph run releases only its own scratch");
             arena_pop_to(output, scalar_end);
         }
     }
     arena_pop_to(scratch, scratch_mark);
-    // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
-    // (CheckOptions.level_order), and its memoized transitions (#1050), every hit verified against its action.
+    // Each batch size by each of the vector path's orders but node order, which takes none: its regions in postorder
+    // batches (CheckOptions.regions), its regions by level (CheckOptions.level_order), and its memoized transitions (#1050),
+    // every hit verified against its action.
     for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
         const uint32_t batch = run / 3;
         const uint32_t order = run % 3;
         const CheckOptions vector_options = {
             .batch_size = batch,
+            .regions = order == 0,
             .level_order = order == 1,
             .transitions = order == 2,
             .verify_transitions = true,
@@ -1931,17 +1933,18 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
 
 static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* test, Arena* storage, Arena* output, Arena* scratch)
 {
-    CheckTestTypes types[3] = { 0 };
-    const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]) && check_test_types_open(&types[2]);
+    CheckTestTypes types[4] = { 0 };
+    const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]) && check_test_types_open(&types[2]) &&
+                             check_test_types_open(&types[3]);
     check_test_expect(test, initialized, "independent type tables for scheduling-order test");
     const uint64_t mark = storage->length;
     const uint64_t output_mark = output->length;
     if (initialized)
     {
-        TypeId array_int[3];
-        TypeId pointer_array_int[3];
-        TypeId array_short[3];
-        for (uint32_t path = 0; path < 3; path += 1)
+        TypeId array_int[4];
+        TypeId pointer_array_int[4];
+        TypeId array_short[4];
+        for (uint32_t path = 0; path < 4; path += 1)
         {
             array_int[path] = type_array(&types[path].table, BUSTER_TYPE_INT, 3);
             pointer_array_int[path] = type_pointer(&types[path].table, array_int[path]);
@@ -1951,6 +1954,8 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                           "type-order fixture input identities");
         check_test_expect(test, array_int[0] == array_int[2] && pointer_array_int[0] == pointer_array_int[2] && array_short[0] == array_short[2],
                           "level-order fixture input identities");
+        check_test_expect(test, array_int[0] == array_int[3] && pointer_array_int[0] == pointer_array_int[3] && array_short[0] == array_short[3],
+                          "region fixture input identities");
         CheckGraph graph;
         const bool allocated = check_graph_initialize(&graph, storage, 8, 0);
         check_test_expect(test, allocated, "type-order graph allocation");
@@ -1970,7 +1975,7 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                 .category = CHECK_LVALUE
             });
             check_graph_add(&graph, CHECK_OP_ADD, 5, second_array, one, BUSTER_CHECK_NONE);
-            const CheckOptions options[3] = {
+            const CheckOptions options[4] = {
                 {
                     .scalar = true
                 },
@@ -1980,10 +1985,13 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                 {
                     .level_order = true
                 },
+                {
+                    .regions = true
+                },
             };
-            CheckStream streams[3];
+            CheckStream streams[4];
             const bool first = check_graph_run(&types[0].table, &graph, output, scratch, &options[0], &streams[0]);
-            for (uint32_t path = 1; path < 3; path += 1)
+            for (uint32_t path = 1; path < 4; path += 1)
             {
                 const bool checked = check_graph_run(&types[path].table, &graph, output, scratch, &options[path], &streams[path]);
                 check_test_expect(test, first && checked && check_test_stream_equal(&streams[0], &streams[path], 0), "scheduler changed newly interned TypeIds");
@@ -1993,6 +2001,7 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
     }
     arena_pop_to(output, output_mark);
     arena_pop_to(storage, mark);
+    check_test_types_close(&types[3]);
     check_test_types_close(&types[2]);
     check_test_types_close(&types[1]);
     check_test_types_close(&types[0]);

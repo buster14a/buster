@@ -305,10 +305,10 @@ static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest*
                                    scalar.vectors[22].memory_type == BUSTER_TYPE_INT,
                               "floating conversion, nondeterminism and nontemporal memory effects remain explicit");
             const uint64_t mark = output.length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 CheckStream actual;
-                const CheckOptions partition = { .batch_size = batch };
+                const CheckOptions partition = { .batch_size = batch, .regions = batch != 0 };
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &actual) &&
                                        check_test_stream_equal(&scalar, &actual, graph.argument_count),
                                   "all vector graph partitions preserve complete builtin descriptors");

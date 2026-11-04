@@ -35,6 +35,11 @@
 // it uncertified). Its code is certified, p6 read from its incoming slot through rbp. With rbp set after the allocation
 // instead, its epilogues' resets moved to match, p6's load at 16 past rbp and the rows below rbp are elsewhere: it is
 // refused.
+//
+// A compare-exchange (#1059): c(p, e, d, k) compare-exchanges the i64 at p in one branch, with p, e, d and k live
+// across it and rax among the four allocatable registers. Its kernel saves rax in the scratch register and restores it
+// after, which gives the value in rax back: its code is certified. Then the restore made rax's move into itself, or a
+// move from rcx, is refused: the value in rax is lost.
 
 typedef struct Tier1CodeCertificateCounts Tier1CodeCertificateCounts;
 struct Tier1CodeCertificateCounts
@@ -68,12 +73,12 @@ struct Tier1CodeCertificateCounts
     uint32_t narrow_register_refused;
     uint32_t narrow_stack;
     uint32_t narrow_stack_refused;
-    // The compare-exchange fixture's compiles certified, its restores of rax, and those left out or taken from another
-    // register that were refused.
-    uint32_t exchanged;
-    uint32_t restores;
-    uint32_t restores_left_refused;
-    uint32_t restores_other_refused;
+    // The compare-exchange's compiles certified, those with a live value in rax across it, and its restore of rax left
+    // out or taken from another register, and those refused.
+    uint32_t exchange;
+    uint32_t exchange_live;
+    uint32_t exchange_restores;
+    uint32_t exchange_restores_refused;
 };
 
 static bool tier1_code_certificate_function(Arena* input, IrFunction* function, uint32_t* call)
@@ -236,6 +241,57 @@ static bool tier1_code_certificate_narrow_function(Arena* input, IrFunction* fun
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->block_offsets[2] = next;
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, parameters[1], BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->instruction_count = next;
+        function->block_offsets[3] = next;
+    }
+    return created;
+}
+
+// c(p, e, d, k): b0 branches on k's low bit to b1 or b2; b1 compare-exchanges the i64 at p from e to d and returns its
+// old value plus p's address, e, d and k, which live across it; b2 returns k.
+static bool tier1_code_certificate_exchange_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 20,
+        .block_count = 3,
+        .constant_count = 2,
+        .parameter_count = 4,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_PTR;
+        function->parameter_types[1] = IR_I64;
+        function->parameter_types[2] = IR_I64;
+        function->parameter_types[3] = IR_I64;
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 4 };
+        function->constants[0].low = 1;
+        function->constants[1].low = 0;
+        uint32_t next = 0;
+        uint32_t parameters[4];
+        for (uint32_t p = 0; p < 4; p += 1)
+        {
+            parameters[p] = tier1_select_test_append(function, &next, IR_PARAM, function->parameter_types[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t bit = tier1_select_test_append(function, &next, IR_AND, IR_I64, parameters[3], one, BUSTER_IR_NONE);
+        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t odd = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, bit, zero, IR_NE);
+        tier1_select_test_append(function, &next, IR_CBR, IR_VOID, odd, 1, 2);
+        function->block_offsets[1] = next;
+        const uint32_t old = tier1_select_test_append(function, &next, IR_ATOMIC_RMW, IR_I64, parameters[0], parameters[1], parameters[2]);
+        function->flags[old] = (uint8_t)(BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE);
+        function->alignment_log2[old] = 3;
+        uint32_t sum = tier1_select_test_append(function, &next, IR_PTRTOINT, IR_I64, parameters[0], BUSTER_IR_NONE, BUSTER_IR_NONE);
+        sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, sum, old, BUSTER_IR_NONE);
+        for (uint32_t p = 1; p < 4; p += 1)
+        {
+            sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, sum, parameters[p], BUSTER_IR_NONE);
+        }
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[2] = next;
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, parameters[3], BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->instruction_count = next;
         function->block_offsets[3] = next;
     }
@@ -616,68 +672,14 @@ static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier
     arena_pop_to(&test->input, 0);
 }
 
-// c(p0, p1, p2), p0 a pointer: b0 branches on p1's low bit to b1 or b2; b1 makes four values of p1 and p2 that live across
-// an atomic compare-exchange of the object at p0 (expected p1, desired p2) and returns its old value plus all four; b2
-// returns p2. Five registers alone are allocatable, so that a value lives across the compare-exchange in rax, which its
-// records keep in the scratch register around its lock cmpxchg and restore last.
-static bool tier1_code_certificate_exchange_function(Arena* input, IrFunction* function, uint32_t* exchange)
-{
-    const IrSizes sizes = {
-        .instruction_count = 24,
-        .block_count = 3,
-        .constant_count = 3,
-        .parameter_count = 3,
-    };
-    const bool created = ir_create(input, &sizes, function) == IR_OK;
-    if (created)
-    {
-        function->result_type = IR_I64;
-        function->parameter_types[0] = IR_PTR;
-        function->parameter_types[1] = IR_I64;
-        function->parameter_types[2] = IR_I64;
-        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 3 };
-        function->constants[0].low = 1;
-        function->constants[1].low = 0;
-        function->constants[2].low = 7;
-        uint32_t next = 0;
-        const uint32_t p0 = tier1_select_test_append(function, &next, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t p1 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t p2 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t bit = tier1_select_test_append(function, &next, IR_AND, IR_I64, p1, one, BUSTER_IR_NONE);
-        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t odd = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, bit, zero, IR_NE);
-        tier1_select_test_append(function, &next, IR_CBR, IR_VOID, odd, 1, 2);
-        function->block_offsets[1] = next;
-        const uint32_t seven = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t v = tier1_select_test_append(function, &next, IR_ADD, IR_I64, p1, seven, BUSTER_IR_NONE);
-        const uint32_t u = tier1_select_test_append(function, &next, IR_XOR, IR_I64, p1, p2, BUSTER_IR_NONE);
-        const uint32_t w = tier1_select_test_append(function, &next, IR_SUB, IR_I64, p1, p2, BUSTER_IR_NONE);
-        const uint32_t x = tier1_select_test_append(function, &next, IR_MUL, IR_I64, p1, p2, BUSTER_IR_NONE);
-        *exchange = tier1_select_test_append(function, &next, IR_ATOMIC_RMW, IR_I64, p0, p1, p2);
-        function->flags[*exchange] = (uint8_t)(BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE);
-        function->alignment_log2[*exchange] = 3;
-        const uint32_t a = tier1_select_test_append(function, &next, IR_ADD, IR_I64, *exchange, v, BUSTER_IR_NONE);
-        const uint32_t b = tier1_select_test_append(function, &next, IR_ADD, IR_I64, a, u, BUSTER_IR_NONE);
-        const uint32_t c = tier1_select_test_append(function, &next, IR_ADD, IR_I64, b, w, BUSTER_IR_NONE);
-        const uint32_t sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, c, x, BUSTER_IR_NONE);
-        tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        function->block_offsets[2] = next;
-        tier1_select_test_append(function, &next, IR_RET, IR_VOID, p2, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        function->instruction_count = next;
-        function->block_offsets[3] = next;
-    }
-    return created;
-}
-
-// The compare-exchange fixture (#1059's TIER1_RULE_ATOMIC_RMW, #939's certificate): its code, which keeps rax in the
-// scratch register around the lock cmpxchg, is certified, rax's value living across it; with the restore of rax left out
-// (a move of rax into itself) or taken from another register, the value in rax is lost, and the code is refused.
-static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, bool rematerialize, Tier1CodeCertificateCounts* counts)
+// The compare-exchange (#1059's TIER1_RULE_ATOMIC_RMW) saves rax in the scratch register, takes the expected value in
+// it, and restores it after: the value that lives across it in rax is still there. With rax among the few allocatable
+// registers, its code is certified; then the restore made rax's move into itself, or a move from another register, is
+// refused where a value lives in rax across the exchange.
+static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
-    uint32_t exchange = BUSTER_IR_NONE;
-    const bool created = tier1_code_certificate_exchange_function(&test->input, &function, &exchange);
+    const bool created = tier1_code_certificate_exchange_function(&test->input, &function);
     const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's compare-exchange fixture is valid IR");
     IrDominance dominance;
@@ -686,35 +688,26 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, bo
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's compare-exchange fixture selects");
-    const uint32_t five = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI);
-    const Tier1EmitOptions options = {
-        .register_mask = five,
-        .vector = vector,
-        .rematerialize = rematerialize,
-        .certify = true,
-    };
+    const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI);
+    const Tier1EmitOptions options = { .register_mask = few, .vector = vector, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
-    tier1_emit_test_expect(test, certified, "the compare-exchange fixture's code, through the CFG consumer, passes its certificate");
-    counts->exchanged += certified;
-    // The restore: rax's move back from the scratch register, after the lock cmpxchg.
-    bool exchanged = false;
+    tier1_emit_test_expect(test, certified, "the compare-exchange fixture's code, rax given back around the exchange, passes its certificate");
+    counts->exchange += certified;
     for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
     {
         const X86Instruction record = emitted.code.records[r];
-        exchanged = exchanged || (record.form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_CMPXCHG_M64_R64;
-        const bool restore = exchanged && record.form == X86_FORM_MOV_R64_RM64 && record.mode == BUSTER_X86_REGISTER_DIRECT && record.reg == X86_REGISTER_RAX && record.rm == BUSTER_TIER1_SELECT_SCRATCH;
+        const bool restore = tier1_cert_emitted_kind(emitted.origins[r]) == TIER1_ORIGIN_NODE && record.form == X86_FORM_MOV_R64_RM64 && record.mode == BUSTER_X86_REGISTER_DIRECT &&
+                             record.reg == X86_REGISTER_RAX && record.rm == BUSTER_TIER1_SELECT_SCRATCH;
         if (restore)
         {
-            const bool left = tier1_code_certificate_refuses(test, &plan, &emitted, r, (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }, UINT32_MAX);
+            const bool kept = tier1_code_certificate_refuses(test, &plan, &emitted, r, (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }, UINT32_MAX);
             const bool other = tier1_code_certificate_refuses(test, &plan, &emitted, r, (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, UINT32_MAX);
-            counts->restores += 1;
-            counts->restores_left_refused += left;
-            counts->restores_other_refused += other;
-            tier1_emit_test_expect(test, left, "a compare-exchange's restore of rax left out fails the code's certificate");
-            tier1_emit_test_expect(test, other, "a compare-exchange's rax restored from another register fails the code's certificate");
-            exchanged = false;
+            counts->exchange_live += 1;
+            counts->exchange_restores += 2;
+            counts->exchange_restores_refused += kept + other;
+            tier1_emit_test_expect(test, kept && other, "a compare-exchange whose rax isn't given back fails the code's certificate: the value that lives in rax across it is lost");
         }
     }
     arena_pop_to(&test->output, 0);
@@ -737,12 +730,12 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_narrow(test, variant != 0, &counts);
     }
-    for (uint32_t variant = 0; variant < 4; variant += 1)
+    for (uint32_t variant = 0; variant < 2; variant += 1)
     {
-        tier1_code_certificate_exchange(test, (variant & 1) != 0, (variant & 2) != 0, &counts);
+        tier1_code_certificate_exchange(test, variant != 0, &counts);
     }
-    tier1_emit_test_expect(test, counts.exchanged == 4 && counts.restores == 4, "the compare-exchange fixture's compiles are certified, each with a restore of rax to corrupt");
     tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
+    tier1_emit_test_expect(test, counts.exchange == 2 && counts.exchange_live == 2, "the compare-exchange fixture's compiles each restore rax around the exchange");
     const bool kept = tier1_code_certificate_walked(false);
     const bool clobbered = tier1_code_certificate_walked(true);
     tier1_emit_test_expect(test, kept, "a conditional tail whose edge move keeps the flags reaches its true successor");
@@ -751,10 +744,9 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
                            "the fixtures' compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
     printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
            "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused; a conditional jump after an edge's "
-           "flag-writing move %s; narrow parameters %u of 2 certified, their extensions corrupted in a register %u of %u and from a slot %u of %u refused; compare-exchanges %u of 4 certified, their restores of rax "
-           "left out %u of %u and taken from another register %u of %u refused\n",
+           "flag-writing move %s; narrow parameters %u of 2 certified, their extensions corrupted in a register %u of %u and from a slot %u of %u refused; compare-exchanges %u of 2 certified, "
+           "their restores of rax corrupted %u of %u refused\n",
            counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
            counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved, kept && !clobbered ? "refused" : "accepted", counts.narrow,
-           counts.narrow_register_refused, counts.narrow_register, counts.narrow_stack_refused, counts.narrow_stack, counts.exchanged, counts.restores_left_refused, counts.restores, counts.restores_other_refused,
-           counts.restores);
+           counts.narrow_register_refused, counts.narrow_register, counts.narrow_stack_refused, counts.narrow_stack, counts.exchange, counts.exchange_restores_refused, counts.exchange_restores);
 }
