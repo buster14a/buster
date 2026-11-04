@@ -2486,7 +2486,11 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
             {
                 alone &= k == j || sources[k] != location;
             }
-            const bool stays = narrow && (((roles.written >> j) & 1) == 0 || alone);
+            // The result's role is where the row defines its result, whose definition the code certificate takes as a
+            // write of the register (#1284): the first operand stays in its own register for it only where no value
+            // live past the node is there (an inlined wrapper's operand that a later row reads too, #1324's).
+            const bool kept = !result_role || ((live_vectors >> own) & 1) == 0;
+            const bool stays = narrow && (((roles.written >> j) & 1) == 0 || alone) && kept;
             const uint8_t reg = placed ? vectors[0] : stays ? own : vectors[j];
             const bool moved = (reg != own || !narrow) && !(placed && split != 0);
             vectors[j] = reg;
