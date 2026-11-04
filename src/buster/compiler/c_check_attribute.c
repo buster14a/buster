@@ -5991,15 +5991,20 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
         // Where the function body a use is in ends.
         uint32_t body_end = 0;
         // The brackets open before a use (`(`, `[` and `{` less their closers): a file-scope declaration's own level is 0.
+        // And of them, the parameter lists (a function declarator's parentheses, a call's to the vector parser).
         int32_t level = 0;
+        int32_t lists = 0;
         for (uint32_t t = 0; t < count; t += 1)
         {
             const uint8_t kind = parser->tokens.kinds[t];
             const uint8_t role = parser->tree.roles[t];
             const bool inside = t < body_end;
             const uint8_t previous = t != 0 ? parser->tokens.kinds[t - 1] : PARSE_KIND_END;
+            const uint8_t previous_role = t != 0 ? parser->tree.roles[t - 1] : PARSE_ROLE_NONE;
             level += (previous == PARSE_KIND_L_PAREN || previous == PARSE_KIND_L_SQUARE || previous == PARSE_KIND_L_BRACE) -
                      (previous == PARSE_KIND_R_PAREN || previous == PARSE_KIND_R_SQUARE || previous == PARSE_KIND_R_BRACE);
+            lists += (previous_role == PARSE_ROLE_OPEN_FUNCTION || previous_role == PARSE_ROLE_OPEN_CALL) -
+                     (previous_role == PARSE_ROLE_CLOSE_FUNCTION || previous_role == PARSE_ROLE_CLOSE_CALL);
             if (!inside && role == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
             {
                 body_end = parser->tree.parents[t];
@@ -6034,21 +6039,28 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             // mark is a context as check_input_availability_contexts' are: a deprecated one drops a deprecated use, an
             // unavailable one an unavailable use too. Only from the specifiers: a `,` or `=` at the declaration's own
             // level, outside every group (an attribute list's, `typeof`'s, a declarator's), ends an initializer or an
-            // earlier declarator, whose uses a later declarator's mark doesn't reach. Looked for only at a marked use,
-            // which are few.
+            // earlier declarator, whose uses a later declarator's mark doesn't reach. And only the declaration's own
+            // declarator, outside every parameter list: a parameter's mark is no context of its own specifiers, and a use
+            // in a parameter list takes its function's (check_input_availability_contexts). Looked for only at a marked
+            // use, which are few.
             uint32_t declarator = marked && !inside ? t + 1 : count;
             int32_t depth = level;
+            int32_t open_lists = lists;
             bool specifiers = true;
             while (specifiers && declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
                    parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
             {
                 const uint8_t scanned = parser->tokens.kinds[declarator];
+                const uint8_t scanned_role = parser->tree.roles[declarator];
                 depth += scanned == PARSE_KIND_L_PAREN || scanned == PARSE_KIND_L_SQUARE;
                 depth -= scanned == PARSE_KIND_R_PAREN || scanned == PARSE_KIND_R_SQUARE || scanned == PARSE_KIND_R_BRACE;
+                open_lists += (scanned_role == PARSE_ROLE_OPEN_FUNCTION || scanned_role == PARSE_ROLE_OPEN_CALL) -
+                              (scanned_role == PARSE_ROLE_CLOSE_FUNCTION || scanned_role == PARSE_ROLE_CLOSE_CALL);
                 specifiers = depth > 0 || (scanned != PARSE_KIND_COMMA && scanned != PARSE_KIND_EQUAL);
                 declarator += specifiers;
             }
-            const uint32_t declarator_key = specifiers && declarator < count && reader->declaration_kinds[declarator] != 0 ? check_input_deprecated_key(reader, declarator) : count;
+            const uint32_t declarator_key = specifiers && open_lists == 0 && declarator < count && reader->declaration_kinds[declarator] != 0 ?
+                                            check_input_deprecated_key(reader, declarator) : count;
             const CheckInputAttribute* enclosing = declarator_key < count ? check_input_availability_mark(reader, marks, chain, declarator_key, declarator, UINT32_MAX) : NULL;
             const uint8_t specified = enclosing == NULL ? 0 : enclosing->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
             const CheckInputAttribute* candidate = marked ? check_input_availability_mark(reader, marks, chain, key, limit, by_tag ? t : UINT32_MAX) : NULL;

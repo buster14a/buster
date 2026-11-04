@@ -5603,7 +5603,9 @@ arguments against the function. The checker now gives these as clang does.
   declaration's drop both. That is the specifiers' alone (`typeof`'s operand
   and an attribute list included, with their commas): a `,` or `=` at the
   declaration's own bracket level ends an initializer or an earlier
-  declarator, whose use keeps its own context, not a later declarator's mark. There
+  declarator, whose use keeps its own context, not a later declarator's mark.
+  The declarator is the declaration's own, outside every parameter list: a
+  parameter's mark is no context of its specifiers. There
   is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by

@@ -967,6 +967,14 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "typedef int T __attribute__((unavailable(\"gone\")));\nint f(T x);\nint g(T);\n",
         "typedef int D __attribute__((deprecated(\"old\")));\nint i(D x);\nint (*fp)(D x);\nvoid n(void) { int p(D); }\n",
         "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) int f(T x);\n",
+        // A parameter's own mark is no context of its specifiers, before or after them; its marked function's is, and a
+        // file-scope declarator in a group or a call in `typeof` before it is still the declaration's.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "int f(T x __attribute__((unavailable)));\nint g(D x __attribute__((deprecated)));\n"
+        "int k(__attribute__((unavailable)) T x);\nint m(__attribute__((deprecated)) D x);\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\nint g(int);\n"
+        "__attribute__((unavailable)) int h(T x __attribute__((unavailable)));\n__attribute__((deprecated)) D (*fq)(int);\n"
+        "__attribute__((unavailable)) T (*fr)(int);\ntypeof(g((T)1)) x __attribute__((unavailable));\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"
