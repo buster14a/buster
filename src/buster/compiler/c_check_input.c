@@ -2328,6 +2328,19 @@ static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttri
     return result;
 }
 
+// Whether a generic attribute is a function type's (#147): ns_returns_retained, cfi_unchecked_callee and the function effects'.
+static bool check_input_function_type_name(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    static const char* const names[] = { "ns_returns_retained", "cfi_unchecked_callee", "allocating", "blocking", "nonallocating", "nonblocking" };
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    bool result = false;
+    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        result = check_input_attribute_equal(name, names[i]);
+    }
+    return result;
+}
+
 // clang's warning for a function type's attribute (a calling convention, GNU's noreturn, regparm) on a declarator whose
 // type is no function's and no pointer's, array's or aligned typedef's to one (#147): "'X' only applies to function types;
 // type here is 'T'" at its first token (a C23 one's scope), the attribute named as written without its scope and the type
@@ -2350,8 +2363,7 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
         // (ns_returns_retained, a generic attribute, is a function type's too.)
         const bool function_type = (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute)) ||
                                    attribute->kind == CHECK_ATTRIBUTE_REGPARM || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword) ||
-                                   (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword &&
-                                    check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "ns_returns_retained"));
+                                   (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && check_input_function_type_name(reader, attribute));
         if (function_type)
         {
             const CheckWarningEvent event =
@@ -3880,6 +3892,18 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             if (!evaluated && !unresolved && !type_argument)
             {
                 check_input_attribute_constant_error(reader, &parsed, attribute, 0, attribute->argument_first, attribute->argument_end);
+            }
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count == 1)
+        {
+            // A generic attribute's integer argument its handler checks (#147, CheckInputAttribute.constant_argument).
+            const String8 name = check_input_attribute_name(reader, attribute->name);
+            if (check_input_attribute_equal(name, "xray_log_args") || check_input_attribute_equal(name, "nonblocking") ||
+                check_input_attribute_equal(name, "nonallocating"))
+            {
+                int64_t value = 0;
+                attribute->constant_argument = check_input_constant_ice(reader, attribute->argument_first, attribute->argument_end, &value);
+                attribute->value = value;
             }
         }
         else if (!attribute->resolved && (attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS))

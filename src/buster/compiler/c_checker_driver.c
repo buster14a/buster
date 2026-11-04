@@ -216,8 +216,8 @@ static String8 check_warning_attribute_normalized(String8 name);
 // in `detail`'s low byte, a parameter's place above it) as clang words it, the attribute named from its first token
 // (`first`) as each message names it: an applied attribute's normalized name (aligned's), the parsed attribute's (a GNU
 // one as written, a C23 one's scope and name normalized), or the parser's name as written, without its scope (a string
-// literal's). Into `text`, `capacity` bytes.
-static void check_driver_attribute_argument(const Parser* parser, const Preprocessor* pp, uint32_t first, uint32_t detail, char* text, uint32_t capacity)
+// literal's); `literal` the string's text where the message quotes it (model's). Into `text`, `capacity` bytes.
+static void check_driver_attribute_argument(const Parser* parser, const Preprocessor* pp, uint32_t first, uint32_t detail, String8 literal, char* text, uint32_t capacity)
 {
     const uint32_t count = parser->tokens.count;
     const bool scoped = first + 2 < count && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON;
@@ -269,6 +269,14 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
         case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
         case CHECK_ARGUMENT_PCS_TYPE: snprintf(text, capacity, "invalid PCS type"); break;
+        case CHECK_ARGUMENT_DESTROY_STORAGE:
+            snprintf(text, capacity, "%s attribute can only be applied to a variable with static or thread storage duration", number != 0 ? "always_destroy" : "no_destroy");
+            break;
+        case CHECK_ARGUMENT_PERSONALITY: snprintf(text, capacity, "'personality' argument is not a function"); break;
+        case CHECK_ARGUMENT_CODE_MODEL: snprintf(text, capacity, "code model '%.*s' is not supported on this target", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_INVALID_ON_DECLARATION: snprintf(text, capacity, "'%s' attribute cannot be applied to a declaration", parsed); break;
+        case CHECK_ARGUMENT_EFFECT_CONSTANT: snprintf(text, capacity, "%.*s attribute requires an integer constant", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_MATRIX_DISABLED: snprintf(text, capacity, "matrix types extension is disabled. Pass -fenable-matrix to enable it"); break;
         case CHECK_ARGUMENT_KERNEL_FUNCTIONS: snprintf(text, capacity, "'%s' attribute only applies to functions", parsed); break;
         case CHECK_ARGUMENT_VARIADIC_CONVENTION: snprintf(text, capacity, "variadic function cannot use %s calling convention", check_input_convention_name(number)); break;
         default: snprintf(text, capacity, "invalid attribute argument"); break;
@@ -1760,7 +1768,9 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             // its note at the arguments' `(`.
                             char text[192];
                             const CheckInputReport* report = input->reports + index;
-                            check_driver_attribute_argument(parser, pp, report->attribute, report->detail, text, sizeof(text));
+                            const String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ?
+                                                    check_warning_string_text(parser, pp, token, scratch) : (String8){ "", 0 };
+                            check_driver_attribute_argument(parser, pp, report->attribute, report->detail, literal, text, sizeof(text));
                             const bool matched = report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN && report->note_token < count;
                             const PPOutputDiagnosticNote note = {
                                 .token = matched ? parser->tokens.sources[report->note_token] : 0,

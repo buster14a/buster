@@ -41,6 +41,7 @@ enum
     CHECK_WARNING_ID_EXTERN_INITIALIZER = 49,
     CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES = 50,
     CHECK_WARNING_ID_UNKNOWN_SANITIZERS = 51,
+    CHECK_WARNING_ID_OVERFLOW_BEHAVIOR = 52,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -166,6 +167,12 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_OWNERSHIP_RETAINED,
     CHECK_WARNING_EVENT_CONSUMED_OBJECT,
     CHECK_WARNING_EVENT_CONSUMED_POINTER,
+    // nomerge's variable of no function pointer type (#147, check_input_attribute_handled), at the attribute: the variable's
+    // name in the payload's token. overflow_behavior's without its experimental option, at the attribute.
+    CHECK_WARNING_EVENT_NOMERGE_POINTER,
+    CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR,
+    // A C23 type attribute that slides from a declaration to its specifiers (#147, -Wdeprecated-attributes), at it.
+    CHECK_WARNING_EVENT_TYPE_ON_DECLARATION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

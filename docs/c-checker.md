@@ -5524,6 +5524,32 @@ arguments against the function. The checker now gives these as clang does.
   an Objective-C object" at the attribute, and "only applies to function
   types" off one.
 
+  More have their handlers' checks and change nothing here
+  (`check_input_attribute_handled`): `btf_type_tag`, `swift_attr` and
+  `no_field_protection` (debug information's and other languages' type
+  attributes); `vec_type_hint`; the function effects (`nonblocking`,
+  `nonallocating`, `blocking`, `allocating`, whose analysis warns of nothing by
+  default: an argument that is no integer constant is clang's "nonblocking
+  attribute requires an integer constant") and `cfi_unchecked_callee`, function
+  types' ("only applies to function types" off one); `init_priority`, a C++
+  one, "'init_priority' attribute ignored"; `always_destroy` and `no_destroy`,
+  clang's error at a variable's name of no static storage; `nomerge` on a
+  variable of no function pointer type, "'nomerge' attribute is ignored
+  because 'x' is not a function pointer"; `abi_tag`'s least argument;
+  `matrix_type`, "matrix types extension is disabled. Pass -fenable-matrix to
+  enable it" (and its subject's or count's error after it);
+  `overflow_behavior`, its warning that it is ignored without its
+  experimental option (`-Woverflow-behavior-attribute-ignored`), but on a tag
+  its subject's; `xray_log_args`'s index of the function's parameters;
+  `personality`'s function; `function_return`'s, `zero_call_used_regs`'s and
+  `model`'s strings, an unknown one warned of ("argument not supported") or
+  clang's "code model 'M' is not supported on this target", and those that
+  change the code (`thunk-extern`, any zeroing, the large model) refused by
+  name. A C23 type attribute before a declaration is clang's: `btf_type_tag`
+  slides to the specifiers, with `-Wdeprecated-attributes`' warning under
+  `clang::`, and a function effect there is "cannot be applied to a
+  declaration".
+
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
   `stdcall` is: clang's "calling convention is not supported for this target"

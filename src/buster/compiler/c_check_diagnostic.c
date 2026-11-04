@@ -88,6 +88,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wextern-initializer", NULL, "'extern' variable has an initializer" },
     { "-Wdeprecated-attributes", "-Wdeprecated", "specifying vector types with the 'mode' attribute is deprecated" },
     { "-Wunknown-sanitizers", NULL, "unknown sanitizer ignored" },
+    { "-Woverflow-behavior-attribute-ignored", NULL, "'overflow_behavior' attribute is ignored because it is not enabled" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

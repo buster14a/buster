@@ -218,6 +218,10 @@ struct CheckInputAttribute
     // as BUSTER_CHECK_COUNT_* and the bound.
     uint8_t count_check;
     uint32_t count_bound;
+    // A generic attribute's integer argument (xray_log_args's, the function effects'), evaluated where its attributes are
+    // read (check_input_read_attributes), not where its handler checks it, which a tag's subjects reach from the constant
+    // evaluator: whether it is an integer constant, its value in `value`.
+    bool constant_argument;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -494,6 +498,18 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_VARIADIC_CONVENTION,
     // A GPU kernel's convention off a function: "'X' attribute only applies to functions", at the attribute.
     CHECK_ARGUMENT_KERNEL_FUNCTIONS,
+    // always_destroy's and no_destroy's "X attribute can only be applied to a variable with static or thread storage
+    // duration" (the number 1 for always_destroy's), at the variable's name; personality's "'personality' argument is not
+    // a function", at it; model's "code model 'M' is not supported on this target", at the string; matrix_type's
+    // "matrix types extension is disabled. Pass -fenable-matrix to enable it", at the attribute.
+    CHECK_ARGUMENT_DESTROY_STORAGE,
+    CHECK_ARGUMENT_PERSONALITY,
+    CHECK_ARGUMENT_CODE_MODEL,
+    CHECK_ARGUMENT_MATRIX_DISABLED,
+    // A function effect before a declaration, "'X' attribute cannot be applied to a declaration", at the attribute; its
+    // argument that is no integer constant, "X attribute requires an integer constant" (its name alone), at it.
+    CHECK_ARGUMENT_INVALID_ON_DECLARATION,
+    CHECK_ARGUMENT_EFFECT_CONSTANT,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2177,6 +2193,11 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
         "ns_returns_not_retained", "ns_returns_autoreleased", "os_returns_retained", "os_returns_not_retained",
         "os_returns_retained_on_zero", "os_returns_retained_on_non_zero",
+        // Debug information's and other languages' type attributes, and function types' effects (no warnings by default)
+        // and CFI's, which change nothing here; and these, whose handlers' checks are check_input_attribute_handled's.
+        "btf_type_tag", "swift_attr", "no_field_protection", "vec_type_hint", "allocating", "blocking", "nonallocating", "nonblocking",
+        "cfi_unchecked_callee", "overflow_behavior", "init_priority", "always_destroy", "no_destroy", "nomerge", "abi_tag", "matrix_type",
+        "xray_log_args", "personality", "function_return", "zero_call_used_regs", "model",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -2391,6 +2412,31 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             }
             valid = false;
         }
+        // A C23 type attribute on a declaration (#147, clang's ProcessDeclAttribute): one of clang's that slide to the
+        // specifiers (btf_type_tag) is applied there, with -Wdeprecated-attributes' warning when it is clang::'s; a
+        // function type's effect (nonblocking and the others) before the declaration is clang's "cannot be applied to a
+        // declaration" error (after its name it is the declarator's type's).
+        uint32_t list_opener = attribute.first;
+        while (standard && list_opener > 0 && parser->tree.depths[list_opener - 1] >= parser->tree.depths[attribute.first])
+        {
+            list_opener -= 1;
+        }
+        const uint8_t before_list = standard && list_opener >= 3 ? parser->tokens.kinds[list_opener - 3] : PARSE_KIND_SEMI;
+        const bool leading = before_list == PARSE_KIND_SEMI || before_list == PARSE_KIND_L_BRACE || before_list == PARSE_KIND_R_BRACE ||
+                             before_list == PARSE_KIND_COLON || before_list == PARSE_KIND_R_SQUARE;
+        const bool declaration_place = valid && known && standard && place == BUSTER_CHECK_PLACE_DECLARATION && fact != NULL &&
+                                       (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0;
+        const bool effect = check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
+                            check_input_attribute_equal(name, "blocking") || check_input_attribute_equal(name, "allocating");
+        if (declaration_place && leading && effect)
+        {
+            check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
+            valid = false;
+        }
+        else if (declaration_place && clang_scope && check_input_attribute_equal(name, "btf_type_tag"))
+        {
+            check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_ON_DECLARATION);
+        }
         if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
@@ -2505,8 +2551,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.kind = thread != NULL ? CHECK_ATTRIBUTE_THREAD_SAFETY : CHECK_ATTRIBUTE_UNKNOWN;
             attribute.argument_count = count;
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
-            // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs).
-            if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && thread != NULL && (thread->flags & BUSTER_CHECK_THREAD_LEAST_ONE) != 0 && count == 0)
+            // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs), and abi_tag's.
+            if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && count == 0 &&
+                ((thread != NULL && (thread->flags & BUSTER_CHECK_THREAD_LEAST_ONE) != 0) || check_input_attribute_equal(name, "abi_tag")))
             {
                 attribute.count_check = BUSTER_CHECK_COUNT_LEAST;
                 attribute.count_bound = 1;
@@ -3616,7 +3663,126 @@ static uint32_t check_input_attribute_excluding_in(CheckInputReader* reader, Str
     return result;
 }
 
-// The retain-ownership attributes (#147): consumed's (cf_, ns_, os_), the returns' (cf_returns_retained and the others) and
+// Handlers' checks of generic attributes past their subjects (#147), as clang's make them in C on x86-64: init_priority, a
+// C++ one, "'init_priority' attribute ignored"; always_destroy's and no_destroy's variable of no static or thread storage,
+// clang's error at its name; nomerge's variable of no function pointer type, "'nomerge' attribute is ignored because 'x'
+// is not a function pointer"; xray_log_args's index of the function's parameters (out of bounds, or no constant);
+// personality's argument, a function's name or "'personality' argument is not a function"; function_return's,
+// zero_call_used_regs's and model's strings (an unsupported one warned of or an error, as clang's, and those whose effect
+// the code here hasn't, thunk-extern, any zeroing and the large model, refused by name). Whether the declaration goes on.
+static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration, TypeId type,
+                                          uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    const String8 spelled = check_input_attribute_name(reader, attribute->name);
+    const uint32_t count = parser->tokens.count;
+    const TypeId bare = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    const bool function_pointer = bare != 0 && type_kind(reader->types, bare) == BUSTER_TYPE_KIND_POINTER &&
+                                  type_kind(reader->types, type_strip_aligned(reader->types, reader->types->types.base[type_index(bare)])) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool destroy = check_input_attribute_equal(spelled, "always_destroy") || check_input_attribute_equal(spelled, "no_destroy");
+    const String8 text = attribute->argument_first < attribute->argument_end && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING &&
+                         check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, &attribute->text) ? attribute->text : (String8){ 0 };
+    bool valid = true;
+    if (attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+    {
+        // Its count's error comes first (check_input_attribute_subjects).
+    }
+    else if (check_input_attribute_equal(spelled, "init_priority"))
+    {
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+        attribute->ignored = true;
+        attribute->subject_ignored = true;
+    }
+    else if (destroy && (declaration & BUSTER_CHECK_SUBJECT_GLOBAL) == 0 && name < count)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, name, CHECK_ARGUMENT_DESTROY_STORAGE,
+                                             check_input_attribute_equal(spelled, "always_destroy") ? 1u : 0u);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "nomerge") && (declaration & BUSTER_CHECK_SUBJECT_VARIABLE) != 0 && !function_pointer && name < count)
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NOMERGE_POINTER, attribute->first, name);
+        attribute->ignored = true;
+        attribute->subject_ignored = true;
+    }
+    else if (check_input_attribute_equal(spelled, "xray_log_args") && attribute->argument_count == 1 && bare != 0 &&
+             type_kind(reader->types, bare) == BUSTER_TYPE_KIND_FUNCTION)
+    {
+        const int64_t index = attribute->value;
+        uint32_t parameters = 0;
+        type_parameters(reader->types, bare, &parameters);
+        if (!attribute->constant_argument)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, 1);
+            valid = false;
+        }
+        else if (index < 1 || index > (int64_t)parameters)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, 1);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "personality") && attribute->argument_count == 1)
+    {
+        const uint32_t argument = attribute->argument_first;
+        const bool lone = argument + 1 == attribute->argument_end && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+        const uint32_t binding = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[argument]) : 0;
+        const uint32_t declared = binding != 0 ? reader->bindings.declaration[binding - 1] : BUSTER_CHECK_NONE;
+        const TypeId personality = declared < count ? reader->declared_types[declared] : 0;
+        if (personality == 0 || type_kind(reader->types, type_strip_aligned(reader->types, personality)) != BUSTER_TYPE_KIND_FUNCTION)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, argument, CHECK_ARGUMENT_PERSONALITY, 0);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "function_return") || check_input_attribute_equal(spelled, "zero_call_used_regs"))
+    {
+        static const char* const zeroing[] = { "skip", "used-gpr-arg", "used-gpr", "used-arg", "used", "all-gpr-arg", "all-gpr", "all-arg", "all" };
+        const bool returns = check_input_attribute_equal(spelled, "function_return");
+        bool known = returns && (check_input_attribute_equal(text, "keep") || check_input_attribute_equal(text, "thunk-extern"));
+        for (uint32_t i = 0; !returns && !known && i < BUSTER_ARRAY_LENGTH(zeroing); i += 1)
+        {
+            known = check_input_attribute_equal(text, zeroing[i]);
+        }
+        const bool unchanged = check_input_attribute_equal(text, returns ? "keep" : "skip");
+        if (!known && text.pointer != NULL)
+        {
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED, attribute->argument_first,
+                                                 attribute->argument_first);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        else if (known && !unchanged)
+        {
+            check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            valid = false;
+        }
+    }
+    else if ((check_input_attribute_equal(spelled, "nonblocking") || check_input_attribute_equal(spelled, "nonallocating")) && attribute->argument_count == 1)
+    {
+        if (!attribute->constant_argument)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->argument_first, CHECK_ARGUMENT_EFFECT_CONSTANT, 0);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "model") && text.pointer != NULL)
+    {
+        if (check_input_attribute_equal(text, "large"))
+        {
+            check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            valid = false;
+        }
+        else if (!check_input_attribute_equal(text, "small"))
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->argument_first, CHECK_ARGUMENT_CODE_MODEL, 0);
+            valid = false;
+        }
+    }
+    return valid;
+}
+
+// The retain-ownership attributes (#147): consumed (cf_, ns_, os_), the returns' (cf_returns_retained and the others) and
 // os_returns_retained_on_zero's and _on_non_zero's, as SemaObjC's handlers take them in C, where no type is an
 // Objective-C object or points to a C++ record: CF's a pointer (a parameter's pointee a pointer, for a returns' one), NS's
 // and OS's nothing. Each warns, at the declaration's first token (`begin`), and is ignored, where its subject is no type
@@ -3705,11 +3871,48 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         const bool transparent = attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION;
         // (A GPU kernel's convention, which a type off a function ignored, is a declaration's attribute: its subject's error.)
         const bool kernel = check_input_attribute_kernel(reader, attribute);
-        const CheckInputSubjectRow* row = attribute->keyword || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
+        // matrix_type without -fenable-matrix (#147): clang's error, then a typedef's subject's off one; cfi_salt is a
+        // function type's, whose warning off one is check_input_attribute_function_types's, not a subject's.
+        const bool generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword;
+        const String8 generic_spelled = generic_name ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
+        const bool matrix = generic_name && check_input_attribute_equal(generic_spelled, "matrix_type") &&
+                            (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) == 0;
+        // overflow_behavior without -fexperimental-overflow-behavior-types: clang's warning that it ignores it, but on a tag,
+        // where its subject's warning comes.
+        const bool tag_declaration = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
+        const bool overflow = generic_name && !tag_declaration && check_input_attribute_equal(generic_spelled, "overflow_behavior") && !attribute->ignored;
+        if (matrix && !attribute->ignored)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_MATRIX_DISABLED, 0);
+            const uint32_t before = reader->output->report_count;
+            if ((declaration & BUSTER_CHECK_SUBJECT_TYPEDEF) == 0)
+            {
+                check_input_report(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_SUBJECT);
+            }
+            else if (attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            }
+            // (After the first, at the same token, which the driver keeps.)
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].repeated = true;
+                reader->output->reports[before].completion = attribute->first + 1;
+            }
+            valid = false;
+            continue;
+        }
+        const CheckInputSubjectRow* row = attribute->keyword || overflow || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
                                           check_input_subject_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
         attribute->subject_ignored = false;
+        if (overflow)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_OVERFLOW_BEHAVIOR, CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
         // A counted_by family attribute's name off a member (#148): clang's parser looks it up first, in the ordinary
         // scopes, the members being none's here; one that names nothing is its error, which ends the attribute.
         const uint32_t counted = attribute->kind == CHECK_ATTRIBUTE_COUNTED_BY && attribute->argument_first + 1 == attribute->argument_end &&
@@ -3793,10 +3996,14 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             attribute->subject_ignored = true;
         }
         // clang's retain-ownership attributes (#147, SemaObjC's handleXReturnsXRetainedAttr and AddXConsumedAttr), which change
-        // nothing in C: check_input_attribute_ownership.
+        // nothing in C: check_input_attribute_ownership; and other handlers' checks (check_input_attribute_handled).
         if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
         {
             check_input_attribute_ownership(reader, attribute, declaration, type, begin);
+        }
+        if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
+        {
+            valid = check_input_attribute_handled(reader, attributes, attribute, declaration, type, name);
         }
         // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
         if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)
@@ -3809,7 +4016,9 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // hasn't; then "'X' attribute only applies to functions and methods", which ignores it. regparm has none there.
         const bool tag = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
         const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute);
-        const bool function_type = convention || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword);
+        const bool function_type = convention || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword) ||
+                                   (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword &&
+                                    check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_unchecked_callee"));
         if (valid && tag && function_type && !attribute->ignored && !attribute->subject_ignored)
         {
             valid = check_input_attribute_pcs(reader, attributes, attribute);

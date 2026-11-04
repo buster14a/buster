@@ -619,6 +619,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_OWNERSHIP_RETAINED:
         case CHECK_WARNING_EVENT_CONSUMED_OBJECT:
         case CHECK_WARNING_EVENT_CONSUMED_POINTER:
+        case CHECK_WARNING_EVENT_NOMERGE_POINTER:
+        case CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR:
+        case CHECK_WARNING_EVENT_TYPE_ON_DECLARATION:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -653,7 +656,18 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
             // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
             const String8 plain = check_warning_attribute_normalized(name);
+            const String8 variable = event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER && payload->token < count ?
+                                     check_driver_warning_name(pp, parser->tokens.names[payload->token]) : (String8){ "", 0 };
             result = event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETAINED ? "'ns_returns_retained' attribute only applies to functions that return an Objective-C object" :
+                event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute is ignored because '%.*s' is not a function pointer", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, (int)variable.length, variable.pointer) :
+                event->kind == CHECK_WARNING_EVENT_TYPE_ON_DECLARATION ?
+                check_warning_text(scratch, "applying attribute '%.*s%s%.*s' to a declaration is deprecated; apply it to the type instead", (int)scope.length,
+                                   scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                event->kind == CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute is ignored because it is not enabled; pass -Xclang -fexperimental-overflow-behavior-types",
+                                   (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
                 event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT || event->kind == CHECK_WARNING_EVENT_CONSUMED_POINTER ?
                 check_warning_text(scratch, "%.*s attribute only applies to %s parameters", (int)plain.length, plain.pointer,
                                    event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT ? "Objective-C object" : "pointer") :
