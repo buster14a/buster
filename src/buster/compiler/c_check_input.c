@@ -1335,6 +1335,9 @@ struct CheckInputReader
     CheckWarningSet variable_sized_records;
     // The unions completed so far, the latest first (CheckInputUnionTokens).
     CheckInputUnionTokens* union_tokens;
+    // During check_input_deprecated_uses (#147), each token's mark as a marked member's name (CheckInput.marked_members),
+    // as context bits (BUSTER_CHECK_CONTEXT_*): check_input_declarator_mark's lookup. Null outside it.
+    const uint8_t* member_marks;
     // An independently checked array bound is a semantic unevaluation barrier, even inside sizeof/typeof.
     uint32_t warning_bound_open;
     Arena* warning_query_arena;

@@ -5954,20 +5954,16 @@ static uint32_t check_input_name_body(const Parser* parser, uint32_t name, uint3
     return check_input_enum_base_skip(parser, check_input_skip_attributes(parser, name + 1, end), end);
 }
 
-// The mark a declarator's name at `name` has: an object's by its declarations (check_input_availability_mark), a
-// member's by the record that marks it (CheckInput.marked_members), or null.
+// The mark a declarator's name at `name` has: an object's by its declarations (check_input_availability_mark), or null;
+// and a member's, by the record that marks it, as context bits in `*member_bit` (CheckInputReader.member_marks, by its
+// name's token: one load, whatever the unit's marked members).
 static const CheckInputAttribute* check_input_declarator_mark(const CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain, uint32_t name,
                                                               uint8_t* member_bit)
 {
     const uint32_t count = reader->parser->tokens.count;
-    const CheckInputAttribute* result = name < count && reader->declaration_kinds[name] != 0 ?
-                                        check_input_availability_mark(reader, marks, chain, check_input_deprecated_key(reader, name), name, UINT32_MAX) : NULL;
-    *member_bit = 0;
-    for (uint32_t i = 0; name < count && reader->declaration_kinds[name] == 0 && i < reader->output->marked_member_count; i += 1)
-    {
-        const CheckInputMarkedMember* marked = reader->output->marked_members + i;
-        *member_bit = marked->name == name ? (marked->unavailable ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED) : *member_bit;
-    }
+    const bool object = name < count && reader->declaration_kinds[name] != 0;
+    const CheckInputAttribute* result = object ? check_input_availability_mark(reader, marks, chain, check_input_deprecated_key(reader, name), name, UINT32_MAX) : NULL;
+    *member_bit = name < count && !object && reader->member_marks != NULL ? reader->member_marks[name] : 0;
     return result;
 }
 
@@ -6176,13 +6172,23 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
     uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
     uint32_t* chain = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
     uint32_t* latest = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
-    const bool allocated = marks != NULL && chain != NULL && latest != NULL;
+    // Each marked member's name's mark, once (check_input_declarator_mark's lookup, CheckInputReader.member_marks).
+    uint8_t* member_marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count + 1);
+    const bool allocated = marks != NULL && chain != NULL && latest != NULL && member_marks != NULL;
     reader->output->resource |= !allocated;
     if (allocated)
     {
         memset(marks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(chain, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(latest, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(member_marks, 0, (uint64_t)count + 1);
+        for (uint32_t i = 0; i < reader->output->marked_member_count; i += 1)
+        {
+            const CheckInputMarkedMember* marked = reader->output->marked_members + i;
+            const uint8_t bit = marked->unavailable ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
+            member_marks[marked->name < count ? marked->name : count] = bit;
+        }
+        reader->member_marks = member_marks;
         const bool scalar = parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
         // In source order, so that each key's chain runs first to last.
@@ -6371,6 +6377,7 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             }
         }
     }
+    reader->member_marks = NULL;
     arena_pop_to(reader->scratch, mark);
 }
 
