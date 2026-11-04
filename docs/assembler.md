@@ -265,7 +265,7 @@ Directives:
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (with an optional fill byte) |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
-| Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file`, `.loc`, and LLVM's `.prefalign` are accepted but add no debug or alignment information |
+| Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file` and `.loc`, which make GNU as's line table (below); LLVM's `.prefalign` is accepted but adds no alignment |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
 
 Each section keeps its own name, properties, alignment, layout and atom, including
@@ -412,6 +412,51 @@ The default x86-64 initial CFA/return-address rules can be suppressed by `simple
 `return_column`, `signal_frame` and `.cfi_sections .eh_frame` are supported.
 Personality/LSDA augmentation, `.debug_frame`/SFrame output and procedures that
 cross sections are diagnosed. Unsupported CFI is never silently discarded.
+
+### Line table (`.file N`, `.loc`)
+
+GCC's and Clang's `-g` output (#1115) gives each row of the DWARF line table as
+a `.loc`, and leaves the table itself to the assembler, as GNU as's dwarf2dbg
+writes it (`assembler_lines.c`). The rules follow its behavior, read from its
+source and checked against its objects, binutils 2.42's and 2.47's alike for
+compiler output; no code of it is here.
+
+- `.file N ["directory"] "name" [md5 0x...]` fills the file and directory
+  tables. `.file 0` (DWARF 5) names the compilation's directory, directory 0,
+  and the main file, whose own directory follows it, as GNU as compares a file's
+  path with that directory (so `.file 0 "/d" "/d/x.c"` gives `/d` twice). A
+  slot taken again must name the same file. The table is DWARF 5's after `.file
+  0` or `.loc 0`, and GNU as's default DWARF 3's otherwise.
+- `.loc file line [column] [basic_block] [prologue_end] [epilogue_begin]
+  [is_stmt 0|1] [isa N] [discriminator N] [view V]` makes a row: at the next
+  instruction (a `data16` or `rex64` statement is one, data isn't), at the next
+  `.loc`, or at once with a view. The column, `is_stmt` and isa last until a
+  `.loc` changes them; a row of line 0 (Clang's `.loc 0 0 5`) is none, and
+  neither is one outside a loaded code section.
+- A view (`view .LVU3`) is a symbol whose value is its row's view number, which
+  data reads (`.uleb128 .LVU3`, `.byte .LVU3`): 0 at its section's first row,
+  after `view -0`, and where the address has moved past the previous row's,
+  and otherwise one more than the previous row's. Layout recomputes them
+  between its passes, as a LEB128 reads labels (`asm_line_views`). `view 0`
+  asserts 0; a numeric view but 0, or a defined symbol, is refused.
+- After layout, `.debug_line` gets GNU as's header, tables and a sequence per
+  code section in the order of its first row (`asm_line_emit`), with the
+  directories' and files' names appended to `.debug_line_str` (DWARF 5) as
+  GNU as appends them. A sequence starts at its first row's
+  `DW_LNE_set_address` and ends at its section's end; a row sets what changed of
+  its file, column, discriminator, isa and `is_stmt`, its flags, then its
+  advance, the smallest of GNU as's encodings. GNU as states a `view -0` row's
+  address again where its frags can't tell it from the previous row's: in the
+  same frag at the same offset, or at its frag's start where the previous row
+  ended its frag's bytes. Its frags end at an alignment, a `.skip`, a symbolic
+  LEB128 and after a `jmp`'s or `jcc`'s opcode, which are modeled; they also end
+  where its memory chunks fill, which isn't, so such a row can take an advance
+  here where GNU as states its address: the same row either way.
+- GNU as writes the table where there are rows, or a `.debug_info` of bytes, and
+  `.debug_line` is empty (GCC's holds only its label); its own `.debug_info` for
+  rows without one isn't written here, and such rows are refused, as are rows
+  beside a `.debug_line` of bytes (GNU as's fatal error) and a DWARF 5 table
+  without `.file 0`'s directory (where GNU as takes its working directory).
 
 ## Code inside another function
 
@@ -1080,12 +1125,15 @@ named failure here rather than one a user meets. The programs are original
   definitions (`.comm` under `-fcommon`) and static zero-initialized storage
   (GCC's `.local` and `.comm`);
 - `program-strings.c`: narrow and wide string literals (merged strings of 1-, 2-
-  and 4-byte characters) and stdio.
+  and 4-byte characters) and stdio;
+- `program-switch.c`: dense switches, which GCC and Clang compile at `-O2` to
+  jump tables of label differences across sections.
 
 GCC and Clang (Clang with `-fno-integrated-as`, as in the corpus above) compile
-each at `-O0`, `-O2`, `-O2 -fPIC` and `-O3 -march=x86-64-v4`, in AT&T and Intel
-syntax, with `-fcf-protection=none` and `-fcommon`: 48 sources. Every variant
-names its `-march` (`x86-64` for the first three) and `-fPIE` or `-fPIC`: a
+each at `-O0`, `-O2`, `-O2 -fPIC`, `-O3 -march=x86-64-v4`, and `-O0` and `-O2`
+with `-g`, in AT&T and Intel syntax, with `-fcf-protection=none` and
+`-fcommon`: 96 sources. Every variant names its `-march` (`x86-64` but for
+`-O3`), its debug information (`-g0` or `-g`) and `-fPIE` or `-fPIC`: a
 compiler's defaults may be others (Ubuntu 26.04's GCC 15 writes AVX's
 instructions at `-O2` without one). Each source must
 assemble by both paths into the same object, by the `assemble` command too (with
@@ -1113,10 +1161,10 @@ The first corpus runs found three gaps beyond the issue's, which are fixed:
   as long (above);
 - GCC 15's `.base64` (above), which it writes where GNU as takes it.
 
-`-g` output isn't in the corpus. Its `.loc`s give no `.debug_line` here, and
-GCC's view numbers (`.byte .LVU27`) are numbers GNU as assigns, where this
-assembler makes them labels. Its TLS variables' DWARF, `.quad x@dtpoff`, is
-DTPOFF64 (above).
+The `-g` variants' DWARF is the compilers' but for what they leave to the
+assembler: the line table of their `.loc`s, GCC's view numbers, and TLS
+variables' `.quad x@dtpoff` (DTPOFF64, above). Each matches GNU as's byte for
+byte ("Line table" above).
 
 Syntax and encoding rules are checked against the
 [GNU assembler manual](https://sourceware.org/binutils/docs/as/), including its

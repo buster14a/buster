@@ -103,14 +103,18 @@ struct AsmSymbol
     // hold: the object's st_size (ObjectOptions.symbol_sizes), or 0.
     uint64_t beyond;
     // `.comm` and `.lcomm` (#1115): ASM_COMMON_GLOBAL for a common symbol (SHN_COMMON, of common_size bytes aligned to
-    // common_alignment: a COMMON symbol of its own atom in the Link, asm_emit), ASM_COMMON_BSS for one .bss holds (.lcomm, or a local's .comm), placed after .bss's other
-    // contents in directive order (common_next, from AsmParser.common_first), as GNU as places them.
+    // common_alignment: a COMMON symbol of its own atom in the Link, asm_emit), ASM_COMMON_BSS for one .bss holds
+    // (.lcomm, or a local's .comm), placed after .bss's other contents in directive order (common_next, from
+    // AsmParser.common_first), as GNU as places them.
     uint8_t common;
     uint32_t common_alignment;
     uint32_t common_next;
     uint64_t common_size;
     // A global common made local and declared again: the bytes before its place in .bss (asm_common_directive).
     uint64_t common_bias;
+    // GCC's `.loc ... view .LVU3` names it (#1115): the line row whose view number it is, plus one, which data reads
+    // (asm_resolve; assembler_lines.c).
+    uint32_t view;
 };
 
 #define ASM_COMMON_GLOBAL 1
@@ -217,14 +221,15 @@ struct AsmResult
     // Whether the source's first control flow, before any branch, is a return: a C helper whose frame would still be
     // reserved, which the checker refuses as it does the record path's.
     bool ret_first;
-    // The source's common symbols (.comm of a global, #1115), which only the object's SHN_COMMON holds: in the Link
-    // each is an undefined OBJECT, and object_options declares it common. The C checker refuses a template's.
+    // The source's common symbols (.comm of a global, #1115): in the Link each is #147's COMMON symbol of its own atom,
+    // which the object writes as SHN_COMMON's. The C checker refuses a template's.
     uint32_t common_count;
     uint64_t lex_ns;
     uint64_t parse_ns;
     uint64_t match_ns;
     uint64_t layout_ns;
     uint64_t emit_ns;
+    // .eh_frame's CFI and .debug_line's line table (#1115), which are written after layout.
     uint64_t cfi_ns;
 };
 
@@ -238,6 +243,8 @@ struct AsmSection
     uint8_t alignment;
     bool data;
     bool declared;
+    // Its last line row, plus one (assembler_lines.c).
+    uint32_t line_last;
 };
 
 typedef struct AsmParser AsmParser;
@@ -271,6 +278,58 @@ struct AsmCfiState
 {
     int64_t offset;
     uint32_t reg;
+};
+
+// GNU as's line table (#1115, assembler_lines.c): a row of `.loc`'s, at its label fragment's place in a code section.
+typedef struct AsmLineRow AsmLineRow;
+struct AsmLineRow
+{
+    uint32_t fragment;
+    // The previous and the next row of its section, plus one.
+    uint32_t previous;
+    uint32_t next;
+    // Its view number (asm_line_views), and what `.loc`'s `view` says of it (ASM_VIEW_*).
+    uint32_t view;
+    uint32_t file;
+    uint32_t line;
+    uint32_t column;
+    uint32_t isa;
+    uint32_t discriminator;
+    uint8_t flags;
+    uint8_t view_kind;
+};
+
+typedef struct AsmLineFile AsmLineFile;
+struct AsmLineFile
+{
+    String8 name;
+    uint32_t directory;
+    uint8_t md5[16];
+    bool assigned;
+};
+
+// A relocation of the generated .debug_line, which emission adds: a set address's ABS64, a line string's ABS32.
+typedef struct AsmLineFixup AsmLineFixup;
+struct AsmLineFixup
+{
+    uint32_t offset;
+    uint32_t symbol;
+    uint8_t kind;
+};
+
+// The location the latest `.loc` gives (GNU as's `current`), and whether its row waits for an instruction.
+typedef struct AsmLineState AsmLineState;
+struct AsmLineState
+{
+    uint32_t file;
+    uint32_t line;
+    uint32_t column;
+    uint32_t isa;
+    uint32_t discriminator;
+    uint32_t view_symbol;
+    uint8_t flags;
+    uint8_t view_kind;
+    bool pending;
 };
 
 struct AsmParser
@@ -331,6 +390,24 @@ struct AsmParser
     uint32_t alias_count;
     // The symbols whose sizes reach past their sections' ends (AsmSymbol.beyond).
     uint32_t beyond_count;
+    // GNU as's line table (#1115, assembler_lines.c): the rows, the file and directory tables (a directory of no
+    // pointer is unset), the latest `.loc`'s state, and whether GNU as's DWARF level is 5 (after `.file 0` or `.loc 0`),
+    // not its default 3.
+    AsmLineRow* line_rows;
+    AsmLineFile* line_files;
+    String8* line_directories;
+    AsmLineState line;
+    uint32_t line_row_count;
+    uint32_t line_file_count;
+    uint32_t line_directory_count;
+    bool line_dwarf5;
+    // The table's .debug_line section and the fragment its bytes fill after layout (asm_line_emit), or 0 for none;
+    // each directory's and file's string label in .debug_line_str (DWARF 5), and the table's relocations.
+    uint32_t line_section;
+    uint32_t line_fragment;
+    uint32_t* line_strings;
+    AsmLineFixup* line_fixups;
+    uint32_t line_fixup_count;
 };
 
 static uint64_t asm_clock(void)
@@ -776,6 +853,7 @@ static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
 }
 
 static uint32_t asm_find_section(const AsmParser* parser, String8 name);
+static void asm_line_instruction(AsmParser* parser, uint32_t location);
 
 static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
 {
@@ -2400,6 +2478,8 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
             exchanged[1] = operand;
             instruction->expressions[1] = expression;
         }
+        // GNU as gives an instruction the row a `.loc` left waiting (#1115).
+        asm_line_instruction(parser, location);
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;
@@ -2429,6 +2509,8 @@ static void asm_prefix_statements(AsmParser* parser, uint32_t end)
         }
         else
         {
+            // GNU as reads a data16 or rex64 statement as an instruction, which takes the row a `.loc` left waiting.
+            asm_line_instruction(parser, location);
             const uint32_t fragment = asm_fragment(parser, ASM_BYTES, location);
             uint8_t* byte = arena_push(parser->arena, 1, 1);
             if (byte == 0)
@@ -2818,6 +2900,7 @@ static void asm_resolve_aliases(AsmParser* parser)
 
 #include "assembler_sections.c"
 #include "assembler_cfi.c"
+#include "assembler_lines.c"
 
 static void asm_directive(AsmParser* parser, uint32_t end)
 {
@@ -2847,29 +2930,15 @@ static void asm_directive(AsmParser* parser, uint32_t end)
     {
         asm_cfi_directive(parser, token, end);
     }
-    else if (asm_is(parser, token, ".loc") || asm_is(parser, token, ".prefalign"))
+    else if (asm_is(parser, token, ".loc"))
     {
-        // Debug locations and LLVM's preferred-alignment hint don't change the code this object writer records. GNU as
-        // 2.42 doesn't accept .prefalign either; taking the hint as no alignment still assembles compiler output. GCC's
-        // `view` operands do define labels at the current place, which its later `.uleb128`s encode.
-        for (uint32_t i = parser->at; asm_is(parser, token, ".loc") && i + 1 < end; i += 1)
-        {
-            if (asm_is(parser, i, "view") && asm_name_token(parser, i + 1))
-            {
-                const uint32_t id = asm_symbol(parser, asm_name_text(parser, i + 1), parser->tokens[i + 1].start);
-                if (parser->symbols[id].defined)
-                {
-                    asm_fail(parser, parser->tokens[i + 1].start, "duplicate debug view label");
-                }
-                else
-                {
-                    parser->symbols[id].defined = true;
-                    parser->symbols[id].section_start = false;
-                    parser->symbols[id].fragment = asm_fragment(parser, ASM_LABEL, parser->tokens[i + 1].start);
-                }
-                i += 1;
-            }
-        }
+        // A line row of GNU as's line table, and GCC's view numbers (#1115, assembler_lines.c).
+        asm_line_loc(parser, location, end);
+    }
+    else if (asm_is(parser, token, ".prefalign"))
+    {
+        // LLVM's preferred-alignment hint doesn't change the code this object writer records. GNU as 2.42 doesn't
+        // accept .prefalign either; taking the hint as no alignment still assembles compiler output.
         parser->at = end;
     }
     else if (asm_is(parser, token, ".file") || asm_is(parser, token, ".ident"))
@@ -2878,8 +2947,8 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                               asm_token_text(parser, parser->at).pointer[0] >= '0' && asm_token_text(parser, parser->at).pointer[0] <= '9';
         if (numbered)
         {
-            // DWARF 5's `.file N "directory" "name" md5 0x...`: the object has no debug sections here.
-            parser->at = end;
+            // `.file N ["directory"] "name" [md5 0x...]`: the line table's file (#1115, assembler_lines.c).
+            asm_line_file(parser, location, end);
         }
         else if (parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_STRING)
         {
@@ -3361,6 +3430,8 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         }
         // The x87's operands GNU as leaves out (fxch alone, fadd st), as asm_instruction gives them.
         asm_x87_operands(parser, &instruction->request);
+        // GNU as gives an instruction the row a `.loc` left waiting (#1115).
+        asm_line_instruction(parser, location);
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;
@@ -3475,6 +3546,7 @@ static void asm_parse(AsmParser* parser)
     }
     asm_place_commons(parser);
     asm_resolve_aliases(parser);
+    asm_line_finish(parser);
     if (parser->cfi_active)
     {
         asm_fail(parser, parser->source.length, "missing .cfi_endproc");
@@ -3489,6 +3561,12 @@ static __int128 asm_symbol_position(const AsmParser* parser, const AsmSymbol* sy
 
 static AsmExpr asm_resolve(AsmParser* parser, AsmExpr expression, uint32_t location)
 {
+    // A view symbol's value is its row's view number (#1115), which layout gives it (asm_line_views).
+    if (expression.plus != 0 && parser->symbols[expression.plus].view != 0 && expression.relocation == ASM_RELOCATION_NONE)
+    {
+        expression.value += parser->line_rows[parser->symbols[expression.plus].view - 1].view;
+        expression.plus = 0;
+    }
     if (expression.relocation != ASM_RELOCATION_NONE && (expression.plus == 0 || expression.minus != 0))
     {
         asm_fail(parser, location, "relocation modifier requires one symbol");
@@ -4215,6 +4293,8 @@ static void asm_layout(AsmParser* parser)
                 relax.limit += leb ? 9 : 0;
             }
             asm_relax_targets(parser, &relax);
+            // A .uleb128 of a view number (#1115) reads the code's offsets as any LEB128 reads its labels'.
+            asm_line_views(parser, false);
             bool stretched = true;
             bool moved = false;
             while (stretched && parser->result.error == 0)
@@ -4231,6 +4311,10 @@ static void asm_layout(AsmParser* parser)
                 {
                     asm_relax_place(parser, &relax, section);
                 }
+                if (relax.lebs && stretched)
+                {
+                    asm_line_views(parser, false);
+                }
                 if (stretched && parser->result.rounds >= relax.limit)
                 {
                     asm_fail(parser, 0, "layout doesn't converge: a .uleb128 or .sleb128 bounces between sizes across an alignment");
@@ -4242,6 +4326,10 @@ static void asm_layout(AsmParser* parser)
             }
         }
         scratch_end(scratch);
+    }
+    if (parser->result.error == 0)
+    {
+        asm_line_views(parser, true);
     }
     for (uint32_t i = 0; i < parser->instruction_count && parser->result.error == 0; i += 1)
     {
@@ -4510,7 +4598,7 @@ static void asm_emit(AsmParser* parser)
             // A section's atom each, and a global common's (#147's representation).
             .atoms = parser->section_count + parser->common_count,
             .symbols = parser->symbol_count,
-            .fixups = parser->fragment_count + parser->instruction_count * 2,
+            .fixups = parser->fragment_count + parser->instruction_count * 2 + parser->line_fixup_count,
             .wide_addends = parser->fragment_count + parser->instruction_count * 2,
     };
     if (!link_initialize(link, parser->arena, parser->arena, capacity))
@@ -4615,9 +4703,9 @@ static void asm_emit(AsmParser* parser)
             }
             continue;
         }
-        if (symbol->alias)
+        if (symbol->alias || symbol->view != 0)
         {
-            // No reference is to it any more (asm_resolve_aliases).
+            // No reference is to it any more (asm_resolve_aliases), or it is a view number (asm_resolve).
             continue;
         }
         if (symbol->section_start && !symbol->defined)
@@ -4830,6 +4918,12 @@ static void asm_emit(AsmParser* parser)
         const AsmCfiProcedure* procedure = &parser->procedures[i];
         link_add_fixup(link, parser->sections[BUSTER_LINK_CLASS_EH_FRAME].atom, procedure->relocation, BUSTER_LINK_FIXUP_PC32, parser->symbols[procedure->symbol].link, 0);
     }
+    // The line table's (asm_line_emit): its set addresses' and line strings' relocations, in their order.
+    for (uint32_t i = 0; i < parser->line_fixup_count && parser->result.error == 0; i += 1)
+    {
+        const AsmLineFixup* fixup = &parser->line_fixups[i];
+        link_add_fixup(link, parser->sections[parser->line_section].atom, fixup->offset, fixup->kind, parser->symbols[fixup->symbol].link, 0);
+    }
     asm_object_options(parser);
     parser->result.common_count = parser->common_count;
     // A record link_add_* refused leaves the Link's error, not a record link_check would see.
@@ -4942,6 +5036,10 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     if (parser.result.error == 0)
     {
         asm_cfi_emit(&parser);
+    }
+    if (parser.result.error == 0)
+    {
+        asm_line_emit(&parser);
     }
     const uint64_t cfi_emitted = asm_clock();
     if (parser.result.error == 0)
