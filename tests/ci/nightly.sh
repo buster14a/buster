@@ -529,6 +529,27 @@ expect_line "$GITHUB_OUTPUT" 'window=closed' 'a dry run never waits for the wind
 expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'the cycle pins main'"'"'s head'
 expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'and hands over a valid empty list of pending dispatches'
 
+# The ledger's publication to buster-performance: it creates the nightly-ledger branch with the ledger and the
+# cycle's report; and when the push is refused (a token GitHub rejects, say), the step still succeeds and hands over
+# its outputs, so the window job's night doesn't depend on it, and only a warning says so.
+git init -q --bare "$work/performance.git"
+NIGHTLY_PUBLICATION_TOKEN=token NIGHTLY_PERFORMANCE_REMOTE="$work/performance.git" GITHUB_RUN_ID=9110 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') \
+    run_coordinator "$work/published" prepare dry-run
+expect_match "$work/coordinate.log" 'The ledger is published' 'the ledger is published'
+git -C "$work/performance.git" cat-file -e nightly-ledger:nightly/main-coverage.tsv || fail 'the published branch holds the ledger'
+git -C "$work/performance.git" cat-file -e nightly-ledger:nightly/reports/2026-11-04.md || fail 'and the cycle'"'"'s report'
+git init -q --bare "$work/refusing.git"
+printf '#!/bin/sh\necho "remote: Permission to buster14a/buster-performance.git denied" >&2\nexit 1\n' > "$work/refusing.git/hooks/pre-receive"
+chmod +x "$work/refusing.git/hooks/pre-receive"
+NIGHTLY_PUBLICATION_TOKEN=token NIGHTLY_PERFORMANCE_REMOTE="$work/refusing.git" GITHUB_RUN_ID=9111 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') \
+    run_coordinator "$work/refused" prepare dry-run
+expect_match "$work/coordinate.log" '::warning title=Nightly ledger::the ledger could not be published' 'a refused publication warns'
+expect_match "$work/coordinate.log" 'Permission to buster14a/buster-performance.git denied' 'and says why'
+expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'and the step still hands over its snapshot'
+expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'its pending dispatches'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'and its window'
+git -C "$work/refusing.git" rev-parse -q --verify refs/heads/nightly-ledger > /dev/null && fail 'nothing reached the refusing remote'
+
 # An earlier schedule's step on time, at 16:10 (there for hours-late scheduled starts): it harvests and reports, and
 # pins, dispatches and waits for nothing, in run mode too.
 : > "$fixtures/calls.log"
