@@ -582,6 +582,8 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
         const uint32_t count = copies != 0 ? asm_round_trip(test, random, 2, copies, intel, att, capacity) : 0;
         uint32_t compared = 0;
         uint32_t preferred = 0;
+        // The first counted lines' instructions, which the report names.
+        char named[96] = "";
         const char* names[] = { "round-trip-intel", "round-trip-att" };
         FILE* files[] = { intel, att };
         for (uint32_t syntax = 0; syntax < 2; syntax += 1)
@@ -601,6 +603,11 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
                 }
                 if (!same && asm_round_trip_gnu_prefers(&copies[i].matched))
                 {
+                    const uint64_t used = strlen(named);
+                    if (preferred < 4 && used + 24 < sizeof(named))
+                    {
+                        snprintf(named + used, sizeof(named) - used, "%s%s", used != 0 ? ", " : ": ", x86_form_description(copies[i].matched.form)->mnemonic);
+                    }
                     preferred += 1;
                 }
                 else
@@ -622,8 +629,8 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
                 }
             }
         }
-        printf("assembler round trip against GNU as: %u lines in each syntax, %u the same bytes, %u where GNU as chooses another encoding of the same instruction\n",
-               count, compared, preferred);
+        printf("assembler round trip against GNU as: %u lines in each syntax, %u the same bytes, %u where GNU as chooses another encoding of the same instruction%s\n",
+               count, compared, preferred, named);
         arena_release(&kept);
     }
     asm_test_check(test, okay, "round trip cross-check setup", 0);

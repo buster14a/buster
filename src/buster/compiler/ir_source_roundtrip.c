@@ -11,8 +11,10 @@
 #include <stdlib.h>
 
 // IR_FENCE (#1059) keeps its order and scope in `a`, which the rows' default comparison and mutation take; IR_MULHU
-// (#141), the last added, is a binary operation of two values, as IR_MUL is.
-_Static_assert(IR_OP_COUNT == 63, "audit the text round-trip oracle when adding an IR operation");
+// (#141) is a binary operation of two values, as IR_MUL is; IR_ATOMIC_RMW (#1059), the last added, keeps its operation
+// and its order in the flags, which the rows' default comparison and mutation take, and a compare-exchange's desired
+// value in `c`, an optional use as a call's is.
+_Static_assert(IR_OP_COUNT == 64, "audit the text round-trip oracle when adding an IR operation");
 
 typedef struct IrSourceTextCheck IrSourceTextCheck;
 struct IrSourceTextCheck
@@ -537,6 +539,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         "tests/ir/empty.ir",
         "tests/ir/tier0-add.ir",
         "tests/ir/fences.ir",
+        "tests/ir/atomics.ir",
         "tests/ir/wide.ir",
     };
     IrSourceTextTests tests = { 0 };

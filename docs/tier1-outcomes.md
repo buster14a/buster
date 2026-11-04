@@ -57,8 +57,11 @@ Selection keeps its refused operation separately. The emitter's optional
 allocation-certificate errors before its public error wraps them; the outcome
 keeps both codes. The certificate checker runs only where `--verify` asks for
 it (`Tier1EmitOptions.certify`, #939). Its refusal (`TIER1_EMIT_CERTIFICATE`,
-cause `certificate`) is an allocation the allocator got wrong, so it is
-internal; its capacity is a resource failure.
+cause `certificate`) is an allocation the allocator got wrong, or code the
+emitter got wrong (the error is the code certificate's `Tier1CertEmittedReason`
+plus `BUSTER_TIER1_EMIT_CODE_CERTIFICATE`), so it is internal; either
+checker's capacity (`TIER1_CERT_CAPACITY`, or the code certificate's
+`TIER1_CERT_EMITTED_CAPACITY` so encoded) is a resource failure.
 Neither the diagnostic nor the refused result borrows an arena pointer.
 
 Failure restores the publication arena, clears code/count outputs, and

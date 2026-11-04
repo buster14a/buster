@@ -413,7 +413,11 @@ So a units lane does five things:
   memory with the rest of the address space, as it frees a command of one
   file's. Before a link it releases it as the others do, so that the link's
   peak stays the units': kept through synth's link by one lane, it took the
-  peak from 328 MB to 386.
+  peak from 328 MB to 386. The run counts the lanes still taking units
+  itself (`CheckUnitsRun`'s `taking`), apart from the board's count, which
+  gates the help: the board's allocation may fail on several lanes, and each
+  lane read none still taking units from a missing board, so each one took
+  itself for the last and left its memory to the exit (#1165's review).
 - **It holds its units to the memory** (#1109): each unit, once preprocessed,
   takes an estimate of its peak from what the lanes may hold at once, and
   waits for another lane to give memory back when it doesn't fit (below).
@@ -460,25 +464,25 @@ no unit left to take, with its release, its pages freed, before it helps
 the other lanes' emissions on the board (#777); the lane that stops taking
 units last in a command that leaves its memory to the exit returns its
 share alone, since no lane takes memory after it. Which lane that is, the
-units' memory counts itself (`CheckUnitsMemory.taking`): the board counts
-the lanes still taking units too, but a run without one (its allocation
-failed) would have every lane take itself for the last, and keep its pages
-while the others still take memory. The help waits for the lanes still
-taking units, one of which may wait for that memory, and a lane that kept
-it there deadlocked with such a unit (a 16 MiB unit of comments beside a
-tiny one, by two lanes with one unit's memory, found in review). So a lane
-holds memory only while it takes units, and waits for nothing but its own
-units' work then. What a unit writes doesn't depend on when it ran, so the
-outputs are the same as without the budget. `test-check-units` runs its
-programs' units with `--units-memory=1`, which serializes every unit's
-parse and later stages, into each unit's object alone; reads the budget
-from files of its own for each branch of `check_units_memory_read`;
-requires one of two equal units by two lanes to wait for the other's
-memory; and compiles that slow unit beside the tiny one under two budgets
-and, under a byte, without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test
-hook that stands for its allocation failing), each object its own alone
-and the report saying that one lane alone kept its pages, where the
-deadlock would hang until the children's alarm.
+run's own count says (`CheckUnitsRun`'s `taking`, above), which holds
+without the board too: a count read from a missing board would have every
+lane take itself for the last and keep its pages while the others still
+take memory. The help waits for the lanes still taking units, one of which
+may wait for that memory, and a lane that kept it there deadlocked with
+such a unit (a 16 MiB unit of comments beside a tiny one, by two lanes
+with one unit's memory, found in review). So a lane holds memory only
+while it takes units, and waits for nothing but its own units' work then.
+What a unit writes doesn't depend on when it ran, so the outputs are the
+same as without the budget. `test-check-units` runs its programs' units
+with `--units-memory=1`, which serializes every unit's parse and later
+stages, into each unit's object alone; reads the budget from files of its
+own for each branch of `check_units_memory_read`; requires one of two
+equal units by two lanes to wait for the other's memory; and compiles that
+slow unit beside the tiny one under two budgets and, under a byte, without
+the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands for its
+allocation failing), each object its own alone and the report saying that
+one lane alone kept its pages, where the deadlock would hang until the
+children's alarm.
 
 The estimate (`check_units_estimate`) is 600 bytes a preprocessed token and
 48 MB a unit. On the laptop, `-c --lanes 1` of each of build.sh's 41
@@ -814,8 +818,12 @@ driver as a process, in a directory of its own:
 - **A few large units** (#777): a unit of 800 functions beside a small one's
   `main`, with `-c` by 8 lanes and `--shared-parts` (a test option: a sharing
   emission pauses after each part it takes itself, and the command reports how
-  many parts the other lanes took), each object its own alone, the six lanes
-  without a unit having taken parts of the large one's; and linked by
+  many parts the other lanes took and how many lanes left their memory to the
+  exit), each object its own alone, the six lanes without a unit having taken
+  parts of the large one's and one lane alone leaving its memory to the exit;
+  again without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that
+  stands for its allocation failing), with no part shared and still one lane
+  alone leaving its memory; and linked, where no lane leaves it, by
   `--lanes` 1, by 8 and by the scalar path on 8, the same bytes, a program
   whose sum is the test's.
 - **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8

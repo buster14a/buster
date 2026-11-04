@@ -1128,7 +1128,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             needed = 1;
             pushed = 1;
         }
-        else if ((kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SET) || kind == BUSTER_TYPED_PTR_ADD || kind == BUSTER_TYPED_COPY)
+        else if ((kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SET) || kind == BUSTER_TYPED_PTR_ADD || kind == BUSTER_TYPED_COPY || kind == BUSTER_TYPED_ATOMIC_RMW ||
+                 kind == BUSTER_TYPED_ATOMIC_CAS)
         {
             needed = 2;
         }
@@ -1185,6 +1186,18 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
         {
             shape = classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class;
+        }
+        else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+        {
+            // An integer class's exchange or addition of a C order (#1059, tier0_atomic_rmw_valid), its address and an
+            // operand of its class.
+            shape = tier0_atomic_rmw_valid(class, value) && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class;
+        }
+        else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+        {
+            // An integer class's compare-exchange of a C order (#1059, tier0_atomic_cas_valid), its expected and desired
+            // values of its class, its address in a local of U64.
+            shape = tier0_atomic_cas_valid(function, class, value) && classes[top - 2] == class && classes[top - 1] == class;
         }
         else if (kind == BUSTER_TYPED_COPY)
         {
@@ -1262,6 +1275,43 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             address = stack[top - needed].low;
             read = kind == BUSTER_TYPED_LOAD;
             write = !read;
+        }
+        else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+        {
+            // With memory checks, its address refused where its natural alignment, which the producer proved (#1059),
+            // isn't, whatever its bytes hold; then its object checked as a load's, which reports reading undefined
+            // bytes, before a store's marks them written.
+            address = stack[top - 2].low;
+            const uint64_t bytes = tier0_class_bytes(class);
+            result->status = runtime.check_memory && (address & (bytes - 1)) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, address, bytes, false);
+            if (result->status == INTERPRETER_OK)
+            {
+                result->status = interpreter_memory_access(&runtime, address, bytes, true);
+            }
+            if (result->status != INTERPRETER_OK)
+            {
+                break;
+            }
+        }
+        else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+        {
+            // Its address read from its local as a LOCAL reads one, then its object checked as an ATOMIC_RMW's (#1059).
+            const uint64_t local = (uint64_t)(uintptr_t)&locals[frame->local_base + (value >> BUSTER_TYPED_CAS_LOCAL_SHIFT)];
+            const uint64_t bytes = tier0_class_bytes(class);
+            result->status = interpreter_memory_access(&runtime, local, 8, false);
+            if (result->status == INTERPRETER_OK)
+            {
+                memcpy(&address, (const void*)(uintptr_t)local, 8);
+                result->status = runtime.check_memory && (address & (bytes - 1)) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, address, bytes, false);
+            }
+            if (result->status == INTERPRETER_OK)
+            {
+                result->status = interpreter_memory_access(&runtime, address, bytes, true);
+            }
+            if (result->status != INTERPRETER_OK)
+            {
+                break;
+            }
         }
         if (read || write)
         {
@@ -1456,6 +1506,40 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             // One thread's accesses in program order, as this interpreter runs them, are already what any fence orders
             // them into: a fence (#1059) has nothing of its own to do here. A concurrent model would need more than this.
             break;
+        case BUSTER_TYPED_ATOMIC_CAS:
+        {
+            // An atomic compare-exchange (#1059), as one thread runs it: the object's old value, normalized as a load's,
+            // replaces the expected value, and the desired value is written where the old value's bytes are the
+            // expected one's (the old value written back where they aren't, as x86's cmpxchg writes it).
+            const uint64_t bytes = tier0_class_bytes(class);
+            const uint64_t mask = bytes < 8 ? (UINT64_C(1) << (8 * bytes)) - 1 : UINT64_MAX;
+            uint64_t old = 0;
+            memcpy(&old, (const void*)(uintptr_t)address, bytes);
+            const uint64_t written = ((old ^ stack[top - 2].low) & mask) == 0 ? stack[top - 1].low : old;
+            memcpy((void*)(uintptr_t)address, &written, bytes);
+            stack[top - 2] = (InterpreterValue){
+                .low = interpreter_typed_normalize(class, old),
+            };
+            classes[top - 2] = (uint8_t)class;
+            top -= 1;
+            break;
+        }
+        case BUSTER_TYPED_ATOMIC_RMW:
+        {
+            // An atomic read/modify/write (#1059), as one thread runs it: the object's old value, normalized as a load's,
+            // replaces the address, and the operand (an exchange) or the sum (an addition) is written in its class's bytes.
+            const uint64_t bytes = tier0_class_bytes(class);
+            uint64_t old = 0;
+            memcpy(&old, (const void*)(uintptr_t)address, bytes);
+            const uint64_t written = (value & BUSTER_TYPED_RMW_ADD) != 0 ? old + stack[top - 1].low : stack[top - 1].low;
+            memcpy((void*)(uintptr_t)address, &written, bytes);
+            stack[top - 2] = (InterpreterValue){
+                .low = interpreter_typed_normalize(class, old),
+            };
+            classes[top - 2] = (uint8_t)class;
+            top -= 1;
+            break;
+        }
         case BUSTER_TYPED_COPY:
             result->status = interpreter_typed_copy(&runtime, stack[top - 2].low, stack[top - 1].low, value);
             top -= 2;

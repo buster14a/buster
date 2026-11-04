@@ -24,8 +24,9 @@
 //   rule's kind (tier1_burs_pick), whose walks fill its fields. A node whose operator the grammar doesn't cover, or whose
 //   rule names a candidate the walks didn't make (a walk past BUSTER_TIER1_SELECT_WALK), takes maximal munch's
 //   (tier1_select_munch), the scalar twin's choice: it is the fallback for what the tables don't cover. An address whose
-//   displacement doesn't fit 32 bits has no candidate at all: its class is the REG leaf's (tier1_burs_displacement),
-//   whose pattern the plan builds for every node, so that the vector path refuses it as the scalar twin does. The cover is
+//   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (tier1_burs_displacement), whose pattern is
+//   munch's, the one candidate it has (its constant index in a register, #141) or none, so that the vector path takes or
+//   refuses it as the scalar twin does. The cover is
 //   the cheapest the grammar has for each tree, and the grammar has every candidate the generator makes for the
 //   operators it covers, so it is never costlier than munch's in the grammar's cost: each pattern's structural bound on
 //   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
@@ -869,8 +870,9 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     else if (op == IR_LOAD && tier1_select_memory_width(type) != 0)
     {
         const uint32_t user = users[node];
+        // Past no barrier but itself, a barrier of its own (tier1_select_barrier: every load, #1059's audit).
         const bool foldable = function->flags[node] == 0 && forest->uses[node] == 1 && user < count && node < user && forest->blocks[user] == forest->blocks[node] &&
-                              forest->barriers[user] <= node;
+                              forest->barriers[user] <= node + 1;
         result = foldable ? TIER1_BURS_OP_LOAD_F : TIER1_BURS_OP_LOAD_N;
     }
     else if (op == IR_STORE && b < count && tier1_select_memory_width(function->type[b]) != 0)
@@ -1071,7 +1073,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, shl, _mm512_set1_epi32(TIER1_BURS_OP_SHL));
         result = _mm512_mask_mov_epi32(result, lshr, _mm512_set1_epi32(TIER1_BURS_OP_LSHR));
         result = _mm512_mask_mov_epi32(result, ashr, _mm512_set1_epi32(TIER1_BURS_OP_ASHR));
-        // Loads, foldable into their single user past no barrier; stores.
+        // Loads, foldable into their single user past no barrier but themselves (every load one: tier1_select_barrier);
+        // stores.
         const __mmask16 load = tier1_burs_types(active, type, memory) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD));
         if (load != 0)
         {
@@ -1079,7 +1082,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __m512i user_block = _mm512_mask_i32gather_epi32(none, placed, user, forest->blocks, 4);
             const __m512i barrier = _mm512_mask_i32gather_epi32(none, placed, user, forest->barriers, 4);
             const __mmask16 foldable = placed & _mm512_cmpeq_epi32_mask(flags, _mm512_setzero_si512()) & _mm512_cmpeq_epi32_mask(uses, _mm512_set1_epi32(1)) &
-                                       _mm512_cmpeq_epi32_mask(user_block, block) & _mm512_cmple_epu32_mask(barrier, node);
+                                       _mm512_cmpeq_epi32_mask(user_block, block) &
+                                       _mm512_cmple_epu32_mask(barrier, _mm512_add_epi32(node, _mm512_set1_epi32(1)));
             result = _mm512_mask_mov_epi32(result, load, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N));
             result = _mm512_mask_mov_epi32(result, foldable, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_F));
         }

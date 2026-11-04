@@ -358,6 +358,9 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                 // A fence (#1059) is an effect in its place among the stores, volatile loads and calls, its order and
                 // scope with it: a pass that drops one, moves one across them or changes its order changes the trace.
                 case IR_FENCE: execution.effects = execution.effects * 65537 + 0xfe00 + a; break;
+                // An atomic read/modify/write (#1059) is an effect of its own, its operation, operand and (a
+                // compare-exchange's) desired value with it.
+                case IR_ATOMIC_RMW: execution.effects = execution.effects * 65537 + 0xfd00 + values[a] * 23 + values[b] * 2 + (f->c[i] == BUSTER_IR_NONE ? 0 : values[f->c[i]] * 29) + (f->flags[i] & BUSTER_IR_RMW_OPERATION); break;
                 case IR_SYMBOL_ADDR: value = (uint64_t)a << 32; break;
                 case IR_ADDRESS: value = values[a] + (b == BUSTER_IR_NONE ? 0 : values[b] * f->addresses[f->c[i]].scale) + f->addresses[f->c[i]].offset; break;
                 case IR_LOAD:

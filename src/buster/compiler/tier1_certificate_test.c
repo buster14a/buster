@@ -574,6 +574,27 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     tier1_cert_test_use(&f, 0, 0, 0, false);
     tier1_cert_test_pair(test, &f, 0, "r32 write invalidates upper r64 bytes");
 
+    // A move needs only its source's first byte known and copies unknown bytes as unknown (#939): a 4-byte value
+    // written by an r32 write over an 8-byte one, its upper bytes unknown, moved whole into another register, is its 4
+    // bytes there; and the 8-byte value the write replaced is not, the move having copied no byte of it.
+    tier1_cert_test_init(&f);
+    f.locations[16] = (Tier1CertLocation){
+        .unit = 16,
+        .width = 4,
+        .extent = 8,
+        .class = TIER1_CERT_GPR,
+        .reg = 2,
+    };
+    f.program.location_count = 17;
+    f.values[2].width = 4;
+    tier1_cert_test_def(&f, 0, 2, 7);
+    f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 2, 0, 0);
+    tier1_cert_test_use(&f, 0, 2, 16, false);
+    tier1_cert_test_pair(test, &f, 1, "a narrow value moved through a wider location is its bytes there");
+    f.source[0][f.blocks[0].source_count - 1].operands[0].value = 0;
+    f.code[0][f.blocks[0].code_count - 1].locations[0] = 2;
+    tier1_cert_test_pair(test, &f, 0, "a wide value the narrow write replaced is not its bytes after the move");
+
     tier1_cert_test_init(&f);
     f.source[0][0] = (Tier1CertSource){
         .opcode = 99,

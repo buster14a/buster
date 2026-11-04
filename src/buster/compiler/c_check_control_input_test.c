@@ -83,7 +83,6 @@ static void check_test_label_prefix_capacity(CheckTest* test)
     uint32_t first[count];
     uint32_t asm_ids[count] = { 0 };
     uint32_t regions[count] = { 0 };
-    CheckInputAttributes* attributes[count] = { 0 };
     memset(kinds, PARSE_KIND_IDENTIFIER, sizeof(kinds));
     memset(roles, PARSE_ROLE_OPERAND, sizeof(roles));
     memset(parents, 0xff, sizeof(parents));
@@ -115,8 +114,9 @@ static void check_test_label_prefix_capacity(CheckTest* test)
             memset(targets, 0xff, sizeof(targets));
             Arena columns = arena_reserve(UINT64_C(1) << 20);
             CheckSparseColumn sparse[2] = { 0 };
+            CheckSparseWide wide = { 0 };
             CheckSparsePool* pool = NULL;
-            const bool reserved = check_sparse_reserve(&columns, &pool, sparse, BUSTER_ARRAY_LENGTH(sparse), count, false, false);
+            const bool reserved = check_sparse_reserve_wide(&columns, &pool, sparse, BUSTER_ARRAY_LENGTH(sparse), &wide, 1, count, false, false);
             CheckInput input =
             {
                 .reports = reports,
@@ -126,7 +126,7 @@ static void check_test_label_prefix_capacity(CheckTest* test)
                 .label_targets = sparse[1],
                 .asm_ids = asm_ids,
                 .expression_regions = regions,
-                .attributes = attributes,
+                .attributes = wide,
             };
             Arena scratch = arena_reserve(8192);
             const uint64_t capacity = scratch.capacity;
@@ -294,7 +294,6 @@ static void check_test_control_walks(CheckTest* test)
     uint32_t asm_ids[count] = { 0 };
     uint32_t regions[count] = { 0 };
     CheckInputAttributes attribute = { 0 };
-    CheckInputAttributes* attributes[count] = { 0 };
     memset(kinds, PARSE_KIND_IDENTIFIER, sizeof(kinds));
     memset(roles, PARSE_ROLE_OPERAND, sizeof(roles));
     memset(parents, 0xff, sizeof(parents));
@@ -332,7 +331,6 @@ static void check_test_control_walks(CheckTest* test)
     kinds[66] = kinds[136] = PARSE_KIND_SEMI;
     parents[66] = 50;
     parents[136] = 84;
-    attributes[66] = attributes[136] = &attribute;
     Parser parser = { 0 };
     parser.tokens.count = count;
     parser.tokens.kinds = kinds;
@@ -380,8 +378,9 @@ static void check_test_control_walks(CheckTest* test)
             Arena scratch = arena_reserve(8192);
             Arena columns = arena_reserve(UINT64_C(1) << 20);
             CheckSparseColumn sparse[3] = { 0 };
+            CheckSparseWide wide = { 0 };
             CheckSparsePool* pool = NULL;
-            const bool reserved = check_sparse_reserve(&columns, &pool, sparse, BUSTER_ARRAY_LENGTH(sparse), count, false, false);
+            const bool reserved = check_sparse_reserve_wide(&columns, &pool, sparse, BUSTER_ARRAY_LENGTH(sparse), &wide, 1, count, false, false);
             inputs[path] = (CheckInput)
             {
                 .deferred_tokens = variant == 0 ? NULL : deferred,
@@ -393,7 +392,7 @@ static void check_test_control_walks(CheckTest* test)
                 .control_owners = sparse[2],
                 .asm_ids = asm_ids,
                 .expression_regions = regions,
-                .attributes = attributes,
+                .attributes = wide,
             };
             CheckInputReader reader =
             {
@@ -406,6 +405,9 @@ static void check_test_control_walks(CheckTest* test)
             check_test_expect(test, scratch.base != NULL && reserved, "control walk comparison has scratch space");
             if (scratch.base != NULL && reserved)
             {
+                // Two statements' attributes, which the walk moves to the statements after them.
+                check_input_set_attributes_at(inputs + path, 66, &attribute);
+                check_input_set_attributes_at(inputs + path, 136, &attribute);
                 check_input_controls(&reader);
                 check_sparse_values(inputs[path].declaration_bodies, count, bodies[path]);
                 check_sparse_values(inputs[path].label_targets, count, targets[path]);

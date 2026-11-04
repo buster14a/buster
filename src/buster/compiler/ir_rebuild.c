@@ -37,7 +37,7 @@ static uint32_t ir_rebuild_values(uint32_t op)
         case IR_CALL_INDIRECT: case IR_CBR: case IR_SWITCH: case IR_ALLOCA: case IR_STACK_RESTORE: mask = 1; break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_SDIV: case IR_UDIV: case IR_SREM: case IR_UREM:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_LSHR: case IR_ASHR:
-        case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_MULHU: mask = 3; break;
+        case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_MULHU: case IR_ATOMIC_RMW: mask = 3; break;
         case IR_SELECT: mask = 7; break;
         default: break;
     }
@@ -374,6 +374,8 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             uint32_t mask = ir_rebuild_values(op);
             mask |= op == IR_ADDRESS && b != BUSTER_IR_NONE ? 2u : 0u;
             mask |= op == IR_RET && a != BUSTER_IR_NONE ? 1u : 0u;
+            // A compare-exchange's desired value (#1059).
+            mask |= op == IR_ATOMIC_RMW && c != BUSTER_IR_NONE ? 4u : 0u;
             const uint32_t old_values[] = { a, b, c };
             uint32_t* new_values[] = { candidate.a + i, candidate.b + i, candidate.c + i };
             for (uint32_t p = 0; check.error == IR_OK && p < 3; p += 1)
