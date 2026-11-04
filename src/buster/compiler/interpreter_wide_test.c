@@ -299,7 +299,7 @@ static void interpreter_test_wide_calls(InterpreterTestTally* tally, Arena* scra
 
 static void interpreter_test_wide_memory(InterpreterTestTally* tally, Arena* scratch)
 {
-    const uint8_t kinds[] = { BUSTER_TYPED_GLOBAL, BUSTER_TYPED_SET_GLOBAL, BUSTER_TYPED_RETURN };
+    const uint8_t kinds[] = { BUSTER_TYPED_GLOBAL, BUSTER_TYPED_STORE_GLOBAL, BUSTER_TYPED_RETURN };
     const uint8_t classes[] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80 };
     const uint64_t values[] = { 2, 3, 0 };
     const Tier0Function function = { .kinds = kinds, .classes = classes, .values = values, .count = BUSTER_ARRAY_LENGTH(kinds) };
@@ -341,7 +341,7 @@ static void interpreter_test_wide_memory(InterpreterTestTally* tally, Arena* scr
     ran = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
     interpreter_test_expect(tally, !ran && result.status == INTERPRETER_MEMORY && result.entry == 0, "wide: an undersized F80 source is rejected before reading");
 
-    const uint8_t local_kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CONST, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_LOAD, BUSTER_TYPED_RETURN };
+    const uint8_t local_kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CONST, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_LOAD, BUSTER_TYPED_RETURN };
     const uint8_t local_classes[] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_U8 };
     const uint8_t locals[] = { BUSTER_TYPED_CLASS_F80 };
     uint64_t local_values[] = { 0, 0, 0, 9, 1, 0, 0 };
