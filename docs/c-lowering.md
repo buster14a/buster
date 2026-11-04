@@ -1149,6 +1149,16 @@ rounds), and each node's local resolved by a pass over its body's range of
 nodes once the body's locals are set (`lower.bodies` 0.7 ms higher, the
 statements unchanged).
 
+Nor did carrying them without a pass. An operand's push reads its type and,
+for its conversion's test, the type's packed word, and an `EXPRESSION`
+task's payload is otherwise zero: the push put the word there, and a copy of
+the loop took it in the expansion's head; a second variant carried the
+operand's op too. #1235's run at `38727492`
+([run](https://github.com/buster14a/buster/actions/runs/41803179958/job/126487426058))
+put `lower.statements` at 7.264 ms and 7.298 against the base's 6.909, every
+round above every base round: the push's added lookups and the copy cost more
+than the shorter chain saved.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
