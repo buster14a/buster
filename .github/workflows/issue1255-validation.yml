@@ -20,32 +20,43 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          fetch-depth: 0
-      - name: Publish the bounded test correction
+          ref: a389f93bf9a8ba1efc07232ad959f99b1f52176f
+          fetch-depth: 3
+      - name: Publish the empty-array oracle distinction
         run: |
           set -euo pipefail
-          parent=968522eed4b318051fa609957da8227724b693e7
-          sed '/^diff --git a\/src\/buster\/compiler\/runtime.c/,$d' issue1255-followup.patch > "$RUNNER_TEMP/issue1255-followup.patch"
-          git checkout --detach "$parent"
-          git apply --index "$RUNNER_TEMP/issue1255-followup.patch"
+          parent=a389f93bf9a8ba1efc07232ad959f99b1f52176f
+          test "$(git rev-parse HEAD)" = "$parent"
+          test "$(git hash-object src/buster/compiler/dynamic_bounds_test.c)" = 952ecf48c1c43e947144afa61d31108997f517a0
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('src/buster/compiler/runtime.c')
+          p = Path('src/buster/compiler/dynamic_bounds_test.c')
           s = p.read_text()
-          s = s.replace('// no object defines it, each with its supported output kinds (a bit per RuntimeKind). For executables, GNU ld and lld\n// define them there:', '// no object defines it, each with its supported output kinds (a bit per RuntimeKind). The executable bounds follow\n// GNU ld and lld, with GNU ld\'s additional __etext alias; shared-library admission is unchanged:')
-          s = s.replace("//   - every executable (dynamic PIE, static executable and static PIE): the ELF header's address (__ehdr_start, through which libc.a's startup finds\n//     the program headers) and the image's start; the preinit array's bounds; and the ends of the text, the data and\n//     the image. These bounds also belong to a dynamic executable; shared-library admission is unchanged here;", "//   - every executable (dynamic PIE, static executable and static PIE): the ELF header's address (__ehdr_start,\n//     through which libc.a's startup finds the program headers) and the image's start; the preinit array's bounds;\n//     the ends of the text and the file-backed data; the start of .bss; and the end of the image;")
+          s = s.replace('// Empty preinit bounds coincide at .init_array\'s start. The direct writer has no preinit atoms; the fixture deliberately\n// leaves that array empty. A nonempty .data and aligned .bss distinguish the file-backed end, zero-fill start and image end.', '// The direct writer follows GNU ld for empty preinit bounds: both coincide at .init_array\'s start. Lld uses offset\n// zero when .preinit_array is absent. A nonempty .data and aligned .bss distinguish the file and memory bounds.')
+          s = s.replace('static bool dynamic_bounds_values(DynamicTestTally* tally, String8 file, uint64_t* values)', 'static bool dynamic_bounds_values(DynamicTestTally* tally, String8 file, uint64_t* values, bool gnu_empty_preinit)')
+          s = s.replace('values[2] = (preinit != 0 ? preinit->sh_addr : init->sh_addr) - base;', 'values[2] = preinit != 0 ? preinit->sh_addr - base : gnu_empty_preinit ? init->sh_addr - base : 0;')
+          s = s.replace('dynamic_bounds_values(tally, file, values)', 'dynamic_bounds_values(tally, file, values, true)')
+          s = s.replace('dynamic_bounds_values(&tally, reference_file, values)', 'dynamic_bounds_values(&tally, reference_file, values, l == 0)')
+          p.write_text(s)
+          p = Path('docs/commands/executable.md')
+          s = p.read_text().replace('rules for their own layouts.\nKind-mask', 'rules for their own layouts, except that lld places the absent preinit\narray\'s bounds at image offset zero. The direct writer retains GNU ld\'s\nchoice of the init array\'s start.\nKind-mask')
+          p.write_text(s)
+          p = Path('src/buster/compiler/runtime.c')
+          s = p.read_text().replace('// no object defines it, each with its supported output kinds (a bit per RuntimeKind). The executable bounds follow\n// GNU ld and lld, with GNU ld\'s additional __etext alias; shared-library admission is unchanged:', '// no object defines it, each with its supported output kinds (a bit per RuntimeKind). The executable image bounds\n// follow GNU ld, including its __etext alias and empty preinit bounds; shared-library admission is unchanged:')
+          p.write_text(s)
+          p = Path('src/buster/compiler/executable.c')
+          s = p.read_text().replace('// as GNU ld and lld define them: the init and fini arrays', '// as GNU ld defines them: the init and fini arrays')
           p.write_text(s)
           PY
-          test "$(git hash-object src/buster/compiler/dynamic_bounds_test.c)" = 952ecf48c1c43e947144afa61d31108997f517a0
-          test "$(git hash-object src/buster/compiler/runtime.c)" = 9aece9467a87acd9d4b4cdbeb063a2a4b7ffd959
-          test "$(git hash-object src/buster/compiler/executable.c)" = 0431eef8f5d265dc8ffb67d047443c466d9b6723
-          test "$(git hash-object docs/commands/executable.md)" = 8f34c458f09e8e54e20693c97788475c7792bc73
-          git add src/buster/compiler/runtime.c
+          test "$(git hash-object src/buster/compiler/dynamic_bounds_test.c)" = 24d94e8ed352fcce3b7b4d469cee6154e29045d7
+          test "$(git hash-object src/buster/compiler/runtime.c)" = 254c0ece15b36e6c64eabd089cd6bb1dcc723eeb
+          test "$(git hash-object docs/commands/executable.md)" = 847a0511ec2e774b25276d3bda5f670203bbd9b9
+          git add src/buster/compiler/dynamic_bounds_test.c src/buster/compiler/runtime.c src/buster/compiler/executable.c docs/commands/executable.md
           git diff --cached --check
           git config user.name 'ChatGPT'
           git config user.email 'noreply@openai.com'
           tree=$(git write-tree)
-          commit=$(printf '%s\n' 'test(link): validate each image-bound layout independently' '' 'Recompute bounds after RELR layout changes. Preserve all twelve direct-link and GNU checks, and distinguish the eleven names lld defines from GNU ld additional __etext alias.' '' 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>' | git commit-tree "$tree" -p "$parent")
+          commit=$(printf '%s\n' 'test(link): distinguish GNU and lld empty preinit bounds' '' 'The direct path retains GNU ld semantics for empty preinit arrays; independently check lld image-offset-zero behavior when its preinit section is absent.' '' 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>' | git commit-tree "$tree" -p "$parent")
           git push origin "$commit:refs/heads/fix/1255-dynamic-image-bounds"
           git reset --hard "$commit"
           mkdir -p "$RUNNER_TEMP/issue1255"
