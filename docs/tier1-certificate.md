@@ -545,7 +545,9 @@ The decoding:
   wider use fails. An SSE carrier's copies (#1280, `tier1_select_carrier_move`)
   are its 8 bytes' `vmovq` and its 4 bytes' `vinsertps` of element 0 with the
   others zeroed (immediate `0x0e`, its source in vvvv too); any other immediate
-  is no move. A recomputation is a constant's edit only where
+  is no move. At a target without AVX512VL (#1281) they are their VEX twins,
+  which name registers below 16 alone: a vector's `vmovdqa` and `vmovdqu` of 16
+  and 32 bytes, and a carrier's VEX `vmovq` and `vinsertps`. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
   value its origin names.
 - **Nodes.** Each node's records are regenerated from the allocation's

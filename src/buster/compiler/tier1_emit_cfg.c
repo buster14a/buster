@@ -1324,7 +1324,7 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER && tier1_emit_cfg_vector_location(location))
     {
         source = (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
-        form = tier1_select_float_forms(emitted->prepared.sizes[value])->store;
+        form = tier1_select_class_forms(emitted->prepared.sizes[value], emitted->prepared.vex)->store;
     }
     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
     {
@@ -1609,10 +1609,10 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         const bool vector = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_VECTOR;
         const bool from_vector = from - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
         const bool to_vector = to - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
-        const Tier1SelectFloatForms* floats = tier1_select_float_forms(width);
+        const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, emitted->prepared.vex);
         if (vector && from_vector && to_vector)
         {
-            records[record_count++] = tier1_select_class_move((uint8_t)(to & 15), (uint8_t)(from & 15), width);
+            records[record_count++] = tier1_select_class_move((uint8_t)(to & 15), (uint8_t)(from & 15), width, emitted->prepared.vex);
         }
         else if (vector && from_vector && tier1_emit_cfg_slot(emitted, to, &offset))
         {
@@ -1963,7 +1963,7 @@ static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1Emi
 
 // A vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT, whose constant's index is the pattern's
 // `immediate`): its words as immediates into the red zone below rsp, a sign-extended imm32's mov qword or two mov dword
-// each, and the vector loaded from there by vmovdqu32 of its width into its register, as Tier 0 builds one in its slot
+// each, and the vector loaded from there by vmovdqu32 of its width (vmovdqu at a target without AVX512VL, #1281) into its register, as Tier 0 builds one in its slot
 // (tier0_emit_vector_value). A function with one keeps its frame out of the red zone (tier1_emit_cfg_frame_flags).
 static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
 {
@@ -1987,7 +1987,7 @@ static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function,
             error = tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
         }
     }
-    const X86Instruction load = { .form = tier1_select_float_forms(width)->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
+    const X86Instruction load = { .form = tier1_select_class_forms(width, holes->vex)->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
     error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
@@ -2188,6 +2188,13 @@ static uint8_t tier1_emit_cfg_take(uint32_t* free)
     return reg;
 }
 
+// A copy of a machine row's floating operand or result (#141): movaps between two registers below 16, a legacy form every
+// target has (#1281), else vmovdqa64 of the xmm registers, one of them past 15 (the zmm registers past the vector roles').
+static X86Instruction tier1_emit_cfg_row_float_move(uint8_t destination, uint8_t source)
+{
+    return destination < 16 && source < 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(X86_FORM_VMOVDQA64_X_XM128, destination, source);
+}
+
 // A machine row's record placed (#1283): as tier0_operation_place places it, but each VECTOR(j) role, in a field or as an
 // /is4 operand, in vectors[j], tier1_emit_cfg_row's placement of it, rather than in a run from `placement`'s first; but
 // VECTOR(0) in `early` before the record `split` (an index plus one, 0 for none) and in that record's fields but its
@@ -2222,15 +2229,20 @@ static X86Instruction tier1_emit_cfg_row_place(X86Instruction original, uint32_t
 // tier1_emit_cfg_row_place): a vector result's VECTOR(0) in the destination, and a vector operand's VECTOR(j) in its own
 // register, where nothing else there is read after they are written (below, and the selection guide's "Machine rows");
 // else VECTOR(j) is zmm16 + j, which no value takes and an EVEX form names (tier1_select_row_supported), or for a row
-// with a VEX or legacy form's vector register in the lowest run of free xmm registers below 16 (xmm15 among them, the
-// class's scratch), a vector operand moved there first at its width and the result moved from VECTOR(0) into the
-// destination last; its floating roles the zmm registers past the run's. An integer, mask or floating operand its records
-// don't write (tier1_select_row_written) stays in its register, and one they write is copied into a free register of its
-// class first.
+// with a VEX or legacy form's vector register, and at a target without AVX512VL for a row with a vector narrower than
+// 64 bytes or at a target without AVX512F (#1281), a free xmm register below 16 (xmm15 among them, the class's
+// scratch), each taken when its role is placed, a vector operand moved there first at its width and the result moved
+// from VECTOR(0) into the destination last; its floating roles the zmm registers past zmm16's, or below 16 for a row
+// that names one in a VEX or legacy form's field and at a target without AVX512VL (#1281): a written floating operand's
+// a free xmm register no vector role takes (nor the destination a vector result is written in), and the result's the
+// destination where no other operand is there, else such a free register; the vector roles and the floating ones below
+// 16 take their registers from one pool. An integer, mask or floating operand its records don't write (tier1_select_row_written) stays in
+// its register, and one they write is copied into a free register of its class first.
 // Its result shares a register with its class's first operand, as Tier 0's placement has them (a row may read either as
 // the other), that operand copied there first: an integer's or a mask's its destination where no other operand is there,
-// else a free register; a floating one's past the vector roles. Its scratch roles take free registers: the caller-saved
-// general registers (r11 among them) and k1 to k7 that hold no value live past the node and no operand. The opmask
+// else a free register; a floating one's past the vector roles, or below 16 as above. Its scratch roles take free
+// registers: the caller-saved general registers (r11 among them) and k1 to k7 that hold no value live past the node and
+// no operand. The opmask
 // registers it names by number, its own scratch, take free ones too (tier1_select_row_rename), but a pair's
 // (VP2INTERSECT's), which must be free where it is. Short of free opmask registers, it borrows those of masks live past
 // it, saved and reloaded around it; short of others, the row is refused (TIER1_EMIT_UNSUPPORTED: its function is Tier
@@ -2292,26 +2304,33 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     Tier0Placement placement;
     memset(&placement, 0, sizeof(placement));
     placement.vector = 16;
-    // A row with a VEX or legacy form's vector register: its vector roles in the lowest run of free xmm registers below
-    // 16, the destination's among them where it is a vector's (the result moves there last, after every read).
-    if (error == TIER1_EMIT_OK && reach.vex_vectors != 0)
+    // A target without AVX512VL (#1281) has no EVEX move of an xmm or a ymm register, and one without AVX512F no register
+    // past xmm15 at all; one with AVX512F but not VL (Knights Landing's) has zmm16 and on and EVEX's 512-bit moves.
+    const bool vex = emitted->prepared.vex;
+    bool narrow = false;
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && j <= row->operand_count; j += 1)
     {
-        const uint32_t run = reach.vectors < 16 ? (1u << reach.vectors) - 1 : 0xffffu;
-        uint32_t base = 16;
-        for (uint32_t b = 16 - reach.vectors + 1; b-- > 0 && reach.vectors <= 16;)
-        {
-            base = ((busy_vectors >> b) & run) == 0 ? b : base;
-        }
-        error = base < 16 ? error : TIER1_EMIT_UNSUPPORTED;
-        placement.vector = (uint8_t)base;
+        const uint32_t class = j < row->operand_count ? row->operand_classes[j] : row->result_class;
+        const uint32_t bytes = j < row->operand_count ? row->operand_bytes[j] : row->result_bytes;
+        narrow |= tier0_class_vector(class) && bytes < 64;
     }
-    // Each VECTOR(j) role's register (#1283), placed one at a time: where no role below takes another, its place in the
-    // run above (zmm16 + j, or the VEX run's), which no value is in.
+    // A row's vector roles are below 16 where it has a VEX or legacy form's vector register, and at a target without
+    // AVX512VL where it has a vector narrower than 64 bytes (whose moves into zmm16 and on would be VL's) or the target has
+    // no zmm16 (#1281's review: a 64-byte EVEX row at an AVX512F target keeps zmm16 and on). A row that names a floating
+    // role in a VEX or legacy form's field (F16C's conversions), and any row at a target without AVX512VL (whose floating
+    // copies past 15 would be VL's), has its floating roles below 16 too. Either kind takes free xmm registers below 16
+    // one at a time, from one pool, where it doesn't stay in place (#1283): not a contiguous run, which register pressure
+    // could leave none of (#1281's review).
+    const bool low_vectors = error == TIER1_EMIT_OK && reach.vectors != 0 && (reach.vex_vectors != 0 || (vex && (narrow || !emitted->prepared.zmm)));
+    const bool low_floats = error == TIER1_EMIT_OK && (vex || tier1_select_row_low_floating(row));
+    uint32_t free_low = low_vectors || low_floats ? 0xffffu & ~busy_vectors : 0;
+    // Each VECTOR(j) role's register (#1283), placed one at a time: where no role below takes another, zmm16 + j, which
+    // no value is in, or for a role below 16 a free register taken when it is placed (UINT8_MAX until then).
     const Tier1SelectRowVectors roles = error == TIER1_EMIT_OK ? tier1_select_row_vectors(row) : (Tier1SelectRowVectors){ 0 };
     uint8_t vectors[16];
     for (uint32_t j = 0; j < 16; j += 1)
     {
-        vectors[j] = (uint8_t)(placement.vector + j);
+        vectors[j] = low_vectors ? UINT8_MAX : (uint8_t)(placement.vector + j);
     }
     uint8_t next_floating = (uint8_t)(16 + reach.vectors);
     X86Instruction records[BUSTER_TIER1_EMIT_ROW_RECORDS];
@@ -2411,6 +2430,17 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         result_moves = !kept;
         placement.mask_result = result_register;
     }
+    else if (error == TIER1_EMIT_OK && tier0_class_floating(result_class) && low_floats)
+    {
+        // Below 16 (#1281), the destination itself where no other operand is there, which no vector role then takes,
+        // else a free xmm register, moved into the destination last.
+        const uint8_t x = (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
+        const bool kept = !shared && (((busy_vectors >> x) & 1) == 0 || (aliased != UINT32_MAX && sources[aliased] == destination));
+        free_low &= ~(1u << x);
+        result_register = kept ? x : tier1_emit_cfg_take(&free_low);
+        result_moves = !kept;
+        placement.floating_result = result_register;
+    }
     else if (error == TIER1_EMIT_OK && tier0_class_floating(result_class))
     {
         result_register = next_floating++;
@@ -2430,9 +2460,9 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         // is copied in (its copy, before the others' moves, would overwrite it before it is read or moved); else no
         // vector operand that stays in its own register there whose role the records name after the first write of
         // VECTOR(0) (an operand dying at the node, whose register the allocation gave the result, is read first), or in
-        // that record where its destination can't be one of its sources (a gather's or a complex multiplication's). In
-        // the VEX run, the destination must not be another role's. Else VECTOR(0) is a register of its own (the run's,
-        // or the first operand's where nothing writes it), moved into the destination at the result's width last.
+        // that record where its destination can't be one of its sources (a gather's or a complex multiplication's); no
+        // other role below 16 then takes it. Else VECTOR(0) is a register of its own (zmm16, a free one below 16, or the
+        // first operand's where nothing writes it), moved into the destination at the result's width last.
         const uint8_t d = (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
         const bool first_vector = row->operand_count != 0 && tier0_class_vector(row->operand_classes[0]);
         const bool clean = (roles.written & 1) != 0 && (roles.legacy & 1) == 0;
@@ -2449,15 +2479,19 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
             const bool late = named > write || (named == write && ((roles.exclusive >> (write - 1)) & 1) != 0);
             blocked |= sources[j] == destination && (copied_in || tier0_class_floating(class) || (own && late));
         }
-        const bool outside_run = reach.vex_vectors == 0 || d < placement.vector || d >= placement.vector + reach.vectors;
-        in_place = !blocked && clean && outside_run;
+        in_place = !blocked && clean;
+        // Below 16 (#1281), the destination taken by the result written in place; else VECTOR(0) takes a free register
+        // only where it is placed and doesn't stay in the first operand's (#1293's review: a row that never writes it
+        // reads it there), in the operand loop or after it.
+        free_low &= in_place ? ~(1u << d) : UINT32_MAX;
         vectors[0] = in_place ? d : vectors[0];
         split = in_place && splits ? write : 0;
         early = split != 0 ? (uint8_t)(sources[0] - BUSTER_TIER1_EMIT_VECTOR_LOCATION) : 0;
         result_register = vectors[0];
         result_moves = !in_place || roles.widest_written[0] > row->result_bytes;
     }
-    error = error == TIER1_EMIT_OK && (result_class == BUSTER_TYPED_CLASS_VOID || result_register != UINT8_MAX) ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
+    // A vector result's VECTOR(0) below 16 may be placed later (low_vectors).
+    error = error == TIER1_EMIT_OK && (result_class == BUSTER_TYPED_CLASS_VOID || result_register != UINT8_MAX || (low_vectors && tier0_class_vector(result_class))) ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
     // The moves into place and out of it (#1283, Tier1EmitResult.row_moves): the operands' and the result's.
     uint32_t moves = 0;
     for (uint32_t j = 0; error == TIER1_EMIT_OK && j < row->operand_count; j += 1)
@@ -2486,28 +2520,28 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
             {
                 alone &= k == j || sources[k] != location;
             }
-            // The result's role is where the row defines its result, whose definition the code certificate takes as a
-            // write of the register (#1284): the first operand stays in its own register for it only where no value
-            // live past the node is there (an inlined wrapper's operand that a later row reads too, #1324's).
-            const bool kept = !result_role || ((live_vectors >> own) & 1) == 0;
-            const bool stays = narrow && (((roles.written >> j) & 1) == 0 || alone) && kept;
+            const bool stays = narrow && (((roles.written >> j) & 1) == 0 || alone);
+            // A role below 16 that doesn't stay in place takes a free register now (#1281's review).
+            vectors[j] = !placed && !stays && vectors[j] == UINT8_MAX ? tier1_emit_cfg_take(&free_low) : vectors[j];
+            error = vectors[j] != UINT8_MAX || placed || stays ? error : TIER1_EMIT_UNSUPPORTED;
             const uint8_t reg = placed ? vectors[0] : stays ? own : vectors[j];
             const bool moved = (reg != own || !narrow) && !(placed && split != 0);
             vectors[j] = reg;
             result_register = result_role ? reg : result_register;
             // An SSE carrier (#1280) copied zero-extended: its value's register may hold anything past its bytes (a
             // parameter's or a call result's, whose upper lanes the convention leaves undefined), which every vector
-            // field reads past, so it never stays in its own register.
-            records[count] = row->operand_bytes[j] < 16 ? tier1_select_carrier_move(reg, own, row->operand_bytes[j]) :
-                                                          tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j])->move, reg, own);
+            // field reads past, so it never stays in its own register. Both by VEX forms at a target without AVX512VL.
+            records[count] = row->operand_bytes[j] < 16 ? tier1_select_carrier_move(reg, own, row->operand_bytes[j], vex) :
+                                                          tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j], vex)->move, reg, own);
             count += moved;
             moves += moved;
         }
         else if (tier0_class_floating(class))
         {
             const uint8_t own = (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
-            const uint8_t reg = alias ? result_register : writes ? next_floating++ : own;
-            records[count] = tier1_select_register_record(tier1_select_vector_forms(16)->move, reg, own);
+            const uint8_t reg = alias ? result_register : writes ? (low_floats ? tier1_emit_cfg_take(&free_low) : next_floating++) : own;
+            error = reg != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
+            records[count] = tier1_emit_cfg_row_float_move(reg, own);
             count += reg != own;
             moves += reg != own;
             placement.operands[j] = reg;
@@ -2533,6 +2567,14 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         }
     }
     error = error == TIER1_EMIT_OK && next_floating <= 32 ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
+    // The vector roles below 16 no operand placed (a row's own vector scratch, and a vector result's VECTOR(0) where its
+    // first operand is no vector), each a free register; the result's register, VECTOR(0)'s.
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && j < reach.vectors; j += 1)
+    {
+        vectors[j] = vectors[j] == UINT8_MAX ? tier1_emit_cfg_take(&free_low) : vectors[j];
+        error = vectors[j] != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
+    }
+    result_register = error == TIER1_EMIT_OK && tier0_class_vector(result_class) ? vectors[0] : result_register;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < reach.scratch; k += 1)
     {
         placement.scratch[k] = tier1_emit_cfg_take(&free_general);
@@ -2572,9 +2614,9 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     {
         moves += 1;
         const uint8_t vector_destination = (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
-        records[count++] = tier0_class_vector(result_class) && row->result_bytes < 16 ? tier1_select_carrier_move(vector_destination, result_register, row->result_bytes) :
-                           tier0_class_vector(result_class)   ? tier1_select_register_record(tier1_select_vector_forms(row->result_bytes)->move, vector_destination, result_register) :
-                           tier0_class_floating(result_class) ? tier1_select_register_record(tier1_select_vector_forms(16)->move, (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION), result_register) :
+        records[count++] = tier0_class_vector(result_class) && row->result_bytes < 16 ? tier1_select_carrier_move(vector_destination, result_register, row->result_bytes, vex) :
+                           tier0_class_vector(result_class)   ? tier1_select_register_record(tier1_select_vector_forms(row->result_bytes, vex)->move, vector_destination, result_register) :
+                           tier0_class_floating(result_class) ? tier1_emit_cfg_row_float_move(vector_destination, result_register) :
                            tier0_class_mask(result_class)     ? tier1_select_register_record(tier1_select_mask_forms(row->result_bytes)->move, (uint8_t)(destination - BUSTER_TIER1_EMIT_MASK_LOCATION), result_register) :
                                                                 tier1_select_move(tier0_class_bytes(result_class) == 8 ? 8 : 4, destination, result_register);
     }
@@ -2674,6 +2716,8 @@ static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const 
 {
     Tier1SelectHoles holes = tier1_select_holes(plan, registers, node);
     holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(&emitted->frame) : holes.scale;
+    holes.vex = emitted->prepared.vex;
+    holes.avx2 = emitted->prepared.avx2;
     return holes;
 }
 
@@ -3231,7 +3275,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                                 .reg = (uint8_t)x,
                                 .rm = (uint8_t)emitted->frame.base_register,
                                 .mode = BUSTER_X86_MEMORY_BASE,
-                                .form = emitted->prepared.vector_bytes != 0 ? (pass == 0 ? tier1_select_float_forms(emitted->prepared.vector_bytes)->store : tier1_select_float_forms(emitted->prepared.vector_bytes)->load) :
+                                .form = emitted->prepared.vector_bytes != 0 ? (pass == 0 ? tier1_select_class_forms(emitted->prepared.vector_bytes, emitted->prepared.vex)->store : tier1_select_class_forms(emitted->prepared.vector_bytes, emitted->prepared.vex)->load) :
                                         pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
                             };
                             error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
@@ -3583,6 +3627,11 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
 static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     emitted->general = true;
+    // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
+    // VEX ones, and machine rows their roles below xmm16.
+    emitted->prepared.vex = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_X_XM128);
+    emitted->prepared.avx2 = x86_target_form_allowed(allowed_forms, X86_FORM_VPCMPEQD_Y_Y_YM256);
+    emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
     Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
     if (error == TIER1_EMIT_OK)
     {

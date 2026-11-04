@@ -1331,7 +1331,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         else if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
         {
             const uint32_t bytes = ir_typed_vector_bytes(input, i);
-            const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
+            // Tier 1's moves of it (ir_typed_vector_moves, #1281): AVX512F's of a zmm register; of an xmm or a ymm one, or
+            // an SSE carrier's, VL's EVEX ones, or else AVX's VEX ones.
+            const uint64_t required = ir_typed_vector_moves(bytes, target_features);
             // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. Every real
             // transport is a full 128/256/512-bit value or an SSE carrier of 4 or 8 bytes (#1280), an f32 or f64 of its
             // bits (ir_typed_stack_type).

@@ -89,6 +89,15 @@ struct IrSimdTypedForm
     IrSimdOperation operation;
 };
 
+// The features Tier 1's moves, spills and reloads of a vector of `bytes` take at a target of `target_features`
+// (tier1_select_class_forms, tier1_select_vector_forms): AVX512F's of a zmm register; of an xmm or a ymm one AVX512F's and
+// VL's EVEX forms where the target has both, else AVX's VEX ones (#1281), which name registers below 16 alone.
+static uint64_t ir_typed_vector_moves(uint32_t bytes, uint64_t target_features)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    return bytes == 64 ? BUSTER_X86_FEATURE(AVX512F) : (target_features & evex) == evex ? evex : BUSTER_X86_FEATURE(AVX);
+}
+
 static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     static const IrSimdTypedForm binary[] = {
@@ -105,6 +114,21 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
         { X86_FORM_VPCMPUD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 },
     };
     static const uint16_t expansions[3] = { X86_FORM_VPMOVM2D_X_K, X86_FORM_VPMOVM2D_Y_K, X86_FORM_VPMOVM2D_Z_K };
+    // The same operations' VEX forms at targets without AVX-512 (#1281), as the typed stream's rows have them there
+    // (c_check_program_vectors_baseline.c and the builtins' rows): AVX's of an xmm register and AVX2's of a ymm one, and
+    // for the bitwise ones the packed singles' forms as well as the integers', whose bits are the same. Tier 1 computes
+    // them by its VEX forms (tier1_select_vector_forms).
+    static const IrSimdTypedForm vex_binary[] = {
+        { { X86_FORM_VPADDD_X_X_XM128, X86_FORM_VPADDD_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_ADD },
+        { { X86_FORM_VPSUBD_X_X_XM128, X86_FORM_VPSUBD_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_SUB },
+        { { X86_FORM_VPMULLD_X_X_XM128, X86_FORM_VPMULLD_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_MUL },
+        { { X86_FORM_VPAND_X_X_XM128, X86_FORM_VPAND_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_AND },
+        { { X86_FORM_VPOR_X_X_XM128, X86_FORM_VPOR_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_OR },
+        { { X86_FORM_VPXOR_X_X_XM128, X86_FORM_VPXOR_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_XOR },
+        { { X86_FORM_VANDPS_X_X_XM128, X86_FORM_VANDPS_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_AND },
+        { { X86_FORM_VORPS_X_X_XM128, X86_FORM_VORPS_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_OR },
+        { { X86_FORM_VXORPS_X_X_XM128, X86_FORM_VXORPS_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_XOR },
+    };
     IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
     IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
     uint32_t width = 0;
@@ -135,6 +159,15 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
                     if (record->form == binary[form].forms[width])
                     {
                         candidate.operation = binary[form].operation;
+                    }
+                }
+                for (uint32_t form = 0; width < 2 && form < sizeof(vex_binary) / sizeof(*vex_binary); form += 1)
+                {
+                    if (record->form == vex_binary[form].forms[width])
+                    {
+                        // Its form's features (AVX, or AVX2 for a ymm register's integers), and its moves'.
+                        candidate.operation = vex_binary[form].operation;
+                        candidate.required_features = ir_typed_vector_moves(source->result_bytes, target_features) | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
                     }
                 }
             }
@@ -450,7 +483,8 @@ static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source,
     IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_INVALID;
     bool admitted = status == IR_SIMD_TYPED_OK && source->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS && source->record_count <= BUSTER_TIER0_OPERATION_RECORDS &&
                     ir_row_type(source->result_class, source->result_bytes) != IR_TYPE_COUNT;
-    // Its vectors' and masks' own moves, Tier 1's: AVX512F's, and VL's below 64 bytes, as any vector value's; DQ's for a
+    // Its vectors' and masks' own moves, Tier 1's, as any vector value's (ir_typed_vector_moves): AVX512F's for a 64-byte
+    // vector, and for a 16- or 32-byte one VL's EVEX ones where the target has them, else AVX's VEX ones (#1281); DQ's for a
     // byte mask and BW's for a doubleword's or a quadword's, as any mask's.
     uint64_t required = 0;
     for (uint32_t j = 0; admitted && j <= source->operand_count; j += 1)
@@ -459,8 +493,8 @@ static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source,
         const uint32_t bytes = j < source->operand_count ? source->operand_bytes[j] : source->result_bytes;
         const uint32_t type = ir_row_type(class, bytes);
         admitted = type != IR_TYPE_COUNT && (type != IR_VOID || j == source->operand_count);
-        // By its class: an SSE carrier's f32 or f64 (#1280) is a vector's too, staged as one.
-        required |= class == BUSTER_TYPED_CLASS_VECTOR ? BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) : 0;
+        // By its class: an SSE carrier's f32 or f64 (#1280) is a vector's too, staged as one (tier1_select_carrier_move).
+        required |= class == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_moves(bytes, target_features) : 0;
         required |= ir_mask_type(type) ? BUSTER_X86_FEATURE(AVX512F) | (bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0) : 0;
     }
     // Each form's features, x86_target_requirement's, whose classified rows carry BUSTER_X86_TARGET_KNOWN, which every

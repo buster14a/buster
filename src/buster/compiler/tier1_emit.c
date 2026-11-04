@@ -161,6 +161,16 @@ struct Tier1EmitPrepared
     // The widest vector a value of the function is (#141), 16, 32 or 64 bytes, or 0 without one: the vector class's
     // call-save rows and temporary slot take that width, and its moves of them that width's forms.
     uint32_t vector_bytes;
+    // The CFG consumer's target has no AVX512VL (#1281): its 16- and 32-byte vectors move, spill and compute by VEX forms
+    // (tier1_select_class_forms, Tier1SelectHoles.vex), and machine rows place their roles below xmm16
+    // (tier1_emit_cfg_row).
+    bool vex;
+    // The target has AVX512F (#1281's review): zmm16 and on and EVEX's 512-bit moves, which a 64-byte row's roles keep
+    // even without AVX512VL (Knights Landing's).
+    bool zmm;
+    // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
+    // (Tier1SelectHoles.avx2).
+    bool avx2;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other
@@ -642,7 +652,8 @@ static uint32_t tier1_emit_class(const Tier1EmitPrepared* prepared, uint32_t val
 }
 
 // A value's spill or reload at its slot: a general register's mov of its width, a mask's kmov of its own (#179), which
-// writes or reads the mask's bytes alone, or a floating value's movss or movsd (#141).
+// writes or reads the mask's bytes alone, a floating value's movss or movsd (#141), or a vector's vmovdqu32 or, at a target
+// without AVX512VL, vmovdqu (#1281).
 static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1Frame* frame, uint32_t value, uint8_t reg, bool load)
 {
     const uint32_t width = prepared->sizes[value];
@@ -650,7 +661,7 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     const bool mask = class == BUSTER_TIER1_ALLOCATE_MASK;
     const bool vector = class == BUSTER_TIER1_ALLOCATE_VECTOR;
     const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
-    const Tier1SelectFloatForms* floats = tier1_select_float_forms(width);
+    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, prepared->vex);
     const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],

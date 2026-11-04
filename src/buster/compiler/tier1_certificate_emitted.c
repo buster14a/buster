@@ -527,6 +527,14 @@ static const Tier1CertEmittedVectorMove tier1_cert_emitted_vector_moves[] = {
     { X86_FORM_VMOVDQU64_ZM512_Z, 64, false, false, true, 32 },
     // An 8-byte SSE carrier's copy (#1280, tier1_select_carrier_move), the rest of its destination zeroed.
     { X86_FORM_VMOVQ_X_XM64_EVEX, 8, true, true, false, 32 },
+    // At a target without AVX512VL (#1281), their VEX twins, below 16 alone: a vector's vmovdqa copies and vmovdqu loads,
+    // stores, spills and reloads (tier1_select_vector_forms and tier1_select_class_forms with `vex`), and a carrier's
+    // vmovq.
+    { X86_FORM_VMOVDQA_X_XM128, 16, true, true, false, 16 },
+    { X86_FORM_VMOVDQA_Y_YM256, 32, true, true, false, 16 },
+    { X86_FORM_VMOVDQU_X_XM128, 16, true, false, true, 16 },
+    { X86_FORM_VMOVDQU_XM128_X, 16, false, false, true, 16 },
+    { X86_FORM_VMOVQ_X_XM64, 8, true, true, false, 16 },
 };
 
 static const Tier1CertEmittedVectorMove* tier1_cert_emitted_vector_move(uint16_t form)
@@ -559,7 +567,9 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
     const Tier1CertEmittedVectorMove* vector = general ? 0 : tier1_cert_emitted_vector_move(form);
     // A 4-byte SSE carrier's copy (#1280, tier1_select_carrier_move): vinsertps of the source's element 0 into element 0,
     // elements 1 to 3 zeroed (immediate 0x0e), the source its vvvv too: a 4-byte move, the rest of its destination zeroed.
-    const bool insert = form == X86_FORM_VINSERTPS_X_X_XM32_IMM8_EVEX && direct && record.immediate == 0x0e && record.vvvv == record.rm && record.reg < 32 && record.rm < 32;
+    // Its VEX twin at a target without AVX512VL (#1281) names registers below 16 alone.
+    const uint8_t insert_registers = form == X86_FORM_VINSERTPS_X_X_XM32_IMM8_EVEX ? 32 : form == X86_FORM_VINSERTPS_X_X_XM32_IMM8 ? 16 : 0;
+    const bool insert = insert_registers != 0 && direct && record.immediate == 0x0e && record.vvvv == record.rm && record.reg < insert_registers && record.rm < insert_registers;
     if (general)
     {
         const uint32_t width = load64 || store64 ? 8 : 4;
@@ -569,8 +579,9 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
     }
     else if (vector != 0 && ((direct && vector->direct) || (memory && vector->memory)) && record.reg < vector->registers && (!direct || record.rm < vector->registers))
     {
-        // The vector class's (#1284): a floating value's movaps and movss or movsd, a vector's vmovdqa64 and vmovdqu32, an
-        // SSE carrier's vmovq (#1280), a part's movsd, movups, vmovdqu or vmovdqu64 (#789), at their forms' widths. A load from memory zeroes the rest of
+        // The vector class's (#1284): a floating value's movaps and movss or movsd, a vector's vmovdqa64 and vmovdqu32 (or
+        // vmovdqa and vmovdqu, #1281), an SSE carrier's vmovq (#1280), a part's movsd, movups, vmovdqu or vmovdqu64
+        // (#789), at their forms' widths. A load from memory zeroes the rest of
         // an xmm register (its scalar view's write extent), and in a wide function every write kills the whole register.
         const uint32_t rm = direct ? tier1_cert_emitted_vector(build, record.rm, vector->width) : tier1_cert_emitted_memory(build, record, vector->width);
         a = vector->load ? tier1_cert_emitted_vector(build, record.reg, vector->width) : rm;
@@ -2502,9 +2513,28 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         kernel.definition_location = vector_result || floating_result ? tier1_cert_emitted_vector(build, result_reg, width) : mask_result ? tier1_cert_emitted_mask(result_reg, width) : tier1_cert_emitted_gpr(result_reg, width);
         valid = kernel.definition_location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
     }
+    // A vector row of no records (a zero-record shuffle's: its result is its wider operand, in that operand's register)
+    // writes nothing: its result's move (tier1_emit_cfg_row's, zero-extended for an SSE carrier) is its definition, at the
+    // move's destination. Defining it in the operand's register would kill the operand, which may live past the node
+    // (#1282's inlined intrinsics: two widenings of one vector).
+    uint32_t viewed = 0;
+    if (valid && value != BUSTER_TIER1_CFG_NONE && vector_result && row->record_count == 0 && end > r)
+    {
+        const X86Instruction move = emitted->code.records[r];
+        const uint8_t destination = move.reg;
+        const X86Instruction expected = row->result_bytes < 16 ? tier1_select_carrier_move(destination, result_reg, row->result_bytes, emitted->prepared.vex)
+                                                               : tier1_select_register_record(tier1_select_vector_forms(row->result_bytes, emitted->prepared.vex)->move, destination, result_reg);
+        const uint32_t location = destination < 32 ? tier1_cert_emitted_vector(build, destination, tier1_cert_emitted_width(emitted, value)) : BUSTER_CERT_NONE;
+        if (location != BUSTER_CERT_NONE && tier1_cert_emitted_exactly(move, expected))
+        {
+            valid = tier1_cert_emitted_take_reference(build, r, 0);
+            kernel.definition_location = location;
+            viewed = 1;
+        }
+    }
     valid = valid && tier1_cert_emitted_originals(build, node, &kernel, placed, row->record_count);
     // The result's move and the borrowed registers' reloads.
-    for (uint32_t at = r + (valid ? row->record_count : 0); valid && at < end; at += 1)
+    for (uint32_t at = r + (valid ? row->record_count + viewed : 0); valid && at < end; at += 1)
     {
         valid = tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
     }
