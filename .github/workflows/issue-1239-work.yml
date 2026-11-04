@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Temporary branch-only workspace for the user-directed #1239 implementation.
+name: Issue 1239 workspace
+on:
+  push:
+    branches: [fix/1239-fp-contract]
+    paths: [.github/workflows/issue-1239-work.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive tracked source for inspection
+        run: git archive --format=tar.gz -o "$RUNNER_TEMP/issue-1239-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1239-source
+          path: ${{ runner.temp }}/issue-1239-source.tar.gz
+          retention-days: 1
