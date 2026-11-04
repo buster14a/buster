@@ -923,6 +923,47 @@ each, and Tier 1's selection tests keep a load from folding past a fence of any
 order, an atomic load or a read/modify/write, and an atomic load from folding at
 all.
 
+**Paired measurements** (#1059). `--helper-forms=LIST` gives every operation
+of the listed families (`fence`, `atomic-access`, `atomic-rmw`, `asm`, or
+`all`) its helper's call where it has a direct form
+(`CheckProgramOptions.helper_forms`, read by the `check_program_direct_*`
+predicates the planner and the lowering ask alike, and by the asm planner): the
+code the compiler made before #1059, of the same compiler, for paired runs. An
+implicit `_Atomic` object's accesses have no helper to take and stay the typed
+stream's. `measure-helpers` (`helpers_measure.c`) builds each program four
+ways, by Tier 0 and by `--tier1`, each as it lowers it and with
+`--helper-forms=all`. Its programs are the primitives' kernels, single-threaded
+loops of a concurrent program's operations (reference counts by `lock xadd`, an
+uncontended spin lock's acquire exchange and release store, a sequence lock's
+acquire and release accesses and fences, flags by `fetch_or`, `fetch_and` and
+`xor_fetch`, a running maximum by a weak compare-exchange, and inline asm's
+`bswap`, `roll` and `leaq`), and speedtest1, whose SQLite's relaxed
+`AtomicLoad` and `AtomicStore` (38 of them, its VDBE loop's interrupt test among
+them) are its direct forms. For each object it reports the families' direct
+forms and helper calls, its executable bytes, and Tier 1's spill and call stores
+and loads (the save and reload traffic: Tier 0 saves the values live across
+every call); every build's output must be the first's; then it times each
+source's `-c` compile and each program's run in rotating rounds, as
+`measure-tier1-programs` times its programs. The 9700X job runs it where the
+direct forms' admission, the helpers' planning or the measurement changes (the
+`helpers` gate), and on the daily and dispatched runs.
+
+On this session's 4-CPU cloud container (indicative; the 9700X's are the
+record), 3 rounds: the helpers' builds of the primitives make 25 helper calls
+where the direct ones make none (Tier 1's: 4, the asm statements', which keep
+their helpers under `--tier1`), 2,947 executable bytes where Tier 0's direct
+ones take 2,275, and Tier 1's 27 call stores and loads each where its direct
+code has 5. A helper strengthens every order to `seq_cst`, so that the runs
+measure that as much as the call: the sequence lock's helpers took 20.8 times
+its direct forms' time by Tier 0 (a release or acquire fence is no instruction,
+its helper an `mfence`), the spin lock's 3.5 times (its release store a plain
+`mov`, its helper an `xchg`), the reference counts' 1.40 times, the asm
+statements' 1.72, the maximum's 1.15, and the flags' compare-exchange loops
+0.98: those loops are no faster than their helpers' here. What they save is the
+call and its leaf (the executable bytes' column), and the IR sees their
+compare-exchanges as `rmw` operations rather than calls; whether that justifies
+them is the 9700X's record's question.
+
 **Pending** (#1059): C's volatile accesses carried to the IR as such
 ([the IR's guide](ir.md)'s "Effects through the consumers"), asm statements of
 fixed registers, labels, the x87's operands or flag outputs in their callers

@@ -371,6 +371,13 @@ static __attribute__((unused)) CheckProgramHelperPhysical check_program_helper_p
 // with BUSTER_TYPED_FENCE_SIGNAL for a signal fence), or UINT32_MAX for one its helper takes (a dynamic or out-of-range
 // order, which the helper strengthens to seq_cst where clang emits a switch or nothing, or a scoped family's, whose scope
 // it evaluates) and for any other node. The planner and the lowering ask it alike.
+// Whether family `family`'s operations take their helpers where they have a direct form (CheckProgram.helper_forms: the C
+// driver's --helper-forms, #1059's paired measurements).
+static bool check_program_helper_forced(const CheckProgram* program, CheckProgramHelperFamily family)
+{
+    return (program->helper_forms >> family & 1u) != 0;
+}
+
 static uint32_t check_program_direct_fence(const CheckProgram* program, uint32_t node, const CheckBuiltinAtomicEffect* effect)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -380,7 +387,8 @@ static uint32_t check_program_direct_fence(const CheckProgram* program, uint32_t
                        id == CBUILTIN_C11_ATOMIC_SIGNAL_FENCE;
     const uint32_t arguments = graph->argument_counts != NULL ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
     uint32_t value = UINT32_MAX;
-    if (effect != NULL && effect->node == node && effect->unsupported == 0 && ((synchronize && arguments == 0) || (fence && arguments == 1)) &&
+    if (!check_program_helper_forced(program, CHECK_PROGRAM_HELPER_FENCE) && effect != NULL && effect->node == node && effect->unsupported == 0 &&
+        ((synchronize && arguments == 0) || (fence && arguments == 1)) &&
         (effect->known_orders & BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER) != 0 && effect->success_order <= BUSTER_TYPED_FENCE_SEQ_CST &&
         effect->fence_scope != CHECK_BUILTIN_ATOMIC_FENCE_NONE)
     {
@@ -415,7 +423,7 @@ static uint32_t check_program_direct_access(const CheckProgram* program, uint32_
     const bool aligned = matched && effect->alignment_known && effect->minimum_alignment >= size;
     const uint32_t orders = load ? 0x27u : 0x29u;
     uint32_t value = UINT32_MAX;
-    if (matched && sized && aligned && effect->unsupported == 0 && !effect->rmw &&
+    if (!check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ATOMIC_ACCESS) && matched && sized && aligned && effect->unsupported == 0 && !effect->rmw &&
         (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER) &&
         (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)) &&
         (effect->known_orders & BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER) != 0 && effect->success_order <= BUSTER_TYPED_FENCE_SEQ_CST &&
@@ -460,7 +468,8 @@ static uint32_t check_program_direct_rmw(const CheckProgram* program, uint32_t n
     // every fixed argument evaluated; any other its planner refuses.
     const bool shaped = rule != NULL && effect->rmw && arguments == rule->fixed_count && rule->fixed_count < 32 &&
                         effect->evaluated_operands == (UINT32_C(1) << rule->fixed_count) - 1;
-    if ((exchange || add) && shaped && typed && sized && effect->alignment_known && effect->minimum_alignment >= size && effect->unsupported == 0 && known &&
+    if (!check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ATOMIC_RMW) && (exchange || add) && shaped && typed && sized && effect->alignment_known &&
+        effect->minimum_alignment >= size && effect->unsupported == 0 && known &&
         (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)))
     {
         const uint32_t order = rule->legacy ? BUSTER_CHECK_NONE : graph->argument_nodes[graph->argument_offsets[node] + arguments - 1];
@@ -500,7 +509,8 @@ static uint32_t check_program_direct_cas(const CheckProgram* program, uint32_t n
     // Its effect's shape is its rule's, every fixed argument evaluated, as a direct read/modify/write's.
     const bool shaped = compare && effect->rmw && arguments == fixed && fixed < 32 && effect->evaluated_operands == (UINT32_C(1) << fixed) - 1;
     uint32_t value = UINT32_MAX;
-    if (shaped && typed && sized && ordered && effect->alignment_known && effect->minimum_alignment >= size && effect->unsupported == 0 &&
+    if (!check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ATOMIC_RMW) && shaped && typed && sized && ordered && effect->alignment_known &&
+        effect->minimum_alignment >= size && effect->unsupported == 0 &&
         (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)))
     {
         // The arguments past its desired value, GNU's weak flag and the orders, which no code reads.
@@ -547,7 +557,8 @@ static uint32_t check_program_direct_fetch(const CheckProgram* program, uint32_t
     const bool shaped = rule != NULL && effect->rmw && arguments == rule->fixed_count && rule->fixed_count < 32 &&
                         effect->evaluated_operands == (UINT32_C(1) << rule->fixed_count) - 1;
     uint32_t value = UINT32_MAX;
-    if ((bitwise || other) && shaped && typed && sized && effect->alignment_known && effect->minimum_alignment >= size && effect->unsupported == 0 && known &&
+    if (!check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ATOMIC_RMW) && (bitwise || other) && shaped && typed && sized && effect->alignment_known &&
+        effect->minimum_alignment >= size && effect->unsupported == 0 && known &&
         (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)))
     {
         const uint32_t order = rule->legacy ? BUSTER_CHECK_NONE : graph->argument_nodes[graph->argument_offsets[node] + arguments - 1];

@@ -142,6 +142,11 @@ struct CheckProgramOptions
     // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
     // statement's row and calls its helper as any function's.
     bool asm_helpers;
+    // The helper families (a bit each, CheckProgramHelperFamily's) whose every operation takes its helper where it has a
+    // direct form (#1059's paired measurements: the C driver's --helper-forms, measure-helpers): the fences', the atomic
+    // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
+    // implicit _Atomic object's accesses have no helper to take, and stay the typed stream's.
+    uint32_t helper_forms;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -290,9 +295,10 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, asm_helpers and target.
+    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms and target.
     bool unselected_operands;
     bool asm_helpers;
+    uint32_t helper_forms;
     X86Target target;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
@@ -3387,7 +3393,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .asm_helpers = options.asm_helpers, .target = options.target, .token = BUSTER_CHECK_NONE,
+                               .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     if (options.return_flow_work != NULL)
     {

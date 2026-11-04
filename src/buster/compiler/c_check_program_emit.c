@@ -442,6 +442,38 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
     }
 }
 
+// --helper-forms' families (#1059's paired measurements, CheckProgramOptions.helper_forms): a comma-separated list of the
+// families that have a direct form (CheckProgramHelperContract.direct), by --helper-report's names (fence,
+// atomic-access, atomic-rmw, asm), or `all` of them, as a bit each; 0 for an empty list, an empty name, or a name of
+// another family or of none.
+static uint32_t check_helper_forms_parse(const char* text)
+{
+    uint32_t direct = 0;
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        direct |= check_program_helper_contracts[f].direct != NULL ? 1u << f : 0;
+    }
+    uint32_t forms = 0;
+    bool valid = text[0] != 0;
+    const char* at = text;
+    while (valid && *at != 0)
+    {
+        const size_t length = strcspn(at, ",");
+        uint32_t found = length == 3 && memcmp(at, "all", 3) == 0 ? direct : 0;
+        for (uint32_t f = 0; found == 0 && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+        {
+            const char* name = check_program_helper_contracts[f].name;
+            found = (direct >> f & 1u) != 0 && strlen(name) == length && memcmp(name, at, length) == 0 ? 1u << f : 0;
+        }
+        forms |= found;
+        // A comma takes a name after it.
+        const bool comma = at[length] == ',';
+        valid = found != 0 && (!comma || at[length + 1] != 0);
+        at += length + (comma ? 1 : 0);
+    }
+    return valid ? forms : 0;
+}
+
 // --helper-report's lines on `stream`: the totals, then a line per family.
 static void check_helper_print_report(FILE* stream, const CheckHelperReport* report)
 {
@@ -549,6 +581,8 @@ struct CheckProgramLanes
     FILE* tier1_refusals;
     // Every emission's plan of its helpers' operations, summed (#1059, --helper-report).
     CheckHelperReport helper_report;
+    // --helper-forms' families (CheckProgramOptions.helper_forms): each one's operations take their helpers.
+    uint32_t helper_forms;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 

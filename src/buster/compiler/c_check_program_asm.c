@@ -2175,6 +2175,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         }
     }
     else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers &&
+             !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              check_asm_row(program, s, places, constraints, index, scalar, &row, &valid, output, scratch))
     {
         // Placed in its caller (#1059): the row, and no helper. The helper's assembly is dropped.

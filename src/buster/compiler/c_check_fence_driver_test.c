@@ -636,7 +636,7 @@ static void check_test_driver_asm_unwind(CheckTest* test, const char* executable
 // which keeps its helper. Its `direct` columns are the lowered code's direct forms (four accesses, two read/modify/writes,
 // one fence: a seq_cst store's own isn't one; the placed statement's X86 entry), its `helper` columns its call sites of
 // each family's helpers, every call in the object (rdtsc's statement's), and `planned` the signatures (that statement's
-// helper alone: neither read/modify/write takes a leaf). By both paths.
+// helper alone: neither read/modify/write takes a leaf). By both paths, and by --helper-forms.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "_Atomic int a;\n"
@@ -654,13 +654,34 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));\n"
                                   "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE) + (int)((lo ^ hi) & 1);\n"
                                   "}\n";
-    static const char* const lines[] = {
-        "helpers\tunits=1\trefused=0\tdirect=8\thelper=1\tplanned=1\n",
-        "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
-        "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
-        "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
-        "helpers.asm\tdirect=1\thelper=1\tplanned=1\n",
-        "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+    // By --helper-forms too (#1059's paired measurements): every family's direct forms take their helpers but the
+    // implicit _Atomic object's (its store, load and update, which have none), and two families' alone.
+    static const char* const options[3] = { NULL, "--helper-forms=all", "--helper-forms=atomic-rmw,asm" };
+    static const char* const lines[3][6] = {
+        {
+            "helpers\tunits=1\trefused=0\tdirect=8\thelper=1\tplanned=1\n",
+            "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+            "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
+            "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+            "helpers.asm\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
+        {
+            "helpers\tunits=1\trefused=0\tdirect=3\thelper=6\tplanned=6\n",
+            "helpers.atomic-access\tdirect=2\thelper=2\tplanned=2\n",
+            "helpers.atomic-rmw\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.fence\tdirect=0\thelper=1\tplanned=1\n",
+            "helpers.asm\tdirect=0\thelper=2\tplanned=2\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
+        {
+            "helpers\tunits=1\trefused=0\tdirect=6\thelper=3\tplanned=3\n",
+            "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+            "helpers.atomic-rmw\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+            "helpers.asm\tdirect=0\thelper=2\tplanned=2\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
     };
     char source[512];
     char object[512];
@@ -668,24 +689,56 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
     snprintf(object, sizeof(object), "%s/helper-report.o", directory);
     const bool written = parse_test_write(source, program, sizeof(program) - 1);
     check_test_expect(test, written, "helper report: the source is written");
-    for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+    for (uint32_t run = 0; written && run < 6; run += 1)
     {
-        char* vector_arguments[] = { (char*)executable, "--helper-report", "-c", "-o", object, source, NULL };
-        char* scalar_arguments[] = { (char*)executable, "--scalar", "--helper-report", "-c", "-o", object, source, NULL };
-        char* text = NULL;
-        const int status = check_test_driver_spawn(scalar != 0 ? scalar_arguments : vector_arguments, &text);
-        bool reported = status == 0 && text != NULL;
-        for (uint32_t l = 0; reported && l < BUSTER_ARRAY_LENGTH(lines); l += 1)
+        const bool scalar = run % 2 != 0;
+        const uint32_t variant = run / 2;
+        char* arguments[8] = { (char*)executable };
+        uint32_t count = 1;
+        if (scalar)
         {
-            reported = strstr(text, lines[l]) != NULL;
+            arguments[count++] = "--scalar";
+        }
+        if (options[variant] != NULL)
+        {
+            arguments[count++] = (char*)options[variant];
+        }
+        arguments[count++] = "--helper-report";
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = object;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        bool reported = status == 0 && text != NULL;
+        for (uint32_t l = 0; reported && l < 6; l += 1)
+        {
+            reported = strstr(text, lines[variant][l]) != NULL;
         }
         if (!reported && text != NULL)
         {
             fprintf(stderr, "%s", text);
         }
         free(text);
-        check_test_expect(test, reported, scalar != 0 ? "helper report (scalar path): every direct form and helper call counted, an implicit update's and two asm statements' among them"
-                                                      : "helper report (vector path): every direct form and helper call counted, an implicit update's and two asm statements' among them");
+        char message[256];
+        snprintf(message, sizeof(message), "helper report (%s path%s%s): every direct form and helper call counted, an implicit update's and two asm statements' among them",
+                 scalar ? "scalar" : "vector", options[variant] != NULL ? ", " : "", options[variant] != NULL ? options[variant] : "");
+        check_test_expect(test, reported, message);
+        unlink(object);
+    }
+    // A family of no direct form, an unknown name and an empty one are refused by name, before any output.
+    static const char* const refused[3] = { "--helper-forms=math", "--helper-forms=fences", "--helper-forms=fence," };
+    for (uint32_t r = 0; written && r < 3; r += 1)
+    {
+        char* arguments[] = { (char*)executable, (char*)refused[r], "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        const bool named = status != 0 && text != NULL && strstr(text, "error: --helper-forms= takes") != NULL && access(object, F_OK) != 0;
+        free(text);
+        char message[256];
+        snprintf(message, sizeof(message), "helper report: %s refused by name, before any output", refused[r]);
+        check_test_expect(test, named, message);
         unlink(object);
     }
     unlink(source);
