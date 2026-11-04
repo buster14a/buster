@@ -64,8 +64,9 @@
 //     them as they were: wholly (status-change times, link counts and the directory's times too) where the take
 //     changed nothing, else their bytes, sizes, modes, modification times and inodes; of two steps failing, exactly
 //     those whose second is a restoration's failing the run without its tool; and another process's file made, put
-//     over one of the take's or removed between its preparation and its replay (oracle_replay_between), which the
-//     take neither truncates nor removes;
+//     over one of the take's, written in place or removed, between its preparation and its replay
+//     (oracle_replay_between) and as it puts back what it changed (oracle_replay_restoring), which the take neither
+//     writes over nor removes;
 //   - listings (the test's program's getdents64, as ls -i lists): a file made anew with the same name and bytes, its
 //     inode another, run again;
 //   - changes (the test's program's mkdir and traced sh's rmdir): mkdir's path, which the run made, there the next
@@ -2175,31 +2176,58 @@ static bool oracle_test_replay_run(OracleTest* test, OracleCache* cache, const c
     return replay->went;
 }
 
-// What another process does between a take's preparation and its replay (oracle_replay_between), by
-// oracle_test_replay_change: 1 makes the file the take would make, 2 and 3 put a file of their own over the counter and
-// over the file the take would remove, 4 removes that file, and 5 makes it where it wasn't; the inode of the file they
-// put into oracle_test_replay_inode.
+// Another process's changes to the replay test's files at a take's boundaries, by oracle_test_replay_change. Between
+// the take's preparation and its replay (oracle_replay_between): 1 makes the file the take would make, 2 and 3 put a
+// file of their own over the counter and over the file the take would remove, 4 removes that file, 5 makes it where it
+// wasn't, and 6 writes the counter in place. As the take puts back what its replay changed (oracle_replay_restoring,
+// with the files in the order the run declares them, oracle_test_replay_run): 7 writes the counter in place before its
+// restoration, 8 puts a file of its own over the file the replay made before its restoration, and 9 makes one where
+// that was, between the check of the file the take moved aside and its removal.
 static const char* oracle_test_replay_place;
 static uint32_t oracle_test_replay_change;
 static ino_t oracle_test_replay_inode;
 
-static void oracle_test_replay_other(void)
+// `text` into the replay test's file `name`: in place, or as a file of its own put over it (or where there is none); the
+// inode of the file there after into oracle_test_replay_inode.
+static void oracle_test_replay_put(const char* name, const char* text, bool in_place)
 {
-    static const char* const names[] = { "", "replay-made", "replay-counter", "replay-gone", "replay-gone", "replay-gone" };
-    static const char* const texts[] = { "", "theirs\n", "9\n", "new\n", "", "new\n" };
-    const uint32_t change = oracle_test_replay_change;
     char path[BUSTER_ORACLE_PATH_BYTES + 32];
     char fresh[BUSTER_ORACLE_PATH_BYTES + 48];
-    snprintf(path, sizeof(path), "%s/%s", oracle_test_replay_place, names[change]);
+    snprintf(path, sizeof(path), "%s/%s", oracle_test_replay_place, name);
     snprintf(fresh, sizeof(fresh), "%s.fresh", path);
+    const bool put = in_place ? oracle_test_write(path, text, strlen(text)) : oracle_test_write(fresh, text, strlen(text)) && rename(fresh, path) == 0;
     struct stat status;
-    if (change == 4)
-    {
-        unlink(path);
-    }
-    else if (oracle_test_write(fresh, texts[change], strlen(texts[change])) && rename(fresh, path) == 0 && lstat(path, &status) == 0)
+    if (put && lstat(path, &status) == 0)
     {
         oracle_test_replay_inode = status.st_ino;
+    }
+}
+
+static void oracle_test_replay_other(void)
+{
+    static const char* const names[] = { "", "replay-made", "replay-counter", "replay-gone", "replay-gone", "replay-gone", "replay-counter" };
+    static const char* const texts[] = { "", "theirs\n", "9\n", "new\n", "", "new\n", "9\n" };
+    const uint32_t change = oracle_test_replay_change;
+    if (change == 4)
+    {
+        oracle_test_unlink(oracle_test_replay_place, "replay-gone");
+    }
+    else if (change >= 1 && change <= 6)
+    {
+        oracle_test_replay_put(names[change], texts[change], change == 6);
+    }
+}
+
+static void oracle_test_replay_restoring(uint32_t file, bool removing)
+{
+    const uint32_t change = oracle_test_replay_change;
+    if (change == 7 && file == 1 && !removing)
+    {
+        oracle_test_replay_put("replay-counter", "9\n", true);
+    }
+    else if ((change == 8 && file == 2 && !removing) || (change == 9 && file == 2 && removing))
+    {
+        oracle_test_replay_put("replay-made", "theirs\n", false);
     }
 }
 
@@ -2209,8 +2237,9 @@ static void oracle_test_replay_other(void)
 // (their status-change times, link counts and directory's times too) where the take changed nothing, and as the cache
 // has a tool's result depend on (bytes, sizes, modes with their set-user and set-group bits, modification times and
 // inodes) where it changed them and put them back, adding one to 1. Of two steps failing, exactly those whose second is
-// a restoration's fail the run without its tool. And another process's file made, put over one of the take's or removed
-// between its preparation and its replay is never truncated or removed by the take.
+// a restoration's fail the run without its tool. And another process's file made, put over one of the take's, written in
+// place or removed, between its preparation and its replay or as it puts back what it changed (at the check of a file
+// it made and its removal among them), is never written over or removed by the take.
 static void oracle_test_replays(OracleTest* test)
 {
     OracleCache cache;
@@ -2260,9 +2289,10 @@ static void oracle_test_replays(OracleTest* test)
         }
     }
     oracle_test_expect(test, exact && refusals == 6, "replays: exactly the takes whose restorations fail refuse, their tool not run");
-    // Another process's changes between the take's preparation and its replay.
+    // Another process's changes between the take's preparation and its replay, and as it puts back what it changed.
     oracle_test_replay_place = directory;
     oracle_replay_between = oracle_test_replay_other;
+    oracle_replay_restoring = oracle_test_replay_restoring;
     bool other = true;
     struct stat status;
     uint64_t length = 0;
@@ -2289,9 +2319,33 @@ static void oracle_test_replays(OracleTest* test)
     oracle_test_replay_change = 5;
     other &= oracle_test_replay_reset(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
              strncmp(replay.output, "1\nnew\n", 6) == 0 && oracle_test_replay_after(directory);
+    // The counter written in place (the same inode and size): not rewritten, the tool counts from it.
+    oracle_test_replay_change = 6;
+    other &= oracle_test_replay_reset(directory, true) && lstat(counter, &before) == 0 && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken &&
+             replay.ran;
+    count = oracle_test_read(counter, &length);
+    other &= count != 0 && strcmp(count, "10\n") == 0 && lstat(counter, &status) == 0 && status.st_ino == before.st_ino;
+    free(count);
+    // The counter written in place after the replay rewrote it, before its restoration (the replay's last step failing):
+    // not written over, so that the run fails without its tool.
+    oracle_test_replay_change = 7;
+    other &= oracle_test_replay_reset(directory, true) && !oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && !replay.ran;
+    count = oracle_test_read(counter, &length);
+    other &= count != 0 && strcmp(count, "9\n") == 0;
+    free(count);
+    // A file of another process's over the one the replay made, before its restoration: moved aside, found not to be
+    // it, and moved back; and one made where that was, between the check of the file moved aside and its removal, left.
+    // The tool writes into each.
+    for (uint32_t change = 8; change <= 9; change += 1)
+    {
+        oracle_test_replay_change = change;
+        other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && replay.ran &&
+                 oracle_test_replay_after(directory) && lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode && oracle_test_replay_kept(directory, false) == 0;
+    }
     oracle_replay_between = 0;
+    oracle_replay_restoring = 0;
     oracle_test_replay_change = 0;
-    oracle_test_expect(test, other, "replays: another process's file made, put over the take's or removed before its replay, neither truncated nor removed by it");
+    oracle_test_expect(test, other, "replays: another process's file made, put over the take's, written in place or removed, neither written over nor removed by the take");
     oracle_test_replay_kept(directory, true);
     oracle_test_unlink(directory, "replay-counter");
     oracle_test_unlink(directory, "replay-made");
