@@ -16,6 +16,39 @@ struct CheckCommonNote
 
 static uint32_t check_common_address_root(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node, bool members);
 
+// A test's hook, in every build, as BUSTER_TEST_LANE_FAIL_AT is: the common warnings' scratch allocation of
+// this index, counted from 0 across one unit's passes, fails as an exhausted arena would, so a test reaches
+// every failure path (UINT32_MAX for none). check_driver_common_warnings reads it once per unit; a lane
+// checks its own units, so the count is the thread's.
+typedef struct CheckCommonResources CheckCommonResources;
+struct CheckCommonResources
+{
+    uint32_t fail_at;
+    uint32_t pushes;
+};
+static _Thread_local CheckCommonResources check_common_resources = { .fail_at = UINT32_MAX };
+
+static void* check_common_push_array(Arena* scratch, uint64_t count, uint64_t element_bytes, uint64_t alignment)
+{
+    const bool failing = check_common_resources.pushes == check_common_resources.fail_at;
+    check_common_resources.pushes += check_common_resources.pushes != UINT32_MAX;
+    void* result = failing ? NULL : arena_push_array(scratch, count, element_bytes, alignment);
+    return result;
+}
+#define CHECK_COMMON_PUSH_ARRAY(arena, Type, count) ((Type*)check_common_push_array((arena), (count), sizeof(Type), _Alignof(Type)))
+
+// A pass's scratch allocation failed: a fatal error that counts as one, so the unit fails instead of
+// silently publishing fewer warnings. Diagnostic collection keeps it, and its replay reports it again,
+// where a bare `pp->fatal` would be cleared at publication. The first failure alone is reported.
+static void check_common_exhausted(Preprocessor* pp)
+{
+    if (!pp->fatal)
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "common warning capacity exhausted");
+    }
+    pp->fatal = true;
+}
+
 // A sparse token column's entry, or BUSTER_CHECK_NONE where the input left the column absent.
 static uint32_t check_common_sparse_get(CheckSparseColumn column, uint32_t token)
 {
@@ -652,7 +685,7 @@ static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node,
     }
     else
     {
-        emission->pp->fatal = true;
+        check_common_exhausted(emission->pp);
     }
 }
 
@@ -1540,7 +1573,11 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
 
 static void check_common_dangling_else(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
 {
-    uint8_t* else_at = parser->tokens.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, parser->tokens.count) : NULL;
+    uint8_t* else_at = parser->tokens.count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, parser->tokens.count) : NULL;
+    if (parser->tokens.count != 0 && else_at == NULL)
+    {
+        check_common_exhausted(pp);
+    }
     if (parser->tokens.count == 0 || else_at == NULL)
     {
         return;
@@ -1689,10 +1726,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     // Each node's parent in the graph, for a subscript's use context: an `&a[i]` spine relaxes the bound to
     // allow one past the end, an explicit `(void)` cast discards the lvalue unchecked, and any other operand
     // inside an address-of's subtree — a nested index — is unchecked as well.
-    uint32_t* parents = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
+    uint32_t* parents = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
     if (graph->count != 0 && (evaluated == NULL || parents == NULL))
     {
-        pp->fatal = true;
+        check_common_exhausted(pp);
     }
     if (parents != NULL)
     {
@@ -1720,11 +1757,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             }
         }
     }
-    uint8_t* emitted = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* arm_effects = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* emitted = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* arm_effects = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     if (graph->count != 0 && (emitted == NULL || arm_effects == NULL))
     {
-        pp->fatal = true;
+        check_common_exhausted(pp);
     }
     if (arm_effects != NULL)
     {
@@ -1736,11 +1773,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     // The emission worklist: a subtree's frames never outlive the pushes its nodes and edges already made,
     // so eight entries per node cover every walk with room to spare.
     const uint32_t work_capacity = graph->count * 8 + 16;
-    uint32_t* work_nodes = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, work_capacity) : NULL;
-    uint8_t* work_kinds = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, work_capacity) : NULL;
+    uint32_t* work_nodes = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, work_capacity) : NULL;
+    uint8_t* work_kinds = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, work_capacity) : NULL;
     if (graph->count != 0 && (work_nodes == NULL || work_kinds == NULL))
     {
-        pp->fatal = true;
+        check_common_exhausted(pp);
     }
     if (emitted != NULL)
     {
@@ -1896,7 +1933,15 @@ static bool check_common_format_attribute(const Parser* parser, Preprocessor* pp
             // The archetype names the checking family: only printf-family semantics belong in this
             // scanner, so `format(scanf, ...)` calls stay unchecked rather than failing printf rules.
             const uint32_t archetype = parser->tokens.names[attribute->argument_first];
-            const String8 name = { .pointer = (char*)intern_bytes(pp->table, archetype), .length = intern_length(pp->table, archetype) };
+            String8 name = { .pointer = (char*)intern_bytes(pp->table, archetype), .length = intern_length(pp->table, archetype) };
+            // `__printf__` names the same archetype: strip the reserved spelling as the attribute
+            // checker does before it accepts the name.
+            if (name.length >= 4 && name.pointer[0] == '_' && name.pointer[1] == '_' && name.pointer[name.length - 1] == '_' &&
+                name.pointer[name.length - 2] == '_')
+            {
+                name.pointer += 2;
+                name.length -= 4;
+            }
             const bool printf_family = (name.length == 6 && memcmp(name.pointer, "printf", 6) == 0) ||
                                        (name.length == 10 && memcmp(name.pointer, "gnu_printf", 10) == 0) ||
                                        (name.length == 9 && memcmp(name.pointer, "ms_printf", 9) == 0);
@@ -2196,10 +2241,10 @@ static void check_common_format_leaf_push(Preprocessor* pp, const CheckGraph* gr
         if (*leaf_count == *leaf_capacity)
         {
             const uint32_t grown = *leaf_capacity * 2;
-            uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, grown);
+            uint32_t* next = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, grown);
             if (next == NULL)
             {
-                pp->fatal = true;
+                check_common_exhausted(pp);
             }
             else
             {
@@ -2220,8 +2265,10 @@ static void check_common_format_leaf_push(Preprocessor* pp, const CheckGraph* gr
 // integer constant through the same casts the spine passes, only that arm is checked.
 static bool check_common_format_condition(const CheckGraph* graph, const CheckStream* stream, uint32_t node, bool* taken)
 {
+    // The outermost folded node holds the converted value: `(unsigned char)256` is zero, not 256, so
+    // the walk stops at the first constant rather than stripping casts down to the literal.
     uint32_t condition = graph->operand0[node];
-    for (uint32_t steps = 0; steps < graph->count && condition < graph->count; steps += 1)
+    for (uint32_t steps = 0; steps < graph->count && condition < graph->count && !check_common_integer_constant(stream, condition); steps += 1)
     {
         const CheckOp condition_op = graph->ops[condition];
         if (condition_op != CHECK_OP_CONVERT && condition_op != CHECK_OP_POSITIVE && condition_op != CHECK_OP_CAST)
@@ -2284,10 +2331,10 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             // a compile-time constant. Whatever else pops is a leaf; the first leaf that is not a
             // string literal ends the walk, like SLCT_NotALiteral's early return.
             uint32_t leaf_capacity = 16;
-            uint32_t* leaf_nodes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, leaf_capacity);
+            uint32_t* leaf_nodes = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, leaf_capacity);
             if (leaf_nodes == NULL)
             {
-                pp->fatal = true;
+                check_common_exhausted(pp);
             }
             uint32_t leaf_count = 0;
             if (leaf_nodes != NULL && format_node < graph->count)
@@ -2299,10 +2346,10 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             // or needing — every argument suppresses it for the rest, like clang's
             // UncoveredArgHandler. Specifier, insufficiency and type diagnostics stay per literal.
             const uint32_t data_count = args_checked ? count - first_argument : 0;
-            uint8_t* covered = data_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, data_count) : NULL;
+            uint8_t* covered = data_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, data_count) : NULL;
             if (data_count != 0 && covered == NULL)
             {
-                pp->fatal = true;
+                check_common_exhausted(pp);
             }
             uint32_t order = 0;
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
@@ -2574,7 +2621,11 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const char* message = check_warning_text(scratch, "invalid conversion specifier '%s'", spelling);
                         check_common_format_report_offset(parser, pp, input, format_token, at, &order, CHECK_WARNING_ID_FORMAT_INVALID_SPECIFIER,
                                                           message, scratch);
-                        if (cover >= data_count)
+                        // A va_list callee's data start at index 0 for clang, so the whole call's argument
+                        // count bounds the index: every plain `%Q` keeps scanning, and so does a `%N$Q`
+                        // whose N names an argument of the call — `render("%3$Q %Q", ap)` stops at the first.
+                        const uint32_t invalid_bound = args_checked ? data_count : count;
+                        if (cover >= invalid_bound)
                         {
                             break;
                         }
@@ -3027,7 +3078,7 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         // range endpoints and the "not in enumerated type" check all compare in that ordered space, and a
         // label it could not evaluate was diagnosed there already.
         const uint32_t case_bound = body_end > body ? body_end - body : 0;
-        uint32_t* found = case_bound != 0 && program != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, case_bound) : NULL;
+        uint32_t* found = case_bound != 0 && program != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, case_bound) : NULL;
         uint32_t found_count = 0;
         if (found != NULL)
         {
@@ -3041,6 +3092,7 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         }
         else if (program != NULL && program->case_count != 0 && case_bound != 0)
         {
+            check_common_exhausted(pp);
             unknown_case = true;
         }
         // A case or default keyword without a resolved entry keeps the report silent, as before.
@@ -3094,9 +3146,13 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         }
         bool values_known = enum_open != BUSTER_CHECK_NONE && enum_close != BUSTER_CHECK_NONE;
         const uint32_t enum_bound = enum_close > enum_open ? enum_close - enum_open : 0;
-        uint32_t* all_names = values_known && enum_bound != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, enum_bound) : NULL;
-        unsigned __int128* all_keys = values_known && enum_bound != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, unsigned __int128, enum_bound) : NULL;
-        unsigned __int128* all_case_keys = values_known && enum_bound != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, unsigned __int128, enum_bound) : NULL;
+        uint32_t* all_names = values_known && enum_bound != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_bound) : NULL;
+        unsigned __int128* all_keys = values_known && enum_bound != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, unsigned __int128, enum_bound) : NULL;
+        unsigned __int128* all_case_keys = values_known && enum_bound != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, unsigned __int128, enum_bound) : NULL;
+        if (values_known && enum_bound != 0 && (all_names == NULL || all_keys == NULL || all_case_keys == NULL))
+        {
+            check_common_exhausted(pp);
+        }
         values_known = values_known && all_names != NULL && all_keys != NULL && all_case_keys != NULL;
         uint32_t enum_count = 0;
         for (uint32_t at = enum_open + 1; values_known && at < enum_close && at < count; at += 1)
@@ -3139,9 +3195,13 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         // An inverted range warns at its own label and covers nothing. The other labels join the value-sorted
         // pass clang runs at the switch's end — plain cases before ranges, each ordered by its lower value —
         // where each endpoint that names no enumerator warns before the missing list.
-        uint32_t* intervals = values_known && found_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, found_count) : NULL;
-        uint32_t* bound_los = values_known && found_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, found_count) : NULL;
-        uint32_t* bound_his = values_known && found_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, found_count) : NULL;
+        uint32_t* intervals = values_known && found_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, found_count) : NULL;
+        uint32_t* bound_los = values_known && found_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, found_count) : NULL;
+        uint32_t* bound_his = values_known && found_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, found_count) : NULL;
+        if (values_known && found_count != 0 && (intervals == NULL || bound_los == NULL || bound_his == NULL))
+        {
+            check_common_exhausted(pp);
+        }
         values_known = values_known && (found_count == 0 || (intervals != NULL && bound_los != NULL && bound_his != NULL));
         uint32_t interval_count = 0;
         for (uint32_t f = 0; values_known && !unknown_case && f < found_count; f += 1)
@@ -3235,8 +3295,12 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         }
         if (!has_default && !unknown_case && values_known && enum_count != 0)
         {
-            uint32_t* missing = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, enum_count);
-            unsigned __int128* missing_values = missing != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, unsigned __int128, enum_count) : NULL;
+            uint32_t* missing = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count);
+            unsigned __int128* missing_values = missing != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, unsigned __int128, enum_count) : NULL;
+            if (missing == NULL || missing_values == NULL)
+            {
+                check_common_exhausted(pp);
+            }
             values_known = missing != NULL && missing_values != NULL;
             uint32_t missing_count = 0;
             for (uint32_t e = 0; values_known && e < enum_count; e += 1)
@@ -3274,7 +3338,11 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                 missing[j] = name;
                 missing_values[j] = value;
             }
-            char* list = values_known && missing_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, 512) : NULL;
+            char* list = values_known && missing_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, char, 512) : NULL;
+            if (values_known && missing_count != 0 && list == NULL)
+            {
+                check_common_exhausted(pp);
+            }
             if (list != NULL)
             {
                 uint64_t length = 0;
@@ -3441,8 +3509,8 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
         {
             continue;
         }
-        uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, body->count);
-        uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, body->count);
+        uint8_t* seen = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, body->count);
+        uint32_t* queue = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, body->count);
         if (seen == NULL || queue == NULL)
         {
             valid = false;
@@ -3468,8 +3536,8 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, Arena* scratch)
 {
-    uint8_t* evaluated = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* referenced = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* evaluated = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* referenced = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     uint8_t* result = evaluated != NULL && referenced != NULL ? evaluated : NULL;
     if (evaluated != NULL && referenced != NULL)
     {
@@ -3704,17 +3772,17 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
 {
     const uint32_t count = input->token_count;
     const CheckGraph* graph = &input->graph;
-    uint32_t* first_write = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
-    uint8_t* addressed = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    uint8_t* written = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    uint32_t* first_read = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
-    uint32_t* first_use_read = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
-    uint8_t* nonread = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* self_read = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* target = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* used_value = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    uint8_t* parameters = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    uint8_t* statement_write = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint32_t* first_write = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    uint8_t* addressed = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint8_t* written = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint32_t* first_read = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    uint32_t* first_use_read = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    uint8_t* nonread = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* self_read = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* target = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* used_value = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* parameters = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint8_t* statement_write = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, program, scratch);
     bool valid = count == 0 || (first_write != NULL && addressed != NULL && written != NULL && first_read != NULL && first_use_read != NULL &&
                                 parameters != NULL && statement_write != NULL &&
@@ -3723,7 +3791,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     {
         // An empty token stream legitimately leaves every column null; anything else is a scratch
         // allocation failure, which the driver treats as a fatal resource error rather than silence.
-        pp->fatal = true;
+        check_common_exhausted(pp);
     }
     if (valid && count != 0)
     {
@@ -4166,6 +4234,9 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         return;
     }
+    const char* fail_at = getenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
+    check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
+    check_common_resources.pushes = 0;
     CheckWarningSpelling spell = { 0 };
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);

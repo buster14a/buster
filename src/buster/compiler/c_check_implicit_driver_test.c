@@ -282,12 +282,17 @@ static bool check_test_driver_common_contains(const char* text, size_t length, c
 }
 
 // The diagnostics of #823's common warnings, line for line against Clang's, with the group and -Werror policy.
-static void check_test_driver_common_output(const char* text, char* filtered, size_t capacity)
+// Whether every diagnostic line fit: a cut line or a dropped one could hide a difference, so a filter that ran
+// out of room fails the comparison rather than comparing the shared prefix.
+static bool check_test_driver_common_output(const char* text, char* filtered, size_t capacity)
 {
     size_t used = 0;
-    filtered[0] = 0;
-    // A copied line needs room for its newline and the terminator, so two slots must stay free.
-    for (const char* at = text; at != NULL && *at != 0 && used + 2 < capacity;)
+    bool complete = capacity != 0;
+    if (complete)
+    {
+        filtered[0] = 0;
+    }
+    for (const char* at = text; complete && at != NULL && *at != 0;)
     {
         const char* end = strchr(at, '\n');
         end = end != NULL ? end : at + strlen(at);
@@ -295,16 +300,68 @@ static void check_test_driver_common_output(const char* text, char* filtered, si
         const bool diagnostic = check_test_driver_common_contains(at, length, ": warning: ") ||
                                 check_test_driver_common_contains(at, length, ": error: ") ||
                                 check_test_driver_common_contains(at, length, ": note: ");
-        if (diagnostic)
+        // A copied line needs room for its newline and the terminator, so two slots must stay free.
+        complete = !diagnostic || length + 2 <= capacity - used;
+        if (diagnostic && complete)
         {
-            const size_t copied = length < capacity - used - 2 ? length : capacity - used - 2;
-            memcpy(filtered + used, at, copied);
-            used += copied;
+            memcpy(filtered + used, at, length);
+            used += length;
             filtered[used++] = '\n';
             filtered[used] = 0;
         }
         at = *end != 0 ? end + 1 : end;
     }
+    return complete;
+}
+
+// Each of the common warnings' scratch allocations, failed in turn (BUSTER_TEST_COMMON_WARNING_FAIL_AT), fails the unit
+// with the capacity's fatal error instead of exiting cleanly with fewer warnings; once the index passes every
+// allocation the unit checks as it does unconstrained. The source reaches each pass: switches, the expression
+// walk, dangling else, -Wuninitialized and a conditional format's growing leaf worklist.
+static void check_test_driver_common_exhaustion(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "int printf(const char *, ...);\n"
+        "enum E { EA, EB, EC, ED, EE };\n"
+        "int f(enum E e, int c, int d) { int u; switch (e) { case EA: return 1; } if (c) if (d) return u; else return 2;\n"
+        "    printf(c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? \"%d\""
+        " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
+        " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\", 1);\n"
+        "    return c == 0 ? 1 / 0 : (c = c); }\n";
+    char path[512];
+    snprintf(path, sizeof(path), "%s/common-warnings-exhaustion.c", directory);
+    const bool written = parse_test_write(path, source, strlen(source));
+    check_test_expect(test, written, "common warning exhaustion fixture is written");
+    for (uint32_t mode = 0; written && mode < 2; mode += 1)
+    {
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-fsyntax-only", "-Wall", path, mode == 0 ? (char*)"--scalar" : NULL, NULL };
+        char* unconstrained = NULL;
+        const int clean = check_test_driver_spawn(arguments, &unconstrained);
+        uint32_t failures = 0;
+        bool reported = true;
+        bool completed = false;
+        for (uint32_t at = 0; !completed && at < 4096; at += 1)
+        {
+            char index[16];
+            snprintf(index, sizeof(index), "%u", at);
+            char* text = NULL;
+            const int status = setenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT", index, 1) == 0 ? check_test_driver_spawn(arguments, &text) : -1;
+            const bool exhausted = text != NULL && strstr(text, "fatal error: common warning capacity exhausted") != NULL;
+            // Past the last allocation, the run is the unconstrained one: exit status and every byte of output.
+            completed = !exhausted && status == clean && text != NULL && unconstrained != NULL && strcmp(text, unconstrained) == 0;
+            reported = reported && (completed || (exhausted && status == 1));
+            failures += exhausted;
+            free(text);
+        }
+        unsetenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
+        free(unconstrained);
+        check_test_expect(test, clean == 0, mode == 0 ? "common warning exhaustion fixture checks unconstrained in the scalar path"
+                                                       : "common warning exhaustion fixture checks unconstrained in the vector path");
+        check_test_expect(test, reported && completed && failures >= 8,
+                          mode == 0 ? "every common warning scratch failure fails the unit in the scalar path"
+                                    : "every common warning scratch failure fails the unit in the vector path");
+    }
+    unlink(path);
 }
 
 static void check_test_driver_common_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -659,6 +716,51 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char boundary_return_uninit[] =
         "int f(int c) { int x; if (c) return 1; x; }\n"
         "int g(int c) { int y = 1; if (c) return y; }\n";
+    // `__printf__` is the printf archetype after the attribute checker's underscore stripping, with a
+    // well-typed control beside the mismatch.
+    static const char format_reserved_archetype[] =
+        "__attribute__((format(__printf__, 1, 2))) void report(const char *, ...);\n"
+        "__attribute__((format(__gnu_printf__, 1, 2))) void report_gnu(const char *, ...);\n"
+        "void f(void) { report(\"%d\", \"x\"); report_gnu(\"%s\", 1); report(\"%d %s\", 1, \"x\"); }\n";
+    // A va_list format keeps scanning past an invalid conversion; a positioned one stops once its index
+    // passes the call's own argument count, as clang's data arguments start at the call's first there.
+    static const char format_varargs_invalid[] =
+        "#include <stdarg.h>\n"
+        "__attribute__((format(printf, 1, 0))) void render(const char *, va_list);\n"
+        "__attribute__((format(printf, 3, 0))) void render3(int, int, const char *, va_list, int);\n"
+        "void f(va_list ap) {\n"
+        "    render(\"%Q %Q\", ap);\n"
+        "    render(\"%Q%\", ap);\n"
+        "    render(\"%2$Q %Q\", ap);\n"
+        "    render(\"%3$Q %Q\", ap);\n"
+        "    render3(1, 1, \"%5$Q %Q\", ap, 1);\n"
+        "    render3(1, 1, \"%6$Q %Q\", ap, 1);\n"
+        "}\n";
+    // Conditional formats: a constant condition selects one arm after its casts convert it, both arms check
+    // in true-first order otherwise, and a nest deeper than the leaf worklist's first capacity grows it.
+    static const char format_conditional[] =
+        "int printf(const char *, ...);\n"
+        "void f(int c, int c0) {\n"
+        "    printf((unsigned char)256 ? \"%d\" : \"%s\", \"x\");\n"
+        "    printf((unsigned char)257 ? \"%s\" : \"%d\", \"x\");\n"
+        "    printf((_Bool)256 ? \"%s\" : \"%d\", \"x\");\n"
+        "    printf((char)512 ? \"%d\" : \"%s\", \"x\");\n"
+        "    printf(c ? \"%d\" : \"%s\", \"x\");\n"
+        "    printf(c ? \"%d %d\" : \"%s\", 1);\n"
+        "    printf(c ? (c0 ? \"%s\" : \"%d\") : (const char *)\"%p\", 1);\n"
+        "    printf(1 ? \"%d\" : (c ? \"%s\" : \"%p\"), \"x\");\n"
+        "    printf("
+        "(c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? "
+        "(c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? "
+        "(c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? "
+        "(c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? (c ? "
+        "\"%d\""
+        " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
+        " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
+        " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
+        " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
+        ", 1.0);\n"
+        "}\n";
     static const struct
     {
         const char* source;
@@ -718,6 +820,9 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { enum_unary_selectors, { "-Wall", NULL, NULL, NULL } },
         { format_wide_pointer, { "-Wall", NULL, NULL, NULL } },
         { boundary_return_uninit, { "-Wall", "-Wextra", NULL, NULL } },
+        { format_reserved_archetype, { "-Wall", "-Werror", NULL, NULL } },
+        { format_varargs_invalid, { "-Wall", NULL, NULL, NULL } },
+        { format_conditional, { "-Wall", NULL, NULL, NULL } },
     };
     char source_path[512];
     snprintf(source_path, sizeof(source_path), "%s/common-warnings.c", directory);
@@ -751,12 +856,15 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
             const int result = check_test_driver_spawn(checker_arguments, &actual);
             char filtered_expected[16384];
             char filtered_actual[16384];
-            check_test_driver_common_output(expected != NULL ? expected : "", filtered_expected, sizeof(filtered_expected));
-            check_test_driver_common_output(actual != NULL ? actual : "", filtered_actual, sizeof(filtered_actual));
+            const bool fit = check_test_driver_common_output(expected != NULL ? expected : "", filtered_expected, sizeof(filtered_expected)) &&
+                             check_test_driver_common_output(actual != NULL ? actual : "", filtered_actual, sizeof(filtered_actual));
+            char fit_description[160];
+            snprintf(fit_description, sizeof(fit_description), "common warning case %u %s diagnostics fit the comparison buffer", c, mode == 0 ? "scalar" : "vector");
+            check_test_expect(test, fit, fit_description);
             const char* path = mode == 0 ? "scalar" : "vector";
             char description[160];
             snprintf(description, sizeof(description), "common warning case %u %s diagnostics agree with Clang", c, path);
-            const bool same = oracle >= 0 && result == oracle && strcmp(filtered_expected, filtered_actual) == 0;
+            const bool same = fit && oracle >= 0 && result == oracle && strcmp(filtered_expected, filtered_actual) == 0;
             check_test_expect(test, same, description);
             if (!same)
             {
@@ -788,9 +896,9 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         const int result = check_test_driver_spawn(checker_arguments, &actual);
         char filtered_expected[1024];
         char filtered_actual[1024];
-        check_test_driver_common_output(expected != NULL ? expected : "", filtered_expected, sizeof(filtered_expected));
-        check_test_driver_common_output(actual != NULL ? actual : "", filtered_actual, sizeof(filtered_actual));
-        const bool same = oracle >= 0 && result == oracle && strcmp(filtered_expected, filtered_actual) == 0;
+        const bool fit = check_test_driver_common_output(expected != NULL ? expected : "", filtered_expected, sizeof(filtered_expected)) &&
+                         check_test_driver_common_output(actual != NULL ? actual : "", filtered_actual, sizeof(filtered_actual));
+        const bool same = fit && oracle >= 0 && result == oracle && strcmp(filtered_expected, filtered_actual) == 0;
         check_test_expect(test, same, mode == 0 ? "header file-scope variables stay unused in the scalar path"
                                                 : "header file-scope variables stay unused in the vector path");
         free(actual);
@@ -798,4 +906,5 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     }
     unlink(header_path);
     unlink(source_path);
+    check_test_driver_common_exhaustion(test, executable, directory);
 }

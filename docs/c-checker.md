@@ -3541,7 +3541,21 @@ widths and precisions and their used-argument counting, C23 `%b`/`%B` (whose
 expected name is the signed class), and wide `%ls`/`%lc` (and `%S`/`%C`)
 arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal formats'
 common conversions and sizes. Its literal-internal diagnostics keep Clang's
-column and the diagnostic collector's source order.
+column and the diagnostic collector's source order. The attribute's archetype
+is compared after the attribute checker's reserved-name stripping, so
+`__printf__` and `__gnu_printf__` check as `printf`. A `va_list` callee
+(`format(printf, N, 0)`) keeps scanning past an invalid conversion, as Clang's
+data arguments then start at the call's first: a positioned `%N$Q` stops the
+scan only once N passes the call's argument count. A conditional format whose
+condition folds selects its arm by the converted value, so
+`(unsigned char)256 ? "%d" : "%s"` checks `"%s"`.
+A common-warning pass whose scratch allocation fails reports
+`fatal error: common warning capacity exhausted` and fails the unit rather
+than publishing fewer warnings; the binding's unused-name columns report theirs
+as the checker input's resource error. The test hook
+`BUSTER_TEST_COMMON_WARNING_FAIL_AT=N`, read in every build as
+`BUSTER_TEST_LANE_FAIL_AT` is, fails the unit's Nth (from 0) common-warning
+scratch allocation.
 `-Wunused-value` covers a bare identifier or literal, a parenthesized
 comparison, a cast (including a typedef of `void`), a conditional, and a comma
 expression, parenthesized or not; a comma operand with a call, assignment or
@@ -3573,8 +3587,12 @@ definitions, brace initializers and self-initialization, bare/parenthesized/
 cast/conditional/comma unused values with side-effect operands and their
 function-end order, `for` conditions and writes, positional indexing and used-
 argument counting, C23 `%b`, integer classes, unsigned `%n` pointers, exact and
-precision formats, and returned stack addresses line for line against Clang on
-both check paths. The semantics are also covered by
+precision formats, reserved-name archetypes, `va_list` invalid conversions,
+constant and nested conditional formats, and returned stack addresses line for
+line against Clang on both check paths; a filtered output that does not fit the
+comparison buffer fails its case. `check_test_driver_common_exhaustion` fails
+each common-warning scratch allocation in turn and requires the capacity error,
+then the unconstrained output once the index passes the last. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
 

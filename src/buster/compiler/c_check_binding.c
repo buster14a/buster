@@ -360,7 +360,9 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         }
         else if (used == NULL || (count != 0 && (used_tokens == NULL || parameters == NULL || reported == NULL)))
         {
-            // A nonempty stream's scratch failure is a resource error, not a quiet skip of the analysis.
+            // A nonempty stream's scratch failure is a resource error, not a quiet skip of the analysis: the
+            // caller already published its resource verdict, and check_input_run tests the flag, not this return.
+            output->resource = true;
             valid = false;
         }
     }
