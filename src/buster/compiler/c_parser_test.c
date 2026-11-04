@@ -3721,7 +3721,11 @@ typedef enum ParseTestPlace
 // checked.
 static ParseTestPlace parse_test_diagnostic_place(uint32_t declarations, bool limited)
 {
-    struct rlimit space;
+    // Zero where /proc or getrlimit fails, so that what follows reads defined values and the run reports a wrong place.
+    struct rlimit space = {
+        .rlim_cur = 0,
+        .rlim_max = 0,
+    };
     const uint64_t base = parse_test_status_bytes("VmSize:");
     bool result = base != 0 && getrlimit(RLIMIT_AS, &space) == 0;
     const uint64_t hard = space.rlim_max == RLIM_INFINITY ? UINT64_MAX : (uint64_t)space.rlim_max;
