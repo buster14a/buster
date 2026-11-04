@@ -7335,11 +7335,24 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
     const CBuiltinId id = (CBuiltinId)graph->members[node];
     const bool start = id == CBUILTIN_VA_START || id == CBUILTIN_C23_VA_START;
     const bool argument = id == CBUILTIN_VA_ARG;
-    const bool copy = id == CBUILTIN_VA_COPY;
+    const bool copy = id == CBUILTIN_VA_COPY || id == CBUILTIN_MS_VA_COPY;
     const TypeId requested = effect < stream->varargs_count ? stream->varargs[effect].requested_type : 0;
+    // A Microsoft list's operations take its char *'s address (#148, CheckVarargsEffect.microsoft).
+    const bool microsoft = effect < stream->varargs_count && stream->varargs[effect].microsoft;
     if (effect >= stream->varargs_count || stream->varargs[effect].node != node || (start && !writer->variadic))
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (id == CBUILTIN_MS_VA_START)
+    {
+        // Sema takes it in an ms_abi function alone, whose definition the backend refuses (check_lower_convention).
+        check_lower_unsupported(writer, "functions of the ms_abi calling convention");
+    }
+    else if (id == CBUILTIN_ZOS_VA_START || id == CBUILTIN_ZOS_VA_COPY)
+    {
+        // clang's x86-64 code for these is LLVM's va_start and va_copy of x86-64's 24-byte va_list over the char * that
+        // z/OS's list is, which no program can use.
+        check_lower_unsupported(writer, "__builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns");
     }
     else if (argument && check_lower_passed(writer, requested) != NULL)
     {
@@ -7349,7 +7362,7 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
     {
         const uint32_t index = writer->varargs_count++;
         CBuiltinVaLowerCall* call = writer->varargs + index;
-        *call = (CBuiltinVaLowerCall){ .id = id };
+        *call = (CBuiltinVaLowerCall){ .id = id, .microsoft = microsoft };
         call->list = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         if (start)
         {
@@ -7363,7 +7376,17 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
         // an XMM register's slot of the save area, a wider one in the overflow area), its value loaded from their address.
         const uint8_t requested_class = argument ? check_lower_class(writer, requested) : BUSTER_TYPED_CLASS_VOID;
         const bool bytes = check_lower_wide_class(requested_class) || requested_class == BUSTER_TYPED_CLASS_VECTOR;
-        if (argument)
+        if (argument && microsoft)
+        {
+            // A Microsoft list's (clang's EmitMSVAArg): a value of 1, 2, 4 or 8 bytes in its slot, any other where the
+            // slot's pointer points; an aggregate's (or a 128-bit integer's or a vector's) value is that place's address.
+            const bool aggregate = check_lower_aggregate(writer, requested);
+            const uint64_t size = type_size(types, requested);
+            call->indirect = size > BUSTER_ABI_SLOT_BYTES || (size & (size - 1)) != 0;
+            call->result_class = aggregate || bytes ? BUSTER_TYPED_CLASS_U64 : check_lower_storage_class(writer, requested);
+            call->size = aggregate || bytes ? (size == 0 ? 1 : (uint32_t)size) : 0;
+        }
+        else if (argument)
         {
             // A struct or union's bytes are copied from the save area into a frame object of its own (with room for
             // whole eightbytes), or read in the overflow area; its value is their address.
@@ -7392,10 +7415,10 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
         {
             call->source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->source);
-            check_lower_operand(writer, node, 1, false, stream->conversions[node].operands[1].type);
+            check_lower_operand(writer, node, 1, microsoft, stream->conversions[node].operands[1].type);
         }
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->list);
-        check_lower_operand(writer, node, 0, false, stream->conversions[node].operands[0].type);
+        check_lower_operand(writer, node, 0, microsoft, stream->conversions[node].operands[0].type);
     }
 }
 

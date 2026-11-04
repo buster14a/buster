@@ -355,7 +355,7 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
                 const CheckVarargsEffect* actual = stream->varargs + selected_varargs++;
                 equal = actual->node == mapping[expected->node] && actual->requested_type == expected->requested_type &&
                         actual->evaluated_operands == expected->evaluated_operands && actual->warnings == expected->warnings &&
-                        actual->mutates_list == expected->mutates_list;
+                        actual->mutates_list == expected->mutates_list && actual->microsoft == expected->microsoft;
             }
         }
     }

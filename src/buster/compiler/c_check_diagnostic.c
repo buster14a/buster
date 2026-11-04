@@ -319,6 +319,38 @@ static const char* check_diagnostic_x86_hard(const CheckInput* input, const Chec
     return result;
 }
 
+// A varargs start whose function refuses it (CHECK_DIAG_CALL, check_varargs_one), as clang reports it (#148): its ABI's
+// error (checkVAStartABI: __builtin_ms_va_start out of an ms_abi function, any other start in one), or else "used in
+// function with fixed args", at the builtin's name, the token before the call's opening parenthesis: the token of
+// the call's role whose parent is the report's `)` (the scan is over the call's arguments, once per error reported).
+// Returns NULL for any other report, whose message and place are its own.
+static const char* check_diagnostic_varargs(const CheckInput* input, const Parser* parser, const TypeTable* types, const CheckReport* report, uint32_t* location)
+{
+    const CheckGraph* graph = &input->graph;
+    const char* result = NULL;
+    *location = report->token;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_CALL && report->node < graph->count &&
+                           graph->ops[report->node] == CHECK_OP_VARARGS && graph->varargs_calls != NULL && graph->argument_offsets[report->node] < graph->varargs_count;
+    if (candidate)
+    {
+        const CheckVarargsContext* context = &graph->varargs_calls[graph->argument_offsets[report->node]].context;
+        const bool function = type_is_valid(types, context->function_type) && type_kind(types, type_strip_aligned(types, context->function_type)) == BUSTER_TYPE_KIND_FUNCTION;
+        const bool win64 = function && type_function_abi_kind(types, type_strip_aligned(types, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
+        const bool microsoft = graph->members[report->node] == CBUILTIN_MS_VA_START;
+        result = microsoft && !win64 ? "'__builtin_ms_va_start' used in System V ABI function" : !microsoft && win64 ? "'va_start' used in Win64 ABI function" :
+                 "'va_start' used in function with fixed args";
+        const uint32_t closing = report->token;
+        uint32_t opening = closing < parser->tokens.count ? closing : 0;
+        while (opening > 0 && !(parser->tree.parents[opening] == closing &&
+                                (parser->tree.roles[opening] == PARSE_ROLE_OPEN_CALL || parser->tree.roles[opening] == PARSE_ROLE_OPEN_KEYWORD)))
+        {
+            opening -= 1;
+        }
+        *location = opening > 0 ? opening - 1 : report->token;
+    }
+    return result;
+}
+
 static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, uint32_t* token)
 {
     uint32_t first = BUSTER_CHECK_NONE;

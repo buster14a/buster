@@ -278,6 +278,28 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: CFString of none", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString();\n}\n", .rejected = true },
         { .name = "generic: CFString as an int", .source = "int f(void)\n{\nreturn __builtin___CFStringMakeConstantString(\"x\");\n}\n", .rejected = true },
         { .name = "generic: NSString of an int", .source = "const void* f(int x)\n{\nreturn __builtin___NSStringMakeConstantString(x);\n}\n", .rejected = true },
+        // The Microsoft and z/OS lists (#148): each ms builtin's list an lvalue of exactly char * (clang's char *&), and
+        // va_arg's where it is one; ms_va_start in an ms_abi variadic function alone, every other start out of one;
+        // z/OS's lists char ** parameters.
+        { .name = "generic: Microsoft and z/OS lists", .source =
+          "int __attribute__((ms_abi)) f(int n, ...)\n{\n__builtin_ms_va_list a, b;\n__builtin_ms_va_start(a, n);\n__builtin_ms_va_copy(b, a);\n"
+          "int x = __builtin_va_arg(b, int);\n__builtin_ms_va_end(b);\n__builtin_ms_va_end(a);\n__builtin_va_list s;\n__builtin_va_copy(s, s);\nreturn x;\n}\n"
+          "int g(char* p, char** q, int n, ...)\n{\nchar* c[1];\n__builtin_ms_va_copy(c[0], *q);\n__builtin_ms_va_end(p);\nchar* z;\n"
+          "__builtin_zos_va_start(&z, n);\n__builtin_zos_va_copy(q, &z);\n__builtin_zos_va_end(q);\nreturn __builtin_va_arg(p, int) + __builtin_va_arg(*q, int);\n}\n" },
+        { .name = "generic: ms_va_start out of ms_abi", .source = "void f(int n, ...)\n{\nchar* a;\n__builtin_ms_va_start(a, n);\n}\n", .rejected = true },
+        { .name = "generic: va_start in ms_abi", .source = "void __attribute__((ms_abi)) f(int n, ...)\n{\n__builtin_va_list a;\n__builtin_va_start(a, n);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_start in ms_abi", .source = "void __attribute__((ms_abi)) f(int n, ...)\n{\nchar* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_start with fixed args", .source = "void __attribute__((ms_abi)) f(int n)\n{\nchar* a;\n__builtin_ms_va_start(a, n);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_end of a const list", .source = "void f(char* const a)\n{\n__builtin_ms_va_end(a);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_end of an unsigned char pointer", .source = "void f(unsigned char* a)\n{\n__builtin_ms_va_end(a);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_copy of a temporary", .source = "void f(char* a)\n{\n__builtin_ms_va_copy(a, a + 1);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_copy of a const char pointer", .source = "void f(char* a, const char* b)\n{\n__builtin_ms_va_copy(a, b);\n}\n", .rejected = true },
+        { .name = "generic: va_arg of a const char pointer", .source = "int f(const char* a)\n{\nreturn __builtin_va_arg(a, int);\n}\n", .rejected = true },
+        { .name = "generic: va_arg of a char pointer temporary", .source = "int f(char* a)\n{\nreturn __builtin_va_arg(a + 0, int);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_start of a void list", .source = "void f(int n, ...)\n{\nvoid* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_start with fixed args", .source = "void f(int n)\n{\nchar* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_copy of one", .source = "void f(char** a)\n{\n__builtin_zos_va_copy(a);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_end's value", .source = "int f(char** a)\n{\nreturn __builtin_zos_va_end(a);\n}\n", .rejected = true },
         // __builtin_invoke(f, a...) is the call f(a...) in C (#148): of a function, a pointer to one and a member of one,
         // with a prototype's conversions and a variadic one's promotions; its errors are the call's.
         { .name = "generic: invoke", .source =
@@ -560,6 +582,33 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "T(struct A v[3]);T(struct A v[2][3]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
         "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
         "generic-clear-padding", clang);
+    // va_arg of a Microsoft list (#148, clang's EmitMSVAArg) against clang's build: 8-byte slots built by hand, read as an
+    // int, a float and a double, structs of 3, 4, 8 and 16 bytes (the 3- and 16-byte ones through their slots' pointers),
+    // a long double, a _Complex double and an __int128 through theirs, then __builtin_ms_va_copy into a list through a
+    // pointer, __builtin_ms_va_end, and va_arg through that pointer and of the copy, whose place is the last value.
+    check_test_program_source(test,
+        "void *memcpy(void *, const void *, unsigned long); static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "struct S3 { char c[3]; }; struct S4 { short a, b; }; struct S8 { int a, b; }; struct S16 { long a, b; };\n"
+        "static unsigned long long slots[16]; static struct S3 s3 = { { 1, 2, 3 } }; static struct S16 s16 = { 11, 12 };\n"
+        "static long double ld = 2.5L; static _Complex double cd = 1.0 + 2.0i; static __int128 wide = ((__int128)7 << 64) | 9;\n"
+        "static double take(char** list) { return __builtin_va_arg(*list, double); }\n"
+        "static void copy_end(__builtin_ms_va_list* to, __builtin_ms_va_list from) { __builtin_ms_va_copy(*to, from); __builtin_ms_va_end(from); }\n"
+        "int tested(int n) { h = (unsigned)n; struct S4 s4 = { 5, 6 }; struct S8 s8 = { 7, 8 }; float f = 1.5f; double d = 3.25;\n"
+        "unsigned long long k = 0; slots[k++] = (unsigned)n; memcpy(&slots[k++], &f, sizeof f); memcpy(&slots[k++], &d, sizeof d);\n"
+        "slots[k++] = (unsigned long long)&s3; memcpy(&slots[k++], &s4, sizeof s4); memcpy(&slots[k++], &s8, sizeof s8);\n"
+        "slots[k++] = (unsigned long long)&s16; slots[k++] = (unsigned long long)&ld; slots[k++] = (unsigned long long)&cd;\n"
+        "slots[k++] = (unsigned long long)&wide; slots[k++] = (unsigned long long)(long long)-3; memcpy(&slots[k++], &d, sizeof d);\n"
+        "slots[k++] = 0x1234; char* ap = (char*)slots; __builtin_ms_va_list copy; mix((unsigned)__builtin_va_arg(ap, int));\n"
+        "mix((unsigned long long)(__builtin_va_arg(ap, float) * 4)); mix((unsigned long long)(__builtin_va_arg(ap, double) * 4));\n"
+        "struct S3 r3 = __builtin_va_arg(ap, struct S3); mix(r3.c[0] + r3.c[1] * 10 + r3.c[2] * 100); struct S4 r4 = __builtin_va_arg(ap, struct S4);\n"
+        "mix(r4.a * 10 + r4.b); struct S8 r8 = __builtin_va_arg(ap, struct S8); mix(r8.a * 10 + r8.b);\n"
+        "struct S16 r16 = __builtin_va_arg(ap, struct S16); mix(r16.a * 100 + r16.b);\n"
+        "mix((unsigned long long)(__builtin_va_arg(ap, long double) * 8)); _Complex double rc = __builtin_va_arg(ap, _Complex double);\n"
+        "mix((unsigned long long)(__real__ rc * 10 + __imag__ rc)); __int128 rw = __builtin_va_arg(ap, __int128);\n"
+        "mix((unsigned long long)(rw >> 64) * 100 + (unsigned long long)rw); mix((unsigned long long)__builtin_va_arg(ap, long long));\n"
+        "copy_end(&copy, ap); mix((unsigned long long)(take(&copy) * 4)); mix((unsigned)__builtin_va_arg(copy, short));\n"
+        "mix((unsigned long long)(copy - (char*)slots)); return (int)(h ^ (h >> 32)); }\n",
+        "generic-microsoft-va-arg", clang);
     // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
     // evaluated once, as the call's.
     check_test_program_source(test,

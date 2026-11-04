@@ -484,7 +484,8 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; and eh_return's
-// unwinding and the constant strings' objects, which clang makes and this compiler doesn't.
+// unwinding and the constant strings' objects, which clang makes and this compiler doesn't; and z/OS's va_start and
+// va_copy, which clang's x86-64 code makes over a char *.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
     static const struct
@@ -503,6 +504,10 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
+        { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
+          "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
+        { "void f(char** a, char** b) { __builtin_zos_va_copy(a, b); }\n",
+          "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
     };
     char source[256];
     char object[256];

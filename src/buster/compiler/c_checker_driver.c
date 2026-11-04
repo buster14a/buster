@@ -1232,6 +1232,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     uint32_t x86_location = BUSTER_CHECK_NONE;
                     const char* x86_message = phase == 1 ? check_diagnostic_x86_hard(input, stream, stream->reports + index, x86_text, sizeof(x86_text), &x86_location) :
                                                            NULL;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_diagnostic_varargs(input, parser, types, stream->reports + index, &x86_location);
+                    }
                     if (source != BUSTER_CHECK_NONE)
                     {
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;

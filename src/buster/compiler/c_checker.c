@@ -344,6 +344,8 @@ struct CheckVarargsEffect
     uint32_t evaluated_operands;
     uint32_t warnings;
     bool mutates_list;
+    // Whether its lists are Microsoft ones, whose addresses it takes (CheckVarargsResult.microsoft, #148).
+    bool microsoft;
 };
 
 typedef struct CheckBuiltinMiscEffect CheckBuiltinMiscEffect;
@@ -2609,6 +2611,7 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
             .evaluated_operands = checked.evaluated_operands,
             .warnings = checked.warnings,
             .mutates_list = checked.mutates_list,
+            .microsoft = checked.microsoft,
         };
     }
     else if (check_graph_has_arguments(action.op) && action.op != CHECK_OP_CALL)

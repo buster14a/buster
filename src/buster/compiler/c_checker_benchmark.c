@@ -152,7 +152,7 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
         const CheckVarargsEffect* x = a->varargs + i;
         const CheckVarargsEffect* y = b->varargs + i;
         equal = x->node == y->node && x->requested_type == y->requested_type && x->evaluated_operands == y->evaluated_operands &&
-                x->warnings == y->warnings && x->mutates_list == y->mutates_list;
+                x->warnings == y->warnings && x->mutates_list == y->mutates_list && x->microsoft == y->microsoft;
     }
     return equal;
 }

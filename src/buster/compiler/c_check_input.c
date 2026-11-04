@@ -9392,6 +9392,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         "__builtin_va_arg",
         "__builtin_va_copy",
         "__builtin_va_end",
+        "__builtin_ms_va_start",
+        "__builtin_ms_va_end",
+        "__builtin_ms_va_copy",
+        "__builtin_zos_va_start",
+        "__builtin_zos_va_end",
+        "__builtin_zos_va_copy",
     };
     const char* const spellings[] =
     {
@@ -9411,16 +9417,19 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         CHECK_INPUT_COUNT_SELECTIONS,
         CHECK_INPUT_COUNT_SELECTIONS,
     };
+    // A spelling the unit never interned counts no token, so it takes no comparison: most units name few of these.
     uint32_t name_count = 4;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(vararg_spellings); i += 1)
     {
         names[name_count] = intern_find(pp->table, (const uint8_t*)vararg_spellings[i], (uint32_t)strlen(vararg_spellings[i]));
-        groups[name_count++] = CHECK_INPUT_COUNT_VARARGS;
+        groups[name_count] = CHECK_INPUT_COUNT_VARARGS;
+        name_count += names[name_count] != 0;
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
     {
         names[name_count] = intern_find(pp->table, (const uint8_t*)spellings[i], (uint32_t)strlen(spellings[i]));
-        groups[name_count++] = i < 2 ? CHECK_INPUT_COUNT_TRANSPARENT_UNIONS : CHECK_INPUT_COUNT_OVERLOADABLE;
+        groups[name_count] = i < 2 ? CHECK_INPUT_COUNT_TRANSPARENT_UNIONS : CHECK_INPUT_COUNT_OVERLOADABLE;
+        name_count += names[name_count] != 0;
     }
     const uint64_t mark = scratch->length;
     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);

@@ -6,7 +6,7 @@
 
 static bool check_input_vararg_id(uint16_t builtin)
 {
-    return builtin >= CBUILTIN_VA_START && builtin <= CBUILTIN_VA_END;
+    return (builtin >= CBUILTIN_VA_START && builtin <= CBUILTIN_VA_END) || cbuiltin_varargs_foreign(builtin);
 }
 
 static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t keyword, uint16_t builtin)

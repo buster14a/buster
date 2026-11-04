@@ -874,6 +874,13 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "const void* h(void) { return __builtin___CFStringMakeConstantString(\"\\xc3\\xa9 \\xed\\x9f\\xbf a\\0b\"); }\n"
         "const void* k(void) { return __builtin___NSStringMakeConstantString(\"\\xff\"); }\n"
         "const void* m(void) { return __builtin___CFStringMakeConstantString(\"\\xed\\xa0\\x80\" \"\\xf4\\x90\\x80\\x80\"); }\n",
+        // A start its function refuses (#148, check_diagnostic_varargs), at the builtin's name: by its ABI, and without
+        // variadic parameters.
+        "void f(int n, ...) { char* a; __builtin_ms_va_start(a, n); }\n",
+        "void __attribute__((ms_abi)) f(int n, ...) { __builtin_va_list a; __builtin_va_start(a, n); }\n",
+        "void __attribute__((ms_abi)) f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); }\n",
+        "void __attribute__((ms_abi)) f(int n) { char* a; __builtin_ms_va_start(a, (n)); }\n",
+        "void f(int n) { __builtin_va_list a; __builtin_va_start(a, n); }\n",
         "void u(void) __attribute__((unavailable));\nvoid z(void) { u(); }\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)

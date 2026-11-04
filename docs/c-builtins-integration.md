@@ -214,6 +214,53 @@ exact-revision target qualification and source/Tier 1 integration remain
 separate acceptance requirements. Host-created-list tests alone establish
 only the recipe expansion contract.
 
+### Microsoft and z/OS lists (#148)
+
+`__builtin_ms_va_start`, `__builtin_ms_va_end` and `__builtin_ms_va_copy`
+(0x459 to 0x45b) and `__builtin_zos_va_start`, `__builtin_zos_va_end` and
+`__builtin_zos_va_copy` (0x45c to 0x45e) take the varargs actions, as clang
+checks them on x86-64 Linux.
+
+- **Microsoft lists.** `__builtin_ms_va_list` is `char *` here. Each ms
+  builtin binds its list as clang's `char *&`: an lvalue of exactly `char *`,
+  never converted. Another type is refused, and so are qualifiers on the
+  pointer or its `char`, and an rvalue (`p + 0`).
+- **Microsoft `va_arg`.** `va_arg` of such an lvalue reads it as a Microsoft
+  list in any function, as clang's `BuildVAArgExpr` does
+  (`check_varargs_microsoft_list`). `char *const` or `const char *` is no list
+  of either kind.
+- **Starts.** clang's `checkVAStartABI` comes first.
+  `__builtin_ms_va_start` belongs to an `ms_abi` function alone ("used in
+  System V ABI function"). Every other start, z/OS's included, belongs to any
+  other function ("'va_start' used in Win64 ABI function"). Then the function
+  must be variadic, and the last-parameter check applies as for `va_start`.
+  The driver words the three errors as clang does, at the builtin's name
+  (`check_diagnostic_varargs`).
+- **z/OS lists.** z/OS's lists are `char **` parameters, converted as a
+  prototype's.
+- **Code.** A Microsoft list's operations take its `char *`'s address
+  (`CheckVarargsEffect.microsoft`).
+  - `va_arg` reads the 8-byte slot it points at and moves it 8 bytes on, as
+    clang's `EmitMSVAArg` does. A value of 1, 2, 4 or 8 bytes is in the slot.
+    Any other is where the slot's pointer points: a 3- or 16-byte struct, a
+    `long double`, a `_Complex double`, an `__int128`. An aggregate's value is
+    that place's address.
+  - `__builtin_ms_va_copy` stores one `char *` in the other.
+    `__builtin_ms_va_end` and `__builtin_zos_va_end` emit nothing, as clang's
+    `va_end` does on x86-64.
+  - `__builtin_ms_va_start` sits only in `ms_abi` definitions, which the
+    backend refuses.
+  - `-c` refuses `__builtin_zos_va_start` and `__builtin_zos_va_copy` by name.
+    clang's x86-64 code for them is LLVM's 24-byte `va_start` and `va_copy`
+    over the `char *` that z/OS's list is.
+- **Input counts.** The reader counts calls of these names among its varargs
+  spellings, to size its tables. A spelling the unit never interned takes no
+  comparison in that count.
+
+clang's `-Wvarargs` warnings, such as "second argument to 'va_start' is not
+the last non-variadic parameter", are checked here (`BUSTER_CHECK_VARARGS_WARN_*`)
+but not yet rendered, for any start.
+
 ## Hints, memory and frame checking
 
 `c_check_builtin_misc.c` checks hints, memory/string builtins and frame queries

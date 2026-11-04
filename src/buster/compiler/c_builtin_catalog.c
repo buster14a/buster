@@ -468,7 +468,13 @@
     X(INVOKE, 0x455u, "__builtin_invoke", BUSTER_CBUILTIN_SOURCE) \
     X(EH_RETURN, 0x456u, "__builtin_eh_return", BUSTER_CBUILTIN_SOURCE) \
     X(CFSTRING_MAKE_CONSTANT_STRING, 0x457u, "__builtin___CFStringMakeConstantString", BUSTER_CBUILTIN_SOURCE) \
-    X(NSSTRING_MAKE_CONSTANT_STRING, 0x458u, "__builtin___NSStringMakeConstantString", BUSTER_CBUILTIN_SOURCE)
+    X(NSSTRING_MAKE_CONSTANT_STRING, 0x458u, "__builtin___NSStringMakeConstantString", BUSTER_CBUILTIN_SOURCE) \
+    X(MS_VA_START, 0x459u, "__builtin_ms_va_start", BUSTER_CBUILTIN_SOURCE) \
+    X(MS_VA_END, 0x45Au, "__builtin_ms_va_end", BUSTER_CBUILTIN_SOURCE) \
+    X(MS_VA_COPY, 0x45Bu, "__builtin_ms_va_copy", BUSTER_CBUILTIN_SOURCE) \
+    X(ZOS_VA_START, 0x45Cu, "__builtin_zos_va_start", BUSTER_CBUILTIN_SOURCE) \
+    X(ZOS_VA_END, 0x45Du, "__builtin_zos_va_end", BUSTER_CBUILTIN_SOURCE) \
+    X(ZOS_VA_COPY, 0x45Eu, "__builtin_zos_va_copy", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -754,6 +760,14 @@ static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
     return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING) ||
            (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING);
+}
+
+// The Microsoft and z/OS va_list builtins (#148, __builtin_ms_va_start to __builtin_zos_va_copy), which take the
+// varargs actions (check_varargs), as va_start's, va_end's and va_copy's do.
+static __attribute__((unused)) bool cbuiltin_varargs_foreign(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_MS_VA_START && id <= CBUILTIN_ZOS_VA_COPY;
+    return result;
 }
 
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
