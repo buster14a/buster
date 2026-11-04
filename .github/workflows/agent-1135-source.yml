@@ -17,29 +17,41 @@ jobs:
           persist-credentials: false
       - name: Install the repository oracle
         run: bash tools/ci/setup-hosted.sh
-      - name: Observe original pragma fixtures
+      - name: Observe original pragma fixtures, including expected rejections
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           clang --version
           cases=(
-          '#pragma weak f\nint f(void){return 7;}\nint main(void){return f()!=7;}'
-          'int f(void){return 7;}\n#pragma weak f\nint main(void){return f()!=7;}'
-          '#pragma weak absent\nint main(void){return 0;}'
-          '#pragma weak f\nstatic int f(void){return 7;}\nint main(void){return f()!=7;}'
-          '#pragma weak a = b\nint b(void){return 7;}\nint main(void){return a()!=7;}'
-          'int b(void){return 7;}\n#pragma weak a = b\nint main(void){return a()!=7;}'
-          'int a(void);\n#pragma weak a = b\nint b(void){return 7;}\nint main(void){return a()!=7;}'
-          'int a(void){return 2;}\n#pragma weak a = b\nint b(void){return 7;}\nint main(void){return a();}'
-          '#define a other\n#pragma weak a = b\nint b(void){return 7;}\n#undef a\nint main(void){return a()!=7;}'
           '#pragma redefine_extname f renamed\nint f(void){return 7;}\nint main(void){return f()!=7;}'
           'int f(void){return 7;}\n#pragma redefine_extname f renamed\nint main(void){return f()!=7;}'
           'int f(void);\nint g(void){return f();}\n#pragma redefine_extname f renamed\nint f(void){return 7;}'
           '#pragma redefine_extname f renamed\nstatic int f(void){return 7;}\nint main(void){return f()!=7;}'
           '#define f other\n#pragma redefine_extname f renamed\n#undef f\nint f(void){return 7;}'
-          '#pragma GCC target("avx2")\nint f(void){return 7;}\n#pragma GCC push_options\n#pragma GCC pop_options'
+          '#pragma GCC target("avx2")\nint f(void){return 7;}\n#pragma GCC push_options\n#pragma GCC pop_options\n#pragma GCC reset_options'
           'int b;\n#pragma weak a = b\nint main(void){return a;}'
           'extern int b;\n#pragma weak a = b\nint main(void){return a;}'
-          'int f(void){return 7;}\nint main(void){\n#pragma weak f\nreturn f()!=7;}')
+          'int f(void){return 7;}\nint main(void){\n#pragma weak f\nreturn f()!=7;}'
+          'int f(void);\n#pragma weak f\nint f(void){return 7;}'
+          'extern int x;\n#pragma weak x\nint main(void){return &x==0;}'
+          'int x=7;\n#pragma weak x\nint main(void){return x;}'
+          '#pragma redefine_extname f one\n#pragma redefine_extname f two\nint f(void){return 7;}'
+          '#pragma redefine_extname f one\nint f(void);\n#pragma redefine_extname f two\nint f(void){return 7;}'
+          'int f(void) __asm__("asm_name");\n#pragma redefine_extname f other\nint f(void){return 7;}'
+          '#pragma redefine_extname f renamed\nint f(void) __asm__("asm_name");\nint f(void){return 7;}'
+          '#pragma redefine_extname absent renamed\nint x;'
+          '#pragma weak f trailing\nint f(void){return 7;}'
+          '#pragma redefine_extname f renamed trailing\nint f(void){return 7;}'
+          '#pragma weak 1\nint x;'
+          '#pragma redefine_extname 1 two\nint x;'
+          '#define f g\n#pragma weak f\n#undef f\nint f(void){return 7;}'
+          'int f(void){return 1;}\n#pragma weak a = f\nint a(void);\nint main(void){return a();}'
+          'int f(void){return 1;}\n#pragma redefine_extname f renamed'
+          'extern int f(void);\nint main(void){\n#pragma redefine_extname f renamed\nreturn f();}'
+          'static int x=7;\n#pragma redefine_extname x renamed\nint f(void){return x;}'
+          '#pragma weak x\ntypedef int x;'
+          'static int f(void){return 7;}\n#pragma weak f\nint main(void){return f();}')
           mkdir -p "$RUNNER_TEMP/pragma-oracle"
-          for i in "${!cases[@]}"; do p="$RUNNER_TEMP/pragma-oracle/$i"; printf '\n===== CASE %s =====\n' "$i"; printf '%b\n' "${cases[$i]}" | tee "$p.c"; clang -Wall -Wextra -S -emit-llvm -o "$p.ll" "$p.c" 2>&1; test ! -f "$p.ll" || cat "$p.ll"; done
+          for i in "${!cases[@]}"; do p="$RUNNER_TEMP/pragma-oracle/$i"; printf '\n===== CASE %s =====\n' "$i"; printf '%b\n' "${cases[$i]}" | tee "$p.c"; clang -Wall -Wextra -S -emit-llvm -o "$p.ll" "$p.c" 2>&1; printf 'exit=%s\n' "$?"; test ! -f "$p.ll" || grep -E '^@|^define|^declare|^attributes' "$p.ll"; done
+          exit 0
