@@ -1813,6 +1813,21 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
 - **Limits.** At most 31 arguments are taken, and clang takes up to the
   format's plus 255.
 
+`__builtin_dump_struct(pointer, printer, rest...)` (0x4b3, #148) is clang's
+record dump, as `BuiltinDumpStruct` checks it.
+
+- **Its arguments.** The pointer, lvalue-converted, points to a complete
+  struct or union. The printer is a function or a function pointer.
+- **The calls.** clang then calls the printer once per line, as
+  `printer(rest..., format, operands...)`: no operands for a brace's line,
+  and up to five for a field's. A prototyped printer must take every such
+  call. It is variadic, with no more parameters than the rest and the
+  format, and the rest and the format (a `char *`) convert to those
+  parameters. An unprototyped printer takes any calls.
+- **Code.** clang's code is those calls, with each field's value or address
+  and type names it prints. This compiler doesn't make them, so `-c` refuses
+  the call by name.
+
 `__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
 arguments never run. It is clang 23's allocation token: the reader works it
 out from the arguments' syntax, in the walk and in the constant evaluator

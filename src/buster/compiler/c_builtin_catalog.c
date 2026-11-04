@@ -478,7 +478,8 @@
     X(INFER_ALLOC_TOKEN, 0x45Fu, "__builtin_infer_alloc_token", BUSTER_CBUILTIN_CONSTANT) \
     X(CALL_WITH_STATIC_CHAIN, 0x4B0u, "__builtin_call_with_static_chain", BUSTER_CBUILTIN_SOURCE) \
     X(OS_LOG_FORMAT_BUFFER_SIZE, 0x4B1u, "__builtin_os_log_format_buffer_size", BUSTER_CBUILTIN_CONSTANT) \
-    X(OS_LOG_FORMAT, 0x4B2u, "__builtin_os_log_format", BUSTER_CBUILTIN_SOURCE)
+    X(OS_LOG_FORMAT, 0x4B2u, "__builtin_os_log_format", BUSTER_CBUILTIN_SOURCE) \
+    X(DUMP_STRUCT, 0x4B3u, "__builtin_dump_struct", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -768,7 +769,7 @@ static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
     return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING) ||
            (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) || id == CBUILTIN_INFER_ALLOC_TOKEN ||
-           (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_OS_LOG_FORMAT);
+           (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_DUMP_STRUCT);
 }
 
 // The Microsoft and z/OS va_list builtins (#148, __builtin_ms_va_start to __builtin_zos_va_copy), which take the

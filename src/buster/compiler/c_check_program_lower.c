@@ -7785,6 +7785,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
+    else if (runtime == CBUILTIN_DUMP_STRUCT)
+    {
+        check_lower_unsupported(writer, "__builtin_dump_struct, whose calls of its printing function this compiler doesn't make");
+    }
     else if (runtime == CBUILTIN_OS_LOG_FORMAT)
     {
         check_lower_os_log(writer, node);

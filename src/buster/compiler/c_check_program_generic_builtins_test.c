@@ -359,6 +359,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: os_log of a big argument", .source = "struct T { char c[300]; };\nunsigned long f(struct T t)\n{\nreturn __builtin_os_log_format_buffer_size(\"%d\", t);\n}\n", .rejected = true },
         { .name = "generic: os_log of no buffer", .source = "void* f(void)\n{\nreturn __builtin_os_log_format(\"%d\");\n}\n", .rejected = true },
         { .name = "generic: os_log of no format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size();\n}\n", .rejected = true },
+        // dump_struct (#148): a pointer to a complete struct or union and a function or a function pointer that takes clang's
+        // generated calls (variadic past the rest of the arguments and the format, or without a prototype).
+        { .name = "generic: dump_struct", .source =
+          "int printf(const char*, ...);\nint pf(void* ctx, const char* f, ...);\nint kr();\nstruct S { int a; unsigned b : 2; struct { char c; } in; int arr[2]; };\n"
+          "union U { int a; };\nvoid f(struct S* s, const union U* u, int (*p)(const char*, ...))\n{\n__builtin_dump_struct(s, printf);\n"
+          "__builtin_dump_struct(u, p);\n__builtin_dump_struct((s), (printf));\n__builtin_dump_struct(s, pf, (void*)0);\n__builtin_dump_struct(s, pf, s);\n"
+          "__builtin_dump_struct(s, kr, 1, 2.0);\n}\n" },
+        { .name = "generic: dump_struct of a struct", .source = "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S s)\n{\n__builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of an int pointer", .source = "int printf(const char*, ...);\nvoid f(int* p)\n{\n__builtin_dump_struct(p, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of an incomplete struct", .source = "int printf(const char*, ...);\nstruct I;\nvoid f(struct I* p)\n{\n__builtin_dump_struct(p, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of no callable", .source = "struct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, 1);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a fixed printer", .source = "int bad(const char*);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, bad);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a missing context", .source = "int pf(void* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a wrong context", .source = "int pf(int* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s, long* l)\n{\n__builtin_dump_struct(s, pf, l);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of an int format", .source = "int pf(void* ctx, int f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf, s);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct's value", .source = "int printf(const char*, ...);\nstruct S { int a; };\nint f(struct S* s)\n{\nreturn __builtin_dump_struct(s, printf);\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of none", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token();\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of void", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token((void)0);\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of no type", .source = "_Static_assert(__builtin_infer_alloc_token(1) == 0, \"\");\n", .rejected = true },

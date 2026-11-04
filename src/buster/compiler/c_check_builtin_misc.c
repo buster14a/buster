@@ -1133,6 +1133,74 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_DUMP_STRUCT)
+    {
+        // clang's BuiltinDumpStruct (#148): a pointer, lvalue-converted, to a complete struct or union ("expected pointer
+        // to struct as 1st argument"), and a function or a function pointer ("expected a callable expression as 2nd
+        // argument"). clang then calls that function once per line, with the rest of the arguments, a format and its
+        // operands: (rest..., format) for a brace's line and up to five operands more for a field's. A prototype must
+        // take each of those calls: it is variadic, with no more parameters than the rest and the format, the rest
+        // converting to its first parameters and the format, a char *, to the next ("too many" or "too few arguments"
+        // otherwise). The calls' code is the printing function's, which this compiler doesn't make (check_lower_unsupported).
+        CheckValue record = check_builtin_misc_argument(table, input, output, 0);
+        const TypeId pointer = type_strip_aligned(table, record.type);
+        const bool is_pointer = output->action.diagnostic == CHECK_DIAG_NONE && check_action_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER;
+        const TypeId pointee = is_pointer ? type_unqualified(type_strip_aligned(table, type_element(table, pointer))) : 0;
+        const uint8_t pointee_kind = pointee != 0 ? check_action_kind(table, pointee) : 0;
+        const TypeId callable = type_strip_aligned(table, input->arguments[1].type);
+        const uint8_t callable_kind = type_is_valid(table, callable) ? check_action_kind(table, callable) : 0;
+        const TypeId function = callable_kind == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(table, type_element(table, callable)) : callable;
+        const bool is_function = type_is_valid(table, function) && check_action_kind(table, function) == BUSTER_TYPE_KIND_FUNCTION;
+        if (output->action.diagnostic == CHECK_DIAG_NONE && pointee_kind != BUSTER_TYPE_KIND_STRUCT && pointee_kind != BUSTER_TYPE_KIND_UNION)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (output->action.diagnostic == CHECK_DIAG_NONE && !check_builtin_misc_source_complete(table, pointee, input))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPLETE, 0);
+        }
+        else if (output->action.diagnostic == CHECK_DIAG_NONE && !is_function)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_CALL, 1);
+        }
+        const uint32_t flags = is_function ? table->types.flags[type_index(function)] : 0;
+        const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+        uint32_t count = 0;
+        const TypeId* parameters = is_function && prototype ? type_parameters(table, function, &count) : NULL;
+        const uint32_t rest = input->argument_count - 2;
+        if (output->action.diagnostic == CHECK_DIAG_NONE && prototype && ((flags & BUSTER_TYPE_FLAG_VARIADIC) == 0 || count > rest + 1))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 1);
+        }
+        for (uint32_t i = 0; output->action.diagnostic == CHECK_DIAG_NONE && parameters != NULL && i < count; i += 1)
+        {
+            // The rest convert as the call's arguments do; the format's literal is a char * (its array decayed).
+            CheckValue argument = i < rest ? input->arguments[2 + i] : (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_CHAR), .category = CHECK_RVALUE };
+            if (i < rest)
+            {
+                const CheckAction action = { .operands = { argument }, .node = input->node, .context = input->context };
+                CheckActionResult converted = { 0 };
+                argument = check_action_operand(table, &action, &converted, 0);
+                if (converted.diagnostic != CHECK_DIAG_NONE)
+                {
+                    check_action_diagnose(&output->action, converted.diagnostic, 2 + i);
+                }
+            }
+            // Into a scratch result: the calls' conversions take no slot of the four the call's own arguments have.
+            CheckBuiltinMiscResult scratch = { 0 };
+            check_builtin_misc_convert(table, input, &scratch, &argument, 0, parameters[i]);
+            if (scratch.action.diagnostic != CHECK_DIAG_NONE)
+            {
+                check_action_diagnose(&output->action, scratch.action.diagnostic, i < rest ? 2 + i : 1);
+            }
+        }
+        if (output->action.diagnostic == CHECK_DIAG_NONE)
+        {
+            output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT };
+            output->reads_memory = true;
+            output->writes_memory = true;
+        }
+    }
     else if (id == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || id == CBUILTIN_OS_LOG_FORMAT)
     {
         // clang's BuiltinOSLogFormat (#148): __builtin_os_log_format's buffer converts to void * as a prototype's
@@ -1441,6 +1509,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // A format, past __builtin_os_log_format's buffer, and its data, as many as the operands' mask holds.
         case CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE: minimum = 1; maximum = 31; break;
         case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 31; break;
+        // A record's pointer, a printing function, and that function's leading arguments.
+        case CBUILTIN_DUMP_STRUCT: minimum = 2; maximum = 31; break;
         case CBUILTIN_OPERATOR_NEW:
         case CBUILTIN_OPERATOR_DELETE:
             // C++'s alone, refused with any arguments, before their count can reach the operands' 32-bit mask.
@@ -1488,7 +1558,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
                               input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || input->id == CBUILTIN_CPU_IS ||
                               input->id == CBUILTIN_CPU_SUPPORTS || input->id == CBUILTIN_INFER_ALLOC_TOKEN || input->id == CBUILTIN_CALL_WITH_STATIC_CHAIN ||
-                              input->id == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || input->id == CBUILTIN_OS_LOG_FORMAT || refused;
+                              input->id == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || input->id == CBUILTIN_OS_LOG_FORMAT || input->id == CBUILTIN_DUMP_STRUCT ||
+                              refused;
         if (classify && !refused && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
