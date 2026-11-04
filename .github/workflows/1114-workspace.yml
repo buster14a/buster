@@ -13,7 +13,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
@@ -35,20 +35,29 @@ jobs:
       - name: Install pinned correctness tools on the available disposable image
         run: |
           set -euo pipefail
-          # Same archive pins and tools as the hosted setup. No performance tooling or measurement is used here.
           sed -e 's/test "$VERSION_ID" = 26.04/test "$VERSION_ID" = 24.04/' -e 's/zstd linux-perf qemu-user/zstd qemu-user/' -e '/^perf --version$/d' -e 's/kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 //' tools/ci/setup-hosted.sh > tools/ci/1114-setup-hosted.sh
           bash tools/ci/1114-setup-hosted.sh
           rm tools/ci/1114-setup-hosted.sh
       - name: Build
         run: ./build.sh --config Debug --jobs 4 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Focused debug regressions
+        id: tests
+        continue-on-error: true
         run: |
           set -uo pipefail
           status=0
-          ./build/compiler test-debug --cross-check 2>&1 | tee "$RUNNER_TEMP/test-debug.log" || status=1
-          ./build/compiler test-check-debug --cross-check --keep 2>&1 | tee "$RUNNER_TEMP/test-check-debug.log" || status=1
-          ./build/compiler test-object-writer 2>&1 | tee "$RUNNER_TEMP/test-object-writer.log" || status=1
+          timeout --kill-after=10s 120s ./build/compiler test-debug 2>&1 | tee "$RUNNER_TEMP/test-debug.log" || status=1
+          timeout --kill-after=10s 180s ./build/compiler test-check-debug --cross-check --programs 1 --keep 2>&1 | tee "$RUNNER_TEMP/test-check-debug.log" || status=1
+          timeout --kill-after=10s 120s ./build/compiler test-object-writer 2>&1 | tee "$RUNNER_TEMP/test-object-writer.log" || status=1
           exit "$status"
+      - name: Capture compiler failure backtraces
+        if: steps.tests.outcome == 'failure'
+        run: |
+          set -uo pipefail
+          for source in "$TMPDIR"/buster-check-debug-*/dbg_rows.c "$TMPDIR"/buster-check-debug-*/dbg_values.c; do
+              test ! -f "$source" || timeout --kill-after=10s 60s gdb -nx -batch -ex 'set debuginfod enabled off' -ex run -ex 'thread apply all bt' -ex 'info registers' --args ./build/compiler -g -o "$source.out" "$source" > "$source.compiler-gdb.log" 2>&1
+          done
+          find "$TMPDIR" -name '*.compiler-gdb.log' -exec cat {} +
       - name: Retain evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -57,5 +66,9 @@ jobs:
           path: |
             ${{ runner.temp }}/*.log
             ${{ runner.temp }}/1114-tests
+            build/compiler
           retention-days: 3
           if-no-files-found: ignore
+      - name: Propagate correctness failure
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
