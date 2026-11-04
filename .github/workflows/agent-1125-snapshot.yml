@@ -1,0 +1,21 @@
+name: Issue 1125 source snapshot
+on:
+  push:
+    branches: [work/1125-option-audit-snapshot]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export source and option parser
+        run: |
+          git archive --format=tar --output=source.tar HEAD
+          grep -n 'pp_parse_options\|predefines_parse_option\|predefines_option\|argument\[1\].*f\|argument\[1\].*m' src/buster/compiler/c_preprocessor.c
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1125-source
+          path: source.tar
+          retention-days: 1
