@@ -60,9 +60,17 @@ struct Tier1MasksTest
     uint8_t* v3;
     // x86-64-v2's with AVX, Sandy Bridge's (#1281's review): AVX's without AVX2, which the fixtures marked `avx` are emitted for.
     uint8_t* avx;
+    // x86-64-v4's forms with AVX512-FP16's complex multiplication, which no target of Tier 1's allows yet, for the
+    // fixtures of rows of it (Tier1MasksFixture.fp16); and the forms of the fixture that runs.
+    uint8_t* fp16;
+    const uint8_t* forms;
     // x86-64-v4's features, which the typed programs' lowering takes as its output target (ir_lower_typed_target).
     uint64_t v4_features;
     bool native;
+    // Whether the host has AVX512-FP16 too, which a fixture of its rows needs to run natively.
+    bool native_fp16;
+    // The fixtures that ran natively, by both paths, with and without rematerialization.
+    uint32_t native_fixtures;
     // --print: each fixture's records, by the vector path, as GNU as reads them.
     bool print;
     Arena output;
@@ -115,6 +123,20 @@ struct Tier1MasksFixture
     bool v3;
     // Emitted for Sandy Bridge, a target with AVX but not AVX2 (#1281's review): its 32-byte vectors by AVX's forms alone.
     bool avx;
+    // Its machine rows and the moves around them into their roles' registers and out of them (#1283,
+    // Tier1EmitResult.row_moves), by the vector path and by the scalar one (whose allocators assign registers
+    // differently; a host without the vector path runs the scalar one for both), with and without rematerialization:
+    // checked where `rows` isn't 0.
+    uint32_t rows;
+    uint32_t row_moves[2];
+    // A row of AVX512-FP16's (#1283's review): its forms are test->fp16's, and it runs natively only where the host has
+    // AVX512-FP16 (not the 9700X's Zen 5).
+    bool fp16;
+    // Rows whose destination can't be a source's register (#1283's review): a gather's or a complex multiplication's,
+    // whose records the test checks for distinct registers.
+    bool exclusive;
+    // Makes the random input one the fixture can run on (a gather's indices in its buffer), before its model reads it.
+    void (*prepare)(uint8_t* input);
     // The buffer after a run, from the input and the count, where the interpreter can't run the fixture: a machine row's
     // (#141), which it has no model of. Null for the interpreter's.
     void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
@@ -239,6 +261,115 @@ static void tier1_masks_test_carriers_model(const uint8_t* input, uint64_t count
     memcpy(output + 144, &single, 4);
     memcpy(output + 160, &result, 8);
 }
+
+// The vector rows' buffer (#1283), of a and b, 16 doublewords at 0 and 64, and k, the word at 0: at 128, w ^ z ^ m, where
+// s = a + b, t = s ^ a ^ b, m = a + t where k has a bit and a elsewhere, n = (b + b)'s low 4 doublewords, w = n + n in its
+// low 4 and 0 past them, z = n's 16 bytes zero-extended; at 192, the bytes of lo (at 0) where c's (at 64) top bit is
+// clear and of hi (at 32) where it is set; n at 224 and m's first doubleword doubled at 240.
+static void tier1_masks_test_vector_rows_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint32_t a[16];
+    uint32_t b[16];
+    uint16_t k = 0;
+    memcpy(a, input, sizeof(a));
+    memcpy(b, input + 64, sizeof(b));
+    memcpy(&k, input, sizeof(k));
+    uint32_t m[16];
+    uint32_t n[4];
+    uint32_t f[16];
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t sum = a[i] + b[i];
+        const uint32_t t = sum ^ a[i] ^ b[i];
+        m[i] = ((k >> i) & 1) != 0 ? a[i] + t : a[i];
+    }
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        n[i] = b[i] + b[i];
+    }
+    uint8_t bytes[16];
+    memcpy(bytes, n, sizeof(bytes));
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t w = i < 4 ? n[i] + n[i] : 0;
+        f[i] = w ^ (uint32_t)bytes[i] ^ m[i];
+    }
+    memcpy(output + 128, f, sizeof(f));
+    for (uint32_t i = 0; i < 32; i += 1)
+    {
+        output[192 + i] = (input[64 + i] & 0x80) != 0 ? input[32 + i] : input[i];
+    }
+    memcpy(output + 224, n, sizeof(n));
+    const uint32_t doubled = m[0] + m[0];
+    memcpy(output + 240, &doubled, sizeof(doubled));
+}
+
+// The gathers' fixture's input (#1283's review): its 16 doubleword indices at 64 each below 16, so that they gather from the
+// buffer's first 64 bytes.
+static void tier1_masks_test_gather_prepare(uint8_t* input)
+{
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t index = input[64 + 4 * i] & 15u;
+        memcpy(input + 64 + 4 * i, &index, 4);
+    }
+}
+
+// The gathers' buffer: of the doublewords d at 0, the indices x at 64 and the word mask k at 0, each lane i where k has a
+// bit is d[x[i]], at 128 elsewhere x[i] (the source is the index) and at 192 d[i] (the source is d).
+static void tier1_masks_test_gather_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint32_t d[16];
+    uint32_t x[16];
+    uint16_t k = 0;
+    memcpy(d, input, sizeof(d));
+    memcpy(x, input + 64, sizeof(x));
+    memcpy(&k, input, sizeof(k));
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t first = ((k >> i) & 1) != 0 ? d[x[i]] : x[i];
+        const uint32_t second = ((k >> i) & 1) != 0 ? d[x[i]] : d[i];
+        memcpy(output + 128 + 4 * i, &first, 4);
+        memcpy(output + 192 + 4 * i, &second, 4);
+    }
+}
+
+// The complex multiplications' buffer: of the half-precision complex numbers a at 0 and b at 64, a times b at 128 and at
+// 192, as the host's vfmulcph computes them (its own rounding, NaNs and denormals), where the host has AVX512-FP16: the
+// encoder's records of a load of each, the product and its store, run from a page of their own, so that the test's own
+// code needs no AVX512-FP16 (this compiler's build of it, the self-host's, takes no intrinsics of it at x86-64).
+static void tier1_masks_test_complex_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    const X86Instruction records[] = {
+        { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 0, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE },
+        { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 },
+        { .form = X86_FORM_VFMULCPH_Z_Z_ZM512, .reg = 2, .vvvv = 0, .rm = 1, .mode = BUSTER_X86_REGISTER_DIRECT },
+        { .form = X86_FORM_VMOVDQU64_ZM512_Z, .reg = 2, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE },
+        { .form = X86_FORM_RET },
+    };
+    const uint32_t count_records = sizeof(records) / sizeof(records[0]);
+    uint8_t* code = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const int64_t size = code != MAP_FAILED ? x86_encode(records, count_records, code, 4096, 0, 0) : -1;
+    if (size > 0 && mprotect(code, 4096, PROT_READ | PROT_EXEC) == 0)
+    {
+        void (*product)(const uint8_t*, uint8_t*) = (void (*)(const uint8_t*, uint8_t*))(void*)code;
+        product(input, output + 128);
+        memcpy(output + 192, output + 128, 64);
+    }
+    if (code != MAP_FAILED)
+    {
+        munmap(code, 4096);
+    }
+}
+
+// The fixtures of AVX512-FP16's rows, the array's last, which run natively only where the host has it.
+#define BUSTER_TIER1_MASKS_TEST_FP16_FIXTURES 1
 
 static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
     {
@@ -1457,6 +1588,126 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .model = tier1_masks_test_carriers_model,
         .v3 = true,
     },
+    {
+        // #1283: vector rows placed one role at a time: a two-operand form's (its first operand read in its own register
+        // up to the result's first write, which the destination takes), a tied operand's (copied into the destination),
+        // a merging opmask's, an operand written and dying at the node (kept in its own register) under an integer
+        // result, a VEX form's /is4 blend in the run below xmm16, a narrow result written at a wider width (moved at its
+        // width), a narrow operand read at a wider one (copied at its width) and a widening conversion's pure write.
+        .name = "vector machine rows",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (vector64, vector64, vector64) -> vector64 [VPTERNLOGD_Z_Z_ZM512_IMM8 0x80 0x81 0x82 0x00 0x00 0x00 150 0]\n"
+                "  row #2 (vector64) -> u32 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0] [VMOVD_RM32_X_EVEX 0x80 0x00 0x90 0x00 0x00 0x00 0 0]\n"
+                "  row #3 (vector32, vector32, vector32) -> vector32 [VPBLENDVB_Y_Y_YM256_Y 0x80 0x80 0x81 0x00 0x00 0x00 32 0]\n"
+                "  row #4 (vector64, vector64, mask2) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]\n"
+                "  row #5 (vector64) -> vector16 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
+                "  row #6 (vector16) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
+                "  row #7 (vector16) -> vector64 [VPMOVZXBD_Z_XM128 0x80 0x00 0x80 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v16i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = load.m16 %0 align=2\n"
+                "  %5 = call.v16i32 row #0(%1, %3) fixed=(v16i32, v16i32) variadic=0\n"
+                "  %6 = call.v16i32 row #1(%5, %1, %3) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
+                "  %7 = call.v16i32 row #4(%1, %6, %4) fixed=(v16i32, v16i32, m16) variadic=0\n"
+                "  %8 = call.v4i32 row #5(%3) fixed=(v16i32) variadic=0\n"
+                "  %9 = call.v16i32 row #6(%8) fixed=(v4i32) variadic=0\n"
+                "  %10 = call.v16i32 row #7(%8) fixed=(v4i32) variadic=0\n"
+                "  %11 = call.v16i32 row #1(%9, %10, %7) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
+                "  %12 = call.i32 row #2(%7) fixed=(v16i32) variadic=0\n"
+                "  %13 = address.ptr %0 offset=128\n"
+                "  %14 = store.void %13, %11 align=1\n"
+                "  %15 = load.v8i32 %0 align=1\n"
+                "  %16 = address.ptr %0 offset=32\n"
+                "  %17 = load.v8i32 %16 align=1\n"
+                "  %18 = load.v8i32 %2 align=1\n"
+                "  %19 = call.v8i32 row #3(%15, %17, %18) fixed=(v8i32, v8i32, v8i32) variadic=0\n"
+                "  %20 = address.ptr %0 offset=192\n"
+                "  %21 = store.void %20, %19 align=1\n"
+                "  %22 = address.ptr %0 offset=224\n"
+                "  %23 = store.void %22, %8 align=1\n"
+                "  %24 = address.ptr %0 offset=240\n"
+                "  %25 = store.void %24, %12 align=4\n"
+                "  %26 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_vector_rows_model,
+        // Tier 0's placement moved 25: each vector operand in (17) and each vector result out (8). What is left, by
+        // the vector path's allocation: the merging opmask's first operand in and the result out (its destination is
+        // the second operand's register), the narrow result's move into itself at its width, the narrow operand's
+        // copy at its width, and the tied operand's in and out (its destination is the second's); by the scalar
+        // path's, the narrow result's and the narrow operand's alone.
+        .rows = 9,
+        .row_moves = { 6, 2 },
+    },
+    {
+        // #1283's review: a gather (the front end's row of _mm512_mask_i32gather_epi32) whose destination can be none of
+        // its index's and mask's registers, #UD otherwise: its source and index one value dying at it, whose register
+        // the allocation gives the result, so the gather writes another and the result moves there; and one of a source
+        // and an index apart, the index dying at it.
+        .name = "gathers whose index dies at them",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, u64, vector64, mask2) -> vector64 [VPGATHERDD_Z_VM32Z 0x80 0x00 0x81 0x82 0x1e 0x0b 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = ptrtoint.i64 %0\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = load.m16 %0 align=2\n"
+                "  %5 = call.v16i32 row #0(%3, %1, %3, %4) fixed=(v16i32, i64, v16i32, m16) variadic=0\n"
+                "  %6 = load.v16i32 %0 align=1\n"
+                "  %7 = load.v16i32 %2 align=1\n"
+                "  %8 = load.m16 %0 align=2\n"
+                "  %9 = call.v16i32 row #0(%6, %1, %7, %8) fixed=(v16i32, i64, v16i32, m16) variadic=0\n"
+                "  %10 = address.ptr %0 offset=128\n"
+                "  %11 = store.void %10, %5 align=1\n"
+                "  %12 = address.ptr %0 offset=192\n"
+                "  %13 = store.void %12, %9 align=1\n"
+                "  %14 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_gather_model,
+        .prepare = tier1_masks_test_gather_prepare,
+        .exclusive = true,
+        // Each gather's source copied into zmm16, its mask (which it clears) into a free opmask register and its result
+        // moved out; by the scalar path's allocation, the second's source and index apart, the first's alone.
+        .rows = 2,
+        .row_moves = { 6, 4 },
+    },
+    {
+        // #1283's review: AVX512-FP16's complex multiplication, whose destination can be neither factor's register, #UD
+        // otherwise: a row whose result is the product alone, its factors dying at it, one of whose registers the
+        // allocation gives the result, so it writes another and the result moves there; and the front end's row of
+        // _mm512_fmul_pch, its result the copy of the product its third operand (the first factor again) holds.
+        .name = "complex multiplications whose factors die at them",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (u32, vector64, vector64) -> vector64 [VFMULCPH_Z_Z_ZM512 0x80 0x81 0x82 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (vector64, vector64, vector64, u32) -> vector64 [VFMULCPH_Z_Z_ZM512 0x82 0x80 0x81 0x00 0x00 0x00 0 0] [VMOVDQU64_Z_ZM512 0x80 0x00 0x82 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v16i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = const.i32 0x00000000000000000000000000000000\n"
+                "  %5 = call.v16i32 row #0(%4, %1, %3) fixed=(i32, v16i32, v16i32) variadic=0\n"
+                "  %6 = load.v16i32 %0 align=1\n"
+                "  %7 = load.v16i32 %2 align=1\n"
+                "  %8 = call.v16i32 row #1(%6, %7, %6, %4) fixed=(v16i32, v16i32, v16i32, i32) variadic=0\n"
+                "  %9 = address.ptr %0 offset=128\n"
+                "  %10 = store.void %9, %5 align=1\n"
+                "  %11 = address.ptr %0 offset=192\n"
+                "  %12 = store.void %11, %8 align=1\n"
+                "  %13 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_complex_model,
+        .fp16 = true,
+        .exclusive = true,
+        // The first's product moved out of zmm16; the second's third operand copied out of the first factor's register
+        // it shares, and its result written in the destination, the dying second factor's register, after it is read.
+        .rows = 2,
+        .row_moves = { 2, 2 },
+    },
 };
 
 // Refusals: a vector, a mask's select.
@@ -1622,7 +1873,7 @@ static __attribute__((no_sanitize("function"))) bool tier1_masks_test_call_seede
 
 // The emitted function's records, sized, encoded by both encoders (which must agree) with the helper after them, its
 // calls resolved to the helper, in an executable mapping; MAP_FAILED, the failure reported, otherwise.
-static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emitted, const uint8_t* target, uint64_t* mapped)
+static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emitted, uint64_t* mapped)
 {
     Tier1SelectCode* code = &emitted->code;
     X86Instruction helper[16];
@@ -1644,7 +1895,7 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
     if (ok)
     {
         const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets);
-        ok = tier1_masks_test_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(target, code->records, code->count) == code->count, "the sized records obey their target, x86-64-v4 or v3");
+        ok = tier1_masks_test_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(test->forms, code->records, code->count) == code->count, "the sized records obey their target's forms");
         bool covered = true;
         for (uint32_t r = 0; ok && r < code->count; r += 1)
         {
@@ -1740,7 +1991,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     Tier1EmitResult emitted = { 0 };
     if (ok)
     {
-        const Tier1EmitError error = tier1_emit_function(&plan, &options, fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4, &test->output, &test->scratch, &emitted, &node);
+        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->forms, &test->output, &test->scratch, &emitted, &node);
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK && emitted.general, fixture->name);
         if (!ok)
         {
@@ -1792,6 +2043,29 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_expect(test, !fixture->spills || (emitted.spill_stores != 0 && emitted.spill_loads != 0), "masks past k1 to k7 are spilled and reloaded");
         tier1_masks_test_expect(test, !fixture->calls || (emitted.call_stores != 0 && emitted.call_loads != 0), "masks live across a call are saved and reloaded");
         tier1_masks_test_expect(test, !fixture->borrows || (emitted.call_stores != 0 && emitted.call_loads != 0), "a machine row short of opmask registers borrows live masks' and reloads them");
+        // A host without the vector path runs the scalar one for both (BUSTER_HOST_VECTOR), and allocates as it does.
+        // A gather's and a complex multiplication's destination is none of their sources' registers (#1283's review),
+        // which would be #UD: tier1_emit_cfg_row stages its result where the allocation gave the result such a register
+        // (a dying index's or factor's), and the encoder's validation, which refuses the function otherwise, passes.
+        uint32_t exclusive = 0;
+        uint32_t distinct = 0;
+        for (uint32_t r = 0; fixture->exclusive && r < emitted.code.count; r += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[r];
+            const X86FormDescription* description = x86_form_description(record->form);
+            const bool memory = record->mode != BUSTER_X86_REGISTER_DIRECT;
+            const bool vsib = memory && (description->rm & BUSTER_X86_OPERAND_VSIB) != 0;
+            const bool complex = x86_form_has_distinct_destination(description);
+            exclusive += vsib || complex ? 1 : 0;
+            distinct += (vsib && record->reg != record->index) || (complex && record->reg != record->vvvv && (memory || record->reg != record->rm)) ? 1 : 0;
+        }
+        tier1_masks_test_expect(test, !fixture->exclusive || (exclusive != 0 && distinct == exclusive), "a gather's and a complex multiplication's destination is none of their sources' registers");
+        tier1_masks_test_expect(test, x86_validate(emitted.code.records, emitted.code.count) == emitted.code.count, "every record the function emits is valid");
+        const uint32_t row_moves = fixture->row_moves[vector && BUSTER_HOST_VECTOR ? 0 : 1];
+        if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
+        {
+            printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
+        }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
         uint32_t frame_accesses = 0;
@@ -1843,7 +2117,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     {
         printf("test-tier1-masks: %s:\n", fixture->name);
     }
-    uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4, &mapped) : MAP_FAILED;
+    uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, &mapped) : MAP_FAILED;
     test->print = print;
     ok = machine != MAP_FAILED;
     uint8_t* buffers = ok && test->native ? mmap(0, BUSTER_TIER1_MASKS_TEST_BUFFER * BUSTER_TIER1_MASKS_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
@@ -1909,6 +2183,11 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
 static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixture* fixture)
 {
     const uint64_t output_mark = test->output.length;
+    // A fixture of AVX512-FP16's rows runs natively only where the host has it, and its model only then.
+    const bool native = test->native;
+    test->native = native && (!fixture->fp16 || test->native_fp16);
+    test->native_fixtures += test->native ? 1 : 0;
+    test->forms = fixture->fp16 ? test->fp16 : fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4;
     IrFunction function;
     IrDominance dominance;
     if (tier1_masks_test_parse(test, fixture->text, &function, &dominance))
@@ -1927,11 +2206,15 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
                 bytes[byte] = input % 4 == 1 ? 0 : input % 4 == 2 ? 0xff : (uint8_t)random;
             }
             counts[input] = fixture->count != 0 ? 1 + tier1_masks_test_next(test) % fixture->count : 0;
-            if (fixture->model != NULL)
+            if (fixture->prepare != NULL)
+            {
+                fixture->prepare(bytes);
+            }
+            if (fixture->model != NULL && test->native)
             {
                 fixture->model(bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
             }
-            else
+            else if (fixture->model == NULL)
             {
                 ok = tier1_masks_test_interpret(test, &function, bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
             }
@@ -1944,6 +2227,8 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
     }
     tier1_masks_test_expect(test, test->scratch.length == 0, "parsing returns the scratch arena");
     arena_pop_to(&test->output, output_mark);
+    test->native = native;
+    test->forms = test->v4;
 }
 
 // ir_function_has_vectors_path's vector path against its scalar twin and the expected answer: operation and type columns
@@ -2637,19 +2922,23 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             .v4 = malloc(X86_FORM_COUNT),
             .v3 = malloc(X86_FORM_COUNT),
             .avx = malloc(X86_FORM_COUNT),
+            .fp16 = malloc(X86_FORM_COUNT),
             .output = arena_reserve(64u << 20),
             .scratch = arena_reserve(64u << 20),
             .execution = arena_reserve(64u << 20),
         };
         uint8_t* baseline = malloc(X86_FORM_COUNT);
         uint8_t* foundation = malloc(X86_FORM_COUNT);
-        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.v3 != 0 && test.avx != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
+        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.fp16 != 0 && test.v3 != 0 && test.avx != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
         if (tier1_masks_test_expect(&test, ready, "initialize the tables and arenas"))
         {
             X86Target v4 = { 0 };
             const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
             tier1_masks_test_expect(&test, parsed, "the x86-64-v4 target");
             x86_target_forms(&v4, test.v4);
+            memcpy(test.fp16, test.v4, X86_FORM_COUNT);
+            test.fp16[X86_FORM_VFMULCPH_Z_Z_ZM512] = 1;
+            test.forms = test.v4;
             const X86Target base = { .architecture = X86_ARCH_BASELINE };
             x86_target_forms(&base, baseline);
             X86Target v3 = { 0 };
@@ -2668,6 +2957,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // and VL's EVEX forms at 128 and 256 bits, which the vectors' fixtures take (#1204's review).
             const X86Target host = x86_target_native();
             test.native = parsed && (host.features & v4.features) == v4.features;
+            test.native_fp16 = (host.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0;
             for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
             {
                 tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);
@@ -2678,8 +2968,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
-            const uint64_t expected_runs = test.native ? 4u * BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
-            tier1_masks_test_expect(&test, test.native_runs == expected_runs, "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
+            const uint32_t runnable = test.native_fp16 ? BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) : BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) - BUSTER_TIER1_MASKS_TEST_FP16_FIXTURES;
+            const uint64_t expected_runs = test.native ? 4u * runnable * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
+            tier1_masks_test_expect(&test, test.native_fixtures == (test.native ? runnable : 0) && test.native_runs == expected_runs,
+                                    "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
             tier1_masks_test_expect(&test, test.recomputed != 0, "with rematerialization, general values beside the masks are recomputed");
             tier1_masks_test_expect(&test, test.refused == 8, "every refusal on both paths");
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
@@ -2706,6 +2998,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         free(test.v4);
         free(test.v3);
         free(test.avx);
+        free(test.fp16);
     }
     return result;
 }

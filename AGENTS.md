@@ -469,7 +469,7 @@ boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-ssa, test-ssa-ir, test-ssa-source` — `ssa.c` — [guide](docs/commands/ssa.md).
 - `test-streaming, benchmark-streaming` — `streaming.c` — [guide](docs/commands/streaming.md).
 - `test-tier0, benchmark-backend, benchmark-backend-source` — `tier0.c` — [guide](docs/commands/tier0.md).
-- `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` — `tier1_select.c` — [guide](docs/commands/tier1.md).
+- `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs, measure-tier1-rows` — `tier1_select.c` — [guide](docs/commands/tier1.md).
 - `test-tier1-allocation, benchmark-tier1-allocation` — `tier1_allocate.c` — [guide](docs/commands/tier1-allocation.md).
 - `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
 - `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).

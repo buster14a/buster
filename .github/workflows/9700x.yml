@@ -1941,6 +1941,39 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler measure-tier1-programs --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
 
+      - name: Time vector code by both tiers and the base's Tier 1, with the moves around Tier 1's machine rows
+        # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
+        # c_lexer.c), each built by this compiler's Tier 0 and --tier1, clang -O2 and, on a pull request, its base's
+        # --tier1, with each Tier 1 build's records, machine rows and moves around them. Their outputs must agree; then
+        # every build runs every program in each of 11 rounds, in an order that rotates by round, as whole processes on
+        # one CPU with their user cycles and instructions (measure-tier1-rows). Where `changes` doesn't rule it out (Tier
+        # 1's input and pipeline and the measurement: `tier1_programs`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.tier1_programs != 'false'
+        timeout-minutes: 6
+        env:
+          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base=()
+          if [ -n "$AB_BASE_SHA" ]; then
+              [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              ab="$RUNNER_TEMP/tier1-rows-ab"
+              rm -rf "$ab"
+              mkdir -p "$ab"
+              # The shallow checkout may lack the base: fetch that public commit alone, without credentials, into a
+              # worktree of its own, which leaves this checkout as it is.
+              if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
+                  GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
+                      --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
+              fi
+              git worktree add --detach "$ab/base" "$AB_BASE_SHA"
+              trap 'git worktree remove --force "$ab/base"' EXIT
+              (cd "$ab/base" && taskset -c 0-7 ./build.sh --config Release)
+              base=(--base "$ab/base/build/compiler")
+          fi
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler measure-tier1-rows --runs 11 --clang clang "${base[@]}" --march znver5 --lexer src/buster/compiler/c_lexer.c --directory /tmp
+
       - name: Time the direct forms against their helpers by both tiers
         # #1059's paired measurements: the primitives' kernels (reference counts, a spin lock, a sequence lock, flags, a
         # running maximum, inline asm) and speedtest1, each built by this compiler's Tier 0 and --tier1 as it lowers them
