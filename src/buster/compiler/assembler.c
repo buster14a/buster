@@ -48,7 +48,7 @@ struct AsmExpr
     uint32_t plus;
     uint32_t minus;
     // Intel addresses keep register terms through parentheses. These fields occupy the record's former padding.
-    uint8_t registers[2]; // Architectural GPR number plus one; 17 is RIP.
+    uint8_t registers[2]; // Architectural GPR number plus one; 17 is RIP; a vector index 32 + 32 * (class - XMM) + number.
     uint8_t scales[2];
     uint8_t register_count;
     uint8_t indexed; // Multiplication explicitly chooses an index, including a scale of one.
@@ -96,16 +96,25 @@ struct AsmSymbol
     // An alias whose target wasn't defined at its `.set`, which takes the target's type and size once it is (GNU as's
     // copy_symbol_attributes; asm_alias_inherit).
     bool inherits;
+    // An alias of it names it (#1115): GNU as lists an undefined weak symbol only when something uses it, a relocation
+    // or an alias, and every other undefined symbol the source names (asm_object_options).
+    bool used;
     // A size that reaches past its section's end, which GNU as writes and the Link's symbol, within its atom, can't
     // hold: the object's st_size (ObjectOptions.symbol_sizes), or 0.
     uint64_t beyond;
     // `.comm` and `.lcomm` (#1115): ASM_COMMON_GLOBAL for a common symbol (SHN_COMMON, of common_size bytes aligned to
-    // common_alignment), ASM_COMMON_BSS for one .bss holds (.lcomm, or a local's .comm), placed after .bss's other
-    // contents in directive order (common_next, from AsmParser.common_first), as GNU as places them.
+    // common_alignment: a COMMON symbol of its own atom in the Link, asm_emit), ASM_COMMON_BSS for one .bss holds
+    // (.lcomm, or a local's .comm), placed after .bss's other contents in directive order (common_next, from
+    // AsmParser.common_first), as GNU as places them.
     uint8_t common;
     uint32_t common_alignment;
     uint32_t common_next;
     uint64_t common_size;
+    // A global common made local and declared again: the bytes before its place in .bss (asm_common_directive).
+    uint64_t common_bias;
+    // GCC's `.loc ... view .LVU3` names it (#1115): the line row whose view number it is, plus one, which data reads
+    // (asm_resolve; assembler_lines.c).
+    uint32_t view;
 };
 
 #define ASM_COMMON_GLOBAL 1
@@ -212,14 +221,15 @@ struct AsmResult
     // Whether the source's first control flow, before any branch, is a return: a C helper whose frame would still be
     // reserved, which the checker refuses as it does the record path's.
     bool ret_first;
-    // The source's common symbols (.comm of a global, #1115), which only the object's SHN_COMMON holds: in the Link
-    // each is an undefined OBJECT, and object_options declares it common. The C checker refuses a template's.
+    // The source's common symbols (.comm of a global, #1115): in the Link each is #147's COMMON symbol of its own atom,
+    // which the object writes as SHN_COMMON's. The C checker refuses a template's.
     uint32_t common_count;
     uint64_t lex_ns;
     uint64_t parse_ns;
     uint64_t match_ns;
     uint64_t layout_ns;
     uint64_t emit_ns;
+    // .eh_frame's CFI and .debug_line's line table (#1115), which are written after layout.
     uint64_t cfi_ns;
 };
 
@@ -233,6 +243,8 @@ struct AsmSection
     uint8_t alignment;
     bool data;
     bool declared;
+    // Its last line row, plus one (assembler_lines.c).
+    uint32_t line_last;
 };
 
 typedef struct AsmParser AsmParser;
@@ -257,6 +269,9 @@ struct AsmCfiProcedure
     uint32_t return_column;
     uint32_t initial_count;
     uint32_t relocation;
+    // Its .debug_frame FDE's (#1115): the offset of its CIE pointer, the 64-bit address after it, and its CIE's.
+    uint32_t debug_relocation;
+    uint32_t debug_cie;
     bool simple;
     bool signal;
 };
@@ -266,6 +281,58 @@ struct AsmCfiState
 {
     int64_t offset;
     uint32_t reg;
+};
+
+// GNU as's line table (#1115, assembler_lines.c): a row of `.loc`'s, at its label fragment's place in a code section.
+typedef struct AsmLineRow AsmLineRow;
+struct AsmLineRow
+{
+    uint32_t fragment;
+    // The previous and the next row of its section, plus one.
+    uint32_t previous;
+    uint32_t next;
+    // Its view number (asm_line_views), and what `.loc`'s `view` says of it (ASM_VIEW_*).
+    uint32_t view;
+    uint32_t file;
+    uint32_t line;
+    uint32_t column;
+    uint32_t isa;
+    uint32_t discriminator;
+    uint8_t flags;
+    uint8_t view_kind;
+};
+
+typedef struct AsmLineFile AsmLineFile;
+struct AsmLineFile
+{
+    String8 name;
+    uint32_t directory;
+    uint8_t md5[16];
+    bool assigned;
+};
+
+// A relocation of the generated .debug_line, which emission adds: a set address's ABS64, a line string's ABS32.
+typedef struct AsmLineFixup AsmLineFixup;
+struct AsmLineFixup
+{
+    uint32_t offset;
+    uint32_t symbol;
+    uint8_t kind;
+};
+
+// The location the latest `.loc` gives (GNU as's `current`), and whether its row waits for an instruction.
+typedef struct AsmLineState AsmLineState;
+struct AsmLineState
+{
+    uint32_t file;
+    uint32_t line;
+    uint32_t column;
+    uint32_t isa;
+    uint32_t discriminator;
+    uint32_t view_symbol;
+    uint8_t flags;
+    uint8_t view_kind;
+    bool pending;
 };
 
 struct AsmParser
@@ -309,6 +376,13 @@ struct AsmParser
     uint32_t procedure_count;
     uint32_t cfi_depth;
     bool cfi_active;
+    // .cfi_sections' choice (#1115): .eh_frame unless it names others, and .debug_frame; the .debug_frame section, the
+    // label at its start, which its FDEs' CIE pointers are relocated against, and the fragment its bytes fill.
+    bool cfi_no_eh_frame;
+    bool cfi_debug_frame;
+    uint32_t cfi_debug_section;
+    uint32_t cfi_debug_label;
+    uint32_t cfi_debug_fragment;
     bool prefix;
     // asm_assemble_code's source: code another function's records hold, which takes no directive but the syntax's.
     bool code;
@@ -326,6 +400,24 @@ struct AsmParser
     uint32_t alias_count;
     // The symbols whose sizes reach past their sections' ends (AsmSymbol.beyond).
     uint32_t beyond_count;
+    // GNU as's line table (#1115, assembler_lines.c): the rows, the file and directory tables (a directory of no
+    // pointer is unset), the latest `.loc`'s state, and whether GNU as's DWARF level is 5 (after `.file 0` or `.loc 0`),
+    // not its default 3.
+    AsmLineRow* line_rows;
+    AsmLineFile* line_files;
+    String8* line_directories;
+    AsmLineState line;
+    uint32_t line_row_count;
+    uint32_t line_file_count;
+    uint32_t line_directory_count;
+    bool line_dwarf5;
+    // The table's .debug_line section and the fragment its bytes fill after layout (asm_line_emit), or 0 for none;
+    // each directory's and file's string label in .debug_line_str (DWARF 5), and the table's relocations.
+    uint32_t line_section;
+    uint32_t line_fragment;
+    uint32_t* line_strings;
+    AsmLineFixup* line_fixups;
+    uint32_t line_fixup_count;
 };
 
 static uint64_t asm_clock(void)
@@ -771,6 +863,7 @@ static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
 }
 
 static uint32_t asm_find_section(const AsmParser* parser, String8 name);
+static void asm_line_instruction(AsmParser* parser, uint32_t location);
 
 static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
 {
@@ -1168,12 +1261,14 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                     const bool is_register = parser->options.intel && prefixed == parser->prefix && token.kind != BUSTER_ASM_STRING && text.length <= 5 && asm_token_register(parser, name_at, &reg);
                     if (is_register)
                     {
-                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != 255))
+                        // A gather's or scatter's vector index too (#1115, `[rdx+4*ymm7]`).
+                        const bool vector = reg.class >= BUSTER_X86_CLASS_XMM && reg.class <= BUSTER_X86_CLASS_ZMM;
+                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != 255 && !vector))
                         {
                             asm_fail(parser, token.start, "invalid use of register");
                         }
                         value.register_count = 1;
-                        value.registers[0] = reg.class == 255 ? 17 : reg.reg + 1;
+                        value.registers[0] = reg.class == 255 ? 17 : vector ? (uint8_t)(32 + 32 * (reg.class - BUSTER_X86_CLASS_XMM) + reg.reg) : reg.reg + 1;
                         value.scales[0] = 1;
                     }
                     else
@@ -1465,9 +1560,18 @@ static bool asm_read_register(AsmParser* parser, uint32_t end, X86Operand* opera
 
 static void asm_address_register(AsmParser* parser, X86Operand* memory, X86Operand reg, uint32_t scale, bool index, uint32_t location)
 {
+    const bool vector = reg.class >= BUSTER_X86_CLASS_XMM && reg.class <= BUSTER_X86_CLASS_ZMM;
     if (reg.class == 255 && !index && !(memory->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)))
     {
         memory->mode = BUSTER_X86_MEMORY_RIP;
+    }
+    else if (vector && (index || parser->options.intel) && !(memory->mode & (BUSTER_X86_MODE_RIP | BUSTER_X86_MODE_INDEX)) && scale <= 3)
+    {
+        // A gather's or scatter's vector index (VSIB, #1115: clang's `vpgatherqd 32(%rdx,%ymm7), %xmm8 {%k1}`, Intel's
+        // `[rdx+4*ymm7]`): in Intel syntax wherever it is written, which is never a base; in AT&T's, the index's place.
+        memory->mode |= BUSTER_X86_MODE_INDEX | scale;
+        memory->index = reg.reg;
+        memory->vsib = reg.class;
     }
     else if (reg.class != BUSTER_X86_CLASS_GPR64 || (memory->mode & BUSTER_X86_MODE_RIP) || scale > 3)
     {
@@ -1524,12 +1628,13 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
     {
         const uint32_t factor = expression->scales[i];
         const uint32_t scale = factor == 2 ? 1 : factor == 4 ? 2 : factor == 8 ? 3 : 0;
+        const uint8_t number = expression->registers[i];
         const X86Operand reg =
         {
             .kind = X86_OPERAND_REGISTER,
-            .class = expression->registers[i] == 17 ? 255 : BUSTER_X86_CLASS_GPR64,
+            .class = number == 17 ? 255 : number >= 32 ? (uint8_t)(BUSTER_X86_CLASS_XMM + (number - 32) / 32) : BUSTER_X86_CLASS_GPR64,
             .width = 8,
-            .reg = expression->registers[i] - 1,
+            .reg = number >= 32 ? (uint8_t)((number - 32) % 32) : (uint8_t)(number - 1),
         };
         asm_address_register(parser, operand, reg, scale, (expression->indexed >> i) & 1, location);
     }
@@ -2143,6 +2248,173 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
     }
 }
 
+// A string instruction's explicit operand (#1115): memory of RSI or RDI (or ESI or EDI) alone, with a segment or not;
+// the accumulator; or DX, or AT&T's `(%dx)`, for a port. Its width is a register's, or Intel's `ptr`'s.
+typedef struct AsmStringOperand AsmStringOperand;
+struct AsmStringOperand
+{
+    uint8_t kind;
+    uint8_t segment;
+    uint8_t width;
+    bool destination;
+    bool narrow;
+};
+
+#define ASM_STRING_NONE 0
+#define ASM_STRING_MEMORY 1
+#define ASM_STRING_ACCUMULATOR 2
+#define ASM_STRING_PORT 3
+
+static AsmStringOperand asm_string_operand(const AsmParser* parser, uint32_t at, uint32_t end)
+{
+    static const char* const segments[] = { "es", "cs", "ss", "ds", "fs", "gs" };
+    static const uint8_t overrides[] = { 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65 };
+    static const char* const accumulators[] = { "al", "ax", "eax", "rax" };
+    static const char* const sizes[] = { "byte", "word", "dword", "qword" };
+    const bool intel = parser->options.intel;
+    AsmStringOperand result = { 0 };
+    for (uint32_t i = 0; intel && at + 1 < end && asm_is_case(parser, at + 1, "ptr") && i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        result.width = asm_is_case(parser, at, sizes[i]) ? (uint8_t)(1u << i) : result.width;
+    }
+    at += result.width != 0 ? 2 : 0;
+    const uint32_t named = at + (!intel && at < end && parser->tokens[at].kind == '%' ? 1 : 0);
+    for (uint32_t i = 0; named + 1 < end && parser->tokens[named + 1].kind == ':' && (intel || named != at) && i < BUSTER_ARRAY_LENGTH(segments); i += 1)
+    {
+        result.segment = asm_is_case(parser, named, segments[i]) ? overrides[i] : result.segment;
+    }
+    at = result.segment != 0 ? named + 2 : at;
+    const uint32_t reg = at + (intel ? 0 : 1);
+    if (result.segment == 0 && reg + 1 == end && (intel || parser->tokens[at].kind == '%'))
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accumulators); i += 1)
+        {
+            if (asm_is_case(parser, reg, accumulators[i]))
+            {
+                result.kind = ASM_STRING_ACCUMULATOR;
+                result.width = (uint8_t)(1u << i);
+            }
+        }
+        result.kind = asm_is_case(parser, reg, "dx") ? ASM_STRING_PORT : result.kind;
+    }
+    else if (at < end && parser->tokens[at].kind == (intel ? '[' : '('))
+    {
+        const uint32_t base = at + (intel ? 1 : 2);
+        const bool shaped = base + 2 == end && parser->tokens[end - 1].kind == (intel ? ']' : ')') && (intel || parser->tokens[at + 1].kind == '%');
+        const bool source = shaped && (asm_is_case(parser, base, "rsi") || asm_is_case(parser, base, "esi"));
+        const bool destination = shaped && (asm_is_case(parser, base, "rdi") || asm_is_case(parser, base, "edi"));
+        result.kind = source || destination ? ASM_STRING_MEMORY : !intel && shaped && result.segment == 0 && asm_is_case(parser, base, "dx") ? ASM_STRING_PORT : ASM_STRING_NONE;
+        result.destination = destination;
+        result.narrow = (source || destination) && asm_token_text(parser, base).pointer[0] != 'r' && asm_token_text(parser, base).pointer[0] != 'R';
+    }
+    return result;
+}
+
+// A string instruction's explicit operands, as GNU as takes them (#1115: clang's `rep;movsq (%rsi), %es:(%rdi)` and
+// `rep stosb es:[rdi], al`): RSI's memory, of any segment, as the source; RDI's, of ES alone, as the destination; the
+// accumulator and DX's port, each where the instruction has it (AT&T's order, Intel's the reverse). They name its
+// size where the mnemonic doesn't (`stos %eax, %es:(%rdi)` is stosl) and must agree with it. GNU as then writes the
+// source's segment but DS's, and 0x67 for ESI and EDI, before the instruction's own prefixes: `prefixes` takes those
+// bytes. Operands of another shape (SSE's movsd and cmpsd) are left to the instruction's own forms.
+static uint32_t asm_string_operands(AsmParser* parser, String8* name, uint32_t end, uint8_t* prefixes)
+{
+    static const char* const bases[] = { "movs", "cmps", "stos", "lods", "scas", "ins", "outs" };
+    // What each takes, in AT&T's order: S the source's memory, D the destination's, A the accumulator, P a port.
+    static const char* const shapes[] = { "SD", "DS", "AD", "SA", "DA", "PD", "SP" };
+    uint64_t space = 0;
+    for (uint64_t i = 0; i < name->length; i += 1)
+    {
+        space = name->pointer[i] == ' ' ? i + 1 : space;
+    }
+    const String8 bare = { .pointer = name->pointer + space, .length = name->length - space };
+    uint32_t base = BUSTER_ARRAY_LENGTH(bases);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bases); i += 1)
+    {
+        const uint64_t length = strlen(bases[i]);
+        base = base == BUSTER_ARRAY_LENGTH(bases) && (bare.length == length || bare.length == length + 1) && memcmp(bare.pointer, bases[i], length) == 0 ? i : base;
+    }
+    const uint64_t base_length = base < BUSTER_ARRAY_LENGTH(bases) ? strlen(bases[base]) : 0;
+    const char written = base_length != 0 && bare.length == base_length + 1 ? bare.pointer[base_length] : 0;
+    const char suffix = written == 'l' && !parser->options.intel ? 'd' : written;
+    uint32_t comma = end;
+    uint32_t commas = 0;
+    uint32_t depth = 0;
+    for (uint32_t i = parser->at; base_length != 0 && i < end; i += 1)
+    {
+        const uint16_t kind = parser->tokens[i].kind;
+        depth += kind == '(' || kind == '[';
+        depth -= (kind == ')' || kind == ']') && depth != 0;
+        comma = kind == ',' && depth == 0 && commas++ == 0 ? i : comma;
+    }
+    uint32_t count = 0;
+    const bool sized = written == 0 || suffix == 'b' || suffix == 'w' || suffix == 'd' || (suffix == 'q' && base < 5);
+    if (base_length != 0 && sized && commas == 1 && parser->at < comma && comma + 1 < end)
+    {
+        AsmStringOperand operands[2] = { asm_string_operand(parser, parser->at, comma), asm_string_operand(parser, comma + 1, end) };
+        if (parser->options.intel)
+        {
+            const AsmStringOperand first = operands[0];
+            operands[0] = operands[1];
+            operands[1] = first;
+        }
+        bool shaped = true;
+        uint8_t width = suffix == 'b' ? 1 : suffix == 'w' ? 2 : suffix == 'd' ? 4 : suffix == 'q' ? 8 : 0;
+        bool agree = true;
+        bool narrow = false;
+        bool wide = false;
+        uint8_t segment = 0;
+        bool destination_segment = true;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            const char shape = shapes[base][i];
+            const AsmStringOperand* operand = &operands[i];
+            shaped &= shape == 'S' ? operand->kind == ASM_STRING_MEMORY && !operand->destination : shape == 'D' ? operand->kind == ASM_STRING_MEMORY && operand->destination :
+                      shape == 'A' ? operand->kind == ASM_STRING_ACCUMULATOR : operand->kind == ASM_STRING_PORT;
+            agree &= operand->width == 0 || width == 0 || operand->width == width;
+            width = width == 0 ? operand->width : width;
+            narrow |= operand->kind == ASM_STRING_MEMORY && operand->narrow;
+            wide |= operand->kind == ASM_STRING_MEMORY && !operand->narrow;
+            segment = shape == 'S' && operand->segment != 0x3e ? operand->segment : segment;
+            destination_segment &= shape != 'D' || operand->segment == 0 || operand->segment == 0x26;
+        }
+        if (shaped)
+        {
+            const char size = width == 1 ? 'b' : width == 2 ? 'w' : width == 4 ? 'd' : width == 8 && base < 5 ? 'q' : 0;
+            char* spelling = arena_push(parser->arena, space + base_length + 1, 1);
+            if (!destination_segment)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "a string instruction's destination must use the ES segment");
+            }
+            else if (!agree || size == 0)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, size == 0 ? "a string instruction's operands give no size, nor does its mnemonic"
+                                                                             : "a string instruction's operands and mnemonic disagree on its size");
+            }
+            else if (narrow && wide)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "a string instruction's operands mix address sizes");
+            }
+            else if (spelling == 0)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "arena exhausted");
+            }
+            else
+            {
+                memcpy(spelling, name->pointer, space);
+                memcpy(spelling + space, bases[base], base_length);
+                spelling[space + base_length] = size;
+                *name = (String8){ .pointer = spelling, .length = space + base_length + 1 };
+                prefixes[count] = segment;
+                count += segment != 0;
+                prefixes[count] = 0x67;
+                count += narrow;
+                parser->at = end;
+            }
+        }
+    }
+    return count;
+}
+
 // GNU as's compare-predicate names (#1115): cmpPss, cmpPsd, cmpPps and cmpPpd for SSE's eight predicates, vcmpP... for
 // AVX's 32 (and the aliases of the first eight), and AVX-512's vpcmpP{b,w,d,q} and vpcmpPu{b,w,d,q} for its eight, each
 // the instruction without the predicate and the predicate's number as its immediate: clang writes `cmpltsd %xmm2,
@@ -2238,6 +2510,8 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         asm_prefixed_mnemonic(parser, name, end);
         asm_string_mnemonic(parser, name, end);
         instruction->written = asm_token_text(parser, parser->at - 1);
+        uint8_t string_prefixes[2];
+        const uint32_t string_prefix_count = asm_string_operands(parser, name, end, string_prefixes);
         const int32_t predicate = asm_compare_predicate(name);
         uint32_t width = 0;
         uint32_t source_width = 0;
@@ -2395,6 +2669,29 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
             exchanged[1] = operand;
             instruction->expressions[1] = expression;
         }
+        // GNU as gives an instruction the row a `.loc` left waiting (#1115), before its prefixes.
+        asm_line_instruction(parser, location);
+        if (string_prefix_count != 0 && parser->code)
+        {
+            // Code that another function's records hold has no bytes but its records': its caller assembles it whole.
+            parser->directive = true;
+            asm_fail(parser, location, "inline assembly's string instruction operands that need a prefix are its unit's");
+        }
+        else if (string_prefix_count != 0 && parser->result.error == 0)
+        {
+            const uint32_t prefix = asm_fragment(parser, ASM_BYTES, location);
+            uint8_t* bytes = arena_push(parser->arena, string_prefix_count, 1);
+            if (bytes == 0)
+            {
+                asm_fail(parser, location, "arena exhausted");
+            }
+            else if (parser->result.error == 0)
+            {
+                memcpy(bytes, string_prefixes, string_prefix_count);
+                parser->fragments[prefix].bytes = bytes;
+                parser->fragments[prefix].size = string_prefix_count;
+            }
+        }
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;
@@ -2424,6 +2721,8 @@ static void asm_prefix_statements(AsmParser* parser, uint32_t end)
         }
         else
         {
+            // GNU as reads a data16 or rex64 statement as an instruction, which takes the row a `.loc` left waiting.
+            asm_line_instruction(parser, location);
             const uint32_t fragment = asm_fragment(parser, ASM_BYTES, location);
             uint8_t* byte = arena_push(parser->arena, 1, 1);
             if (byte == 0)
@@ -2577,12 +2876,13 @@ static uint32_t asm_note_section(const AsmParser* parser, uint32_t end)
 
 // `.comm name, size[, alignment]` and `.lcomm name, size` (#1115), as GNU as reads them for ELF. A common symbol (C's
 // tentative definitions under -fcommon) is an object of SHN_COMMON, which the linker places: a global OBJECT whose
-// alignment is the third operand, or without one the size's power of two up to 16. A local's .comm and every .lcomm
-// are instead an object of .bss, placed after its other contents (GNU as's subsection 1) in directive order, aligned
-// to the third operand or, for .lcomm, to the size's power of two up to 8 (asm_place_commons). A global's repeated
-// .comm keeps the first size, as GNU as does (it warns of another), and takes the last alignment: its third operand, or
-// without one (or 0) the kept size's power of two. A local's repeated .comm or .lcomm, or a name defined otherwise, is
-// a duplicate definition, as in GNU as; a weak name, and a common one made local and declared again, are refused.
+// alignment is the third operand, or without one the size's power of two up to 16 (in the Link, #147's COMMON symbol
+// of its own atom). A local's .comm and every .lcomm are instead an object of .bss, placed after its other contents
+// (GNU as's subsection 1) in directive order, aligned to the third operand or, for .lcomm, to the size's power of two
+// up to 8 (asm_place_commons). A global's repeated .comm keeps the first size, as GNU as does (it warns of another),
+// and takes the last alignment: its third operand, or without one (or 0) the kept size's power of two; one made local
+// and declared again joins .bss's, as GNU as places it (below). A local's repeated .comm or .lcomm, or a name defined
+// otherwise, is a duplicate definition, as in GNU as, and a weak name is refused.
 static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end)
 {
     const uint32_t location = parser->tokens[token].start;
@@ -2617,7 +2917,12 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
         {
             const uint8_t kind = local ? ASM_COMMON_BSS : ASM_COMMON_GLOBAL;
             const bool repeated = symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_GLOBAL;
-            const uint32_t bytes = repeated ? (uint32_t)symbol->common_size : (uint32_t)size;
+            // A global common made local and declared again (`.comm x,4,4`, `.local x`, then `.comm x` or `.lcomm x`):
+            // GNU as keeps its first size, as for a repeated .comm, and places it in .bss with the new directive's
+            // alignment, but at its common size past that place, as the symbol's value is still that size when
+            // bss_alloc gives it its frag; the .bss it takes is twice the size (#1115).
+            const bool relocal = symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_BSS;
+            const uint32_t bytes = (repeated || relocal) && symbol->common_size != 0 ? (uint32_t)symbol->common_size : (uint32_t)size;
             uint32_t power = 1;
             while (power < bytes && power < 16)
             {
@@ -2625,13 +2930,7 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
             }
             const uint32_t placed = lcomm ? (bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1) : alignment != 0 ? (uint32_t)alignment : 1;
             const uint32_t chosen = local ? placed : alignment != 0 ? (uint32_t)alignment : power;
-            if (symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_BSS)
-            {
-                // GNU as places it in .bss at its common size past its own alignment's place, a quirk this assembler
-                // doesn't follow.
-                asm_fail(parser, location, "a common symbol made local and declared again");
-            }
-            else if ((symbol->common != 0 && !repeated) || symbol->defined || symbol->absolute)
+            if ((symbol->common != 0 && !repeated && !relocal) || symbol->defined || symbol->absolute)
             {
                 asm_fail(parser, location, "duplicate symbol definition");
             }
@@ -2641,6 +2940,8 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
             }
             else
             {
+                symbol->common_bias = relocal ? symbol->common_size : 0;
+                parser->common_count -= relocal;
                 symbol->common = kind;
                 symbol->common_size = bytes;
                 symbol->common_alignment = chosen;
@@ -2678,6 +2979,7 @@ static void asm_place_commons(AsmParser* parser)
             asm_fail(parser, symbol->location, "duplicate symbol definition");
         }
         const uint32_t align = asm_fragment(parser, ASM_ALIGN, symbol->location);
+        const uint32_t bias = symbol->common_bias != 0 ? asm_fragment(parser, ASM_FILL, symbol->location) : 0;
         const uint32_t label = asm_fragment(parser, ASM_LABEL, symbol->location);
         const uint32_t fill = asm_fragment(parser, ASM_FILL, symbol->location);
         if (parser->result.error == 0)
@@ -2685,6 +2987,11 @@ static void asm_place_commons(AsmParser* parser)
             parser->fragments[align].alignment = symbol->common_alignment;
             parser->fragments[align].maximum = BUSTER_ASM_MAX_SECTION;
             parser->fragments[align].padding = ASM_PADDING_FILL;
+            if (bias != 0)
+            {
+                parser->fragments[bias].size = (uint32_t)symbol->common_bias;
+                parser->fragments[bias].padding = ASM_PADDING_FILL;
+            }
             parser->fragments[fill].size = (uint32_t)symbol->common_size;
             parser->fragments[fill].padding = ASM_PADDING_FILL;
             symbol->defined = true;
@@ -2759,6 +3066,11 @@ static void asm_resolve_aliases(AsmParser* parser)
         {
             asm_fail(parser, symbol->location, "absolute expression required here (forward constants are unsupported)");
         }
+        else if (symbol->alias && target->common == ASM_COMMON_GLOBAL)
+        {
+            // GNU as refuses it too, whichever comes first (#1115): a common symbol has no place yet to be one of.
+            asm_fail(parser, symbol->location, "a symbol can't be equated to a common symbol");
+        }
         else if (symbol->alias && target->defined && !target->section_start && target->offset + symbol->alias_target.value >= INT32_MIN &&
                  target->offset + symbol->alias_target.value <= INT32_MAX)
         {
@@ -2773,9 +3085,12 @@ static void asm_resolve_aliases(AsmParser* parser)
                 asm_alias_inherit(symbol, target);
             }
         }
-        else if (symbol->alias && (symbol->explicit_binding || symbol->has_size))
+        else if (symbol->alias)
         {
-            asm_fail(parser, symbol->location, "exported aliases of undefined symbols are not supported by the shared object writer");
+            // An alias of an undefined symbol, exported or not, is in no table, as GNU as leaves it out (its binding,
+            // type and size with it): references to it are the target's, and the target is listed, a weak one too,
+            // which an alias uses (asm_object_options).
+            target->used = true;
         }
     }
     for (uint32_t i = 0; parser->alias_count != 0 && i < parser->instruction_count; i += 1)
@@ -2797,6 +3112,7 @@ static void asm_resolve_aliases(AsmParser* parser)
 
 #include "assembler_sections.c"
 #include "assembler_cfi.c"
+#include "assembler_lines.c"
 
 static void asm_directive(AsmParser* parser, uint32_t end)
 {
@@ -2826,29 +3142,15 @@ static void asm_directive(AsmParser* parser, uint32_t end)
     {
         asm_cfi_directive(parser, token, end);
     }
-    else if (asm_is(parser, token, ".loc") || asm_is(parser, token, ".prefalign"))
+    else if (asm_is(parser, token, ".loc"))
     {
-        // Debug locations and LLVM's preferred-alignment hint don't change the code this object writer records. GNU as
-        // 2.42 doesn't accept .prefalign either; taking the hint as no alignment still assembles compiler output. GCC's
-        // `view` operands do define labels at the current place, which its later `.uleb128`s encode.
-        for (uint32_t i = parser->at; asm_is(parser, token, ".loc") && i + 1 < end; i += 1)
-        {
-            if (asm_is(parser, i, "view") && asm_name_token(parser, i + 1))
-            {
-                const uint32_t id = asm_symbol(parser, asm_name_text(parser, i + 1), parser->tokens[i + 1].start);
-                if (parser->symbols[id].defined)
-                {
-                    asm_fail(parser, parser->tokens[i + 1].start, "duplicate debug view label");
-                }
-                else
-                {
-                    parser->symbols[id].defined = true;
-                    parser->symbols[id].section_start = false;
-                    parser->symbols[id].fragment = asm_fragment(parser, ASM_LABEL, parser->tokens[i + 1].start);
-                }
-                i += 1;
-            }
-        }
+        // A line row of GNU as's line table, and GCC's view numbers (#1115, assembler_lines.c).
+        asm_line_loc(parser, location, end);
+    }
+    else if (asm_is(parser, token, ".prefalign"))
+    {
+        // LLVM's preferred-alignment hint doesn't change the code this object writer records. GNU as 2.42 doesn't
+        // accept .prefalign either; taking the hint as no alignment still assembles compiler output.
         parser->at = end;
     }
     else if (asm_is(parser, token, ".file") || asm_is(parser, token, ".ident"))
@@ -2857,8 +3159,8 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                               asm_token_text(parser, parser->at).pointer[0] >= '0' && asm_token_text(parser, parser->at).pointer[0] <= '9';
         if (numbered)
         {
-            // DWARF 5's `.file N "directory" "name" md5 0x...`: the object has no debug sections here.
-            parser->at = end;
+            // `.file N ["directory"] "name" [md5 0x...]`: the line table's file (#1115, assembler_lines.c).
+            asm_line_file(parser, location, end);
         }
         else if (parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_STRING)
         {
@@ -3100,8 +3402,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
              asm_is(parser, token, ".align") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
     {
         const bool nops = asm_is(parser, token, ".nops");
-        const bool skip = asm_is(parser, token, ".skip") || asm_is(parser, token, ".space");
-        const bool align = !asm_is(parser, token, ".zero") && !skip && !nops;
+        // GNU as's .zero is its .space, of an optional fill too: clang writes `.zero 16,63` for a vector of 63s (#1115).
+        const bool skip = asm_is(parser, token, ".skip") || asm_is(parser, token, ".space") || asm_is(parser, token, ".zero");
+        const bool align = !skip && !nops;
         __int128 value = asm_absolute(parser, end);
         if (asm_is(parser, token, ".p2align"))
         {
@@ -3340,6 +3643,8 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         }
         // The x87's operands GNU as leaves out (fxch alone, fadd st), as asm_instruction gives them.
         asm_x87_operands(parser, &instruction->request);
+        // GNU as gives an instruction the row a `.loc` left waiting (#1115).
+        asm_line_instruction(parser, location);
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;
@@ -3454,6 +3759,8 @@ static void asm_parse(AsmParser* parser)
     }
     asm_place_commons(parser);
     asm_resolve_aliases(parser);
+    asm_line_finish(parser);
+    asm_cfi_finish(parser);
     if (parser->cfi_active)
     {
         asm_fail(parser, parser->source.length, "missing .cfi_endproc");
@@ -3468,6 +3775,12 @@ static __int128 asm_symbol_position(const AsmParser* parser, const AsmSymbol* sy
 
 static AsmExpr asm_resolve(AsmParser* parser, AsmExpr expression, uint32_t location)
 {
+    // A view symbol's value is its row's view number (#1115), which layout gives it (asm_line_views).
+    if (expression.plus != 0 && parser->symbols[expression.plus].view != 0 && expression.relocation == ASM_RELOCATION_NONE)
+    {
+        expression.value += parser->line_rows[parser->symbols[expression.plus].view - 1].view;
+        expression.plus = 0;
+    }
     if (expression.relocation != ASM_RELOCATION_NONE && (expression.plus == 0 || expression.minus != 0))
     {
         asm_fail(parser, location, "relocation modifier requires one symbol");
@@ -4194,6 +4507,8 @@ static void asm_layout(AsmParser* parser)
                 relax.limit += leb ? 9 : 0;
             }
             asm_relax_targets(parser, &relax);
+            // A .uleb128 of a view number (#1115) reads the code's offsets as any LEB128 reads its labels'.
+            asm_line_views(parser, false);
             bool stretched = true;
             bool moved = false;
             while (stretched && parser->result.error == 0)
@@ -4210,6 +4525,10 @@ static void asm_layout(AsmParser* parser)
                 {
                     asm_relax_place(parser, &relax, section);
                 }
+                if (relax.lebs && stretched)
+                {
+                    asm_line_views(parser, false);
+                }
                 if (stretched && parser->result.rounds >= relax.limit)
                 {
                     asm_fail(parser, 0, "layout doesn't converge: a .uleb128 or .sleb128 bounces between sizes across an alignment");
@@ -4221,6 +4540,10 @@ static void asm_layout(AsmParser* parser)
             }
         }
         scratch_end(scratch);
+    }
+    if (parser->result.error == 0)
+    {
+        asm_line_views(parser, true);
     }
     for (uint32_t i = 0; i < parser->instruction_count && parser->result.error == 0; i += 1)
     {
@@ -4250,13 +4573,31 @@ static void asm_layout(AsmParser* parser)
 
 static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment)
 {
-    AsmExpr expression = asm_resolve(parser, fragment->expression, fragment->location);
-    // A TLS variable's 32-bit offset as data (#1115): `.long x@dtpoff` (DWARF's location of a TLS variable in 32-bit
-    // DWARF expressions) and `.long x@tpoff`. The 64-bit ones are DTPOFF64 and TPOFF64, which the Link doesn't have.
-    const bool offset = expression.relocation == ASM_RELOCATION_TPOFF || expression.relocation == ASM_RELOCATION_DTPOFF;
-    if (expression.relocation != ASM_RELOCATION_NONE && (!offset || fragment->size != 4))
+    // GNU as's `.long A - B` where B is in the datum's section and A isn't (#1115: GCC's -O2 PIE jump tables, `.long
+    // .L45-.L35` in .rodata with .L45 in .text): A's distance from the datum, plus the datum's from B, which is constant,
+    // so a PC-relative relocation of A (PC32, and PC64 for `.quad`). A B elsewhere stays refused, as GNU as refuses it.
+    AsmExpr source = fragment->expression;
+    bool relative = false;
+    if (source.plus != 0 && source.minus != 0 && source.relocation == ASM_RELOCATION_NONE)
     {
-        asm_fail(parser, fragment->location, "of data, only .long takes a relocation modifier, @TPOFF or @DTPOFF");
+        const AsmSymbol* positive = &parser->symbols[source.plus];
+        const AsmSymbol* negative = &parser->symbols[source.minus];
+        const bool here = negative->defined && !negative->absolute && !negative->section_start && parser->fragments[negative->fragment].section == fragment->section;
+        const bool elsewhere = !positive->absolute && (!positive->defined || parser->fragments[positive->fragment].section != fragment->section);
+        if (here && elsewhere)
+        {
+            source.value += (__int128)fragment->offset - asm_symbol_position(parser, negative);
+            source.minus = 0;
+            relative = true;
+        }
+    }
+    AsmExpr expression = asm_resolve(parser, source, fragment->location);
+    // A TLS variable's offset as data (#1115): `.quad x@dtpoff` (DWARF's location of a TLS variable, which GCC and Clang
+    // write at -g), `.long x@dtpoff` (32-bit DWARF expressions), and `.quad x@tpoff` and `.long x@tpoff`.
+    const bool offset = expression.relocation == ASM_RELOCATION_TPOFF || expression.relocation == ASM_RELOCATION_DTPOFF;
+    if (expression.relocation != ASM_RELOCATION_NONE && (!offset || (fragment->size != 4 && fragment->size != 8)))
+    {
+        asm_fail(parser, fragment->location, "of data, only .long and .quad take a relocation modifier, @TPOFF or @DTPOFF");
     }
     uint8_t* bytes = parser->result.link.atoms.bytes[atom];
     if (expression.plus == 0)
@@ -4283,8 +4624,10 @@ static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment
     }
     else
     {
-        const uint8_t kind = expression.relocation == ASM_RELOCATION_TPOFF  ? BUSTER_LINK_FIXUP_TPOFF32
-                           : expression.relocation == ASM_RELOCATION_DTPOFF ? BUSTER_LINK_FIXUP_DTPOFF32
+        const bool wide = fragment->size == 8;
+        const uint8_t kind = expression.relocation == ASM_RELOCATION_TPOFF  ? (wide ? BUSTER_LINK_FIXUP_TPOFF64 : BUSTER_LINK_FIXUP_TPOFF32)
+                           : expression.relocation == ASM_RELOCATION_DTPOFF ? (wide ? BUSTER_LINK_FIXUP_DTPOFF64 : BUSTER_LINK_FIXUP_DTPOFF32)
+                           : relative                                       ? (fragment->size == 4 ? BUSTER_LINK_FIXUP_PC32 : BUSTER_LINK_FIXUP_PC64)
                            : fragment->size == 4                            ? BUSTER_LINK_FIXUP_ABS32
                                                                             : BUSTER_LINK_FIXUP_ABS64;
         memset(bytes + fragment->offset, 0, fragment->size);
@@ -4297,16 +4640,17 @@ static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment
 // immediate the form sign-extends (`movl %fs:x@tpoff, %eax`, `leaq x@dtpoff(%rax), %rdx`, `addq $x@tpoff, %rax`), as
 // TPOFF32 and DTPOFF32; @GOTTPOFF (initial-exec), @TLSGD (general-dynamic) and @TLSLD (local-dynamic) in a
 // RIP-relative displacement, as their kinds.
-static uint8_t asm_tls_kind(AsmParser* parser, uint32_t location, uint16_t relocation, bool rip, bool signed32)
+static uint8_t asm_tls_kind(AsmParser* parser, uint32_t location, uint16_t relocation, bool rip, bool signed32, bool wide)
 {
     uint8_t kind = BUSTER_LINK_FIXUP_NONE;
     if (relocation == ASM_RELOCATION_TPOFF || relocation == ASM_RELOCATION_DTPOFF)
     {
-        if (!signed32)
+        // A 64-bit immediate (`movabs $x@tpoff, %rax`) takes the 64-bit kinds, R_X86_64_TPOFF64 and DTPOFF64.
+        if (!signed32 && !wide)
         {
-            asm_fail(parser, location, "@TPOFF and @DTPOFF take a signed 32-bit displacement or immediate");
+            asm_fail(parser, location, "@TPOFF and @DTPOFF take a signed 32-bit displacement or immediate, or a 64-bit immediate");
         }
-        kind = relocation == ASM_RELOCATION_TPOFF ? BUSTER_LINK_FIXUP_TPOFF32 : BUSTER_LINK_FIXUP_DTPOFF32;
+        kind = relocation == ASM_RELOCATION_TPOFF ? (wide ? BUSTER_LINK_FIXUP_TPOFF64 : BUSTER_LINK_FIXUP_TPOFF32) : (wide ? BUSTER_LINK_FIXUP_DTPOFF64 : BUSTER_LINK_FIXUP_DTPOFF32);
     }
     else
     {
@@ -4395,7 +4739,7 @@ static void asm_instruction_fixups(AsmParser* parser, AtomId atom, AsmInstructio
                     else if (expression.relocation != ASM_RELOCATION_NONE)
                     {
                         kind = asm_tls_kind(parser, instruction->location, expression.relocation, displacement && (operand->mode & BUSTER_X86_MODE_RIP) != 0,
-                                            !pc_relative && width == 4 && signed_field);
+                                            !pc_relative && width == 4 && signed_field, !pc_relative && !displacement && width == 8);
                     }
                     memset(bytes, 0, width);
                     link_add_fixup(&parser->result.link, atom, offset, kind, parser->symbols[expression.plus].link, addend);
@@ -4465,9 +4809,10 @@ static void asm_emit(AsmParser* parser)
     const LinkCapacity capacity =
         {
             .names = parser->symbol_count,
-            .atoms = parser->section_count,
+            // A section's atom each, and a global common's (#147's representation).
+            .atoms = parser->section_count + parser->common_count,
             .symbols = parser->symbol_count,
-            .fixups = parser->fragment_count + parser->instruction_count * 2,
+            .fixups = parser->fragment_count + parser->instruction_count * 2 + parser->line_fixup_count + parser->procedure_count * 2,
             .wide_addends = parser->fragment_count + parser->instruction_count * 2,
     };
     if (!link_initialize(link, parser->arena, parser->arena, capacity))
@@ -4572,9 +4917,9 @@ static void asm_emit(AsmParser* parser)
             }
             continue;
         }
-        if (symbol->alias)
+        if (symbol->alias || symbol->view != 0)
         {
-            // No reference is to it any more (asm_resolve_aliases).
+            // No reference is to it any more (asm_resolve_aliases), or it is a view number (asm_resolve).
             continue;
         }
         if (symbol->section_start && !symbol->defined)
@@ -4588,14 +4933,15 @@ static void asm_emit(AsmParser* parser)
             symbol->link = link_add_symbol(link, name, target->atom, 0, 0, symbol->flags, BUSTER_LINK_SOURCE_PROGRAM);
             continue;
         }
-        if (!symbol->defined && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0) || (symbol->explicit_binding && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL)))
+        if (!symbol->defined && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0)))
         {
             asm_fail(parser, symbol->location, "undefined local symbol");
             continue;
         }
-        if (!symbol->defined && !symbol->explicit_binding)
+        // An undefined symbol is global unless weak: also one `.local` names, which GNU as lists as a global (#1115).
+        if (!symbol->defined && (!symbol->explicit_binding || (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL))
         {
-            symbol->flags |= BUSTER_LINK_SYMBOL_GLOBAL;
+            symbol->flags = (uint8_t)((symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
         }
         const AsmFragment* definition = &parser->fragments[symbol->fragment];
         // GNU as makes a symbol of a TLS section a TLS variable (`.type tl, @object` in .tbss, as clang and GCC write
@@ -4603,9 +4949,17 @@ static void asm_emit(AsmParser* parser)
         // access.
         const bool tls_section = symbol->defined && link_class_is_tls(parser->sections[definition->section].class);
         const uint8_t type = symbol->flags & BUSTER_LINK_SYMBOL_TYPE;
+        // A global common (#147's representation, BUSTER_LINK_SYMBOL_COMMON): a symbol of its own zero-filled atom,
+        // which the object writer leaves to the linker as SHN_COMMON, its value the atom's alignment (#1115).
+        const bool common = symbol->common == ASM_COMMON_GLOBAL && !symbol->defined;
         if (symbol->common == ASM_COMMON_GLOBAL && symbol->defined)
         {
             asm_fail(parser, symbol->location, "duplicate symbol definition");
+        }
+        if (common && symbol->tls)
+        {
+            // As GNU as refuses it ("Accessing `x' as thread-local object"): a common symbol is no TLS variable.
+            asm_fail(parser, symbol->location, "TLS relocation modifier on a common symbol");
         }
         if (symbol->defined && symbol->tls && !tls_section)
         {
@@ -4633,7 +4987,16 @@ static void asm_emit(AsmParser* parser)
         const bool beyond = symbol->defined && (uint64_t)size.value > remaining;
         symbol->beyond = beyond ? (uint64_t)size.value : 0;
         parser->beyond_count += beyond;
-        symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, beyond ? remaining : (uint64_t)size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+        if (common)
+        {
+            const AtomId atom = link_add_atom(link, BUSTER_LINK_CLASS_BSS, (uint8_t)__builtin_ctz(symbol->common_alignment), symbol->common_size, 0, 0);
+            symbol->flags = (uint8_t)((symbol->flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON);
+            symbol->link = link_add_symbol(link, name, atom, 0, symbol->common_size, symbol->flags, BUSTER_LINK_SOURCE_PROGRAM);
+        }
+        else
+        {
+            symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, beyond ? remaining : (uint64_t)size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+        }
     }
     parser->result.directives = link->symbols.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint8_t, link->symbols.count) : 0;
     if (link->symbols.count != 0 && parser->result.directives == 0)
@@ -4764,10 +5127,24 @@ static void asm_emit(AsmParser* parser)
             }
         }
     }
-    for (uint32_t i = 0; i < parser->procedure_count && parser->result.error == 0; i += 1)
+    for (uint32_t i = 0; !parser->cfi_no_eh_frame && i < parser->procedure_count && parser->result.error == 0; i += 1)
     {
         const AsmCfiProcedure* procedure = &parser->procedures[i];
         link_add_fixup(link, parser->sections[BUSTER_LINK_CLASS_EH_FRAME].atom, procedure->relocation, BUSTER_LINK_FIXUP_PC32, parser->symbols[procedure->symbol].link, 0);
+    }
+    // .debug_frame's, each FDE's in GNU as's order: its CIE's offset in the section, then its first address.
+    for (uint32_t i = 0; parser->cfi_debug_section != 0 && i < parser->procedure_count && parser->result.error == 0; i += 1)
+    {
+        const AsmCfiProcedure* procedure = &parser->procedures[i];
+        const AtomId atom = parser->sections[parser->cfi_debug_section].atom;
+        link_add_fixup(link, atom, procedure->debug_relocation, BUSTER_LINK_FIXUP_ABS32, parser->symbols[parser->cfi_debug_label].link, procedure->debug_cie);
+        link_add_fixup(link, atom, procedure->debug_relocation + 4, BUSTER_LINK_FIXUP_ABS64, parser->symbols[procedure->symbol].link, 0);
+    }
+    // The line table's (asm_line_emit): its set addresses' and line strings' relocations, in their order.
+    for (uint32_t i = 0; i < parser->line_fixup_count && parser->result.error == 0; i += 1)
+    {
+        const AsmLineFixup* fixup = &parser->line_fixups[i];
+        link_add_fixup(link, parser->sections[parser->line_section].atom, fixup->offset, fixup->kind, parser->symbols[fixup->symbol].link, 0);
     }
     asm_object_options(parser);
     parser->result.common_count = parser->common_count;
@@ -4881,6 +5258,10 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     if (parser.result.error == 0)
     {
         asm_cfi_emit(&parser);
+    }
+    if (parser.result.error == 0)
+    {
+        asm_line_emit(&parser);
     }
     const uint64_t cfi_emitted = asm_clock();
     if (parser.result.error == 0)
@@ -5098,8 +5479,10 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 }
                 else if (expression.relocation != ASM_RELOCATION_NONE)
                 {
+                    // A C template's references take the code generators' kinds (link_kind_fits), which the 64-bit TLS
+                    // offsets aren't.
                     kind = asm_tls_kind(&parser, instruction->location, expression.relocation, displacement && (operand->mode & BUSTER_X86_MODE_RIP) != 0,
-                                        !pc_relative && width == 4 && signed_field);
+                                        !pc_relative && width == 4 && signed_field, false);
                 }
                 char* name = !symbol->internal && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
                 if (symbol->internal && symbol->defined)

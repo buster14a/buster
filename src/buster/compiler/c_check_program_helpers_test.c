@@ -305,9 +305,10 @@ static void check_test_program_helper_contracts(CheckTest* test)
     {
         const CheckProgramHelperContract* contract = &check_program_helper_contracts[f];
         check_test_expect(test, contract->name != NULL && contract->helper != NULL && contract->effects != 0 && (contract->effects & ~BUSTER_CHECK_HELPER_EFFECTS) == 0 &&
-                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE || f == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS || f == CHECK_PROGRAM_HELPER_ATOMIC_RMW),
-                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences, the atomic accesses and "
-                          "the read/modify/writes a direct form");
+                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE || f == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS || f == CHECK_PROGRAM_HELPER_ATOMIC_RMW ||
+                                                                                           f == CHECK_PROGRAM_HELPER_ASM),
+                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences, the atomic accesses, "
+                          "the read/modify/writes and the asm statements a direct form");
     }
     // The family of each helper by what names it, and a helper no family names (a load or a store of another id, a
     // read/modify/write without its rule) UNMODELED's, with every effect; a load reads and a store writes, each alone.

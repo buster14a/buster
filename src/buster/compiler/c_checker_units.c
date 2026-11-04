@@ -1780,6 +1780,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
             .units_lane = lane,
+            .helper_forms = command->helper_forms,
         };
         lane->memory = run->memory;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };

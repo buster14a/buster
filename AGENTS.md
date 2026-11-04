@@ -416,7 +416,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-bindings, test-parser-bindings` — `c_bindings.c` — [guide](docs/commands/bindings.md).
 - `test-branch-sizing, benchmark-branch-sizing` — `branch_sizing.c` — [guide](docs/commands/branch-sizing.md).
 - `./build.sh, bake-tables, test-baked-tables` — `baked.c` — [guide](docs/commands/build.md).
-- `test-builtins, test-check-builtins, test-builtin-lowering` — `c_builtin.c` — [guide](docs/commands/builtins.md).
+- `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` — `c_builtin.c` — [guide](docs/commands/builtins.md).
 - `check-call-graph, test-call-graph` — `call_graph.c` — [guide](docs/commands/call-graph.md).
 - `test-calling-convention, benchmark-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
 - `check, test-checker, test-checker-driver` — `c_checker.c` — [guide](docs/commands/checker.md).

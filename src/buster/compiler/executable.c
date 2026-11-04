@@ -1081,6 +1081,14 @@ BUSTER_INLINE bool executable_patch_other(ExecutablePatch patch, uint8_t* bytes,
             // A shared library keeps the module base; a relaxed executable uses the thread pointer.
             value = (int32_t)patch.reference[target] + addend + (int64_t)patch.tls_block;
             break;
+        case BUSTER_LINK_FIXUP_TPOFF64:
+            value = (int32_t)patch.reference[target] + addend;
+            width = 8;
+            break;
+        case BUSTER_LINK_FIXUP_DTPOFF64:
+            value = (int32_t)patch.reference[target] + addend + (int64_t)patch.tls_block;
+            width = 8;
+            break;
         case BUSTER_LINK_FIXUP_TLSGD:
         case BUSTER_LINK_FIXUP_TLSLD:
             value = patch.tlsgd_slots != 0 ? (int64_t)(patch.base + patch.got + 8 * (kind == BUSTER_LINK_FIXUP_TLSGD ? patch.tlsgd_slots[target] : patch.tlsld_slot)) + addend - place : 0;
@@ -3906,8 +3914,9 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
         const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
         const bool dynamic = executable_bit(shared->dynamic_bits, target);
         const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
-        const bool module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0;
-        const bool missing_module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0;
+        const bool module_kind = kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_DTPOFF64;
+        const bool module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && module_kind && link->symbols.atom[target] != 0;
+        const bool missing_module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && module_kind && link->symbols.atom[target] == 0;
         // A shared library's count leaves its TLSGD fixups out, and a static PIE has no dynamic symbols. Only a PIE
         // that relaxes its accesses (ExecutableShared.relaxes_tls) takes one to an import: without __tls_get_addr
         // named, the access is refused here, as before #515, rather than once the patch can't relax it.
@@ -4372,7 +4381,8 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             // dynamic accesses share one module pair. Only local-exec is impossible in a shared library.
             const uint64_t gd = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD));
             const uint64_t ld = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSLD));
-            const uint64_t refused_kinds = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TPOFF32));
+            const uint64_t refused_kinds = valid & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TPOFF32)) |
+                                                    _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TPOFF64)));
             for (uint64_t left = gd; left != 0; left &= left - 1)
             {
                 const SymbolId target = fixups->target[group + (FixupId)__builtin_ctzll(left)];
@@ -4877,11 +4887,11 @@ static void executable_classify(const Link* link, ExecutableShared* shared, cons
     }
 }
 
-// Whether a shared library refuses a fixup of `kind` whatever its target: a TPOFF32 (local-exec), whose offset from the
-// thread pointer a shared library can't know, as lld refuses it with -shared.
+// Whether a shared library refuses a fixup of `kind` whatever its target: a TPOFF32 or TPOFF64 (local-exec), whose
+// offset from the thread pointer a shared library can't know, as lld refuses it with -shared.
 static bool executable_shared_refuses(uint8_t kind)
 {
-    return kind == BUSTER_LINK_FIXUP_TPOFF32;
+    return kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64;
 }
 
 // Whether a PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that needs a
@@ -4896,8 +4906,9 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool relocated = class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE || class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
     const bool absolute32 = kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS32S;
     const bool text = kind == BUSTER_LINK_FIXUP_ABS64 && !executable_class_is_written(atom_class);
+    const bool module_kind = kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_DTPOFF64;
     const bool dynamic_tls = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
-                                                                       (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0));
+                                                                       (module_kind && link->symbols.atom[target] != 0));
     // A dynamic PIE's general-dynamic access to an import relaxes to initial-exec through its GOT slot, when the PIE
     // relaxes its accesses (executable_check_direct's rule).
     const bool initial_exec = scope == BUSTER_EXECUTABLE_SCOPE_IMPORTS && kind == BUSTER_LINK_FIXUP_TLSGD && relaxes_tls;
@@ -4908,7 +4919,7 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
                                   link->symbols.atom[target] == 0 && class != BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
     const bool refused = (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) ||
                          (relative && executable_is_absolute_zero(link, target, scope)) || (absolute && executable_refuses_absolute(kind)) || missing_tls_pair ||
-                         (scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (executable_shared_refuses(kind) || (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0)));
+                         (scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (executable_shared_refuses(kind) || (module_kind && link->symbols.atom[target] == 0)));
     *cause = !refused                          ? EXECUTABLE_CAUSE_NONE :
              relocated && text                 ? EXECUTABLE_CAUSE_RELOCATION_TEXT :
              relocated && absolute32           ? EXECUTABLE_CAUSE_RELOCATION_ABSOLUTE32 :

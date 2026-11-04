@@ -255,6 +255,8 @@ static const uint32_t object_test_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_TLSGD] = R_X86_64_TLSGD,
     [BUSTER_LINK_FIXUP_TLSLD] = R_X86_64_TLSLD,
     [BUSTER_LINK_FIXUP_DTPOFF32] = R_X86_64_DTPOFF32,
+    [BUSTER_LINK_FIXUP_TPOFF64] = R_X86_64_TPOFF64,
+    [BUSTER_LINK_FIXUP_DTPOFF64] = R_X86_64_DTPOFF64,
 };
 
 #define BUSTER_OBJECT_TEST_INT3 0xcc
@@ -268,6 +270,8 @@ static uint64_t object_test_relocation_width(uint32_t type)
         case R_X86_64_64:
         case R_X86_64_PC64:
         case R_X86_64_SIZE64:
+        case R_X86_64_TPOFF64:
+        case R_X86_64_DTPOFF64:
         {
             result = 8;
         } break;

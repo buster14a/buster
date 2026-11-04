@@ -845,6 +845,10 @@ static ExecutableTestField executable_test_expected(const Link* link, const Exec
             *value = size + addend;
             range = 2;
             break;
+        case BUSTER_LINK_FIXUP_TPOFF64:
+            *value = symbol + addend;
+            range = 2;
+            break;
         default:
             range = 3;
             break;
