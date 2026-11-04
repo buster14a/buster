@@ -613,8 +613,10 @@ These are bits, not floats, and the existing types keep them exact:
   their constants are bit patterns, a signaling NaN's among them, and GVN numbers
   no floating operation but `fneg`, which they never have;
 - Tier 1's moves of `f32` and `f64` are bit moves ([the selection
-  guide](tier1-selection.md)'s "Machine rows"), and their registers hold zeros past
-  their bytes, as Tier 0's reloads leave them, which the rows rely on.
+  guide](tier1-selection.md)'s "Machine rows"). Each row operand is zero-extended
+  into its role, as Tier 0's reloads leave it, which the rows rely on. The
+  verifier admits any `f32` or `f64` value as a carrier operand, a parameter's or
+  a call's among them, whose bytes past it the convention leaves undefined.
 
 Two new types would have needed their own moves, spills and constants in Tier 1,
 a place in the type masks and in the SIMD model's contiguous shapes, and the

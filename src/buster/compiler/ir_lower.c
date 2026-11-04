@@ -446,8 +446,8 @@ static const uint8_t ir_typed_types[16] = {
 // type for them: the f32 and f64 values' loads, stores, constants, copies, phis and spills are bit moves already (movss
 // and movsd, movaps, xorps, vmovd and vmovq), the IR's passes have no floating arithmetic to fold them by, and the
 // lowering gives them no floating operation (only a row reads one), so their bits stay exact. A new type would have
-// taken its own moves and spills, and a place in the type masks and the SIMD model's shapes. Their registers hold zeros
-// past their bytes, as Tier 0's (tier1_emit_cfg_row).
+// taken its own moves and spills, and a place in the type masks and the SIMD model's shapes. A row reads one
+// zero-extended into its role, as Tier 0's (tier1_emit_cfg_row), whatever made it.
 static IrType ir_typed_stack_type(uint8_t class)
 {
     static const uint8_t vectors[17] = {
