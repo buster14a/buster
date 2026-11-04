@@ -457,7 +457,17 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char return_stack[] =
         "int *a(void) { int x[3]; return &x[0]; }\n"
         "struct S { int m; };\n"
-        "int *c(void) { struct S s; return &s.m; }\n";
+        "int *c(void) { struct S s; return &s.m; }\n"
+        // What a returned address goes through: kept by casts and pointer arithmetic, consumed by a dereference, a member
+        // access, a subscript or a comparison.
+        "int d(struct S s) { return (&s)->m; }\n"
+        "int e(void) { int a[2] = { 0 }; return (&a[0])[1] + a[0]; }\n"
+        "int f(int *p) { int x = 0; return &x == p; }\n"
+        "int g(struct S s) { return *(&s.m); }\n"
+        "int *h(void) { int x = 0; return &x + 1; }\n"
+        "long i(void) { int x = 0; return (long)&x; }\n"
+        "int *j(void) { int a[2]; return a; }\n"
+        "int *k(int c) { int x = 0, y = 0; return c ? &x : &y; }\n";
     static const char generic_selection[] =
         "int a(void) { int x; return _Generic(1, int: x, default: 0); }\n"
         "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"

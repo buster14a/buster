@@ -1631,6 +1631,10 @@ static void check_common_dangling_else(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+// Whether the address at `token` (an `&`, or an array that decays) is what a return returns: up the tree to the `return`,
+// through what keeps the address (casts, groups, pointer arithmetic, a conditional's arms), as clang's checkExprLifetime
+// follows a returned value. A dereference (`*`, `->`, a subscript), a comparison, a logical operator, a call, an
+// assignment or an initializer consumes it.
 static bool check_common_in_return(const Parser* parser, uint32_t token)
 {
     bool result = false;
@@ -1638,14 +1642,17 @@ static bool check_common_in_return(const Parser* parser, uint32_t token)
     for (uint32_t steps = 0; at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
     {
         const uint8_t role = parser->tree.roles[at];
+        const uint8_t kind = parser->tokens.kinds[at];
         if (role == PARSE_ROLE_RETURN)
         {
             result = true;
             break;
         }
-        if (role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_CLOSE_CALL ||
-            role == PARSE_ROLE_OPEN_INITIALIZER || role == PARSE_ROLE_ASSIGN ||
-            (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[at] == PARSE_KIND_STAR))
+        if (at != token && (role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_CLOSE_CALL ||
+                            role == PARSE_ROLE_OPEN_INITIALIZER || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_MEMBER_OPERATOR ||
+                            role == PARSE_ROLE_OPEN_SUBSCRIPT || role == PARSE_ROLE_CLOSE_SUBSCRIPT || role == PARSE_ROLE_EQUALITY ||
+                            role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR ||
+                            (role == PARSE_ROLE_PREFIX && (kind == PARSE_KIND_STAR || kind == PARSE_KIND_EXCLAIM))))
         {
             break;
         }
@@ -1690,7 +1697,8 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
                                check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
-            if (local && check_common_in_return(parser, graph->tokens[root]))
+            // From the address itself (its `&`, or the array that decays), so that what is done to it counts.
+            if (local && check_common_in_return(parser, graph->tokens[node]))
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 const char* subject = check_common_parameter_token(input, parser, declaration) ? "parameter" : "local variable";
