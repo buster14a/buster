@@ -623,9 +623,9 @@ _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, catego
 // each case's own stores. On the vector path a value of columns is one 64-byte store of its header, the rest of those 64
 // bytes zero, and one 32-byte store of its object, the rest zero; a whole value is copied by the same two halves, so that
 // a load of a field, or of either half, lies within one store. Returned through a temporary instead, as check_stream_value
-// did, the columns' case was cleared by two overlapping 32-byte stores and copied into the action by a 32-byte load across
-// both, which no store can forward: the instruction most sampled in check-expressions of sqlite3.c's -c, at each operand
-// of each action (#1050). The scalar path is the same value by assignment.
+// returns it, the columns' case was cleared by two overlapping 32-byte stores and copied into the action by a 32-byte load
+// across both, which no store can forward: the instruction most sampled in check-expressions of sqlite3.c's -c, at each
+// operand of each action (#1050). The scalar path is the same value by assignment.
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_action, once per operand.
 static inline __attribute__((always_inline)) void check_stream_value_to(const CheckStream* stream, uint32_t node, CheckValue* destination)
 {
@@ -670,10 +670,34 @@ static inline __attribute__((always_inline)) void check_stream_value_to(const Ch
 #endif
 }
 
+// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), by assignment: its callers,
+// the lowering's most of all, take it into registers or a value of their own, which check_stream_value_to's stores would
+// leave them to copy whole across its two halves (#1050).
 static CheckValue check_stream_value(const CheckStream* stream, uint32_t node)
 {
     CheckValue result;
-    check_stream_value_to(stream, node, &result);
+    if (stream->dense_values != NULL)
+    {
+        result = stream->dense_values[node];
+    }
+    else
+    {
+        const uint32_t row = stream->payload_rows[node];
+        if (row != 0 && row <= stream->payload_count)
+        {
+            result = stream->payloads[row - 1];
+        }
+        else
+        {
+            result = (CheckValue){
+                .type = stream->value_types[node],
+                .category = (CheckCategory)stream->value_categories[node],
+                .flags = stream->value_flags[node],
+                .constant_kind = (CheckConstantKind)stream->value_constants[node],
+                .object = stream->value_objects[node],
+            };
+        }
+    }
     return result;
 }
 
