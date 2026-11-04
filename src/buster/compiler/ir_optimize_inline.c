@@ -6,11 +6,22 @@
 // Tarjan, Depth-First Search and Linear Graph Algorithms (1972). The DFS uses explicit bounded stacks, not recursion.
 //
 // Tarjan components are processed in callee-before-caller order. Recursive members are never candidates. A candidate
-// is a single-block leaf without stack objects; its operations, faulting accesses and volatile flags are copied in
-// their original order. Parameters become the already evaluated actual arguments; the final return becomes COPY or
-// disappears for void. A previously rewritten acyclic function may become a leaf, allowing nested expansion.
+// is a leaf whose blocks are one straight line (one block, or #1282's chain, each block's br to the next dropped); its
+// operations, faulting accesses and volatile flags are copied in their original order. Parameters become the already
+// evaluated actual arguments; the final return becomes COPY or disappears for void. A previously rewritten acyclic
+// function may become a leaf, allowing nested expansion.
 // Caller blocks and predecessor identities do not change. Every variable side-table slice is rebuilt per occurrence,
 // because valid source slices can overlap with different roles. This first scope does not splice callee CFGs or phis.
+//
+// #1282 takes SIMD functions, the x86 intrinsic wrappers': a callee's vectors, masks and machine rows are copied with it
+// (its vector constants and rows appended to the caller's, IR_VCONST's index and IrCall.row rebased, a row call staying a
+// call), and so are its stack slots (IR_STACK_ADDR's and IR_LIFETIME's rebased). A call that passes or returns aggregates
+// by value (#131's ABI records) is inlined where its records are the callee's own: each aggregate argument's bytes are
+// copied into a fresh slot of the caller, whose address the callee's parameter becomes (the callee owns its copy, as the
+// convention's callee does), and an aggregate result's bytes from the address the callee returns into the call's
+// destination. A copy is one vector load and store where the aggregate is in a vector register whole and the options
+// allow its width (IrInlineOptions.vector_copies), else 8-, 4-, 2- and 1-byte integers. SROA and promotion then make the
+// copies values (ir_optimize_sroa.c's `flagged`).
 //
 // Costs are structural units: cloned instructions plus copied constant/address rows, not measured cycles or bytes.
 // Per-call cost columns receive one masked 16-lane threshold sweep, with an exact scalar twin. Caller/unit growth
@@ -50,6 +61,9 @@ struct IrInlineOptions
     uint32_t maximum_cost;
     uint32_t maximum_function_growth;
     uint32_t maximum_unit_instructions;
+    // The vectors' widths an aggregate's copy may take where a vector register holds it whole (#1282): bit 0 16 bytes,
+    // bit 1 32, bit 2 64, which the target's vectors must have (AVX-512F, and VL for 16 and 32). 0 copies by integers.
+    uint8_t vector_copies;
     bool enabled;
     bool scalar;
 };
@@ -101,6 +115,16 @@ struct IrInlineBody
     uint32_t size;
     uint32_t cost;
     bool supported;
+};
+
+// What one expansion adds to its caller past the callee's cloned body (#1282): the aggregate copies' instructions,
+// addresses and slots.
+typedef struct IrInlineCopies IrInlineCopies;
+struct IrInlineCopies
+{
+    uint32_t instructions;
+    uint32_t addresses;
+    uint32_t slots;
 };
 
 static __attribute__((unused)) IrInlineOptions ir_inline_options(void)
@@ -184,7 +208,8 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
 
 static bool ir_inline_sizes_valid(const IrFunction* function)
 {
-    return function->instruction_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->block_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->extra_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->vector_constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->slot_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->address_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_type_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->parameter_count <= BUSTER_IR_INLINE_MAX_ITEMS;
+    return function->instruction_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->block_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->extra_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->vector_constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->slot_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->address_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_type_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->parameter_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->row_count <= BUSTER_IR_INLINE_MAX_ITEMS &&
+           function->passed_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->abi_call_count <= BUSTER_IR_INLINE_MAX_ITEMS;
 }
 
 static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
@@ -204,6 +229,14 @@ static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
         }
     }
     return first < unit->count && unit->symbols[first] == symbol ? first : BUSTER_IR_NONE;
+}
+
+// Whether `node` is a call site: a call of a callee, direct or indirect, but not a row call (#141), which runs its machine
+// row in place of a callee and stays as it is.
+static bool ir_inline_site(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0);
 }
 
 // A call with ABI records (#131) has the convention's shape, which only its records give (a hidden pointer its callee
@@ -274,7 +307,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         {
             const uint64_t mark = scratch->length;
             IrOptimizeWork work = { 0 };
-            check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
+            check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
             const uint64_t bytes = scratch->length - mark;
             result->scratch_bytes = bytes > result->scratch_bytes ? bytes : result->scratch_bytes;
             arena_pop_to(scratch, mark);
@@ -289,7 +322,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
             result->call_offsets[f] = result->call_count;
             for (uint32_t node = 0; node < function->instruction_count; node += 1)
             {
-                result->call_count += function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT;
+                result->call_count += ir_inline_site(function, node);
             }
         }
     }
@@ -318,7 +351,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         uint32_t call = result->call_offsets[f];
         for (uint32_t node = 0; check.error == IR_OK && node < function->instruction_count; node += 1)
         {
-            if (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT)
+            if (ir_inline_site(function, node))
             {
                 const uint32_t callee = function->op[node] == IR_CALL ? ir_inline_symbol(unit, function->a[node]) : BUSTER_IR_NONE;
                 result->call_nodes[call] = node;
@@ -435,26 +468,155 @@ static IrError ir_inline_components(const IrInlineUnit* unit, Arena* scratch, Ir
     return error;
 }
 
+// Whether `op` may be cloned into a caller in its order (#1282 adds the SIMD operations, slots' addresses and lifetimes,
+// fences, intrinsics and atomic read/modify/writes): not a terminator before the return, a phi, a call (but a row call,
+// which ir_inline_body checks) or the dynamic stack's operations.
+static bool ir_inline_cloned(uint32_t op)
+{
+    return op != IR_CALL_INDIRECT && op != IR_PHI && op != IR_BR && op != IR_CBR && op != IR_SWITCH && op != IR_RET && op != IR_UNREACHABLE && op != IR_ALLOCA &&
+           op != IR_STACK_SAVE && op != IR_STACK_RESTORE && op != IR_BR_INDIRECT && op < IR_OP_COUNT;
+}
+
+// Whether the function's blocks are one straight line (#1282): each but the last ends in a br to the next, the last in its
+// return, and no other instruction ends a block. The lowering's preheader stays a block of its own past the optimizer's
+// CFG cleanup, so a wrapper is two such blocks; its br's are dropped as its body is cloned.
+static bool ir_inline_chain(const IrFunction* function)
+{
+    bool chain = function->block_count != 0 && function->instruction_count != 0 && function->op[function->instruction_count - 1] == IR_RET;
+    for (uint32_t block = 0; chain && block + 1 < function->block_count; block += 1)
+    {
+        const uint32_t end = function->block_offsets[block + 1];
+        chain = end > function->block_offsets[block] && function->op[end - 1] == IR_BR && function->a[end - 1] == block + 1;
+    }
+    return chain;
+}
+
 static IrInlineBody ir_inline_body(const IrFunction* function)
 {
+    // Labels would be defined twice. A variadic definition's incoming frame is its own, and an aggregate result through a
+    // hidden pointer (#131's MEMORY) has the convention's parameters rather than the callee's.
+    bool slots = true;
+    for (uint32_t slot = 0; slot < function->slot_count; slot += 1)
+    {
+        slots = slots && (function->slots[slot].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0;
+    }
     IrInlineBody body = {
         .cost = UINT32_MAX,
-        // Labels would be defined twice, and by-value aggregates' copies (#131's ABI records) need a frame of their own.
-        .supported = function->block_count == 1 && function->slot_count == 0 && function->op[function->instruction_count - 1] == IR_RET && function->label_count == 0 &&
-                     function->parameter_passed == 0,
+        .supported = ir_inline_chain(function) && function->label_count == 0 && !function->variadic && slots &&
+                     (function->parameter_passed == 0 || function->result_abi.kind != BUSTER_ABI_RESULT_MEMORY),
     };
     if (body.supported)
     {
-        body.size = function->result_type != IR_VOID;
+        // A value's result is a COPY; an aggregate's bytes are copied instead (ir_inline_copies).
+        body.size = function->result_type != IR_VOID && function->result_size == 0;
         for (uint32_t node = 0; node + 1 < function->instruction_count; node += 1)
         {
+            // A br is the chain's (ir_inline_chain), between its blocks, and disappears.
             const uint32_t op = function->op[node];
-            body.supported &= op != IR_CALL && op != IR_CALL_INDIRECT && op != IR_PHI && op != IR_STACK_ADDR && op < IR_BR;
-            body.size += op != IR_PARAM;
+            body.supported &= op == IR_BR || (ir_inline_cloned(op) && (op != IR_CALL || function->calls[function->b[node]].row != 0));
+            body.size += op != IR_PARAM && op != IR_BR;
         }
-        body.cost = body.size + function->constant_count + function->address_count;
+        const uint64_t cost = (uint64_t)body.size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->slot_count;
+        body.cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1;
     }
     return body;
+}
+
+// The vector type that copies an aggregate of `size` bytes whole (#1282): one a vector register holds whole (its first
+// register a vector one, no second, neither eightbyte alone), of a width `allowed` has (IrInlineOptions.vector_copies);
+// else IR_VOID, for a copy by integers.
+static IrType ir_inline_whole(uint8_t first, uint8_t second, bool alone, uint64_t size, uint8_t allowed)
+{
+    const bool whole = first != BUSTER_ABI_REGISTER_NONE && (first & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && second == BUSTER_ABI_REGISTER_NONE && !alone;
+    const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
+    const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
+    return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
+}
+
+static IrType ir_inline_argument_whole(AbiLocation location, uint64_t size, uint8_t allowed)
+{
+    return location.kind == BUSTER_ABI_LOCATION_REGISTERS ? ir_inline_whole(location.registers[0], location.registers[1], (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0, size, allowed) :
+                                                            IR_VOID;
+}
+
+static IrType ir_inline_result_whole(AbiReturn result, uint64_t size, uint8_t allowed)
+{
+    return result.kind == BUSTER_ABI_RESULT_REGISTERS ? ir_inline_whole(result.registers[0], result.registers[1], (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, size, allowed) : IR_VOID;
+}
+
+// A copy's instructions and addresses (ir_inline_emit_copy's): one vector load and store, or an integer's of 8, 4, 2 or
+// 1 bytes at a time, each past the first through an ADDRESS of each side.
+static IrInlineCopies ir_inline_copy_size(uint64_t size, IrType whole)
+{
+    IrInlineCopies copies = { 0 };
+    if (whole != IR_VOID)
+    {
+        copies.instructions = 2;
+    }
+    for (uint64_t offset = 0; whole == IR_VOID && offset < size;)
+    {
+        const uint64_t remaining = size - offset;
+        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+        copies.instructions += offset != 0 ? 4 : 2;
+        copies.addresses += offset != 0 ? 2 : 0;
+        offset += piece;
+    }
+    return copies;
+}
+
+// Whether the call at `node` of `caller` passes and returns what `callee` takes and returns by the same ABI records
+// (#131, #1282): a call with records of its own and a callee with its own, neither returning through a hidden pointer, the
+// same aggregate result's bytes, and argument by argument the same aggregate's bytes (a ptr to them on both sides) or the
+// same type, none an argument the convention ignores. Every other call with records stays a call (IR_INLINE_ABI).
+static bool ir_inline_abi_match(const IrFunction* caller, uint32_t node, const IrFunction* callee)
+{
+    const IrCall call = caller->calls[caller->b[node]];
+    const uint32_t count = call.argument_count;
+    bool match = call.abi != 0 && call.abi - 1 < caller->abi_call_count && callee->parameter_passed != 0 && !call.variadic && count == callee->parameter_count &&
+                 call.parameter_count == count && (uint64_t)callee->parameter_passed - 1 + count <= callee->passed_count;
+    const IrAbiCall* records = match ? &caller->abi_calls[call.abi - 1] : 0;
+    match = match && (uint64_t)records->passed + count <= caller->passed_count && records->call.result.kind != BUSTER_ABI_RESULT_MEMORY &&
+            callee->result_abi.kind != BUSTER_ABI_RESULT_MEMORY && records->result_size == callee->result_size &&
+            (callee->result_size != 0 ? call.result_type == IR_VOID && callee->result_type == IR_PTR : call.result_type == callee->result_type);
+    for (uint32_t p = 0; match && p < count; p += 1)
+    {
+        const IrPassed given = caller->passed[records->passed + p];
+        const IrPassed taken = callee->passed[callee->parameter_passed - 1 + p];
+        const uint8_t type = caller->call_types[call.type_first + p];
+        match = given.size == taken.size && given.location.kind != BUSTER_ABI_LOCATION_IGNORE && taken.location.kind != BUSTER_ABI_LOCATION_IGNORE &&
+                (given.size != 0 ? type == IR_PTR && callee->parameter_types[p] == IR_PTR : type == callee->parameter_types[p]);
+    }
+    return match;
+}
+
+// What inlining the call at `node` of `caller` adds past `callee`'s cloned body (#1282): each aggregate argument's slot,
+// its address and its copy, and the aggregate result's copy into the call's destination where it has one.
+static IrInlineCopies ir_inline_copies(const IrFunction* caller, uint32_t node, const IrFunction* callee, uint8_t allowed)
+{
+    IrInlineCopies copies = { 0 };
+    const IrCall call = caller->calls[caller->b[node]];
+    if (call.abi != 0)
+    {
+        const IrAbiCall* records = &caller->abi_calls[call.abi - 1];
+        for (uint32_t p = 0; p < call.argument_count; p += 1)
+        {
+            const IrPassed given = caller->passed[records->passed + p];
+            if (given.size != 0)
+            {
+                const IrInlineCopies copy = ir_inline_copy_size(given.size, ir_inline_argument_whole(given.location, given.size, allowed));
+                copies.instructions += copy.instructions + 1;
+                copies.addresses += copy.addresses;
+                copies.slots += 1;
+            }
+        }
+        if (callee->result_size != 0 && caller->c[node] != BUSTER_IR_NONE)
+        {
+            const IrInlineCopies copy = ir_inline_copy_size(callee->result_size, ir_inline_result_whole(callee->result_abi, callee->result_size, allowed));
+            copies.instructions += copy.instructions;
+            copies.addresses += copy.addresses;
+        }
+    }
+    return copies;
 }
 
 static void ir_inline_threshold(const uint32_t* costs, uint32_t count, uint32_t maximum, bool scalar, uint8_t* selected)
@@ -523,16 +685,21 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         {
             decision = IR_INLINE_RECURSIVE;
         }
-        else if (unit->functions[function].calls[unit->functions[function].b[node]].abi != 0)
+        else if ((unit->functions[function].calls[unit->functions[function].b[node]].abi != 0 || result->functions[callee].parameter_passed != 0) &&
+                 !ir_inline_abi_match(&unit->functions[function], node, &result->functions[callee]))
         {
             decision = IR_INLINE_ABI;
         }
         else
         {
-            const IrInlineBody body = ir_inline_body(&result->functions[callee]);
-            decision = body.supported ? IR_INLINE_SELECTED : IR_INLINE_BODY;
-            result->costs[call] = body.cost;
-            result->expanded_sizes[call] = body.size;
+            const IrFunction* body_function = &result->functions[callee];
+            const IrInlineBody body = ir_inline_body(body_function);
+            const IrInlineCopies copies = body.supported ? ir_inline_copies(&unit->functions[function], node, body_function, options.vector_copies) : (IrInlineCopies){ 0 };
+            const uint64_t size = (uint64_t)body.size + copies.instructions;
+            const uint64_t cost = (uint64_t)body.cost + copies.instructions + copies.addresses + copies.slots;
+            decision = body.supported && size < BUSTER_IR_INLINE_MAX_ITEMS ? IR_INLINE_SELECTED : IR_INLINE_BODY;
+            result->costs[call] = decision == IR_INLINE_SELECTED && cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX;
+            result->expanded_sizes[call] = decision == IR_INLINE_SELECTED ? (uint32_t)size : 0;
         }
         result->decisions[call] = decision;
     }
@@ -544,9 +711,16 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         }
         // Appended constant and address rows are bounded like instructions: a call that would carry the caller's
         // side tables past the representation limit stays a call, rather than failing the whole unit.
+        const IrFunction* caller = &unit->functions[function];
         uint64_t growth = 0;
-        uint64_t constants = unit->functions[function].constant_count;
-        uint64_t addresses = unit->functions[function].address_count;
+        uint64_t constants = caller->constant_count;
+        uint64_t addresses = caller->address_count;
+        uint64_t slots = caller->slot_count;
+        uint64_t vectors = caller->vector_constant_count;
+        uint64_t rows = caller->row_count;
+        uint64_t descriptors = caller->call_count;
+        uint64_t extras = caller->extra_count;
+        uint64_t types = caller->call_type_count;
         for (uint32_t call = first; call < end; call += 1)
         {
             if (result->decisions[call] == IR_INLINE_SELECTED)
@@ -554,11 +728,17 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                 const uint32_t size = result->expanded_sizes[call];
                 const uint32_t extra = size > 1 ? size - 1 : 0;
                 const IrFunction* callee = &result->functions[result->callees[call]];
+                const IrInlineCopies copies = ir_inline_copies(caller, result->call_nodes[call], callee, options.vector_copies);
                 if (!fits[call - first])
                 {
                     result->decisions[call] = IR_INLINE_COST;
                 }
-                else if (growth + extra > options.maximum_function_growth || (uint64_t)unit->functions[function].instruction_count + growth + extra > BUSTER_IR_INLINE_MAX_ITEMS || *charged + extra > options.maximum_unit_instructions || constants + callee->constant_count > BUSTER_IR_INLINE_MAX_ITEMS || addresses + callee->address_count > BUSTER_IR_INLINE_MAX_ITEMS)
+                else if (growth + extra > options.maximum_function_growth || (uint64_t)caller->instruction_count + growth + extra > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         *charged + extra > options.maximum_unit_instructions || constants + callee->constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         addresses + callee->address_count + copies.addresses > BUSTER_IR_INLINE_MAX_ITEMS || slots + callee->slot_count + copies.slots > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         vectors + callee->vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS || rows + callee->row_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         descriptors + callee->call_count > BUSTER_IR_INLINE_MAX_ITEMS || extras + callee->extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         types + callee->call_type_count > BUSTER_IR_INLINE_MAX_ITEMS)
                 {
                     result->decisions[call] = IR_INLINE_GROWTH;
                 }
@@ -567,7 +747,13 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                     growth += extra;
                     *charged += extra;
                     constants += callee->constant_count;
-                    addresses += callee->address_count;
+                    addresses += callee->address_count + copies.addresses;
+                    slots += callee->slot_count + copies.slots;
+                    vectors += callee->vector_constant_count;
+                    rows += callee->row_count;
+                    descriptors += callee->call_count;
+                    extras += callee->extra_count;
+                    types += callee->call_type_count;
                     result->inlined_calls += 1;
                 }
             }
@@ -576,7 +762,30 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
     return error;
 }
 
-static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, uint32_t constants, uint32_t addresses)
+// Where an expansion's side-table rows start in its caller: the indices its cloned nodes are rebased by (the caller's own
+// nodes' are all 0), and the next descriptor, argument, fixed type and address of the rewrite.
+typedef struct IrInlineBases IrInlineBases;
+struct IrInlineBases
+{
+    uint32_t constants;
+    uint32_t addresses;
+    uint32_t slots;
+    uint32_t vectors;
+    uint32_t rows;
+};
+
+typedef struct IrInlineCursor IrInlineCursor;
+struct IrInlineCursor
+{
+    uint32_t node;
+    uint32_t extra;
+    uint32_t descriptors;
+    uint32_t types;
+    uint32_t addresses;
+    uint32_t slots;
+};
+
+static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, IrInlineBases bases)
 {
     const uint32_t op = source->op[old];
     destination->op[node] = (uint8_t)op;
@@ -588,11 +797,19 @@ static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* d
     destination->c[node] = (ir_operand_table[op] & 4) != 0 ? values[source->c[old]] : source->c[old];
     if (op == IR_CONST)
     {
-        destination->a[node] += constants;
+        destination->a[node] += bases.constants;
+    }
+    else if (op == IR_VCONST)
+    {
+        destination->a[node] += bases.vectors;
+    }
+    else if (op == IR_STACK_ADDR || op == IR_LIFETIME)
+    {
+        destination->a[node] += bases.slots;
     }
     else if (op == IR_ADDRESS)
     {
-        destination->c[node] += addresses;
+        destination->c[node] += bases.addresses;
         if (source->b[old] != BUSTER_IR_NONE)
         {
             destination->b[node] = values[source->b[old]];
@@ -609,12 +826,143 @@ static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* d
     }
 }
 
-static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineResult* result)
+// A call's fresh descriptor, argument slice and fixed-type slice at the cursor, its machine row's index rebased by `rows`
+// (a row call of an expansion, #1282), its ABI records' index the caller's (only the caller's own calls have them).
+static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, uint32_t rows, IrInlineCursor* cursor)
+{
+    IrCall descriptor = source->calls[source->b[old]];
+    for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
+    {
+        destination->extra[cursor->extra + p] = values[source->extra[descriptor.argument_first + p]];
+    }
+    if (descriptor.parameter_count != 0)
+    {
+        memcpy(destination->call_types + cursor->types, source->call_types + descriptor.type_first, descriptor.parameter_count);
+    }
+    descriptor.argument_first = cursor->extra;
+    descriptor.type_first = cursor->types;
+    descriptor.row += descriptor.row != 0 ? rows : 0;
+    cursor->extra += descriptor.argument_count;
+    cursor->types += descriptor.parameter_count;
+    destination->calls[cursor->descriptors] = descriptor;
+    destination->b[node] = cursor->descriptors++;
+}
+
+static uint32_t ir_inline_emit(IrFunction* f, IrInlineCursor* cursor, uint32_t op, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
+{
+    const uint32_t node = cursor->node++;
+    f->op[node] = (uint8_t)op;
+    f->type[node] = (uint8_t)type;
+    f->flags[node] = 0;
+    f->alignment_log2[node] = 0;
+    f->a[node] = a;
+    f->b[node] = b;
+    f->c[node] = c;
+    return node;
+}
+
+// `base` past `offset` bytes: base itself at 0, else an ADDRESS of a new address row.
+static uint32_t ir_inline_offset(IrFunction* f, IrInlineCursor* cursor, uint32_t base, uint64_t offset)
+{
+    uint32_t pointer = base;
+    if (offset != 0)
+    {
+        f->addresses[cursor->addresses] = (IrAddress){ .offset = (int64_t)offset, .scale = 1 };
+        pointer = ir_inline_emit(f, cursor, IR_ADDRESS, IR_PTR, base, BUSTER_IR_NONE, cursor->addresses++);
+    }
+    return pointer;
+}
+
+// Copies `size` bytes from the ptr `from` to the ptr `to` (ir_inline_copy_size's instructions): one vector `whole` load and
+// store, or integers of 8, 4, 2 and 1 bytes, all unaligned (neither side's alignment is known past its bytes').
+static void ir_inline_emit_copy(IrFunction* f, IrInlineCursor* cursor, uint32_t from, uint32_t to, uint64_t size, IrType whole)
+{
+    if (whole != IR_VOID)
+    {
+        const uint32_t loaded = ir_inline_emit(f, cursor, IR_LOAD, whole, from, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_inline_emit(f, cursor, IR_STORE, IR_VOID, to, loaded, BUSTER_IR_NONE);
+    }
+    for (uint64_t offset = 0; whole == IR_VOID && offset < size;)
+    {
+        const uint64_t remaining = size - offset;
+        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+        const IrType type = piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
+        const uint32_t loaded = ir_inline_emit(f, cursor, IR_LOAD, type, ir_inline_offset(f, cursor, from, offset), BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_inline_emit(f, cursor, IR_STORE, IR_VOID, ir_inline_offset(f, cursor, to, offset), loaded, BUSTER_IR_NONE);
+        offset += piece;
+    }
+}
+
+// The expansion of the call at `node` of `source` (the caller) into `rewritten` at the cursor: its aggregate arguments'
+// copies into fresh slots (#1282), the callee's nodes but its parameters, which become the arguments (an aggregate's its
+// copy's address), and its result: a COPY of its value, or its aggregate bytes copied into the call's destination.
+static void ir_inline_expand(const IrFunction* source, uint32_t node, const IrFunction* callee, const uint32_t* values, uint32_t* inner_values, uint32_t* parameters,
+                             IrFunction* rewritten, IrInlineBases bases, uint8_t allowed, IrInlineCursor* cursor)
+{
+    const IrCall descriptor = source->calls[source->b[node]];
+    const IrAbiCall* records = descriptor.abi != 0 ? &source->abi_calls[descriptor.abi - 1] : 0;
+    if (callee->slot_count != 0)
+    {
+        memcpy(rewritten->slots + bases.slots, callee->slots, (uint64_t)callee->slot_count * sizeof(IrSlot));
+    }
+    // Every argument's value, an aggregate's copied whether or not a parameter node reads it (ir_inline_copies counts
+    // them all; a copy no one reads is dead once promoted).
+    for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
+    {
+        const uint32_t argument = values[source->extra[descriptor.argument_first + p]];
+        const IrPassed given = records != 0 ? source->passed[records->passed + p] : (IrPassed){ 0 };
+        parameters[p] = argument;
+        if (given.size != 0)
+        {
+            const IrType whole = ir_inline_argument_whole(given.location, given.size, allowed);
+            const uint32_t slot = cursor->slots++;
+            rewritten->slots[slot] = (IrSlot){
+                .size = given.size,
+                .alignment = whole != IR_VOID ? (uint32_t)given.size : 8,
+                .type = IR_VOID,
+                .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN,
+            };
+            const uint32_t address = ir_inline_emit(rewritten, cursor, IR_STACK_ADDR, IR_PTR, slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_inline_emit_copy(rewritten, cursor, argument, address, given.size, whole);
+            parameters[p] = address;
+        }
+    }
+    for (uint32_t inner = 0; inner + 1 < callee->instruction_count; inner += 1)
+    {
+        if (callee->op[inner] == IR_PARAM)
+        {
+            inner_values[inner] = parameters[callee->a[inner]];
+        }
+        else if (callee->op[inner] != IR_BR)
+        {
+            inner_values[inner] = cursor->node;
+            ir_inline_node(callee, inner, rewritten, cursor->node, inner_values, bases);
+            if (callee->op[inner] == IR_CALL)
+            {
+                ir_inline_descriptor(callee, inner, rewritten, cursor->node, inner_values, bases.rows, cursor);
+            }
+            cursor->node += 1;
+        }
+    }
+    const uint32_t returned = callee->a[callee->instruction_count - 1];
+    if (callee->result_size != 0 && source->c[node] != BUSTER_IR_NONE)
+    {
+        const IrType whole = ir_inline_result_whole(callee->result_abi, callee->result_size, allowed);
+        ir_inline_emit_copy(rewritten, cursor, inner_values[returned], values[source->c[node]], callee->result_size, whole);
+    }
+    else if (callee->result_type != IR_VOID && callee->result_size == 0)
+    {
+        ir_inline_emit(rewritten, cursor, IR_COPY, callee->result_type, inner_values[returned], BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+}
+
+static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result)
 {
     const IrFunction* source = &unit->functions[function];
     bool ok = true;
     uint32_t* values = ir_allocate(scratch, source->instruction_count, 4, &ok);
     uint32_t maximum_callee = 0;
+    uint32_t maximum_parameters = 0;
     IrSizes sizes = {
         .block_count = source->block_count,
         .constant_count = source->constant_count,
@@ -624,26 +972,37 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         .label_count = source->label_count,
         .abi_call_count = source->abi_call_count,
         .passed_count = source->passed_count,
+        .vector_constant_count = source->vector_constant_count,
+        .row_count = source->row_count,
     };
     uint32_t call = result->call_offsets[function];
     for (uint32_t node = 0; ok && node < source->instruction_count; node += 1)
     {
         const uint32_t op = source->op[node];
-        const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
-        const bool selected = calls && result->decisions[call] == IR_INLINE_SELECTED;
+        const bool site = ir_inline_site(source, node);
+        const bool selected = site && result->decisions[call] == IR_INLINE_SELECTED;
         if (selected)
         {
             const IrFunction* callee = &result->functions[result->callees[call]];
+            const IrInlineCopies copies = ir_inline_copies(source, node, callee, options.vector_copies);
             sizes.instruction_count += result->expanded_sizes[call];
             values[node] = source->type[node] == IR_VOID ? BUSTER_IR_NONE : (uint32_t)sizes.instruction_count - 1;
             sizes.constant_count += callee->constant_count;
-            sizes.address_count += callee->address_count;
+            sizes.address_count += callee->address_count + copies.addresses;
+            sizes.slot_count += callee->slot_count + copies.slots;
+            sizes.vector_constant_count += callee->vector_constant_count;
+            sizes.row_count += callee->row_count;
+            // Its row calls (#1282), the only calls of an expanded body.
+            sizes.call_count += callee->call_count;
+            sizes.extra_count += callee->extra_count;
+            sizes.call_type_count += callee->call_type_count;
             maximum_callee = callee->instruction_count > maximum_callee ? callee->instruction_count : maximum_callee;
+            maximum_parameters = callee->parameter_count > maximum_parameters ? callee->parameter_count : maximum_parameters;
         }
         else
         {
             values[node] = (uint32_t)sizes.instruction_count++;
-            if (calls)
+            if (op == IR_CALL || op == IR_CALL_INDIRECT)
             {
                 const IrCall descriptor = source->calls[source->b[node]];
                 sizes.call_count += 1;
@@ -663,14 +1022,17 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 sizes.extra_count += source->c[node];
             }
         }
-        call += calls;
+        call += site;
     }
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
-    if (sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS)
+    if (sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+        sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.slot_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+        sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS)
     {
         error = IR_ERROR_LIMIT;
     }
     uint32_t* inner_values = error == IR_OK ? ir_allocate(scratch, maximum_callee, 4, &ok) : 0;
+    uint32_t* parameters = error == IR_OK ? ir_allocate(scratch, maximum_parameters, 4, &ok) : 0;
     if (!ok)
     {
         error = IR_ERROR_MEMORY;
@@ -696,6 +1058,14 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         {
             memcpy(rewritten.slots, source->slots, (uint64_t)source->slot_count * sizeof(IrSlot));
         }
+        if (source->vector_constant_count != 0)
+        {
+            memcpy(rewritten.vector_constants, source->vector_constants, (uint64_t)source->vector_constant_count * sizeof(IrSimdValue));
+        }
+        if (source->row_count != 0)
+        {
+            memcpy(rewritten.rows, source->rows, (uint64_t)source->row_count * sizeof(Tier0Operation));
+        }
         if (source->parameter_count != 0)
         {
             memcpy(rewritten.parameter_types, source->parameter_types, source->parameter_count);
@@ -719,103 +1089,89 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         rewritten.result_abi = source->result_abi;
         rewritten.variadic = source->variadic;
         rewritten.incoming = source->incoming;
-        uint32_t constants = source->constant_count;
-        uint32_t addresses = source->address_count;
-        uint32_t extra = 0;
-        uint32_t descriptors = 0;
-        uint32_t types = 0;
-        uint32_t cursor = 0;
+        IrInlineBases bases = {
+            .constants = source->constant_count,
+            .vectors = source->vector_constant_count,
+            .rows = source->row_count,
+        };
+        IrInlineCursor cursor = {
+            .addresses = source->address_count,
+            .slots = source->slot_count,
+        };
         call = result->call_offsets[function];
         for (uint32_t block = 0; block < source->block_count; block += 1)
         {
-            rewritten.block_offsets[block] = cursor;
+            rewritten.block_offsets[block] = cursor.node;
             for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
             {
                 const uint32_t op = source->op[node];
-                const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
-                if (calls && result->decisions[call] == IR_INLINE_SELECTED)
+                const bool site = ir_inline_site(source, node);
+                if (site && result->decisions[call] == IR_INLINE_SELECTED)
                 {
                     const IrFunction* callee = &result->functions[result->callees[call]];
-                    const IrCall descriptor = source->calls[source->b[node]];
                     if (callee->constant_count != 0)
                     {
-                        memcpy(rewritten.constants + constants, callee->constants, (uint64_t)callee->constant_count * sizeof(IrConstant));
+                        memcpy(rewritten.constants + bases.constants, callee->constants, (uint64_t)callee->constant_count * sizeof(IrConstant));
                     }
                     if (callee->address_count != 0)
                     {
-                        memcpy(rewritten.addresses + addresses, callee->addresses, (uint64_t)callee->address_count * sizeof(IrAddress));
+                        memcpy(rewritten.addresses + cursor.addresses, callee->addresses, (uint64_t)callee->address_count * sizeof(IrAddress));
                     }
-                    for (uint32_t inner = 0; inner + 1 < callee->instruction_count; inner += 1)
+                    if (callee->vector_constant_count != 0)
                     {
-                        if (callee->op[inner] == IR_PARAM)
-                        {
-                            inner_values[inner] = values[source->extra[descriptor.argument_first + callee->a[inner]]];
-                        }
-                        else
-                        {
-                            inner_values[inner] = cursor;
-                            ir_inline_node(callee, inner, &rewritten, cursor++, inner_values, constants, addresses);
-                        }
+                        memcpy(rewritten.vector_constants + bases.vectors, callee->vector_constants, (uint64_t)callee->vector_constant_count * sizeof(IrSimdValue));
                     }
-                    if (callee->result_type != IR_VOID)
+                    if (callee->row_count != 0)
                     {
-                        rewritten.op[cursor] = IR_COPY;
-                        rewritten.type[cursor] = callee->result_type;
-                        rewritten.a[cursor++] = inner_values[callee->a[callee->instruction_count - 1]];
+                        memcpy(rewritten.rows + bases.rows, callee->rows, (uint64_t)callee->row_count * sizeof(Tier0Operation));
                     }
-                    constants += callee->constant_count;
-                    addresses += callee->address_count;
+                    // The callee's own rows first, then the copies' fresh ones after its slots and addresses.
+                    bases.addresses = cursor.addresses;
+                    bases.slots = cursor.slots;
+                    cursor.addresses += callee->address_count;
+                    cursor.slots += callee->slot_count;
+                    ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, bases, options.vector_copies, &cursor);
+                    bases.constants += callee->constant_count;
+                    bases.vectors += callee->vector_constant_count;
+                    bases.rows += callee->row_count;
                 }
                 else
                 {
-                    ir_inline_node(source, node, &rewritten, cursor, values, 0, 0);
-                    if (calls)
+                    const IrInlineBases own = { 0 };
+                    ir_inline_node(source, node, &rewritten, cursor.node, values, own);
+                    if (op == IR_CALL || op == IR_CALL_INDIRECT)
                     {
-                        IrCall descriptor = source->calls[source->b[node]];
-                        for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
-                        {
-                            rewritten.extra[extra + p] = values[source->extra[descriptor.argument_first + p]];
-                        }
-                        if (descriptor.parameter_count != 0)
-                        {
-                            memcpy(rewritten.call_types + types, source->call_types + descriptor.type_first, descriptor.parameter_count);
-                        }
-                        descriptor.argument_first = extra;
-                        descriptor.type_first = types;
-                        extra += descriptor.argument_count;
-                        types += descriptor.parameter_count;
-                        rewritten.calls[descriptors] = descriptor;
-                        rewritten.b[cursor] = descriptors++;
+                        ir_inline_descriptor(source, node, &rewritten, cursor.node, values, 0, &cursor);
                     }
                     else if (op == IR_PHI)
                     {
-                        rewritten.a[cursor] = extra;
+                        rewritten.a[cursor.node] = cursor.extra;
                         for (uint32_t p = 0; p < source->b[node]; p += 1)
                         {
-                            rewritten.extra[extra++] = source->extra[source->a[node] + p * 2];
-                            rewritten.extra[extra++] = values[source->extra[source->a[node] + p * 2 + 1]];
+                            rewritten.extra[cursor.extra++] = source->extra[source->a[node] + p * 2];
+                            rewritten.extra[cursor.extra++] = values[source->extra[source->a[node] + p * 2 + 1]];
                         }
                     }
                     else if (op == IR_SWITCH)
                     {
-                        rewritten.b[cursor] = extra;
+                        rewritten.b[cursor.node] = cursor.extra;
                         const uint32_t count = source->c[node] * 2 + 1;
-                        memcpy(rewritten.extra + extra, source->extra + source->b[node], (uint64_t)count * 4);
-                        extra += count;
+                        memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)count * 4);
+                        cursor.extra += count;
                     }
                     else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
                     {
                         // Its labels' list (#785), the caller's label indices, as its blocks are.
-                        rewritten.b[cursor] = extra;
-                        memcpy(rewritten.extra + extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
-                        extra += source->c[node];
+                        rewritten.b[cursor.node] = cursor.extra;
+                        memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
+                        cursor.extra += source->c[node];
                     }
-                    cursor += 1;
+                    cursor.node += 1;
                 }
-                call += calls;
+                call += site;
             }
         }
-        rewritten.block_offsets[rewritten.block_count] = cursor;
+        rewritten.block_offsets[rewritten.block_count] = cursor.node;
         result->functions[function] = rewritten;
         result->output_instructions += rewritten.instruction_count;
     }
@@ -849,7 +1205,7 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         check.error = ir_inline_choose(unit, failed_function, options, scratch, &inlined, &charged);
         if (check.error == IR_OK)
         {
-            check.error = ir_inline_rewrite(unit, failed_function, output, scratch, &inlined);
+            check.error = ir_inline_rewrite(unit, failed_function, output, scratch, options, &inlined);
         }
         if (check.error == IR_OK)
         {
@@ -857,7 +1213,7 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
             IrOptimizeWork verification = { 0 };
             // The caller CFG is unchanged, including valid unreachable regions; check the same reachable SSA
             // contract as the input, rather than deleting regions or inventing dominance for dead blocks.
-            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
+            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
             const uint64_t bytes = scratch->length - scratch_mark;
             inlined.scratch_bytes = bytes > inlined.scratch_bytes ? bytes : inlined.scratch_bytes;
             arena_pop_to(scratch, verification_mark);
