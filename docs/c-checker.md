@@ -5595,8 +5595,9 @@ arguments against the function. The checker now gives these as clang does.
   warning and an unavailable one an unavailable use's error too: the body of
   a function itself marked (by any declaration before its body), a marked
   declaration's declarator and initializer, and a marked declarator's
-  parameter lists at any scope (a prototype's, a definition's, a function
-  pointer's, named parameters or not; `check_input_availability_contexts`).
+  parameter lists and array bounds at any scope (a prototype's, a
+  definition's, a function pointer's, named parameters or not;
+  `check_input_availability_contexts`).
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
@@ -5605,7 +5606,10 @@ arguments against the function. The checker now gives these as clang does.
   declaration's own bracket level ends an initializer or an earlier
   declarator, whose use keeps its own context, not a later declarator's mark.
   The declarator is the declaration's own, outside every parameter list: a
-  parameter's mark is no context of its specifiers. There
+  parameter's mark is no context of its specifiers. A `{` ends the specifiers
+  only at the declaration's own level; a compound literal's in a group
+  (`typeof((T){0})`) is theirs. A tag's body in them isn't: an enumerator's
+  value keeps its own context. There
   is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by

@@ -5907,8 +5907,8 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
             {
                 check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, t), t, t, initialized);
             }
-            // A marked declarator's parameter lists, at any scope, as clang reads their uses in the declaration's context:
-            // those after its name, past its groups' `)` and its array bounds (a function pointer's, a function's that
+            // A marked declarator's parameter lists and array bounds, at any scope, as clang reads their uses in the
+            // declaration's context: those after its name, past its groups' `)` (a function pointer's, a function's that
             // returns one), nested lists within them.
             const uint32_t key = kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] != 0 ? check_input_deprecated_key(reader, t) : count;
             bool suffix = key < count && marks[key] != 0 && marks[key] - 1 <= t;
@@ -5921,7 +5921,7 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
                 const bool list = next == PARSE_KIND_L_PAREN && (next_role == PARSE_ROLE_OPEN_FUNCTION || next_role == PARSE_ROLE_OPEN_CALL) && closer < count &&
                                   closer > at;
                 const bool bound = next == PARSE_KIND_L_SQUARE && closer < count && closer > at;
-                if (list)
+                if (list || bound)
                 {
                     check_input_availability_fill(reader, contexts, marks, chain, key, t, at, closer + 1);
                 }
@@ -6046,17 +6046,24 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             uint32_t declarator = marked && !inside ? t + 1 : count;
             int32_t depth = level;
             int32_t open_lists = lists;
+            // The braces the scan opened: a `}` beyond them closes one open at the use, and a tag's body there (an
+            // enumerator's value, a member's bound) isn't the declarator's context; a compound literal's is.
+            int32_t braces = 0;
             bool specifiers = true;
-            while (specifiers && declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
-                   parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
+            while (specifiers && declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI)
             {
                 const uint8_t scanned = parser->tokens.kinds[declarator];
                 const uint8_t scanned_role = parser->tree.roles[declarator];
-                depth += scanned == PARSE_KIND_L_PAREN || scanned == PARSE_KIND_L_SQUARE;
+                // A `{` at the declaration's own level is a body or an initializer's; within a group, a compound
+                // literal's (`typeof((T){0})`), which the specifiers hold.
+                const bool body = scanned == PARSE_KIND_L_BRACE && depth <= 0;
+                const bool tag_body = scanned == PARSE_KIND_R_BRACE && braces == 0 && (scanned_role == PARSE_ROLE_CLOSE_STRUCT || scanned_role == PARSE_ROLE_CLOSE_ENUM);
+                braces += (scanned == PARSE_KIND_L_BRACE) - (scanned == PARSE_KIND_R_BRACE && braces != 0);
+                depth += scanned == PARSE_KIND_L_PAREN || scanned == PARSE_KIND_L_SQUARE || scanned == PARSE_KIND_L_BRACE;
                 depth -= scanned == PARSE_KIND_R_PAREN || scanned == PARSE_KIND_R_SQUARE || scanned == PARSE_KIND_R_BRACE;
                 open_lists += (scanned_role == PARSE_ROLE_OPEN_FUNCTION || scanned_role == PARSE_ROLE_OPEN_CALL) -
                               (scanned_role == PARSE_ROLE_CLOSE_FUNCTION || scanned_role == PARSE_ROLE_CLOSE_CALL);
-                specifiers = depth > 0 || (scanned != PARSE_KIND_COMMA && scanned != PARSE_KIND_EQUAL);
+                specifiers = !body && !tag_body && (depth > 0 || (scanned != PARSE_KIND_COMMA && scanned != PARSE_KIND_EQUAL));
                 declarator += specifiers;
             }
             const uint32_t declarator_key = specifiers && open_lists == 0 && declarator < count && reader->declaration_kinds[declarator] != 0 ?

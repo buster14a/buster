@@ -975,6 +975,22 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\nint g(int);\n"
         "__attribute__((unavailable)) int h(T x __attribute__((unavailable)));\n__attribute__((deprecated)) D (*fq)(int);\n"
         "__attribute__((unavailable)) T (*fr)(int);\ntypeof(g((T)1)) x __attribute__((unavailable));\n",
+        // A compound literal's braces in the specifiers (`typeof((T){0})`) are the specifiers'; a `{` at the declaration's
+        // level, an initializer's compound literal's, still ends them.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((unavailable)) typeof((T){0}) x;\n__attribute__((deprecated)) typeof((D){0}) y;\n"
+        "__attribute__((unavailable)) typeof((D){0}) w;\nint *a = (D[]){0}, b __attribute__((deprecated));\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypeof((T){0}) x;\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\ntypeof((D){0}) y;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) typeof((T){0}) z;\n",
+        // A marked declarator's array bounds take its mark, at any scope, past a group's `)` and in a later dimension; a
+        // tag's body in its specifiers doesn't (an enumerator's value), and a compound literal's braces there do.
+        "typedef int D __attribute__((deprecated(\"old\")));\n__attribute__((deprecated)) int x[sizeof(D)];\n"
+        "int y __attribute__((deprecated)), z[sizeof(D)];\n__attribute__((deprecated)) int (*fp)[sizeof(D)];\n"
+        "__attribute__((deprecated)) int w[2][sizeof(D)];\nvoid f(void) { __attribute__((deprecated)) int v[sizeof(D)]; (void)v; }\n"
+        "__attribute__((deprecated)) enum { A = sizeof(D) } e;\n__attribute__((deprecated)) typeof((int){ sizeof(D) }) c;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) int x[sizeof(T)];\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) enum { A = sizeof(T) } x;\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"
