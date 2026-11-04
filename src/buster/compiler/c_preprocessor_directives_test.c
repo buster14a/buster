@@ -672,6 +672,8 @@ struct PPDirectiveTestStructure
     const char* source;
     const char* header;
     const char* standard;
+    // Optional exact diagnostic after the main file's path, including the newline. Empty expects no diagnostic.
+    const char* diagnostic;
 };
 
 // Original raw-string inputs; Clang is an external diagnostic/location oracle, including suppressed contexts.
@@ -693,6 +695,157 @@ static const PPDirectiveTestStructure pp_directive_test_raw_errors[] = {
 };
 
 static const PPDirectiveTestStructure pp_directive_test_structures[] = {
+    // #1254: exact error text and source character, even without the optional Clang oracle.
+    {
+        .name = "invalid octal digit",
+        .source = "#if 08\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:6: error: invalid digit '8' in octal constant\n",
+    },
+    {
+        .name = "invalid explicit octal digit",
+        .source = "#if 0o18\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:8: error: invalid digit '8' in octal constant\n",
+    },
+    {
+        .name = "invalid binary digit",
+        .source = "#if 0b102\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:9: error: invalid digit '2' in binary constant\n",
+    },
+    {
+        .name = "invalid integer suffix",
+        .source = "#if 1lul\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:6: error: invalid suffix 'lul' on integer constant\n",
+    },
+    {
+        .name = "missing hexadecimal digits",
+        .source = "#if 0x\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:6: error: invalid suffix 'x' on integer constant\n",
+    },
+    {
+        .name = "missing exponent digits",
+        .source = "#if 1e\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:6: error: exponent has no digits\n",
+    },
+    {
+        .name = "missing signed exponent digits",
+        .source = "#if 1e+\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:6: error: exponent has no digits\n",
+    },
+    {
+        .name = "missing hexadecimal exponent digits",
+        .source = "#if 0x1p\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:8: error: exponent has no digits\n",
+    },
+    {
+        .name = "missing hexadecimal exponent",
+        .source = "#if 0x1.\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:9: error: hexadecimal floating constant requires an exponent\n",
+    },
+    {
+        .name = "missing hexadecimal significand",
+        .source = "#if 0x.p1\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:8: error: hexadecimal floating constant requires a significand\n",
+    },
+    {
+        .name = "invalid floating suffix",
+        .source = "#if 1.0fblah\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:8: error: invalid suffix 'fblah' on floating constant\n",
+    },
+    {
+        .name = "separator at exponent start",
+        .source = "#if 1e'2\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:7: error: digit separator cannot appear at start of digit sequence\n",
+    },
+    {
+        .name = "separator at mantissa end",
+        .source = "#if 1'.0\n#endif\n",
+        .standard = "c23",
+        .diagnostic = ":1:6: error: digit separator cannot appear at end of digit sequence\n",
+    },
+    {
+        .name = "well-formed decimal floating constant",
+        .source = "#if 1.5\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:5: error: floating point literal in preprocessor expression\n",
+    },
+    {
+        .name = "well-formed hexadecimal floating constant",
+        .source = "#if 0x1p2\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:5: error: floating point literal in preprocessor expression\n",
+    },
+    {
+        .name = "integer overflow unchanged",
+        .source = "#if 99999999999999999999999\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:5: error: integer literal is too large to be represented in any integer type\n",
+    },
+    {
+        .name = "invalid digit after LF splice",
+        .source = "#if 0\\\n8\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":2:1: error: invalid digit '8' in octal constant\n",
+    },
+    {
+        .name = "invalid digit after CRLF splice",
+        .source = "#if 0\\\r\n8\r\n#endif\r\n",
+        .standard = "gnu17",
+        .diagnostic = ":2:1: error: invalid digit '8' in octal constant\n",
+    },
+    {
+        .name = "invalid suffix after repeated splices",
+        .source = "#if 1\\\n\\\nlul\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":3:1: error: invalid suffix 'lul' on integer constant\n",
+    },
+    {
+        .name = "missing exponent after splice",
+        .source = "#if 1\\\ne\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":2:1: error: exponent has no digits\n",
+    },
+    {
+        .name = "malformed selected elif",
+        .source = "#if 0\n#elif 08\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":2:8: error: invalid digit '8' in octal constant\n",
+    },
+    {
+        .name = "short circuit still checks literal syntax",
+        .source = "#if 0 && 08\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = ":1:11: error: invalid digit '8' in octal constant\n",
+    },
+    {
+        .name = "skipped group does not check literal syntax",
+        .source = "#if 0\n#if 08\n#endif\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = "",
+    },
+    {
+        .name = "untaken elif does not check literal syntax",
+        .source = "#if 1\n#elif 08\n#endif\n",
+        .standard = "gnu17",
+        .diagnostic = "",
+    },
+    {
+        .name = "valid integer forms unchanged",
+        .source = "#if 0xffu == 255 && 077LL == 63 && 0b10 == 2 && 1ULL == 1\nkept\n#endif\n",
+        .standard = "c23",
+        .diagnostic = "",
+    },
     { "#else after #else", "#if 1\n#else\n#else\n#endif\n", 0, 0 },
     { "#elif after #else", "#if 0\n#else\n#elif 1\n#endif\n#if 1\n#else\n#elif 1\n#endif\n", 0, 0 },
     { "#elifdef and #elifndef after #else", "#if 0\n#else\n#elifdef X\n#endif\n#if 0\n#else\n#elifndef X\n#endif\n", 0, 0 },
@@ -919,6 +1072,16 @@ static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtur
         result = result && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0;
         char* oracle = result && with_clang ? pp_directive_test_clang(path, fixture->standard) : 0;
         result = result && (!with_clang || (oracle != 0 && strcmp(diagnostics[0], oracle) == 0));
+        if (result && fixture->diagnostic != NULL)
+        {
+            char expected[8192];
+            const int length = snprintf(expected, sizeof(expected), "%s%s", fixture->diagnostic[0] != 0 ? path : "", fixture->diagnostic);
+            result = length >= 0 && (size_t)length < sizeof(expected) && strcmp(diagnostics[0], expected) == 0;
+            if (!result)
+            {
+                printf("expected numeric diagnostic:\n%s", length >= 0 && (size_t)length < sizeof(expected) ? expected : "<too long>\n");
+            }
+        }
         if (!result)
         {
             printf("%s %s differs:\nours:\n%s%sclang:\n%s\n", label, fixture->name, diagnostics[0] != 0 ? diagnostics[0] : "<failed>",
