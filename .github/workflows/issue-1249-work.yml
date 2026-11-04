@@ -12,24 +12,24 @@ permissions:
 jobs:
   workspace:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Retain exact source for this investigation
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-1249-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: issue-1249-source
-          path: ${{ runner.temp }}/buster-1249-source.tar.gz
-          retention-days: 1
       - name: Install the approved hosted toolchain
         run: bash tools/ci/setup-hosted.sh
-      - name: Build the baseline compiler
-        run: BUSTER_HOST_ARCH=x86-64 ./build.sh
+      - name: Retain the exact compiler and its resource headers
+        run: tar -czf "$RUNNER_TEMP/issue-1249-clang.tar.gz" -C "$RUNNER_TEMP/llvm-23.1.4" bin/clang bin/clang-23 bin/lld bin/ld.lld lib/clang/23 LICENSE.TXT
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: issue-1249-baseline
-          path: build/compiler
+          name: issue-1249-clang
+          path: ${{ runner.temp }}/issue-1249-clang.tar.gz
           retention-days: 1
+      - name: Original-source reference diagnostics
+        shell: bash
+        run: |
+          printf '%s\n' 'void f(void) { undeclared_x foo; }' > "$RUNNER_TEMP/expression.c"
+          printf '%s\n' 'struct S { unsigned char [bytes 4]; };' > "$RUNNER_TEMP/array.c"
+          printf '%s\n' 'struct S { unsigned : x 5; };' > "$RUNNER_TEMP/bitfield.c"
+          for source in "$RUNNER_TEMP/expression.c" "$RUNNER_TEMP/array.c" "$RUNNER_TEMP/bitfield.c"; do clang -std=gnu17 -fsyntax-only -fno-color-diagnostics "$source" && exit 1 || test "$?" = 1; done
