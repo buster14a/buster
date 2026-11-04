@@ -961,6 +961,15 @@ on the base without the fragments (every variant's object was the base's):
 Every round of the two together was below every round of the base: `lower`
 0.29 ms lower.
 
+A later run ([run at `1cb13f8a`](https://github.com/buster14a/buster/actions/runs/41779070832/job/126409052295))
+measured the runtimes' test with the linkage and the declaration's own token
+first, which the locals' test loads too, and the object and the name only for
+a declaration with external linkage: `lower.prepare` 1.192 ms against 1.260
+(every one of four rounds lower), and so it tests them. The same run's
+integer constants' fast path, which wrote a constant of a plain class first in
+`check_lower_constant` by its packed facts, didn't pay (`lower.statements`
+6.936 ms against 6.899), and isn't kept.
+
 ## The tasks' loop's code (#1048)
 
 The loop's copies (`check_lower_drain_body`) inline the whole expansion, so

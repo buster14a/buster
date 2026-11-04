@@ -11917,11 +11917,14 @@ static inline __attribute__((always_inline)) void check_lower_declared_runtime(c
                                                                               const IdentId* identifiers, const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols)
 {
     const CheckInput* input = program->input;
-    const uint32_t object = input->objects[declaration];
-    const IdentId name = names[declaration];
-    if (name != 0 && input->declarations[declaration] == declaration && check_input_linkage(input->declaration_bits, declaration) == 2 && object != 0 &&
-        object < program->object_count)
+    // The linkage and the declaration's own token first, which the locals' test loads too, and the object and the name
+    // only for a declaration with external linkage, few of a unit's (#1048: 0.07 ms of sqlite3.c's preparation on the
+    // 9700X, docs/c-lowering.md's "The leaf path and the runtimes' names").
+    if (check_input_linkage(input->declaration_bits, declaration) == 2 && input->declarations[declaration] == declaration && names[declaration] != 0 &&
+        input->objects[declaration] != 0 && input->objects[declaration] < program->object_count)
     {
+        const uint32_t object = input->objects[declaration];
+        const IdentId name = names[declaration];
         // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
         bool any = false;
         for (uint32_t s = 0; s < spelled; s += 1)
