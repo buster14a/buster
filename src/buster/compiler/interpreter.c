@@ -1209,7 +1209,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 result->status = INTERPRETER_INVALID;
                 break;
             }
-            needed = function->call_argument_counts[value];
+            needed = function->call_argument_counts[value] + (function->call_targets[value] == 0);
             pushed = class != BUSTER_TYPED_CLASS_VOID && needed == 0;
         }
         else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_FENCE && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID))
@@ -1489,7 +1489,28 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             const uint32_t count = function->call_argument_counts[value];
             const uint32_t first = function->call_first[value];
             const SymbolId symbol = function->call_targets[value];
-            const uint32_t callee = interpreter_typed_find_function(program, symbol);
+            const bool indirect = symbol == 0;
+            const uint32_t argument_base = top - count;
+            const uint32_t call_base = argument_base - indirect;
+            const uint64_t address = indirect ? stack[call_base].low : 0;
+            uint32_t callee = indirect ? UINT32_MAX : interpreter_typed_find_function(program, symbol);
+            if (indirect)
+            {
+                if (classes[call_base] != BUSTER_TYPED_CLASS_U64)
+                {
+                    result->status = INTERPRETER_INVALID;
+                }
+                // Only opaque tokens made by GLOBAL_ADDRESS or explicitly registered native addresses name code.
+                // The callee sits below the arguments and is consumed even by a void or zero-argument call.
+                for (uint32_t f = 0; f < program->function_count; f += 1)
+                {
+                    if (address == (uint64_t)(uintptr_t)&program->functions[f])
+                    {
+                        callee = f;
+                        break;
+                    }
+                }
+            }
             for (uint32_t a = 0; a < count; a += 1)
             {
                 if (classes[top - count + a] != function->argument_classes[first + a])
@@ -1520,15 +1541,15 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 else
                 {
                     const uint64_t mark = scratch->length;
-                    result->status = interpreter_typed_enter(target, locals, defined, local_top, stack + top - count, count, &runtime, depth + 1, scratch);
+                    result->status = interpreter_typed_enter(target, locals, defined, local_top, stack + argument_base, count, &runtime, depth + 1, scratch);
                     frames[depth] = (InterpreterTypedFrame){
                         .function = callee,
-                        .stack_base = top - count,
+                        .stack_base = call_base,
                         .local_base = local_top,
                         .return_class = (uint8_t)class,
                         .arena_mark = mark,
                     };
-                    top -= count;
+                    top = call_base;
                     local_top += target->local_count;
                     depth += 1;
                 }
@@ -1538,7 +1559,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 const InterpreterNativeBinding* binding = 0;
                 for (uint32_t n = 0; n < program->native_count; n += 1)
                 {
-                    if (program->natives[n].symbol == symbol)
+                    if (indirect ? address == (uint64_t)(uintptr_t)program->natives[n].address : program->natives[n].symbol == symbol)
                     {
                         binding = &program->natives[n];
                         break;
@@ -1566,7 +1587,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                     .binding = binding,
                     .types = types,
                     .extensions = extensions,
-                    .arguments = stack + top - count,
+                    .arguments = stack + argument_base,
                     .argument_count = count,
                     // This stream has already promoted every variadic argument, so their fixed/unnamed split is
                     // immaterial for the scalar machine classes it can express.
@@ -1582,7 +1603,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 }
                 else
                 {
-                    top -= count;
+                    top = call_base;
                     if (class != BUSTER_TYPED_CLASS_VOID)
                     {
                         returned = interpreter_typed_value(class, returned);
