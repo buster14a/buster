@@ -1,0 +1,74 @@
+name: Issue 1291 validation details
+on:
+  push:
+    branches: [codex/1291-validation-details]
+    paths: [.github/workflows/issue-1291-details.yml]
+permissions:
+  contents: read
+  actions: read
+  issues: write
+jobs:
+  details:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Extract prior regression failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/buster14a/buster/actions/jobs/126684833978/logs > "$RUNNER_TEMP/previous.log"
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          lines = pathlib.Path(os.environ['RUNNER_TEMP'], 'previous.log').read_text(errors='replace').splitlines()
+          start = next((i for i, s in enumerate(lines) if '##[group]Run ./build/compiler test-preprocessor' in s), max(0, len(lines) - 200))
+          lines = lines[start:]
+          selected = set(range(max(0, len(lines)-45), len(lines)))
+          for i, s in enumerate(lines):
+              if re.search(r'FAIL|mismatch|failed|expected|actual|Error:', s, re.I):
+                  selected.update(range(max(0, i-3), min(len(lines), i+6)))
+          text = '\n'.join(lines[i] for i in sorted(selected))
+          body = '### Hosted validation failure details\n\nSource commit: `bad752e8c714ff1709fd911f6dd0e44c80cd24ee`. Prior run: 41861671753.\n\n```text\n' + text[-18000:] + '\n```\n\n---\nAgent session: ChatGPT session for #1291 (no session identifier or private session URL is exposed)\nModel: OpenAI / GPT-6 Astra Pro'
+          subprocess.run(['gh', 'api', 'repos/buster14a/buster/issues/1318/comments', '--method', 'POST', '--input', '-'], input=json.dumps({'body': body}), text=True, check=True, stdout=subprocess.DEVNULL)
+          print(text[-18000:])
+          PY
+      - name: Install toolchain and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/ci/setup-hosted.sh > "$RUNNER_TEMP/setup.log" 2>&1 || { tail -60 "$RUNNER_TEMP/setup.log"; exit 1; }
+          BUSTER_HOST_ARCH=x86-64 ./build.sh --config Debug --jobs 2 > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
+      - name: Validate issue through both drivers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          source = root / 'issue1291.c'
+          source.write_text('#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n')
+          report = []
+          failures = []
+          expected = [':1:8: warning: left side of operator converted from negative value to unsigned: -1 to 18446744073709551615', ':4:8: warning: right side of operator converted from negative value to unsigned: -2 to 18446744073709551614']
+          for mode in ['-E', '-fsyntax-only']:
+              for flags in [[], ['-Werror'], ['-w', '-Werror']]:
+                  proc = subprocess.run(['./build/compiler', mode, *flags, str(source)], text=True, capture_output=True)
+                  if flags == []:
+                      ok = proc.returncode == 0 and all(s in proc.stderr for s in expected) and proc.stderr.count('side of operator converted') == 2
+                  elif flags == ['-Werror']:
+                      ok = proc.returncode != 0 and proc.stderr.count('error:') == 2 and proc.stderr.count('side of operator converted') == 2
+                  else:
+                      ok = proc.returncode == 0 and not proc.stderr
+                  label = ' '.join([mode, *flags])
+                  report.append(('PASS ' if ok else 'FAIL ') + label + ' (exit=' + str(proc.returncode) + ')')
+                  if not ok:
+                      failures.append(label)
+                      report.append(proc.stderr[:4000])
+          text = '\n'.join(report)
+          body = '### Focused driver validation\n\nSource commit: `bad752e8c714ff1709fd911f6dd0e44c80cd24ee`. GitHub-hosted Ubuntu baseline Debug build.\n\n```text\n' + text + '\n```\n\n---\nAgent session: ChatGPT session for #1291 (no session identifier or private session URL is exposed)\nModel: OpenAI / GPT-6 Astra Pro'
+          subprocess.run(['gh', 'api', 'repos/buster14a/buster/issues/1318/comments', '--method', 'POST', '--input', '-'], input=json.dumps({'body': body}), text=True, check=True, stdout=subprocess.DEVNULL)
+          print(text)
+          raise SystemExit(bool(failures))
+          PY
