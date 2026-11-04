@@ -107,13 +107,16 @@ patterns are:
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
-  to the consumer (#141). It moves past the nodes between them that don't write
-  memory, call, access a volatile or atomic object, fence or move rsp
-  (arithmetic, constants, addresses, other nonvolatile loads) and past none that
-  do: a store to any address, a call, a volatile or atomic load (#1059:
-  `BUSTER_IR_OBSERVABLE`) or store, a fence of any order or scope (a signal
-  fence's too), an allocation or a restore of the dynamic stack; an atomic load
-  folds into nothing. A pass of its own after the plan's pass over
+  to the consumer (#141). It moves past the nodes between them that don't touch
+  memory, call, fence or move rsp (arithmetic, constants, addresses) and past
+  none that do: a store to any address, a call, any other load (#1059's audit:
+  the typed stream doesn't carry a C access's volatility, so that a load the IR
+  doesn't flag `BUSTER_IR_VOLATILE` may still be a volatile object's, and two
+  volatile reads keep their order: `tier1_select_fold_barrier`), an atomic
+  read/modify/write, a fence of any order or scope (a signal fence's too), an
+  allocation or a restore of the dynamic stack; a volatile or atomic load (#1059:
+  `BUSTER_IR_OBSERVABLE`) folds into nothing. On `main.c`'s `--tier1` build the
+  rule costs 6 records of 239,884 and 32 bytes of code. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
@@ -127,6 +130,14 @@ patterns are:
   no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
+- The IR's `intrinsic` (#141): `mulhu` is `TIER1_RULE_MULTIPLY_HIGH` (one operand in `rax`, `mul` of the other, its
+  `rdx` the result, saved around as a division's fixed registers are), and the x86 builtins' `pdep`, `pext`, `bzhi`
+  and `bextr` of an `I32` or an `I64` are `TIER1_RULE_INTRINSIC`, their one VEX instruction of the width
+  (`tier1_select_intrinsic`), `pdep`'s and `pext`'s source in `vvvv` and mask in `rm`, `bzhi`'s and `bextr`'s source in
+  `rm` and index or control in `vvvv`, the destination any register, an operand's too. Neither folds an operand. The
+  emission's target allow-list refuses the instruction for a target without BMI2 (BMI1 for `bextr`), the lowering's
+  own admission having refused its row there already; `test-tier1-select` runs each of both widths from both operand
+  orders into its own register and each operand's natively on both paths where the machine has them.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
@@ -616,12 +627,27 @@ remain ordered barriers, and no load is folded across one.
 The native consumer captures argument locations before definition-phase
 evictions, saves surviving caller registers in dedicated fixed-frame rows,
 resolves parallel argument moves using reserved R11, and emits the call. All
-argument shuffles use full-width copies before narrowing `I32` destinations,
-so mixed-width cycles preserve their original sources. The return value moves
-from RAX before live registers are restored; `I32` returns use a 32-bit move
-even when the destination is RAX. Existing allocation keeps the result's
-destination distinct from the saved survivors. Call preservation counts are
-reported separately as `call_stores` and `call_loads`.
+argument shuffles use full-width copies, so mixed-width cycles preserve their
+original sources. The return value moves from RAX, and stays in RAX where
+allocation put it there. Existing allocation keeps the result's destination
+distinct from the saved survivors. A survivor is loaded back where something
+first needs it, not right after the call, and a later call doesn't store it
+again while its row still holds it (#1116, the [allocation
+guide](tier1-allocation.md)'s "Values live across calls"). Call preservation
+counts are reported separately as `call_stores` and `call_loads`.
+
+An `I32` value's upper half is unspecified in Tier 1's registers, as System V
+leaves an `int` parameter's and result's (#1116). Every rule reads an `I32`
+operand at 32 bits (an address's index is an `I64`), and a zero extension to
+`I64` always writes its `mov r32, r32`, even in place. So nothing else writes
+a move to clear it:
+
+- an `I32` argument is passed as the argument moves leave its register;
+- an `I32` result stays in RAX;
+- a copy of an `I32`, and a truncation to `I32`, is nothing in its own register.
+
+Narrow values keep their canonical storage (#981): a narrow result is still
+zero-extended from RAX, and a narrow truncation still clears in place.
 
 Call-containing functions disable the red zone and use the frame planner's
 System V call alignment, including zero-argument calls. The bounded register
@@ -1009,7 +1035,10 @@ of Lua 5.4.8 (#1204's runs, at `c1f08986`), and every function of c-testsuite's
 subset. Since #1204's merge, Tier 1 also takes thread-locals' addresses, calls
 of up to eight 64-byte vectors in registers, and addresses whose constant index
 doesn't fit a disp32 (#141); the compiler's own `main.c` by `--tier1
--march=native` then compiles 983 of its 1,100 functions by Tier 1, and the
-others stop before selection: one naked, and 115 at the lowering to the IR, for
-vectors and x86 builtins it doesn't represent (the Tier 1 guide's list). What
-Tier 1 still refuses is that list's. The run-time gap to clang -O2 is #1189's.
+-march=native` then compiles 983 of its 1,100 functions by Tier 1. Since the
+x86 builtins' scalar bit manipulations became the IR's `intrinsic` (#141), it
+compiles 1,004 of its 1,117 (at `48ac6d71`, 1,001: `_pdep_u64`, `_pext_u64`
+and `_bzhi_u64` are the three), and the others stop before selection: one
+naked, and 112 at the lowering to the IR, for vectors of elements other than
+32-bit integers and the x86 builtins' rows of vectors (the Tier 1 guide's
+list). What Tier 1 still refuses is that list's. The run-time gap to clang -O2 is #1189's.

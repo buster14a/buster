@@ -200,6 +200,15 @@
 //     store's and load's barrier: no access moves across it, and it is never eliminated. Tier 0 defers it
 //     (tier0_emit_atomic_rmw); the C producer's exchanges, additions and subtractions of a constant order
 //     (c_check_program_helpers.c's check_program_direct_rmw).
+//   - ATOMIC_CAS: an atomic compare-exchange (#1059), which pops the expected value and the desired one, both of `class`
+//     (an integer's, 1 to 8 bytes), and pushes the object's old value, of `class`: `value` its order
+//     (BUSTER_TYPED_FENCE_ORDER's bits) and, from BUSTER_TYPED_CAS_LOCAL_SHIFT, the local, of U64, that holds the
+//     object's address. It is one lock cmpxchg of the class's bytes at the address, naturally aligned, a full barrier
+//     on x86-64, which every order takes: the object takes the desired value where it holds the expected one, and the
+//     old value is pushed either way, so that the producer compares it with the expected one for the success. A
+//     consumer keeps it as an atomic read/modify/write's barrier, and its local as a use of it (the references that
+//     give a local its home: tier0_count_references). Tier 0 defers it (tier0_emit_atomic_cas); the C producer's
+//     compare-exchanges of a native object (c_check_program_atomic.c's plans).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
@@ -294,7 +303,8 @@
 #define BUSTER_TYPED_FENCE 49
 // Past the fence, as it is, for the scalar validator alone.
 #define BUSTER_TYPED_ATOMIC_RMW 50
-#define BUSTER_TYPED_KINDS 51
+#define BUSTER_TYPED_ATOMIC_CAS 51
+#define BUSTER_TYPED_KINDS 52
 // A FENCE's value: its order (C's memory_order) and its scope (a signal fence's bit), and the one that takes mfence.
 #define BUSTER_TYPED_FENCE_ORDER 0x07
 #define BUSTER_TYPED_FENCE_SIGNAL 0x08
@@ -302,6 +312,8 @@
 #define BUSTER_TYPED_ACCESS_ATOMIC 0x10
 // An ATOMIC_RMW's operation: an addition (lock xadd), and without it an exchange (xchg).
 #define BUSTER_TYPED_RMW_ADD 0x08
+// Where an ATOMIC_CAS's value has its address's local, above its order.
+#define BUSTER_TYPED_CAS_LOCAL_SHIFT 8
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -783,6 +795,14 @@ static bool tier0_atomic_rmw_valid(uint32_t class, uint64_t value)
 {
     return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_RMW_ADD)) == 0 &&
            (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
+}
+
+// Whether an ATOMIC_CAS is one: of an integer class, of an order of C's (0 to 5) and of a local of U64, nothing else.
+static bool tier0_atomic_cas_valid(const Tier0Function* function, uint32_t class, uint64_t value)
+{
+    const uint64_t local = value >> BUSTER_TYPED_CAS_LOCAL_SHIFT;
+    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (value & ((UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT) - 1) & ~(uint64_t)BUSTER_TYPED_FENCE_ORDER) == 0 &&
+           (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST && local < function->local_count && function->local_classes[local] == BUSTER_TYPED_CLASS_U64;
 }
 
 // A FENCE's records: mfence for a thread fence of seq_cst, which orders the thread's stores before its later loads, as
@@ -2790,10 +2810,11 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     // FENCE: tier0_emit_deferred's, mfence or nothing by its value (tier0_fence_records).
     tier0_defer(BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
-    // ATOMIC_RMW: tier0_emit_deferred's, of each integer class (tier0_emit_atomic_rmw).
+    // ATOMIC_RMW and ATOMIC_CAS: tier0_emit_deferred's, of each integer class (tier0_emit_atomic_rmw, tier0_emit_atomic_cas).
     for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_U64; class += 1)
     {
         tier0_defer(BUSTER_TYPED_ATOMIC_RMW, class, BUSTER_TIER0_VARIANT_PLAIN);
+        tier0_defer(BUSTER_TYPED_ATOMIC_CAS, class, BUSTER_TIER0_VARIANT_PLAIN);
     }
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
@@ -3361,6 +3382,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
     [BUSTER_TYPED_FENCE] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_ATOMIC_RMW] = BUSTER_TIER0_ADDRESSED,
+    [BUSTER_TYPED_ATOMIC_CAS] = BUSTER_TIER0_BINARY,
     [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
@@ -4079,6 +4101,12 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
         {
             references[values[i]] += 1;
         }
+        else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+        {
+            // A compare-exchange reads its address from the local its value names (#1059), so that a parameter whose
+            // only use it is still has its home and its incoming register's save.
+            references[values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] += 1;
+        }
     }
     if (function->call_tails != 0)
     {
@@ -4089,14 +4117,16 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
 static __mmask64 tier0_lanes(int64_t first, uint32_t count);
 
 // tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
-// kinds in the four kinds' bitset), then a count per set bit, without a branch per entry.
+// kinds in the five kinds' bitset), then a count per set bit, without a branch per entry: an ATOMIC_CAS's local is its
+// value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
 static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
     const uint32_t count = function->count;
     memset(references, 0, function->local_count * sizeof(uint32_t));
-    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL;
+    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL |
+                                     1ull << BUSTER_TYPED_ATOMIC_CAS;
     const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
     _Static_assert(BUSTER_TYPED_KIND_LIMIT == 64, "a kind is a bit of a quadword");
     for (uint32_t first = 0; first < count; first += 64)
@@ -4107,7 +4137,7 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
         {
             const uint32_t i = first + (uint32_t)__builtin_ctzll(bits);
             bits &= bits - 1;
-            references[values[i]] += 1;
+            references[values[i] >> (kinds[i] == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0)] += 1;
         }
     }
     if (function->call_tails != 0)
@@ -4581,6 +4611,32 @@ static uint64_t tier0_frame_objects_vector(const Tier0Function* function, const 
         }
     }
     return offset;
+}
+
+// Whether a function with vectors holds a VECTOR value, which its frame's slots (Tier0Frame.vectors, 64 bytes per depth)
+// take: an entry of class VECTOR, the value every VECTOR operand of a row is. A function whose X86 entries are scalar
+// alone (an asm statement's placed in its caller, #1059; an x86 builtin's of general registers or masks) has none.
+static bool tier0_vector_slots(const Tier0Function* function)
+{
+    bool found = false;
+    for (uint32_t i = 0; !found && i < function->count; i += 1)
+    {
+        found = function->classes[i] == BUSTER_TYPED_CLASS_VECTOR;
+    }
+    return found;
+}
+
+// tier0_vector_slots for the vector path: 64 entries' classes at a time.
+static bool tier0_vector_slots_vector(const Tier0Function* function)
+{
+    bool found = false;
+    for (uint32_t first = 0; !found && first < function->count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, function->count);
+        const __m512i classes = _mm512_maskz_loadu_epi8(lanes, function->classes + first);
+        found = _mm512_mask_cmpeq_epi8_mask(lanes, classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VECTOR)) != 0;
+    }
+    return found;
 }
 
 static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
@@ -6141,6 +6197,42 @@ static void tier0_emit_atomic_rmw(const Tier0Function* function, const Tier0Entr
                               : bytes == 1 ? X86_FORM_XCHG_RM8_R8 : bytes == 2 ? X86_FORM_XCHG_RM16_R16 : bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
     tier0_put(writer, tier0_instruction(form, operand, address, BUSTER_X86_MEMORY_BASE, 0, 0));
     tier0_put(writer, tier0_instruction(tier0_load_form(class), address, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+}
+
+// An ATOMIC_CAS's records, with E its expected value's register at depth - 2, D its desired value's at depth - 1 and A the
+// stack's first free register, at the depth: E swapped with rax, where cmpxchg takes the expected value, rax's own (a
+// value deeper down's) kept in E; the address loaded from its local's home into A; lock cmpxchg of D with the object at
+// A, which leaves the old value in rax; rax swapped back with E, so that E holds the old value and rax its own again; and
+// the old value extended in E as the class's load extends it (tier0_load_form's movsx, movzx or mov). At depth 2, E is rax,
+// which takes no swap.
+static uint32_t tier0_atomic_cas_records(uint32_t depth)
+{
+    return depth == 2 ? 3 : 5;
+}
+
+static void tier0_emit_atomic_cas(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t depth = entries->depths[i];
+    const uint32_t class = entries->key_classes[i];
+    const uint8_t expected = tier0_integer_depths[depth - 2];
+    const uint8_t desired = tier0_integer_depths[depth - 1];
+    const uint8_t address = tier0_integer_depths[depth];
+    const Tier0Home* home = &homes[function->values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT];
+    const uint32_t bytes = tier0_class_bytes(class);
+    const uint32_t form = bytes == 1 ? X86_FORM_LOCK_CMPXCHG_M8_R8 : bytes == 2 ? X86_FORM_LOCK_CMPXCHG_M16_R16 : bytes == 4 ? X86_FORM_LOCK_CMPXCHG_M32_R32 : X86_FORM_LOCK_CMPXCHG_M64_R64;
+    const bool swap = expected != X86_REGISTER_RAX;
+    if (swap)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_XCHG_RM64_R64, expected, X86_REGISTER_RAX, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    tier0_put(writer, home->is_register != 0 ? tier0_instruction(X86_FORM_MOV_R64_RM64, address, home->reg, BUSTER_X86_REGISTER_DIRECT, 0, 0)
+                                            : tier0_instruction(X86_FORM_MOV_R64_RM64, address, home->reg, home->mode, home->displacement, 0));
+    tier0_put(writer, tier0_instruction(form, desired, address, BUSTER_X86_MEMORY_BASE, 0, 0));
+    if (swap)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_XCHG_RM64_R64, expected, X86_REGISTER_RAX, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    tier0_put(writer, tier0_instruction(tier0_load_form(class), expected, expected, BUSTER_X86_REGISTER_DIRECT, 0, 0));
 }
 
 // A FENCE's records (tier0_fence_records): mfence for a thread fence of seq_cst, none for the others.
@@ -8228,6 +8320,10 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     {
         tier0_emit_atomic_rmw(function, entries, i, writer);
     }
+    else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+    {
+        tier0_emit_atomic_cas(function, entries, homes, i, writer);
+    }
     else if (memory && tier0_vector_entry(entries, i))
     {
         tier0_emit_vector_entry(function, entries, frame, homes, i, writer);
@@ -8453,6 +8549,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     else if (kind == BUSTER_TYPED_ATOMIC_RMW)
     {
         count = BUSTER_TIER0_ATOMIC_RMW_RECORDS;
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+    {
+        count = tier0_atomic_cas_records(entries->depths[i]);
     }
     else if (memory && tier0_vector_entry(entries, i))
     {
@@ -8851,6 +8951,12 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                     integer_top = !wide && depth > integer_top ? depth : integer_top;
                     floating_top = wide && floating > floating_top ? floating : floating_top;
                 }
+                else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
+                {
+                    // A compare-exchange's address, in the integer stack's first free register; rax, which it swaps with its
+                    // expected value, it gives back.
+                    integer_top = depth > integer_top ? depth : integer_top;
+                }
                 else if (tier0_moves_stack(function->kinds[i]))
                 {
                     // The frame pointer's; STACK_SAVE's and FRAME_ADDRESS's value at its depth (ALLOCA's and
@@ -9007,6 +9113,13 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
         uses[0] = true;
         window[0] = 2;
         touch[0] = (int32_t)before[0] - 1;
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+    {
+        // Its expected and desired values, and its address in the register at the depth; rax it gives back.
+        uses[0] = true;
+        window[0] = 2;
+        touch[0] = (int32_t)before[0];
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
@@ -9746,7 +9859,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     // and the vectors'.
     frame.memory = tier0_memory_function(function);
     frame.memory_slots = function->x87 || function->int128;
-    frame.vectors = function->vectors;
+    frame.vectors = function->vectors && (BUSTER_VECTOR_PATH(vector) ? tier0_vector_slots_vector(function) : tier0_vector_slots(function));
     frame.x87_result = function->x87 && tier0_x87_returns(function);
     // The masks' slots: one per depth the mask stack reaches, and at least one per register, which a deep row's
     // borrowing saves (tier0_emit_operation).
@@ -10119,6 +10232,20 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_UWRMSR_R64_R64,
 };
 
+// Whether a general-purpose legacy form's effects (x86_semantics.c's) may be a row's (#1059: an inline assembly
+// statement placed in its caller, c_check_program_asm.c's check_asm_row), beside the rule every form keeps (a covered
+// form whose syntax names its operands, without implicit registers or a branch): control goes on (no jump through a
+// register, call, return or trap), no flag changes but the status ones (cld and std write the direction flag, which the
+// convention keeps clear at every call and Tier 0's code assumes clear), and it touches neither the x87's state (its
+// stack, which Tier 0 keeps empty between entries, and its control word), nor vector registers no field names (Key
+// Locker's), nor an operand no role names (RARE), nor an opmask register.
+static bool tier0_operation_general_effects(const X86Effects* effects)
+{
+    const uint32_t control = (uint32_t)effects->kinds >> 4;
+    const uint32_t kept = BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_IMPLICIT_VECTORS | BUSTER_X86_EFFECT_RARE | BUSTER_X86_EFFECT_OPMASKS;
+    return control == BUSTER_X86_CONTROL_NONE && ((effects->flags_written | effects->flags_undefined) & BUSTER_X86_FLAG_DF) == 0 && (effects->properties & kept) == 0;
+}
+
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override (below
 // X86_FORM_COUNT: without BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS, the only ones 64-bit mode has; a 64-bit-mode
 // record's decorations have none), a symbol or a branch, whose syntax names its operands (or that has none:
@@ -10127,7 +10254,8 @@ static const uint16_t tier0_operation_legacy_forms[] = {
 // (x86_semantics.c's, #760) touch nothing its syntax doesn't name: a covered form without implicit registers (mulx's
 // rdx) or vzeroupper's every vector register. A form the tables don't cover has the conservative record, whose
 // registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the string compares (rax, rcx, rdx and xmm0)
-// among them. Or one of tier0_operation_legacy_forms. Requires x86_semantics_initialize, as tier0_compile does.
+// among them. Or one of tier0_operation_legacy_forms. Or a general-purpose legacy form (#1059, inline assembly placed in
+// its caller: tier0_operation_general_effects) of the same rule. Requires x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
     bool valid = form < X86_FORM_COUNT;
@@ -10152,7 +10280,9 @@ static bool tier0_operation_form_valid(uint32_t form)
             legacy = form == tier0_operation_legacy_forms[k];
         }
         const bool sse = description->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_vector_operand(description);
-        valid = legacy || (explicit && (vex || evex || sse) && named && description->relative_bytes == 0);
+        const bool general = description->family == BUSTER_X86_FAMILY_LEGACY && !sse && (explicit || syntax == X86_SYNTAX_RM_ONE) && named &&
+                             description->relative_bytes == 0 && tier0_operation_general_effects(effects);
+        valid = legacy || general || (explicit && (vex || evex || sse) && named && description->relative_bytes == 0);
     }
     return valid;
 }
@@ -10777,6 +10907,19 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                     {
                         tier0_reject(&validator, i, "a fence of a class, or of an order or a scope that isn't one");
                     }
+                    continue;
+                }
+                if (kind == BUSTER_TYPED_ATOMIC_CAS)
+                {
+                    // An atomic compare-exchange takes its expected and its desired values of its class, its address from its
+                    // local, and leaves the old value.
+                    const uint32_t desired = tier0_pop(&validator, i);
+                    const uint32_t expected = tier0_pop(&validator, i);
+                    if (!tier0_atomic_cas_valid(function, class, value) || desired != class || expected != class)
+                    {
+                        tier0_reject(&validator, i, "an atomic compare-exchange's values, class, order or address's local");
+                    }
+                    tier0_push(&validator, class);
                     continue;
                 }
                 if (kind == BUSTER_TYPED_ATOMIC_RMW)
@@ -12111,6 +12254,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
                 const bool wide = function->values[i] >= 16;
                 deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
+            }
+            else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
+            {
+                deferred_integer_top = entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
             }
             else if (tier0_moves_stack(function->kinds[i]))
             {

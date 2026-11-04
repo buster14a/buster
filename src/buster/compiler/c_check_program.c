@@ -138,6 +138,15 @@ struct CheckProgramOptions
     // The blocks' objects' lifetimes (#177, c_check_program_lifetime.c): CHECK_CONTROL_LIFETIME entries, which the
     // lowering turns into its functions' lifetime events, for Tier 1's frame (the C driver's --tier1).
     bool lifetimes;
+    // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
+    // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
+    // statement's row and calls its helper as any function's.
+    bool asm_helpers;
+    // The helper families (a bit each, CheckProgramHelperFamily's) whose every operation takes its helper where it has a
+    // direct form (#1059's paired measurements: the C driver's --helper-forms, measure-helpers): the fences', the atomic
+    // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
+    // implicit _Atomic object's accesses have no helper to take, and stay the typed stream's.
+    uint32_t helper_forms;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -286,8 +295,10 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands and target.
+    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms and target.
     bool unselected_operands;
+    bool asm_helpers;
+    uint32_t helper_forms;
     X86Target target;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
@@ -3382,7 +3393,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .target = options.target, .token = BUSTER_CHECK_NONE,
+                               .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     if (options.return_flow_work != NULL)
     {
@@ -3457,10 +3468,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
     uint32_t* label_positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    // The ranges the writer leaves out (CheckProgram.dropped_ranges), a token's room each, and per region whether one
-    // holds it, for a unit with regions.
-    uint64_t* dropped_ranges = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
-    uint8_t* dropped_regions = regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->region_count) : 0;
     // The label scan a constant condition's dead operand can need nests inside the run's traversal, on marks of its
     // own: each set of pushes is bounded by node_count. Only a unit with a statement expression can need it, so its
     // extra room is the regions' alone (#891).
@@ -3479,7 +3486,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
-            dropped_ranges != 0 && (!regions || dropped_regions != 0) &&
             stops != 0 && repeats != 0 && (!regions || region_first != 0) && region_next != 0 && openings != 0 && vla_next != 0 && (!assemblies || asm_statements != 0) &&
             (!variable || (vla_first != 0 && allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0)) &&
             (input->cleanup_count == 0 || cleanup_parents != 0);
@@ -3493,6 +3499,17 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     if (valid)
     {
         arena_discard(scratch);
+    }
+    // The ranges the writer leaves out (CheckProgram.dropped_ranges), a token's room each, and per region whether one
+    // holds it, for a unit with regions. Past the discard: the writer fills a prefix of the ranges, a few kilobytes,
+    // where room for a token's each before it kept 8 bytes a token of the scratch's earlier pages through the backend's
+    // peak (sqlite3.c's 5.7 MB, #628).
+    uint64_t* dropped_ranges = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
+    uint8_t* dropped_regions = regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->region_count) : 0;
+    valid = valid && dropped_ranges != 0 && (!regions || dropped_regions != 0);
+    if (!valid && program->status == CHECK_PROGRAM_OK)
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
     }
     uint32_t body_count = 0;
     if (valid)

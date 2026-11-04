@@ -38,18 +38,27 @@ requirements. [Command index](README.md).
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`); `test-checker-corpus`
+  `CheckDriverPart`). Its library-builtin comparisons are pinned to Clang
+  23.1.4, CI's reference: it compares `clang --version` with the release,
+  prints `expected clang 23.1.4, found …` when another release is found, and
+  skips only the plain names that release's table is known to classify
+  differently (the named list `cbuiltin_library_table_differences`: 23.1.5's
+  `strlcat` and `strlcpy`), still comparing every other name and every
+  version-independent check, and reruns them under a fake clang 23.1.5 so the
+  skip path is exercised under the reference too; the fake reaches `--clang`'s
+  executable through a path with a space, quotes and `$;*`
+  (`clang_release_wrapper`), so an awkward `--clang` path stays one word. `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
   `benchmark-checker-source` measures checking of real
-  source bodies by the scalar schedule, the vector path's postorder batches (`vector`), its level order
-  (`levels`, `CheckOptions.level_order`), its memoized transitions in node order (`transitions`,
-  `CheckOptions.transitions`, #1050, `c_check_transitions.c`) and its transitions keyed in 16-lane windows
-  (`windows`, `CheckOptions.transition_windows`): #133's question of which order wins, which the postorder
-  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder"), and #1050's ("Memoized
-  transitions"), opt-in (the driver's `--check-transitions`) since they saved 4% of `sqlite3.c`'s graph run
-  there. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
+  source bodies by the scalar schedule, the vector path in node order (`vector`, its default), its regions in
+  postorder batches (`regions`, `CheckOptions.regions`) and by level (`levels`, `CheckOptions.level_order`), and its
+  memoized transitions in node order (`transitions`, `CheckOptions.transitions`, #1050, `c_check_transitions.c`,
+  keyed by interned value classes): #133's question of which order the regions take, which the postorder batches
+  won on the 9700X (`docs/c-checker.md`, "Level order or postorder"), #1050's of what the regions do ("Node order or
+  regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
+  don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
   `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
@@ -67,7 +76,7 @@ requirements. [Command index](README.md).
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
-  `--transitions` selects the memoized transitions' fixtures, keys and table limits alone (`c_check_transitions_test.c`).
+  `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.

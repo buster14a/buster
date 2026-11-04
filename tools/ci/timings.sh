@@ -8,7 +8,9 @@ output=${1:?usage: timings.sh OUTPUT_DIRECTORY}
 repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 [[ "$repository" == buster14a/buster ]]
 mkdir -p "$output"
+# Every run starts its observations and lock lines afresh, in a directory used before too.
 : > "$output/observations.tsv"
+: > "$output/locks.tsv"
 gh api "repos/$repository/actions/workflows/9700x.yml/runs?per_page=100" > "$output/runs.json"
 jq -e '.workflow_runs | type == "array"' "$output/runs.json" > /dev/null
 # A nightly backlog dispatch's run name says it is one (9700x.yml's run-name): its coverage is targeted.
@@ -40,7 +42,42 @@ while IFS=$'\t' read -r run event kind; do
         (([$job.steps[]? | select(.conclusion == "success" and (.name | startswith("Benchmark ") or startswith("Measure ") or startswith("Attribute "))) | elapsed(.started_at; .completed_at)]) as $measured |
         if ($measured | length) > 0 and ($measured | all(. != null)) then row($job; "benchmark-steps"; ($measured | add)) else empty end)
     ' "$output/jobs-$run.json" >> "$output/observations.tsv"
+    # The shared lock, from the runner hooks' own lines in the job's log (data, never run): the job-started hook's
+    # start, its `this job has the machine` when it holds the lock, and the job-completed hook's `gave the machine
+    # back`. A log that can't be read, or lacks a line, gives that metric no sample.
+    jq -r '.jobs[] | select(.name == "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)" and .status == "completed" and .conclusion == "success") | .id' \
+        "$output/jobs-$run.json" > "$output/job-list.tsv"
+    while IFS= read -r job; do
+        [[ "$job" =~ ^[1-9][0-9]*$ ]]
+        if gh api "repos/$repository/actions/jobs/$job/logs" > "$output/job.log" 2> /dev/null; then
+            awk -v job="$job" -v group="$group" '
+                { stamp = $1; sub(/^[^0-9]*/, "", stamp) }
+                start == "" && /##\[group\]Run .*\/job-started\.sh/ { start = stamp }
+                acquired == "" && /buster-9700x: this job has the machine/ { acquired = stamp }
+                /buster-9700x: gave the machine back/ { released = stamp }
+                END { printf "%s\t%s\t%s\t%s\t%s\n", job, group, start == "" ? "-" : start, acquired == "" ? "-" : acquired, released == "" ? "-" : released }
+            ' "$output/job.log" >> "$output/locks.tsv"
+        fi
+        rm -f "$output/job.log"
+    done < "$output/job-list.tsv"
+    rm -f "$output/job-list.tsv"
 done < "$output/run-list.tsv"
+# Each lock line's instant, then the wait and the hold in whole seconds; a malformed or reversed pair gives no sample.
+instant()
+{
+    if [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$ ]]; then
+        date -u -d "$1" +%s.%N
+    fi
+}
+if [ -s "$output/locks.tsv" ]; then
+    while IFS=$'\t' read -r job group start acquired released; do
+        a=$(instant "$start") b=$(instant "$acquired") c=$(instant "$released")
+        awk -v job="$job" -v group="$group" -v a="$a" -v b="$b" -v c="$c" 'BEGIN {
+            if (a != "" && b != "" && b + 0 >= a + 0) printf "%s\t%s\tlock-wait\t%.0f\n", job, group, b - a
+            if (b != "" && c != "" && c + 0 >= b + 0) printf "%s\t%s\tlock-hold\t%.0f\n", job, group, c - b
+        }' >> "$output/observations.tsv"
+    done < "$output/locks.tsv"
+fi
 cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/timings.c -o "$output/timings"
 "$output/timings" < "$output/observations.tsv" > "$output/summary.md"
 printf '\nSample: up to the latest 100 runs of `9700x.yml`; job pagination is complete and only the latest attempt is used. Raw API timestamps are retained with this report.\n' >> "$output/summary.md"

@@ -299,7 +299,7 @@ musl's 1,006 (`-c`, CPUs 0 to 7):
   `sqlite3.c` reach 2.9 times one's, at 268.73 bytes of DRAM traffic per
   source byte).
 
-So a units lane does four things:
+So a units lane does five things:
 
 - **It keeps its three big arenas** (the driver's arena, scratch and output,
   which the checker and the emission fill) from one unit to the next, emptied
@@ -413,7 +413,143 @@ So a units lane does four things:
   memory with the rest of the address space, as it frees a command of one
   file's. Before a link it releases it as the others do, so that the link's
   peak stays the units': kept through synth's link by one lane, it took the
-  peak from 328 MB to 386.
+  peak from 328 MB to 386. The run counts the lanes still taking units
+  itself (`CheckUnitsRun`'s `taking`), apart from the board's count, which
+  gates the help: the board's allocation may fail on several lanes, and each
+  lane read none still taking units from a missing board, so each one took
+  itself for the last and left its memory to the exit (#1165's review).
+- **It holds its units to the memory** (#1109): each unit, once preprocessed,
+  takes an estimate of its peak from what the lanes may hold at once, and
+  waits for another lane to give memory back when it doesn't fit (below).
+
+### The units' memory
+
+[The record](https://github.com/buster14a/buster-performance/tree/a0063f8fcf9c5f09217031719c853e33b73c1ce8/docs/measurements/units-memory-1109-2026-11-02)
+has this section's and the next one's measurements, their scripts and their
+machines.
+
+A lane took one unit after another whatever their sizes, so the process's
+peak was about the sum of the lanes' largest units: each lane's three arenas
+keep the pages of its largest unit so far. A `main.c`-sized unit adds about
+3.5 GB, and build.sh's sources hold ten of them (`main.c` and the
+`main_unit_*.c` files that include it), which a run takes last, their
+sources being the smallest. On a 4-core VM of 16 GB, the 41 sources at once
+were killed by the cgroup's OOM killer at 14 GB, without a diagnostic
+(#1109).
+
+So the units' lanes share a memory budget (`CheckUnitsMemory`): seven
+eighths of what the process may still take when the run starts
+(`check_units_memory_read`: the least of `MemAvailable`, or the free pages
+without it, and, for each cgroup v2 from the process's own up to its
+hierarchy's root, `memory.max` less `memory.current`, the files' pages on
+its lists counted as free, and nothing where a limit's `memory.current`
+can't be read, since what the cgroup uses is then unknown and the lanes
+take turns; a cgroup v1 limit isn't read, so under one the machine's memory
+is the bound), the eighth left for what the estimates
+don't count (the links the lanes keep, the lanes' thread scratch, the
+lanes that take only functions' parts, the link). Each process budgets
+alone: several compilers at once (`make -j`) still add up. A unit takes its
+estimate once preprocessed, before its parse (`check_units_admit`, from
+`check_driver_unit`), when its tokens are known: the preprocessor's own
+memory is a small part of a unit's peak (208 MB of `main.c`'s 3.5 GB),
+and its source file's size says nothing of what it includes. A lane holds
+its largest unit's estimate since it last gave memory back, as its arenas
+hold that unit's pages; a unit that doesn't fit beside what the other lanes
+hold makes its lane give back what it holds (its three arenas' pages past
+their first huge page boundary, `arena_discard`) and sleep on a word that
+every lane advances when it gives memory back, until it fits or no other
+lane holds any: a unit alone always runs, however large. A lane gives its
+memory back at each unit's end while another lane waits, and once it has
+no unit left to take, with its release, its pages freed, before it helps
+the other lanes' emissions on the board (#777); the lane that stops taking
+units last in a command that leaves its memory to the exit returns its
+share alone, since no lane takes memory after it. Which lane that is, the
+run's own count says (`CheckUnitsRun`'s `taking`, above), which holds
+without the board too: a count read from a missing board would have every
+lane take itself for the last and keep its pages while the others still
+take memory. The help waits for the lanes still taking units, one of which
+may wait for that memory, and a lane that kept it there deadlocked with
+such a unit (a 16 MiB unit of comments beside a tiny one, by two lanes
+with one unit's memory, found in review). So a lane holds memory only
+while it takes units, and waits for nothing but its own units' work then.
+What a unit writes doesn't depend on when it ran, so the outputs are the
+same as without the budget. `test-check-units` runs its programs' units
+with `--units-memory=1`, which serializes every unit's parse and later
+stages, into each unit's object alone; reads the budget from files of its
+own for each branch of `check_units_memory_read`; requires one of two
+equal units by two lanes to wait for the other's memory; and compiles that
+slow unit beside the tiny one under two budgets and, under a byte, without
+the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands for its
+allocation failing), each object its own alone and the report saying that
+one lane alone kept its pages, where the deadlock would hang until the
+children's alarm.
+
+The estimate (`check_units_estimate`) is 600 bytes a preprocessed token and
+48 MB a unit. On the laptop, `-c --lanes 1` of each of build.sh's 41
+sources, of `sqlite3.c`, of Lua 5.4.8's 34 files and of an empty file and
+one of 45 headers (78 units, whose peaks huge pages round up) added from
+16.9 MB (the empty file) to 3,899 MB (`main_unit_frontend.c`, 8,087,159
+tokens) to the process's resident set. The units of 300,000 tokens or more
+took 446 to 644 bytes a token (`main.c` 534, `sqlite3.c` 460), and the
+estimate is 1.02 to 1.46 times their peaks (1.14 for `main.c`, 1.20 for
+`main_unit_frontend.c`), and 1.17 to 2.85 times the smaller units'.
+
+On the 9700X (64 GB), build.sh's 42 sources at once with `-c` on its 8
+lanes (`-march=native` and build.sh's language flags; the process's peak
+resident set; each run its own hold of the lock), `08cf75ce` against its
+main parent `a4a2182a`, five interleaved rounds by default and two with a
+budget:
+
+| run | wall | peak | units that waited |
+|---|---|---|---|
+| main (`a4a2182a`), median of 5 | 6.58 s | 25.3 GiB | |
+| this budget, by default, median of 5 | 6.58 s | 25.4 GiB | 0 |
+| `--units-memory`, 12 GiB | 10.95, 10.97 s | 7.7, 7.6 GiB | 9, 9 |
+| `--units-memory`, 6 GiB | 17.63, 17.66 s | 4.9, 4.9 GiB | 26, 24 |
+
+By default no unit waited, and the run took main's time and memory (main's
+peaks 24.6 to 25.4 GiB, these 25.1 to 25.5): its 25 GiB peak would not fit
+the 16 GB VM. Under a 16 GB VM's budget (12 GiB) the `main.c`-sized units
+(4.2 GB each by estimate, 4.9 GB for `main_unit_frontend.c`) ran at most
+three at a time beside the small ones, and the run took 67% longer and
+stayed well under the budget; under 6 GiB they ran one at a time, in 2.7
+times main's time. #1109's own command, the sources linked into one
+executable (`-o selfhost ... -lm -lpthread`), measured at `a5f0fbc2`,
+peaked at 27.7 and 28.1 GiB by default and at 10.99 and 10.98 GiB under
+12 GiB, against 10.86 and 10.92 GiB for `-c` under it: the links the lanes
+keep add 60 to 130 MB, inside the budget's spare eighth, and the
+self-hosted compiler ran. At `a4a2182a` that link fails with the budget and
+without it alike: `lane.c` reads `__bss_start` since #652, which buster's
+linker defines only for static executables.
+
+### Huge pages on a virtual machine
+
+On #1109's VM, a huge page's first touch took about 1 ms of system time
+(the guest clears all 2 MB, and the host backs them, whatever the arena
+uses of them; `compact_stall` stayed 0). With transparent huge pages off
+for the process (`PR_SET_THP_DISABLE` before `exec`), the checking of
+`main.c` ran 2 to 4 times as fast (its `check-input` 14.2 and 8.3 s against 3.3 and 4.3 s), and
+Lua's `lvm.c` with huge pages took about 30% longer at the median and up to
+7 times as long at the tail. On the 9700X it goes the other way for large
+units (`282c4494`, `--lanes 1` on CPU 2, the medians of interleaved runs,
+base pages by `BUSTER_HUGE_PAGES=0`; the process's peak resident set):
+
+| unit | huge pages | base pages | peak, huge | peak, base |
+|---|---|---|---|---|
+| `lvm.c`, `-c` (10 runs each) | 12.6 ms | 12.8 ms | 82 MB | 36 MB |
+| `sqlite3.c`, `-c` (6) | 117.4 ms | 144.6 ms | 315 MB | 248 MB |
+| `main.c`, `-fsyntax-only` (3) | 1,710 ms | 2,106 ms | 3,484 MB | 3,251 MB |
+
+So `main_driver` decides the process's pages before any arena is reserved
+(`arena_page_policy`, `lane.c`): on a virtual machine, by CPUID's
+hypervisor bit, transparent huge pages are off for the whole process
+(`PR_SET_THP_DISABLE`, which `MADV_HUGEPAGE` doesn't override, and which the
+processes it starts inherit); elsewhere the process keeps what it was
+started with. `BUSTER_HUGE_PAGES=0` turns them off anywhere, and `=1`
+leaves them as the system has them, even on a VM whose huge pages are
+backed ahead and cheap. `--time-stages` reports which (`huge-pages`).
+GitHub's hosted runners are virtual machines, so the hosted correctness
+jobs run with base pages.
 
 ## The link
 
@@ -682,8 +818,12 @@ driver as a process, in a directory of its own:
 - **A few large units** (#777): a unit of 800 functions beside a small one's
   `main`, with `-c` by 8 lanes and `--shared-parts` (a test option: a sharing
   emission pauses after each part it takes itself, and the command reports how
-  many parts the other lanes took), each object its own alone, the six lanes
-  without a unit having taken parts of the large one's; and linked by
+  many parts the other lanes took and how many lanes left their memory to the
+  exit), each object its own alone, the six lanes without a unit having taken
+  parts of the large one's and one lane alone leaving its memory to the exit;
+  again without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that
+  stands for its allocation failing), with no part shared and still one lane
+  alone leaving its memory; and linked, where no lane leaves it, by
   `--lanes` 1, by 8 and by the scalar path on 8, the same bytes, a program
   whose sum is the test's.
 - **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8

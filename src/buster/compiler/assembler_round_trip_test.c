@@ -243,7 +243,9 @@ static void asm_round_trip_att_operand(const X86Instruction* record, const AsmRo
             }
             if (index)
             {
-                asm_round_trip_append(text, capacity, length, ",%%%s,%u", x86_gpr64_names[operand->index & BUSTER_X86_REGISTER_NUMBER], 1u << (operand->mode & BUSTER_X86_MODE_SCALE));
+                // A gather's or scatter's vector index is a register of the VSIB operand's class (#1115).
+                const char* name = (form->rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(operand->index, form->rm) : x86_gpr64_names[operand->index & BUSTER_X86_REGISTER_NUMBER];
+                asm_round_trip_append(text, capacity, length, ",%%%s,%u", name, 1u << (operand->mode & BUSTER_X86_MODE_SCALE));
             }
             asm_round_trip_append(text, capacity, length, ")");
         }

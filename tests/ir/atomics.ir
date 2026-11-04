@@ -24,5 +24,9 @@ b0:
   %21 = rmw.i16 %0, %12 align=2 xchg consume
   %22 = rmw.i64 %2, %17 align=8 add release
   %23 = rmw.i64 %2, %22 align=16 xchg acquire
-  %24 = ret.void %23
+  %24 = rmw.i32 %0, %19, %1 align=4 cas seq_cst
+  %25 = rmw.i8 %0, %20, %11 align=1 cas relaxed
+  %26 = rmw.i16 %0, %21, %12 align=2 cas acq_rel
+  %27 = rmw.i64 %2, %23, %22 align=8 cas acquire
+  %28 = ret.void %27
 }

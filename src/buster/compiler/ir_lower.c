@@ -154,9 +154,9 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
 // must be lowered (or refused, as FRAME_ADDRESS and TAIL_CALL are, and the X86 rows past the SIMD subset) here before
 // tier0_validate accepts it. A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is, and an
-// ATOMIC_RMW an IR_ATOMIC_RMW of its operation and order.
-_Static_assert(BUSTER_TYPED_KINDS == 51 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_ATOMIC_RMW == BUSTER_TYPED_FENCE + 1 &&
-                   BUSTER_TYPED_KINDS == BUSTER_TYPED_ATOMIC_RMW + 1,
+// ATOMIC_RMW an IR_ATOMIC_RMW of its operation and order, and an ATOMIC_CAS one of the compare-exchange.
+_Static_assert(BUSTER_TYPED_KINDS == 52 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_ATOMIC_RMW == BUSTER_TYPED_FENCE + 1 &&
+                   BUSTER_TYPED_ATOMIC_CAS == BUSTER_TYPED_ATOMIC_RMW + 1 && BUSTER_TYPED_KINDS == BUSTER_TYPED_ATOMIC_CAS + 1,
                "ir_lower.c lowers or refuses every typed kind");
 _Static_assert(BUSTER_TYPED_FENCE_ORDER == BUSTER_IR_FENCE_ORDER && BUSTER_TYPED_FENCE_SIGNAL == BUSTER_IR_FENCE_SIGNAL &&
                BUSTER_TYPED_FENCE_SEQ_CST == BUSTER_IR_FENCE_SEQ_CST, "a typed fence's value is its IR_FENCE's operand");
@@ -290,7 +290,9 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     // Consume and reproduce the value at the same depth.
                     break;
                 case BUSTER_TYPED_ATOMIC_RMW:
-                    // An address and an operand, and the old value in their place (#1059).
+                case BUSTER_TYPED_ATOMIC_CAS:
+                    // An address and an operand, or an expected value and a desired one, and the old value in their place
+                    // (#1059).
                     depth -= 1;
                     stack[depth - 1] = class;
                     break;
@@ -670,6 +672,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
     return value;
+}
+
+// A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places.
+static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+{
+    return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
 }
 
 // A mask's bits as an integer of at least 32 bits, which Tier 1's arithmetic takes (an m8's or m16's zero-extended past

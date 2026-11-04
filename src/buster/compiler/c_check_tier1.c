@@ -86,8 +86,10 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
             category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         case CHECK_TIER1_CAUSE_CERTIFICATE:
-            // A refused certificate is an allocation the allocator got wrong (#939): internal, never Tier 0's to hide.
-            category = error == TIER1_CERT_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            // A refused certificate is an allocation the allocator got wrong, or code the emitter got wrong (its
+            // Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE, #939): internal, never Tier 0's to hide. Either
+            // checker's capacity is a resource failure.
+            category = error == TIER1_CERT_CAPACITY || error == (BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY) ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         default:
             break;
@@ -115,6 +117,42 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
     }
     const CheckTier1Outcome success = { .category = CHECK_TIER1_SUCCESS, .instruction = BUSTER_IR_NONE, .operation = IR_OP_COUNT };
     return error == 0 ? success : check_tier1_failure(stage, cause, error, instruction, detail);
+}
+
+// The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116): each shape of it
+// that the selector's call boundary doesn't take, by the selector's own predicates (tier1_select_call_supported's), so
+// that the report follows the boundary as it grows; and whether it is indirect or variadic, which the boundary takes.
+// An ABI record the boundary refuses, the call's or an argument's, is `abi-record`, and so are aggregates' parts in
+// registers past the staging slots (#141); an argument without one is named by its type. Every argument is looked at,
+// those past the boundary's limit too (the verifier bounds them all), so that a call past the limit still names its
+// other kinds.
+static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
+{
+    const bool call = node < ir->instruction_count && (ir->op[node] == IR_CALL || ir->op[node] == IR_CALL_INDIRECT) && ir->b[node] < ir->call_count;
+    uint32_t kinds = 0;
+    if (call)
+    {
+        const IrCall* descriptor = &ir->calls[ir->b[node]];
+        const uint32_t result = ir->type[node];
+        kinds |= (ir->op[node] == IR_CALL_INDIRECT ? 1u : 0) << CHECK_TIER1_CALL_INDIRECT;
+        kinds |= (descriptor->variadic ? 1u : 0) << CHECK_TIER1_CALL_VARIADIC;
+        kinds |= (tier1_select_call_abi(ir, node, descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
+        kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_MAX_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
+        kinds |= (tier1_select_call_arity(descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ARGUMENT_COUNT;
+        uint32_t staged = 0;
+        for (uint32_t argument = 0; argument < descriptor->argument_count; argument += 1)
+        {
+            const uint32_t type = tier1_select_argument_type(ir, descriptor, argument);
+            const IrPassed* record = tier1_select_argument_record(ir, descriptor, argument);
+            const bool taken = record != 0 ? tier1_select_record_supported(record, type) : tier1_select_call_argument(type);
+            const uint32_t shape = record != 0 ? CHECK_TIER1_CALL_ABI_RECORD : type == IR_I1 || type == IR_I8 || type == IR_I16 ? CHECK_TIER1_CALL_NARROW_ARGUMENT : CHECK_TIER1_CALL_OTHER_ARGUMENT;
+            kinds |= (taken ? 0 : 1u) << shape;
+            staged += taken ? tier1_select_argument_slots(record) : 0;
+        }
+        kinds |= (staged <= BUSTER_TIER1_SELECT_STAGING_SLOTS ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
+        kinds |= (tier1_select_call_result(result) ? 0 : 1u) << CHECK_TIER1_CALL_OTHER_RESULT;
+    }
+    return kinds;
 }
 
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome)
@@ -330,6 +368,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
         outcome.operation = refused;
+        outcome.call_kinds = selected == TIER1_SELECT_ERROR_UNSUPPORTED ? check_tier1_call_kinds(ir, node) : 0;
         stage = outcome.stage;
     }
     Tier1EmitResult emitted = { 0 };
@@ -417,6 +456,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .spill_slots = emitted.allocation.spill_count,
             .frame_bytes = emitted.frame.maximum_stack_bytes,
             .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
+            .code_certified = emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK,
+            .code_uncertified = emitted.code_checked && emitted.code_reason != TIER1_CERT_EMITTED_OK,
         };
         *code = (Tier0Code){
             .records = records,
@@ -472,11 +513,19 @@ static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_
 {
     const char* operation = outcome.stage == CHECK_TIER1_SELECTION && outcome.operation < IR_OP_COUNT ? ir_op_names[outcome.operation] :
                             outcome.stage == CHECK_TIER1_SELECTION && outcome.operation == IR_OP_COUNT ? "function" : "none";
+    // A refused call's kinds, comma-separated, past the fields every refusal has (#1116).
+    char kinds[256] = { 0 };
+    uint32_t used = 0;
+    for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+    {
+        const int written = ((outcome.call_kinds >> k) & 1) != 0 ? snprintf(kinds + used, sizeof(kinds) - used, "%s%s", used == 0 ? "\tcall=" : ",", check_tier1_call_kind_names[k]) : 0;
+        used += written > 0 && used + (uint32_t)written < sizeof(kinds) ? (uint32_t)written : 0;
+    }
     fprintf(stream, "tier1-refused\t%.*s\t%s\tcategory=%s\tcause=%s\terror=%" PRIu32 "\tinstruction=%" PRIu32 "\tdetail=%" PRIu32
-                    "\toperation=%s\temission_error=%" PRIu32 "\tdominance_checked=%" PRIu32 "\tfallback=%s\n",
+                    "\toperation=%s\temission_error=%" PRIu32 "\tdominance_checked=%" PRIu32 "\tfallback=%s%s\n",
             (int)length, (const char*)name, check_tier1_stage_names[outcome.stage], check_tier1_category_names[outcome.category],
             check_tier1_cause_names[outcome.cause], outcome.error, outcome.instruction, outcome.detail, operation, outcome.emission_error,
-            (uint32_t)outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden");
+            (uint32_t)outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden", kinds);
 }
 
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report)
@@ -506,6 +555,13 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             fprintf(stream, "\tselection.error%" PRIu32 "=%" PRIu32, k - IR_OP_COUNT, report->operations[k]);
         }
     }
+    for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+    {
+        if (report->calls[k] != 0)
+        {
+            fprintf(stream, "\tselection.call.%s=%" PRIu32, check_tier1_call_kind_names[k], report->calls[k]);
+        }
+    }
     for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_OPERATIONS; k += 1)
     {
         if (report->emission[k] != 0)
@@ -515,7 +571,8 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
-                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\n",
+                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
-            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones);
+            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
+            report->code_certified, report->code_uncertified);
 }

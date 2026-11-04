@@ -672,7 +672,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 | `flt-rounds` | floating environment, barrier | none | none |
 | `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
 | `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
-| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | none |
+| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | a statement of register, memory and constant operands whose records name no register but its operands' and whose forms a Tier 0 row takes: an `X86` entry in its caller (`check_asm_row`, [the inline assembly guide](c-inline-assembly.md)'s "Placed in the caller") |
 | `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
 
 A helper's physical effects are `x86_semantics.c`'s, read from its records
@@ -754,13 +754,12 @@ seq_cst store, its `xchg` where this is `mov` and `mfence`, the helpers' and
 GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for the
 9700X's measurements. A dynamic or invalid order (which the helper strengthens
 to seq_cst), a scoped family's, a floating object's and an unaligned or wider
-one keep their helper or libatomic's call. The planner reserves an implicit
-object's compare-exchange leaf for a width only where a compound assignment,
-increment or decrement updates such an object (but an integer's addition or
-subtraction: "Direct read/modify/writes", below), and a builtin's width's leaves
-where a builtin takes them; no leaf for a direct load or store, and a leaf for a
-generic form's or a representation's (a floating or another object's builtin)
-that keeps one. The compiler's own `main.c`, every function lowered
+one keep their helper or libatomic's call. The planner reserves no leaf for an
+implicit object's access or update (its update loop's compare-exchange is
+direct: "Direct compare-exchanges", below), and a width's load, store and
+exchange leaves only where a C11 or generic load, store or exchange of a native
+object takes its plan (a generic form's, or a representation's: a floating or
+another object's builtin, that keeps one). The compiler's own `main.c`, every function lowered
 (`--lower-all`), takes 91 atomic accesses directly and keeps 8 helper calls of
 them (its tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the
 unit plans no helper.
@@ -792,18 +791,80 @@ read/modify/writes"), an atomic access no pass moves, merges or drops, and Tier 
 selects the same instructions, the object's width and never its narrow value's
 32-bit register's, as a barrier no load folds past. clang -O0's code is the same
 (`xchg`, `lock xadd`); -O2's has a `lock add` where an addition's result is unused.
-A compare-exchange, the bitwise, minimum, maximum and floating operations, a
-dynamic order, a scoped family's and an implicit update of another operation keep
-their helper or loop. The compiler's own `main.c` calls 3 read/modify/write
-helpers where it called 19 (16 direct; 2 helpers planned where 7 were), and with
-every function lowered 305 where it called 403 (102 direct; 152 planned where 176
-were); SQLite 3.50.4 has none, and its object is unchanged.
+The bitwise, minimum and maximum operations are loops of compare-exchanges
+("Direct fetch loops", below); the floating operations, a dynamic order and a
+scoped family's keep their helper; an implicit update of another operation keeps
+its loop, whose compare-exchange is direct. The compiler's own `main.c` calls 3
+read/modify/write helpers where it called 19 (16 direct; 2 helpers planned where
+7 were), and with every function lowered 305 where it called 403 (102 direct; 152
+planned where 176 were); SQLite 3.50.4 has none, and its object is unchanged.
+
+**Direct compare-exchanges.** `check_program_direct_cas` admits
+`__atomic_compare_exchange_n`, `__c11_atomic_compare_exchange_strong` and
+`_weak`, `__sync_bool_compare_and_swap` and `__sync_val_compare_and_swap`,
+unscoped, without a `__sync` builtin's protected variables, of an integer's, an
+enumeration's or a pointer's object of 1, 2, 4 or 8 bytes, its value's size,
+known aligned to it (a native one, for C11's), of orders the checker knows (any
+of C's for either, `lock cmpxchg` being a full barrier; a `__sync` builtin's is
+seq_cst) whose arguments, and GNU's weak flag, evaluate for no effect. The
+lowering (`check_lower_atomic_cas_direct`) puts the pointer in a temporary, which
+the typed stream's `ATOMIC_CAS` names, and pushes the expected value and the
+desired one, converted to the object's type; `ATOMIC_CAS` of the object's class
+leaves the old value, which is the val form's result and whose equality with the
+expected one (in `int`, for a narrow object's) is the others'. GNU's and C11's
+expected value is where their second argument points: the lowering reads it
+there after evaluating the desired value, as clang does, and writes the old
+value back there only where the exchange failed, as their leaf does. Every
+plan's compare-exchange is direct too (`check_lower_atomic_direct_plan`): a
+generic `__atomic_compare_exchange`'s, a C11 one's of a representation, and the
+loop of an implicit `_Atomic` update that isn't an integer's addition or
+subtraction (`*=`, `<<=`, a floating object's `+=`, a bool's), which so calls
+nothing; its expected buffer takes the old bits whether or not it succeeded, as
+the leaf leaves it. Tier 0 swaps the expected value into `rax` where it isn't
+there, loads the address from its local's home into the stack's first free
+register, and emits `lock cmpxchg` of the object's width, swapping back and
+extending the old value as the class's load does ([the Tier 0
+guide](tier0.md)); the IR keeps it as `rmw ... cas` ([the IR guide](ir.md)'s
+"Atomic read/modify/writes"), and Tier 1 selects `lock cmpxchg` around `rax` the
+same way. A C11 compare-exchange of a floating object (whose bits its leaf
+compares), a dynamic order and a scoped family's keep their helper. The
+compiler's own `main.c` calls 1 read/modify/write helper where it called 3 (18
+direct; 1 helper planned where 2 were), and with every function lowered 281
+where it called 305 (126 direct; 144 planned where 152 were); SQLite 3.50.4 has
+none, and its object is unchanged.
+
+**Direct fetch loops.** `check_program_direct_fetch` admits the bitwise, minimum
+and maximum read/modify/writes, returning the old value or the new one: GNU's
+`__atomic_fetch_and`, `_or`, `_xor`, `_nand`, `_min` and `_max` and their
+`_fetch` forms, the `__sync` ones (clang's `__sync_fetch_and_min`, `_max`,
+`_umin` and `_umax` too) and C11's `__c11_atomic_fetch_and`, `_or`, `_xor`,
+`_nand`, `_min` and `_max`, unscoped, of an integer's or an enumeration's object
+(a bool's for and, or and xor alone, whose bits stay 0 or 1) of 1, 2, 4 or 8
+bytes, its value's size, known aligned to it (a native one, for C11's), of an
+order the checker knows (any of C's; a `__sync` builtin's is seq_cst) whose
+argument evaluates for no effect, its effect's shape its rule's. x86 has no
+instruction that leaves such an operation's old value, so that clang's code is
+a `lock cmpxchg` loop, and so is this one (`check_lower_atomic_fetch_direct`):
+the pointer and the operand converted to the object's type into temporaries, the
+object read by a relaxed atomic `LOAD`, and a loop that computes the new value
+from the old one (in `int` for a narrow object, converted back; nand's and
+complemented; the minimum or the maximum by the value type's ordering, an arm
+of each), runs `ATOMIC_CAS` of the old value and the new one, and goes round
+again, the old value its result, until that result is the old value. Its result
+is the old value or the kept new one. No helper is planned for one, and no new
+typed kind or IR operation is needed. clang's wrapping increment and decrement,
+the floating minimums and maximums, a pointer's, a dynamic order and a scoped
+family's keep their helper. The compiler's own `main.c` calls no
+read/modify/write helper where it called 1 (19 direct; none planned where 1
+was), and with every function lowered 194 where it called 281 (213 direct; 112
+planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
 forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
-`ATOMIC_RMW` and a fence's `FENCE` (but a seq_cst store's own), `helper`: the
+`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
+asm statement's `X86` entry in its caller, `helper`: the
 lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
 asm statement's alike, and `planned`: helpers emitted) and a line per family
@@ -867,12 +928,78 @@ each, and Tier 1's selection tests keep a load from folding past a fence of any
 order, an atomic load or a read/modify/write, and an atomic load from folding at
 all.
 
-**Pending** (#1059): the other read/modify/writes (compare-exchange, and the
-bitwise, minimum and maximum fetch operations: `lock cmpxchg`, a `lock` form
-where the result is unused, or a compare-exchange loop), C's volatile
-accesses carried to the IR as such, the asm statements' operations placed in
-their callers (slice 4), and the paired 9700X measurements of helper calls,
-save and reload traffic, code size, compile time and runtime.
+**Paired measurements** (#1059). `--helper-forms=LIST` gives every operation
+of the listed families (`fence`, `atomic-access`, `atomic-rmw`, `asm`, or
+`all`) its helper's call where it has a direct form
+(`CheckProgramOptions.helper_forms`, read by the `check_program_direct_*`
+predicates the planner and the lowering ask alike, and by the asm planner): the
+code the compiler made before #1059, of the same compiler, for paired runs. An
+implicit `_Atomic` object's accesses have no helper to take and stay the typed
+stream's. `measure-helpers` (`helpers_measure.c`) builds each program four
+ways, by Tier 0 and by `--tier1`, each as it lowers it and with
+`--helper-forms=all`. Its programs are the primitives' kernels, single-threaded
+loops of a concurrent program's operations (reference counts by `lock xadd`, an
+uncontended spin lock's acquire exchange and release store, a sequence lock's
+acquire and release accesses and fences, flags by `fetch_or`, `fetch_and` and
+`xor_fetch`, a running maximum by a weak compare-exchange, and inline asm's
+`bswap`, `roll` and `leaq`), and speedtest1, whose SQLite's relaxed
+`AtomicLoad` and `AtomicStore` (38 of them, its VDBE loop's interrupt test among
+them) are its direct forms. For each object it reports the families' direct
+forms and helper calls, its executable bytes, and Tier 1's spill and call stores
+and loads (the save and reload traffic: Tier 0 saves the values live across
+every call); every build's output must be the first's; then it times each
+source's `-c` compile and each program's run in rotating rounds, as
+`measure-tier1-programs` times its programs. The 9700X job runs it where the
+direct forms' admission, the helpers' planning or the measurement changes (the
+`helpers` gate), and on the daily and dispatched runs.
+
+On the 9700X ([buster-performance's
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/helpers-direct-1059-2026-11-04),
+#1264's run 41764205497, `znver5`, medians of 11 runs and 5 compiles), every
+direct form is faster than its helper by both tiers. Run time, helpers / direct:
+
+| Program | Tier 0 | `--tier1` |
+| --- | ---: | ---: |
+| `sequence` (fences, acquire and release accesses) | 46.8 | 101.6 |
+| `lock` (acquire exchange, release store) | 4.37 | 4.84 |
+| `swaps` (inline asm) | 3.06 | 1.00 (helpers either way) |
+| `counts` (`lock xadd`) | 1.12 | 1.12 |
+| `maximum` (weak compare-exchange) | 1.07 | 1.65 |
+| `flags` (compare-exchange fetch loops) | 1.03 | 1.05 |
+| speedtest1 (38 relaxed accesses) | 1.00 | 1.02 |
+
+A helper strengthens every order to `seq_cst`, so the runs measure that as well
+as the call: a release or acquire fence is no instruction where its helper is an
+`mfence`, and a release store is a `mov` where its helper is an `xchg`. The
+fetch loops gain least, since each iteration is a `lock cmpxchg` either way:
+Tier 0's direct loop runs more instructions than the helper's leaf (510 M against
+465 M) but takes 3% fewer cycles. So no family keeps its helper for want of a
+gain. Every range of 11 runs is apart from its pair's, except two: speedtest1 by
+Tier 0, and `swaps` by `--tier1`, which runs the same code either way.
+
+The objects' facts:
+- **Helper calls.** The primitives' helpers builds make 25 calls where the
+  direct ones make none (Tier 1's make 4: the asm statements keep their helpers
+  under `--tier1`). speedtest1's make 38 where the direct ones make none.
+- **Code size.** The primitives' text is 2,275 bytes against 2,947 by Tier 0,
+  and 1,875 against 2,579 by `--tier1`. speedtest1's is 687 bytes smaller by
+  Tier 0 and 2,346 by `--tier1` (1,415,994).
+- **Save and reload traffic.** The primitives' Tier 1 code has 5 call stores
+  and 5 loads, where the helpers' has 27 of each. speedtest1's has 47 fewer of
+  each, and 14 fewer spill stores and 16 fewer spill loads.
+- **Run time.** speedtest1 by `--tier1` runs 1.6% faster, in time and in
+  cycles (203.5 against 206.9 ms), and by Tier 0 the same.
+- **Compile time.** speedtest1's `-c` is unchanged: 112.4 against 113.7 ms by
+  Tier 0, and 464.7 against 464.8 by `--tier1`. Instructions are equal to
+  within 0.03%.
+- **The primitives' compile.** At 2 ms its times follow the rotation's order,
+  not the compile's cost: a helpers build runs right after its direct build in
+  4 of the 5 rounds, and takes the same time in the round where it runs first.
+
+**Pending** (#1059): C's volatile accesses carried to the IR as such
+([the IR's guide](ir.md)'s "Effects through the consumers"), asm statements of
+fixed registers, labels, the x87's operands or flag outputs in their callers
+(each keeps its helper), and Tier 1's IR for an asm statement's row.
 
 ## Atomic and terminal helper calls
 
@@ -2190,7 +2317,15 @@ no C library has. Each is a builtin of the unit unless `-fno-builtin`,
 and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. A declaration of such a name is the library's function, which calls
+answers by. The list is pinned to Clang 23.1.4, CI's reference: its GNU rows
+include `strlcat` and `strlcpy`, which 23.1.5's table drops. The oracles compare
+`clang --version` with the release, print `expected clang 23.1.4, found …`
+when another release is found, and skip only the plain names the found release
+is known to classify differently (`cbuiltin_library_table_differences`: 23.1.5's
+`strlcat` and `strlcpy`), a difference no named release explains still failing.
+Neither `strlcat` nor `strlcpy` is folded: a call
+of either stays a call of the library's function in every mode. A declaration
+of such a name is the library's function, which calls
 reach as any function's; where it has external linkage and the row's
 prototype, its calls fold as `__builtin_X`'s do (Sema's `BuiltinAttr`:
 `check_input_library_call` marks them, `check_builtin_library_fold_plain` folds

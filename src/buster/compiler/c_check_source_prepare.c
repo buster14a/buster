@@ -63,6 +63,9 @@ struct CheckSourceRequest
     // The blocks' objects' lifetimes in the checked program (CheckProgramOptions.lifetimes), as the driver's --tier1 asks
     // for them (#177), for a client whose IR carries them as lifetime markers (ir_source_prepare's, #141).
     bool lifetimes;
+    // Asm statements keep their helpers (CheckProgramOptions.asm_helpers), as the driver's --tier1 has them, for a client
+    // whose IR lowers the typed stream (ir_source_prepare's), which has no operation for a statement placed in its caller.
+    bool asm_helpers;
     // The tests' injected failure: the stage it stops the file at (CHECK or PROGRAM; READY for none), as a real failure
     // there would, the checker's running out of a resource, or the program's with `fault_unsupported` a refusal by name
     // and otherwise a resource's.
@@ -135,6 +138,7 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         .initializer_reference_count = source->data.reference_count,
         .scalar = scalar,
         .lifetimes = request.lifetimes,
+        .asm_helpers = request.asm_helpers,
     }) : (CheckProgramOptions){ 0 };
     prepared = prepared && check_program(&source->program, parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
     if (prepared && request.fault == CHECK_SOURCE_PROGRAM)
@@ -143,7 +147,7 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         source->program.status = request.fault_unsupported ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
     }
     const bool selected = prepared && (!request.select || check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE,
-                                                                                   scalar, &path->output_arena, &path->scratch));
+                                                                                   scalar, false, &path->output_arena, &path->scratch));
     // -c's check of the selected definitions' target features (the driver's check_driver_target_features), its errors
     // counted rather than printed; its output popped, as the driver pops it.
     const uint64_t mark = path->output_arena.length;

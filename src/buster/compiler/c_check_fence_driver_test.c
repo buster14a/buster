@@ -13,8 +13,8 @@
 // none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process with one CPU prints
 // that it skipped the runs. A concurrent counter litmus of the direct read/modify/writes (check_test_driver_counters),
 // built and checked the same four ways. And --helper-report's counts of a unit with every kind of helper call
-// (check_test_driver_helper_report). Include after c_check_tier1_driver_test.c, whose decoder of a function's object
-// and Tier 1 report readers this test takes.
+// (check_test_driver_helper_report), and Tier 1's order of two volatile reads (check_test_driver_volatile_order). Include
+// after c_check_tier1_driver_test.c, whose decoder of a function's object and Tier 1 report readers this test takes.
 
 static const char check_test_fence_litmus_source[] =
     "#define _GNU_SOURCE\n"
@@ -233,7 +233,11 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
 
 // #1059's concurrent read/modify/writes: four threads add to shared counters by every direct form (GNU's fetch_add, a
 // __sync_ one, an implicit _Atomic object's increment, C11's fetch_sub of a short and GNU's add_fetch of a byte, which
-// wrap) and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
+// wrap) and by compare-exchange loops of each direct form (GNU's weak compare-exchange of a long, __sync's val form of a
+// short and bool form of a byte, which wrap, C11's weak one of an int, and an implicit _Atomic double's +=, its plan's
+// loop), set and clear a bit of their own in a shared word by GNU's fetch_or and fetch_and, compare-exchange loops, each
+// old value showing the bit as it left it (another thread's update lost would change it), and raise a shared peak by
+// fetch_max, and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
 // increment a volatile counter ten times as often, the control, which may lose updates. Every atomic count must be
 // exact. Each run's threads start together, past a barrier of an add_fetch and an acquire load, so that they overlap
 // where they have CPUs of their own.
@@ -251,6 +255,14 @@ static const char check_test_counter_litmus_source[] =
     "static _Atomic long implicit;\n"
     "static _Atomic short down;\n"
     "static unsigned char bytes;\n"
+    "static long swapped;\n"
+    "static short valued;\n"
+    "static unsigned char flagged;\n"
+    "static _Atomic int c11;\n"
+    "static _Atomic double floating;\n"
+    "static unsigned long bits;\n"
+    "static long peak;\n"
+    "static int mismatches;\n"
     "static int lock;\n"
     "static long guarded;\n"
     "static volatile long plain;\n"
@@ -264,16 +276,30 @@ static const char check_test_counter_litmus_source[] =
     "        if (spins > 64) sched_yield();\n"
     "    }\n"
     "}\n"
-    "void* worker(void* unused)\n"
+    "void* worker(void* argument)\n"
     "{\n"
+    "    const long self = (long)argument;\n"
+    "    const unsigned long mine = 1ul << self;\n"
     "    start();\n"
     "    for (int i = 0; i < ITERATIONS; i++)\n"
     "    {\n"
+    "        if ((__atomic_fetch_or(&bits, mine, __ATOMIC_ACQ_REL) & mine) != 0) __atomic_fetch_add(&mismatches, 1, __ATOMIC_RELAXED);\n"
+    "        if ((__atomic_fetch_and(&bits, ~mine, __ATOMIC_ACQ_REL) & mine) == 0) __atomic_fetch_add(&mismatches, 1, __ATOMIC_RELAXED);\n"
+    "        __atomic_fetch_max(&peak, (long)i * THREADS + self, __ATOMIC_RELAXED);\n"
     "        __atomic_fetch_add(&gnu, 1, __ATOMIC_RELAXED);\n"
     "        __sync_fetch_and_add(&legacy, 2);\n"
     "        implicit++;\n"
     "        __c11_atomic_fetch_sub(&down, 1, __ATOMIC_ACQ_REL);\n"
     "        __atomic_add_fetch(&bytes, 3, __ATOMIC_SEQ_CST);\n"
+    "        long expected = __atomic_load_n(&swapped, __ATOMIC_RELAXED);\n"
+    "        while (!__atomic_compare_exchange_n(&swapped, &expected, expected + 1, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}\n"
+    "        short old;\n"
+    "        do old = __atomic_load_n(&valued, __ATOMIC_RELAXED); while (__sync_val_compare_and_swap(&valued, old, (short)(old - 1)) != old);\n"
+    "        unsigned char seen;\n"
+    "        do seen = __atomic_load_n(&flagged, __ATOMIC_RELAXED); while (!__sync_bool_compare_and_swap(&flagged, seen, (unsigned char)(seen + 5)));\n"
+    "        int current = __c11_atomic_load(&c11, __ATOMIC_RELAXED);\n"
+    "        while (!__c11_atomic_compare_exchange_weak(&c11, &current, current + 2, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {}\n"
+    "        floating += 1.0;\n"
     "        for (int spins = 0; __atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE) != 0; spins++)\n"
     "        {\n"
     "            if (spins > 64) sched_yield();\n"
@@ -281,7 +307,7 @@ static const char check_test_counter_litmus_source[] =
     "        guarded++;\n"
     "        __atomic_store_n(&lock, 0, __ATOMIC_RELEASE);\n"
     "    }\n"
-    "    return unused;\n"
+    "    return argument;\n"
     "}\n"
     "void* control(void* unused)\n"
     "{\n"
@@ -294,7 +320,7 @@ static const char check_test_counter_litmus_source[] =
     "    pthread_t threads[THREADS];\n"
     "    int created = 0;\n"
     "    ready = 0;\n"
-    "    while (created < THREADS && pthread_create(&threads[created], 0, body, 0) == 0) created++;\n"
+    "    while (created < THREADS && pthread_create(&threads[created], 0, body, (void*)(long)created) == 0) created++;\n"
     "    for (int t = 0; t < created; t++) pthread_join(threads[t], 0);\n"
     "    return created == THREADS;\n"
     "}\n"
@@ -304,7 +330,9 @@ static const char check_test_counter_litmus_source[] =
     "    alarm(120);\n"
     "    if (sched_getaffinity(0, sizeof(set), &set) != 0 || CPU_COUNT(&set) < 2) { printf(\"skipped\\n\"); return 0; }\n"
     "    if (!run(worker) || !run(control)) return 1;\n"
-    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld\\n\", gnu, legacy, (long)implicit, (int)down, (int)bytes, guarded, (long)plain);\n"
+    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld bits=%lu peak=%ld mismatches=%d\\n\", gnu,\n"
+    "           legacy, (long)implicit, (int)down, (int)bytes, guarded, (long)plain, swapped, (int)valued, (int)flagged, (int)c11, (long)floating, bits, peak,\n"
+    "           mismatches);\n"
     "    return 0;\n"
     "}\n";
 
@@ -343,11 +371,13 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         arguments[count] = NULL;
         char* text = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        // The worker's six read/modify/writes and the barrier's one, and four atomic accesses (the lock's release, the
-        // barrier's load, and main's loads of the two _Atomic counters), are the typed stream's, none a helper's call.
-        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=7\thelper=0\tplanned=0\n") != NULL &&
-                              strstr(text, "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n") != NULL &&
-                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=11\thelper=0\tplanned=0\n") != NULL;
+        // The worker's eight read/modify/writes (two of them the mismatches' additions) and eight compare-exchanges (three
+        // of them the bitwise and maximum loops') and the barrier's addition, and fourteen atomic accesses (the lock's
+        // release, the barrier's load, the compare-exchange loops' first loads, and main's loads of the four _Atomic
+        // counters), are the typed stream's, none a helper's call.
+        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=17\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers.atomic-access\tdirect=14\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=31\thelper=0\tplanned=0\n") != NULL;
         const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
         if ((status != 0 || !reported) && text != NULL)
         {
@@ -355,7 +385,7 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         }
         free(text);
         const bool built = status == 0 && reported && taken;
-        char message[256];
+        char message[512];
         snprintf(message, sizeof(message), "counters (%s): the litmus builds, its read/modify/writes taken directly%s", way, tier1 ? " and its threads Tier 1's" : "");
         check_test_expect(test, built, message);
         char captured[256] = { 0 };
@@ -367,13 +397,29 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         int bytes = -1;
         long guarded = -1;
         long plain = -1;
+        long swapped = -1;
+        int valued = -1;
+        int flagged = -1;
+        int c11 = -1;
+        long floating = -1;
+        unsigned long bits = 1;
+        long peak = -1;
+        int mismatches = -1;
         const bool skipped = ran && strcmp(captured, "skipped\n") == 0;
-        const bool read = ran && sscanf(captured, "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld", &gnu, &legacy, &implicit, &down, &bytes, &guarded,
-                                        &plain) == 7;
+        const bool read = ran && sscanf(captured,
+                                        "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld bits=%lu "
+                                        "peak=%ld mismatches=%d",
+                                        &gnu, &legacy, &implicit, &down, &bytes, &guarded, &plain, &swapped, &valued, &flagged, &c11, &floating, &bits, &peak, &mismatches) == 15;
+        // Each thread's bit clear at the end, every old value its owner's, and the peak the last iteration's of the last
+        // thread.
         const bool exact = read && gnu == total && legacy == 2 * total && implicit == total && down == (int16_t)-total && bytes == (uint8_t)(3 * total) && guarded == total &&
-                           plain >= 1 && plain <= control;
-        snprintf(message, sizeof(message), "counters (%s): every atomic count is exact (gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld)", way, gnu, legacy,
-                 implicit, down, bytes, guarded);
+                           plain >= 1 && plain <= control && swapped == total && valued == (int16_t)-total && flagged == (uint8_t)(5 * total) && c11 == 2 * total &&
+                           floating == total && bits == 0 && mismatches == 0 && peak == total - 1;
+        char message_counts[256];
+        snprintf(message_counts, sizeof(message_counts),
+                 "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld bits=%lu peak=%ld mismatches=%d", gnu, legacy,
+                 implicit, down, bytes, guarded, swapped, valued, flagged, c11, floating, bits, peak, mismatches);
+        snprintf(message, sizeof(message), "counters (%s): every atomic count is exact (%s)", way, message_counts);
         check_test_expect(test, skipped || exact, message);
         if (read)
         {
@@ -391,12 +437,206 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
     unlink(source);
 }
 
+// #1059's audit: two volatile reads through pointers keep their order by Tier 1, by both paths. Its load folding moves a
+// load into its consumer past no other load (tier1_select_fold_barrier), as the IR doesn't know a C access's volatility:
+// `ordered`'s first read, of p (rdi), comes before its second, of q (rsi), in the object's code, where folding the first
+// into the subtraction once read q first. clang's code reads them in this order too.
+static void check_test_driver_volatile_order(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "int ordered(volatile int* p, volatile int* q)\n"
+                                  "{\n"
+                                  "    int a = *p;\n"
+                                  "    int b = *q;\n"
+                                  "    return b - a;\n"
+                                  "}\n";
+    char source[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/volatile-order.c", directory);
+    snprintf(object, sizeof(object), "%s/volatile-order.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "volatile order: the source is written");
+    for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+    {
+        CheckTestTier1Build build;
+        const bool built = check_test_tier1_build(executable, source, "ordered", object, true, scalar != 0, true, false, NULL, &build);
+        X86Decoded records[64];
+        uint32_t offsets[64];
+        uint32_t types[64];
+        uint32_t relocations = 0;
+        const uint32_t count = built ? check_test_tier1_function(object, "ordered", records, 64, offsets, types, &relocations) : 0;
+        // Each pointer's first memory operand: its read.
+        uint32_t first_p = UINT32_MAX;
+        uint32_t first_q = UINT32_MAX;
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const X86Instruction* instruction = &records[r].instruction;
+            const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0 && (instruction->mode & BUSTER_X86_MODE_BASE) != 0;
+            const uint32_t base = instruction->rm & 15;
+            first_p = memory && base == X86_REGISTER_RDI && first_p == UINT32_MAX ? r : first_p;
+            first_q = memory && base == X86_REGISTER_RSI && first_q == UINT32_MAX ? r : first_q;
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "volatile order (%s path): Tier 1 reads p (record %u) before q (record %u)", scalar != 0 ? "scalar" : "vector", first_p, first_q);
+        check_test_expect(test, built && count != 0 && first_p < first_q && first_q != UINT32_MAX, message);
+        unlink(object);
+    }
+    unlink(source);
+}
+
+// An asm statement placed in its caller (#1059, check_asm_row): -c's object of a function of a placed bswap and lfence
+// has their instructions among the function's own records, and no call, by both paths; under --tier1, whose IR has no
+// operation for a placed statement's row, both keep their helpers (CheckProgramOptions.asm_helpers), which Tier 1's
+// code of the function calls, none refused.
+static void check_test_driver_asm_placed(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "unsigned placed(unsigned x, unsigned y)\n"
+                                  "{\n"
+                                  "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+                                  "    __asm__ volatile(\"lfence\" ::: \"memory\");\n"
+                                  "    return x + y;\n"
+                                  "}\n";
+    char source[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/asm-placed.c", directory);
+    snprintf(object, sizeof(object), "%s/asm-placed.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "asm placed: the source is written");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        const bool scalar = (run & 1) != 0;
+        const bool tier1 = (run & 2) != 0;
+        char* arguments[12] = { (char*)executable };
+        uint32_t count = 1;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (tier1)
+        {
+            arguments[count++] = "--tier1";
+            arguments[count++] = "--tier1-refusals";
+        }
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = object;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        X86Decoded records[64];
+        uint32_t offsets[64];
+        uint32_t types[64];
+        uint32_t relocations = 0;
+        const uint32_t decoded = status == 0 ? check_test_tier1_function(object, "placed", records, 64, offsets, types, &relocations) : 0;
+        uint32_t swaps = 0;
+        uint32_t fences = 0;
+        uint32_t calls = 0;
+        for (uint32_t r = 0; r < decoded; r += 1)
+        {
+            const uint32_t form = records[r].instruction.form;
+            swaps += form == X86_FORM_BSWAP_R32;
+            fences += form == X86_FORM_LFENCE;
+            calls += form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64;
+        }
+        const bool taken = !tier1 || (text != NULL && strstr(text, "tier1-refused\tplaced\t") == NULL);
+        const bool placed = tier1 ? swaps == 0 && fences == 0 && calls == 2 && relocations == 2 : swaps == 1 && fences == 1 && calls == 0 && relocations == 0;
+        char message[256];
+        snprintf(message, sizeof(message), "asm placed (%s path%s): the function's own records hold bswap (%u) and lfence (%u), with %u calls%s", scalar ? "scalar" : "vector",
+                 tier1 ? ", --tier1" : "", swaps, fences, calls, tier1 ? ": Tier 1's, of the two helpers" : "");
+        check_test_expect(test, status == 0 && decoded != 0 && placed && taken, message);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        unlink(object);
+    }
+    unlink(source);
+}
+
+// A function's frame and unwind entry with templates placed in it (#1059): an executable the driver builds whole, by
+// each path and with --tier1 too (whose statements keep their helpers), whose callee between two placed statements
+// counts its stack by glibc's backtrace, through the function's own unwind entry: one frame more than main's own count,
+// and the placed statements' values right.
+static void check_test_driver_asm_unwind(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "int printf(const char* format, ...);\n"
+                                  "int backtrace(void** buffer, int size);\n"
+                                  "static int __attribute__((noinline)) frames(void)\n"
+                                  "{\n"
+                                  "    void* buffer[64];\n"
+                                  "    return backtrace(buffer, 64);\n"
+                                  "}\n"
+                                  "static int __attribute__((noinline)) placed(int n, int* inner)\n"
+                                  "{\n"
+                                  "    unsigned x = (unsigned)n;\n"
+                                  "    long a = n, b = 2L * n, c = 3L * n;\n"
+                                  "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+                                  "    *inner = frames();\n"
+                                  "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+                                  "    return (int)(x == (unsigned)n) + (int)(a + b + c);\n"
+                                  "}\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    const int outer = frames();\n"
+                                  "    int inner = 0;\n"
+                                  "    const int result = placed(5, &inner);\n"
+                                  "    printf(\"outer=%d inner=%d result=%d\\n\", outer, inner, result);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[512];
+    char output[512];
+    snprintf(source, sizeof(source), "%s/asm-unwind.c", directory);
+    snprintf(output, sizeof(output), "%s/asm-unwind", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "asm unwind: the source is written");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        const bool scalar = (run & 1) != 0;
+        const bool tier1 = (run & 2) != 0;
+        char* arguments[12] = { (char*)executable, "--verify" };
+        uint32_t count = 2;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (tier1)
+        {
+            arguments[count++] = "--tier1";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = output;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        char captured[128] = { 0 };
+        const bool ran = status == 0 && check_test_driver_capture(output, captured, sizeof(captured));
+        int outer = -1;
+        int inner = -1;
+        int result = -1;
+        const bool read = ran && sscanf(captured, "outer=%d inner=%d result=%d", &outer, &inner, &result) == 3;
+        char message[256];
+        snprintf(message, sizeof(message), "asm unwind (%s path%s): backtrace through the placed statements' function counts %d frames, main %d; result %d",
+                 scalar ? "scalar" : "vector", tier1 ? ", --tier1" : "", inner, outer, result);
+        check_test_expect(test, read && outer > 1 && inner == outer + 1 && result == 31, message);
+        unlink(output);
+    }
+    unlink(source);
+}
+
 // --helper-report's counts (#1059) of a unit with every kind of direct form and helper call: an implicit _Atomic store,
-// load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store and load, a fence, and
-// an asm statement with instructions. Its `direct` columns are the lowered code's direct forms (four accesses, one
-// read/modify/write, one fence: a seq_cst store's own isn't one), its `helper` columns its call sites of each family's
-// helpers, every call in the object (the statement's), and `planned` the signatures (the statement's helper alone: the
-// update takes no compare-exchange's leaf). By both paths.
+// load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store, compare-exchange (its
+// ATOMIC_CAS) and load, a fence, an asm statement placed in its caller (a nop's) and one of fixed registers (rdtsc's),
+// which keeps its helper. Its `direct` columns are the lowered code's direct forms (four accesses, two read/modify/writes,
+// one fence: a seq_cst store's own isn't one; the placed statement's X86 entry), its `helper` columns its call sites of
+// each family's helpers, every call in the object (rdtsc's statement's), and `planned` the signatures (that statement's
+// helper alone: neither read/modify/write takes a leaf). By both paths, and by --helper-forms.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "_Atomic int a;\n"
@@ -406,17 +646,42 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    a = 1;\n"
                                   "    a += 2;\n"
                                   "    __atomic_store_n(&counter, 3, __ATOMIC_RELEASE);\n"
+                                  "    int expected = 3;\n"
+                                  "    __atomic_compare_exchange_n(&counter, &expected, 4, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);\n"
                                   "    __atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
                                   "    __asm__ volatile(\"nop\" ::: \"memory\");\n"
-                                  "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE);\n"
+                                  "    unsigned lo, hi;\n"
+                                  "    __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));\n"
+                                  "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE) + (int)((lo ^ hi) & 1);\n"
                                   "}\n";
-    static const char* const lines[] = {
-        "helpers\tunits=1\trefused=0\tdirect=6\thelper=1\tplanned=1\n",
-        "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
-        "helpers.atomic-rmw\tdirect=1\thelper=0\tplanned=0\n",
-        "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
-        "helpers.asm\tdirect=0\thelper=1\tplanned=1\n",
-        "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+    // By --helper-forms too (#1059's paired measurements): every family's direct forms take their helpers but the
+    // implicit _Atomic object's (its store, load and update, which have none), and two families' alone.
+    static const char* const options[3] = { NULL, "--helper-forms=all", "--helper-forms=atomic-rmw,asm" };
+    static const char* const lines[3][6] = {
+        {
+            "helpers\tunits=1\trefused=0\tdirect=8\thelper=1\tplanned=1\n",
+            "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+            "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
+            "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+            "helpers.asm\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
+        {
+            "helpers\tunits=1\trefused=0\tdirect=3\thelper=6\tplanned=6\n",
+            "helpers.atomic-access\tdirect=2\thelper=2\tplanned=2\n",
+            "helpers.atomic-rmw\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.fence\tdirect=0\thelper=1\tplanned=1\n",
+            "helpers.asm\tdirect=0\thelper=2\tplanned=2\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
+        {
+            "helpers\tunits=1\trefused=0\tdirect=6\thelper=3\tplanned=3\n",
+            "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+            "helpers.atomic-rmw\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
+            "helpers.asm\tdirect=0\thelper=2\tplanned=2\n",
+            "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
+        },
     };
     char source[512];
     char object[512];
@@ -424,24 +689,56 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
     snprintf(object, sizeof(object), "%s/helper-report.o", directory);
     const bool written = parse_test_write(source, program, sizeof(program) - 1);
     check_test_expect(test, written, "helper report: the source is written");
-    for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+    for (uint32_t run = 0; written && run < 6; run += 1)
     {
-        char* vector_arguments[] = { (char*)executable, "--helper-report", "-c", "-o", object, source, NULL };
-        char* scalar_arguments[] = { (char*)executable, "--scalar", "--helper-report", "-c", "-o", object, source, NULL };
-        char* text = NULL;
-        const int status = check_test_driver_spawn(scalar != 0 ? scalar_arguments : vector_arguments, &text);
-        bool reported = status == 0 && text != NULL;
-        for (uint32_t l = 0; reported && l < BUSTER_ARRAY_LENGTH(lines); l += 1)
+        const bool scalar = run % 2 != 0;
+        const uint32_t variant = run / 2;
+        char* arguments[8] = { (char*)executable };
+        uint32_t count = 1;
+        if (scalar)
         {
-            reported = strstr(text, lines[l]) != NULL;
+            arguments[count++] = "--scalar";
+        }
+        if (options[variant] != NULL)
+        {
+            arguments[count++] = (char*)options[variant];
+        }
+        arguments[count++] = "--helper-report";
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = object;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        bool reported = status == 0 && text != NULL;
+        for (uint32_t l = 0; reported && l < 6; l += 1)
+        {
+            reported = strstr(text, lines[variant][l]) != NULL;
         }
         if (!reported && text != NULL)
         {
             fprintf(stderr, "%s", text);
         }
         free(text);
-        check_test_expect(test, reported, scalar != 0 ? "helper report (scalar path): every direct form and helper call counted, an implicit update's and an asm statement's among them"
-                                                      : "helper report (vector path): every direct form and helper call counted, an implicit update's and an asm statement's among them");
+        char message[256];
+        snprintf(message, sizeof(message), "helper report (%s path%s%s): every direct form and helper call counted, an implicit update's and two asm statements' among them",
+                 scalar ? "scalar" : "vector", options[variant] != NULL ? ", " : "", options[variant] != NULL ? options[variant] : "");
+        check_test_expect(test, reported, message);
+        unlink(object);
+    }
+    // A family of no direct form, an unknown name and an empty one are refused by name, before any output.
+    static const char* const refused[3] = { "--helper-forms=math", "--helper-forms=fences", "--helper-forms=fence," };
+    for (uint32_t r = 0; written && r < 3; r += 1)
+    {
+        char* arguments[] = { (char*)executable, (char*)refused[r], "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        const bool named = status != 0 && text != NULL && strstr(text, "error: --helper-forms= takes") != NULL && access(object, F_OK) != 0;
+        free(text);
+        char message[256];
+        snprintf(message, sizeof(message), "helper report: %s refused by name, before any output", refused[r]);
+        check_test_expect(test, named, message);
         unlink(object);
     }
     unlink(source);

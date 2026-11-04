@@ -185,6 +185,23 @@ table. The kinds are:
   gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
   `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
   guide](c-builtins-integration.md)'s "Direct read/modify/writes").
+- `ATOMIC_CAS` (#1059), an atomic compare-exchange, pops the expected value and the desired one, both of an integer
+  `class`, and pushes the object's old value of `class`: `value` a C memory order and, from
+  `BUSTER_TYPED_CAS_LOCAL_SHIFT`, the local (of U64) that holds the object's address, since three operands and a scratch
+  register would take a fourth depth. Tier 0 defers it: the expected value swapped into rax where it isn't there (rax's
+  own value, a deeper one's, kept in its register), the address loaded from the local's home into the stack's first
+  free register (which the entry so claims, as a copy's scratch), `lock cmpxchg` of the desired value's register with
+  the object, the class's bytes, a full barrier on x86-64 that every order takes, which leaves the old value in rax, the
+  swap undone, and the old value extended as the class's load extends it. The producer compares it with the expected
+  value for the success (in `I32` for a narrow class, which Tier 0's compares take). Its local counts as a use of it
+  where Tier 0 gives locals their homes (`tier0_count_references` and its vector twin), so that a pointer parameter
+  whose only use is a compare-exchange's address keeps its incoming value (`test-ir-lowering` runs such functions
+  natively against both interpreters). No consumer moves an access across it or drops it; `ir_lower` makes it a load of
+  the local and the IR's `rmw ... cas`. The typed interpreter runs it as one thread does, as an `ATOMIC_RMW`. The C
+  producer gives a compare-exchange of a constant order one (`check_program_direct_cas`), and so does every plan's (an
+  implicit `_Atomic` update's loop, a generic form's), and a bitwise, minimum or maximum read/modify/write a loop of
+  them (`check_program_direct_fetch`): [the builtin integration guide](c-builtins-integration.md)'s "Direct
+  compare-exchanges" and "Direct fetch loops".
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
@@ -510,8 +527,10 @@ builtins on vectors, as on structs, call libatomic's generic functions.
   in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
   memory, on the stack whole.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
-  the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
-  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
+  the copies of selection, measuring and the deferred entries' emitter that look for their entries
+  (`tier0_memory_function`), as `x87` and `int128` do, and the vectors' slots where an entry is of class VECTOR
+  (`tier0_vector_slots`, 64 entries' classes at a time on the vector path): a function whose rows are scalar alone (an
+  asm statement's placed in its caller, #1059, an x86 builtin's of general registers or masks) reserves none. Tier 0's own records for them are EVEX ones, so a front
   end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
 
 **Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
@@ -547,7 +566,11 @@ VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the
 non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
 values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are, and the
 extensions' system instructions: RAO-INT's atomic operations, `cldemote`, `serialize`, UINTR's, `ptwrite`, `umonitor`,
-MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); a VEX form without
+MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); any general-purpose legacy
+form of the same rule (#1059, for an asm statement placed in its caller: `tier0_operation_general_effects`), covered and of
+named operands, whose control goes on and that changes no flag but the status ones (not the direction flag) and touches
+none of the x87's state (`add`, `bswap`, `lock xadd`, `lea`, `setcc`, `mfence`, `lfence`, `sfence`, `pause`, the
+prefetches; not `cpuid`, `push`, `jmp r/m`, `cld` or `fld`); a VEX form without
 operands only where its effects name no register either (`tilerelease`, not `vzeroupper` or `vzeroall`); no branch,
 symbol or RIP-relative address, each field's role of its class (an integer operand's no narrower than its field, the
 integer result's in a field of 32 or 64 bits), and each record `x86_validate` takes with its roles placed. So a row

@@ -434,6 +434,7 @@ Columns:
 | `size` | its size |
 | `bytes` | its contents: in a lane's buffer, the runtime snapshot or a mapped input; null for zero-fill |
 | fixup range | where its fixups are: a first `FixupId` and a count |
+| `section` | its input section's name, a `String8`, when one names it (a foreign input section, a definition's `section` attribute): what a `__start_NAME`/`__stop_NAME` bound brackets; empty otherwise |
 | `address` | after layout: an image offset for a loaded atom, a file offset otherwise |
 
 The classes are numbered in lld's order of segments, so that sorting atoms by
@@ -494,6 +495,7 @@ relocation, and an executable's patch kernel derives its arithmetic from it:
 | `PC64` | 8 bytes of data (unwind tables) | `R_X86_64_PC64` | S + A − P |
 | `ABS32`, `ABS32S` | 4 bytes: data, an imm32 or a disp32, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
 | `SIZE32`, `SIZE64` | 4 or 8 bytes: data, an imm32 or an imm64 | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
+| `TPOFF64`, `DTPOFF64` | 8 bytes: `movabs`'s imm64 (`movabs $x@tpoff`) or data (DWARF's `.quad x@dtpoff`); the importer's and the assembler's only (#1115) | `R_X86_64_TPOFF64`, `R_X86_64_DTPOFF64` | `TPOFF32`'s and `DTPOFF32`'s values in 8 bytes; a shared library refuses `TPOFF64` and takes `DTPOFF64` as its module's offset, as `DTPOFF32` |
 
 G is the address of S's GOT slot. A linker that relaxes `CALL_GOT`,
 `LOAD_GOT` or `GOTTPOFF` rewrites the instruction's bytes before the field,
@@ -1012,7 +1014,13 @@ runtime has that the dynamic one doesn't:
   the ELF header's address (`__ehdr_start`, through which `libc.a`'s startup
   finds the program headers), `__executable_start`, the preinit array's
   bounds, the IRELATIVE relocations' (`__rela_iplt_start` and
-  `__rela_iplt_end`), and the ends of the text, the data and the image.
+  `__rela_iplt_end`), and the ends of the text, the data and the image. As
+  GNU ld and lld do, a `__start_NAME` or `__stop_NAME` that stays undefined
+  is defined too when `NAME`, a C identifier, names an input section with
+  atoms: at its atoms' run ("Atoms" under "Layout", below), the bound the
+  C registry idiom iterates; a name no such section has, or one a member
+  or library already defines, is no bound and resolves as any other
+  symbol does.
 
 The runtime refers, without defining them, to `main`, to `__tls_get_addr`
 (from those 25 PIC members on the 9700X) and to `_DYNAMIC`, from
@@ -1140,13 +1148,14 @@ against the dynamic runtime with two of GNU ld's and lld's `-shared` rules:
   hidden reference to it is an error, as for a PIE.
 - **Every definition with default or protected visibility is an export**
   (`bind_shared_exports`), not only those of names a library defines or
-  `libc.so.6` refers to. The crt objects' and `libc_nonshared.a`'s global
-  names are all hidden, and so are `libgcc.a`'s but for its decimal
-  floating-point and split-stack members', so the exports are the program's
-  (and those members', as GNU ld and lld export them). The vector path
-  takes 16 symbols at a time, a mask of their flags', atoms' and sources'
-  columns, compressed in a register and stored with a mask of its count; its
-  exact twin takes a symbol at a time.
+  `libc.so.6` refers to — a `__start_NAME`/`__stop_NAME` bound the linker
+  defines among them, which GNU ld and lld put in `.dynsym` too. The crt
+  objects' and `libc_nonshared.a`'s global names are all hidden, and so are
+  `libgcc.a`'s but for its decimal floating-point and split-stack members',
+  so the exports are the program's (and those members', as GNU ld and lld
+  export them). The vector path takes 16 symbols at a time, a mask of their
+  flags', atoms' and sources' columns, compressed in a register and stored
+  with a mask of its count; its exact twin takes a symbol at a time.
 
 `test-bind --cross-check` compiles three C libraries with `-fPIC` and compares
 binding with lld's `-shared` link of each: the same `.dynsym`, with the
@@ -1762,7 +1771,16 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
   prefix sums of their padded sizes, largest alignment first. Functions are at
   least 16-byte aligned and padded to 16 with `int3`. The init and fini arrays
   keep id order, as whole 8-byte entries. Atoms aligned past a page are
-  refused for now.
+  refused for now. Before the count, the atoms of each input section a
+  `__start_NAME`/`__stop_NAME` bound names are made one run at their bucket's
+  end (`executable_bound_sections`): the bucket the run takes is its largest
+  member alignment's, each member keeps its own alignment and real size — the
+  padding before a member is inside the bounds, as GNU ld's members' is, and
+  `__stop` is the last member's end, not the section's rounded one — and only
+  the layout's bucket accounting is rounded back to the bucket's alignment.
+  A bound section whose atoms are of more than one class, or of a class whose
+  order is its atoms', can't be one run of one output section, and fails,
+  naming the bound symbol.
 - **The GOT:** a slot for each target of `CALL_GOT`, `LOAD_GOT`, `GOTPCREL`
   and `GOTTPOFF`, numbered from 1 in symbol order: the target's address, its
   offset from the thread pointer for TLS, or 0 for a weak symbol defined

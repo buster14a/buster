@@ -130,6 +130,22 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
         { IR_BITCAST, IR_I64, IR_F64, { 0x8000000000000000ull, 0 }, { 0, 0 }, 0, { 0x8000000000000000ull, 0 }, INTERPRETER_OK, "bitcast preserves negative zero" },
         { IR_INTTOPTR, IR_PTR, IR_I128, { 0x1234, 8 }, { 0, 0 }, 0, { 0x1234, 0 }, INTERPRETER_OK, "integer to pointer truncates to target width" },
         { IR_PTRTOINT, IR_I128, IR_PTR, { 0x1234, 0 }, { 0, 0 }, 0, { 0x1234, 0 }, INTERPRETER_OK, "pointer to integer zero extends" },
+        // The intrinsics (#141), their operation in `predicate`, as BMI's instructions give them on a Zen 5.
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { UINT64_MAX, 0 }, BUSTER_IR_INTRINSIC_MULHU, { UINT64_MAX - 1, 0 }, INTERPRETER_OK, "mulhu's high product" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0xb, 0 }, { 0xf0f0, 0 }, BUSTER_IR_INTRINSIC_PDEP, { 0xb0, 0 }, INTERPRETER_OK, "pdep deposits the low bits at the mask's" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { UINT64_C(0x8000000000000001), 0 }, BUSTER_IR_INTRINSIC_PDEP, { UINT64_C(0x8000000000000001), 0 }, INTERPRETER_OK, "pdep reaches bit 63" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0x80000001, 0 }, BUSTER_IR_INTRINSIC_PEXT, { 3, 0 }, INTERPRETER_OK, "pext packs bit 31" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x123456789abcdef0), 0 }, { UINT64_C(0xff00ff00ff00ff00), 0 }, BUSTER_IR_INTRINSIC_PEXT, { 0x12569ade, 0 }, INTERPRETER_OK, "pext extracts the mask's bytes" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0x105, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0x1f, 0 }, INTERPRETER_OK, "bzhi's index is its low byte" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0x20, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0x80000001, 0 }, INTERPRETER_OK, "bzhi at the width keeps every bit" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0xff, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0x80000001, 0 }, INTERPRETER_OK, "bzhi past the width keeps every bit" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 63, 0 }, BUSTER_IR_INTRINSIC_BZHI, { UINT64_MAX >> 1, 0 }, INTERPRETER_OK, "bzhi clears bit 63" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 0x100, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0, 0 }, INTERPRETER_OK, "bzhi of index 0 is zero" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x12345678, 0 }, { 0xc08, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0x456, 0 }, INTERPRETER_OK, "bextr's start and length its control's bytes" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0x820, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0, 0 }, INTERPRETER_OK, "bextr from past the width is zero" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0xff1c, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0xf, 0 }, INTERPRETER_OK, "bextr's field past the width has zeros" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0xf000000000000000), 0 }, { 0xa3c, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0xf, 0 }, INTERPRETER_OK, "bextr reaches bit 63" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 4, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0, 0 }, INTERPRETER_OK, "bextr of length 0 is zero" },
     };
     for (uint32_t t = 0; t < sizeof(cases) / sizeof(cases[0]); t += 1)
     {
@@ -153,7 +169,7 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
             ir_interpreter_test_instruction(&function, 1, IR_CONST, test.source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const uint8_t operands = ir_operand_table[test.op];
             const uint32_t b = (operands & 2) != 0 ? 1 : BUSTER_IR_NONE;
-            const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP ? test.predicate : BUSTER_IR_NONE;
+            const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP || test.op == IR_INTRINSIC ? test.predicate : BUSTER_IR_NONE;
             ir_interpreter_test_instruction(&function, 2, test.op, test.type, 0, b, c);
             ir_interpreter_test_instruction(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const IrInterpreterFunction binding = { .symbol = 91, .function = &function };
@@ -552,8 +568,10 @@ static void ir_interpreter_test_memory(IrInterpreterTestTally* tally, Arena* mem
 }
 
 // #1059's atomic read/modify/writes, rmw, as one thread runs them: an addition and an exchange of an i32 in a slot return
-// its old values and leave the sum and the operand, and the object is checked as a load's and a store's: its undefined
-// bytes reported (or not, when the check is off), and an address misaligned for the access's declared alignment refused.
+// its old values and leave the sum and the operand, compare-exchanges the desired value where the old one is the expected
+// one alone (an undefined desired value a use either way), and the object is checked as a load's and a store's: its
+// undefined bytes reported (or not, when the check is off), and an address misaligned for the access's declared alignment
+// refused.
 static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -578,8 +596,8 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         ir_interpreter_test_instruction(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_RMW_ADD);
-        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_RMW_EXCHANGE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 6, IR_ADD, IR_I32, 4, 5, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 7, IR_LOAD, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 8, IR_ADD, IR_I32, 6, 7, BUSTER_IR_NONE);
@@ -588,12 +606,31 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         {
             function.alignment_log2[i] = i == 2 || i == 4 || i == 5 || i == 7 ? 2 : 0;
         }
-        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT;
-        function.flags[5] = BUSTER_IR_ATOMIC;
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
+        function.flags[5] = BUSTER_IR_ATOMIC | BUSTER_IR_RMW_EXCHANGE;
         const IrInterpreterFunction code = { .symbol = 71, .function = &function };
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
                                 "atomic addition and exchange return old values and leave the sum and the operand");
+        // a = cas x, 5, 3 (5, x 3); b = cas x, 5, 5 (3, x 3): a + b + x, 13 had the second stored and 15 had the first
+        // not.
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 1, 3);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, 1);
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE;
+        function.flags[5] = BUSTER_IR_ATOMIC | BUSTER_IR_RMW_COMPARE;
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 11 },
+                                "atomic compare-exchanges return old values and store the desired one where the old one is the expected one alone");
+        // A desired value undefined: diagnosed as a use, as the compare-exchange reads it whether or not it stores it.
+        ir_interpreter_test_instruction(&function, 3, IR_UNDEF, IR_I32, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 1, 1);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, 3);
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){ 0 },
+                                "an atomic compare-exchange of an undefined desired value diagnosed");
+        ir_interpreter_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_NONE);
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
+        function.flags[5] = BUSTER_IR_ATOMIC | BUSTER_IR_RMW_EXCHANGE;
         // Its store a constant's in place: the read/modify/writes read undefined bytes.
         ir_interpreter_test_instruction(&function, 2, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         function.alignment_log2[2] = 0;
@@ -607,8 +644,8 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         ir_interpreter_test_instruction(&function, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
         function.alignment_log2[2] = 2;
         ir_interpreter_test_instruction(&function, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
-        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_RMW_ADD);
-        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_RMW_EXCHANGE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_NONE);
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_MEMORY, (InterpreterValue){ 0 },
                                 "a misaligned atomic read/modify/write rejected");
     }

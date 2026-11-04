@@ -672,6 +672,56 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
     return status;
 }
 
+// An intrinsic's value (#141), of an I32's or an I64's operands (ir.c's rule) as the x86 instructions give it: mulhu
+// an I64's alone, the product of two 64-bit values fitting 128 bits; pdep and pext bit by bit along the mask; bzhi's
+// index and bextr's start and length their control's low byte and second byte, an index or a length past the width
+// keeping every bit and a start past it none.
+static unsigned __int128 ir_interpreter_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
+{
+    const uint64_t all = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    unsigned __int128 result = 0;
+    switch (operation)
+    {
+        case BUSTER_IR_INTRINSIC_MULHU: result = ((unsigned __int128)a * b) >> 64; break;
+        case BUSTER_IR_INTRINSIC_PDEP:
+        case BUSTER_IR_INTRINSIC_PEXT:
+        {
+            uint64_t value = 0;
+            uint32_t k = 0;
+            for (uint32_t bit = 0; bit < bits; bit += 1)
+            {
+                if (((b >> bit) & 1) != 0)
+                {
+                    if (operation == BUSTER_IR_INTRINSIC_PDEP)
+                    {
+                        value |= ((a >> k) & 1) << bit;
+                    }
+                    else
+                    {
+                        value |= ((a >> bit) & 1) << k;
+                    }
+                    k += 1;
+                }
+            }
+            result = value;
+        } break;
+        case BUSTER_IR_INTRINSIC_BZHI:
+        {
+            const uint32_t index = (uint32_t)(b & 0xff);
+            result = index >= bits ? a & all : a & ((UINT64_C(1) << index) - 1);
+        } break;
+        case BUSTER_IR_INTRINSIC_BEXTR:
+        {
+            const uint32_t start = (uint32_t)(b & 0xff);
+            const uint32_t length = (uint32_t)((b >> 8) & 0xff);
+            const uint64_t field = start >= bits ? 0 : (a & all) >> start;
+            result = length >= bits ? field : field & ((UINT64_C(1) << length) - 1);
+        } break;
+        default: break;
+    }
+    return result;
+}
+
 static InterpreterStatus ir_interpreter_operation(const IrFunction* function, uint32_t instruction, InterpreterValue av, InterpreterValue bv, InterpreterValue* value)
 {
     const uint8_t op = function->op[instruction];
@@ -699,8 +749,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     case IR_ADD: result = left + right; break;
     case IR_SUB: result = left - right; break;
     case IR_MUL: result = left * right; break;
-    // An I64's alone (ir.c's row): the product of two 64-bit values fits 128 bits.
-    case IR_MULHU: result = (left * right) >> bits; break;
+    case IR_INTRINSIC: result = ir_interpreter_intrinsic(function->c[instruction], bits, (uint64_t)left, (uint64_t)right); break;
     case IR_AND: result = left & right; break;
     case IR_OR: result = left | right; break;
     case IR_XOR: result = left ^ right; break;
@@ -1016,6 +1065,11 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             {
                 operands = 0;
             }
+            else if (op == IR_ATOMIC_RMW && c != BUSTER_IR_NONE)
+            {
+                // A compare-exchange's desired value (#1059), which it uses whether or not it stores it.
+                operands = 7;
+            }
             for (uint32_t p = 0; result.status == INTERPRETER_OK && p < 3; p += 1)
             {
                 const uint32_t id = p == 0 ? a : p == 1 ? b : c;
@@ -1083,10 +1137,12 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_ATOMIC_RMW:
                 {
                     // An atomic read/modify/write (#1059), as one thread runs it: its object's old value read, the operand
-                    // (an exchange) or the sum (an addition) written, a byte at a time through volatile accesses as an
-                    // atomic load's and store's are here, the old value the result. With memory checks, its address is
-                    // refused where its declared alignment isn't, whatever its bytes hold; then its object is checked as a
-                    // load's, which reports reading undefined bytes, before a store's marks them written.
+                    // (an exchange), the sum (an addition), or, where the old value's bytes are the operand's, the desired
+                    // value (a compare-exchange; the old value written back where they aren't, as x86's cmpxchg writes it),
+                    // written, a byte at a time through volatile accesses as an atomic load's and store's are here, the old
+                    // value the result. With memory checks, its address is refused where its declared alignment isn't,
+                    // whatever its bytes hold; then its object is checked as a load's, which reports reading undefined
+                    // bytes, before a store's marks them written.
                     const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
                     result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
@@ -1102,7 +1158,12 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         {
                             old |= (uint64_t)object[byte] << (8 * byte);
                         }
-                        const uint64_t written = c == BUSTER_IR_RMW_ADD ? old + bv.low : bv.low;
+                        const uint32_t operation = function->flags[i] & BUSTER_IR_RMW_OPERATION;
+                        const uint64_t mask = bytes < 8 ? (UINT64_C(1) << (8 * bytes)) - 1 : UINT64_MAX;
+                        const uint64_t desired = operation == BUSTER_IR_RMW_COMPARE && c < function->instruction_count ? frame->values[c].low : 0;
+                        const uint64_t written = operation == BUSTER_IR_RMW_ADD       ? old + bv.low
+                                                 : operation == BUSTER_IR_RMW_COMPARE ? ((old ^ bv.low) & mask) == 0 ? desired : old
+                                                                                      : bv.low;
                         for (uint32_t byte = 0; byte < bytes; byte += 1)
                         {
                             object[byte] = (uint8_t)(written >> (8 * byte));

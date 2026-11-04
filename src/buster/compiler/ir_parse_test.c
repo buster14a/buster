@@ -258,6 +258,12 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function () -> void {\nb0:\n%0 = ret.void\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = call.void @1() fixed=() variadic=2\n%1 = ret.void\n}\n", IR_PARSE_LIMIT },
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = icmp.i1 %0, %0 strange\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
+        // An intrinsic's operation (#141): a name of its own, of its type (mulhu an I64's alone), of operands of its type.
+        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = intrinsic.i64 %0, %0 strange\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
+        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = intrinsic.i64 %0, %0\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
+        { "function () -> void {\nb0:\n%0 = undef.i32\n%1 = intrinsic.i32 %0, %0 mulhu\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = undef.i16\n%1 = intrinsic.i16 %0, %0 pdep\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = undef.i32\n%2 = intrinsic.i64 %0, %1 bzhi\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nslot $1 size=8 align=8 type=i64 flags=0x00\nb0:\n%0 = ret.void\n}\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = undef.i64\n}\n", IR_PARSE_VERIFY },
         { "function () -> i64 {\nb0:\n%0 = ret.void\n}\n", IR_PARSE_VERIFY },
@@ -279,6 +285,10 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function (ptr) -> i64 {\nb0:\n%0 = param.ptr 0\n%1 = load.i64 %0 align=1 atomic seq_cst\n%2 = ret.void %1\n}\n", IR_PARSE_VERIFY },
         { "function (ptr, i32) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i32 1\n%2 = store.void %0, %1 align=2 atomic release\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=1 add seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
+        // A compare-exchange without its desired value, an exchange with one, and a desired value of another type.
+        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
+        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %1 align=2 xchg seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
+        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %0 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
     };
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {
@@ -686,6 +696,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/fences.ir",
                 "tests/ir/atomics.ir",
                 "tests/ir/wide.ir",
+                "tests/ir/intrinsics.ir",
             };
             for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)
             {

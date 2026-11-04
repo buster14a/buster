@@ -287,10 +287,12 @@ comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Functions with what the IR doesn't represent stop before Tier 1, at the
 lowering to the IR: vectors of elements other than 32-bit integers (floats,
 doubles, 8-, 16- and 64-bit integers, which `__m512i`'s intrinsics are), any
-vector at a target without AVX-512 (#775), and x86 builtins' rows, scalar ones
-among them (BMI2's `pdep`, `pext` and `bzhi`), which #732's subset left to the
-typed stream's adapter. Adding them is the IR's: its type column has 18 of the
-32 types its masks allow.
+vector at a target without AVX-512 (#775), and x86 builtins' rows of vectors,
+which #732's subset left to the typed stream's adapter. Adding them is the IR's:
+its type column has 18 of the 32 types its masks allow. The scalar ones, BMI2's
+`pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
+[the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
+instruction of selection's `TIER1_RULE_INTRINSIC`.
 
 ### The 128-bit integers
 
@@ -308,7 +310,7 @@ blocks keep their numbers and a block's phis stay first:
   borrow; a negation: each half negated, the high one less 1 where the low one
   isn't zero;
 - a product, modulo 2^128 whatever the signedness: the low halves' product and
-  its high half, the IR's `mulhu` (the high 64 bits of an `I64`s' unsigned
+  its high half, the IR's `intrinsic` `mulhu` (the high 64 bits of an `I64`s' unsigned
   product, [the IR guide](ir.md)'s), plus each cross product of a low half by a
   high one not known to be zero. A product of two zero extensions, C's
   `(unsigned __int128)a * b`, is `imul` and `mul` alone: selection's

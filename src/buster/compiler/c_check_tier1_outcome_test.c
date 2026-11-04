@@ -45,6 +45,8 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_FRAME, TIER1_FRAME_REGISTER_CONFLICT, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_VALUE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_CAPACITY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
+    { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_FRAME, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
+    { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_EMISSION, TIER1_EMIT_INVALID, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION, BUSTER_CHECK_TIER1_FRAME_PUBLICATION, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, 0xfedcba98, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
@@ -117,6 +119,9 @@ static const CheckTier1ClassCase check_tier1_classification_cases[] = {
     { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_TRANSITION, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_ENTRY, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_EDGE, CHECK_TIER1_INTERNAL },
+    // The code's certificate (tier1_certificate_emitted.c): its capacity (check_tier1_test_classification walks every
+    // refusal's reason).
+    { CHECK_TIER1_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY, CHECK_TIER1_RESOURCE_FAILURE },
     { CHECK_TIER1_CAUSE_PUBLICATION, BUSTER_CHECK_TIER1_FRAME_PUBLICATION, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_PUBLICATION, 0, CHECK_TIER1_INTERNAL },
 };
@@ -136,6 +141,17 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
                                 failure.fallback == expected && strict.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN,
                                 "the classification table follows the documented policy", detail);
     }
+    // Every refusal of the code's certificate is internal; only its capacity is a resource failure.
+    for (uint32_t reason = TIER1_CERT_EMITTED_REFUSED; reason < TIER1_CERT_EMITTED_REASON_COUNT; reason += 1)
+    {
+        const uint32_t error = BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason;
+        const CheckTier1Outcome failure = check_tier1_failure(CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, error, 0x12345678, 0x87654321);
+        const CheckTier1Category expected = reason == TIER1_CERT_EMITTED_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : CHECK_TIER1_INTERNAL;
+        char detail[96];
+        snprintf(detail, sizeof(detail), "code certificate reason %" PRIu32, reason);
+        check_lanes_test_expect(tally, failure.category == expected && failure.error == error && failure.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN,
+                                "the code certificate's refusals are internal and its capacity a resource failure", detail);
+    }
     check_lanes_test_expect(tally, BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_CERTIFICATE + 1 &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_NONE] == CHECK_TIER1_CAUSE_EMISSION &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_IR] == CHECK_TIER1_CAUSE_IR &&
@@ -149,6 +165,151 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
     check_lanes_test_expect(tally, !tier1_emit_cfg_preference_fatal(TIER1_CFG_OK) && !tier1_emit_cfg_preference_fatal(TIER1_CFG_CONSTRAINT) &&
                             !tier1_emit_cfg_preference_fatal(TIER1_CFG_CAPACITY) && tier1_emit_cfg_preference_fatal(TIER1_CFG_INVALID),
                             "the speculative callee-saved preference ignores constraint and capacity", NULL);
+}
+
+// A refused call's kinds (#1116): each shape a call's descriptor can have, a node that isn't a call, and the refusal
+// line and report that print them.
+static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
+{
+    Arena arena = arena_reserve(1u << 20);
+    const uint32_t many = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
+    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .call_count = 6, .call_type_count = 3 + many + 8, .abi_call_count = 3, .passed_count = 7 };
+    IrFunction function;
+    const bool created = arena.base != NULL && ir_create(&arena, &sizes, &function) == IR_OK;
+    check_lanes_test_expect(tally, created, "create the call kinds' IR", NULL);
+    if (created)
+    {
+        // f(int, double, long double) -> double; (*p)(short, long..., __int128) of one argument past the boundary's
+        // limit, the __int128, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
+        // h(long) of two parameters -> long double; k(a, b, c, d) of four 32-byte aggregates, each whole in a ymm
+        // register, whose parts take 16 staging slots; m(a, b) of two 64-byte ones, each whole in a zmm register, whose
+        // parts wait in zmm16 and on instead (#141); and a constant.
+        function.call_types[0] = IR_I32;
+        function.call_types[1] = IR_F64;
+        function.call_types[2] = IR_F80;
+        function.call_types[3] = IR_I16;
+        for (uint32_t k = 1; k < many - 1; k += 1)
+        {
+            function.call_types[3 + k] = IR_I64;
+        }
+        function.call_types[2 + many] = IR_I128;
+        function.call_types[3 + many] = IR_I64;
+        function.call_types[4 + many] = IR_I64;
+        for (uint32_t k = 5 + many; k < 11 + many; k += 1)
+        {
+            function.call_types[k] = IR_PTR;
+        }
+        function.calls[0] = (IrCall){ .type_first = 0, .argument_count = 3, .parameter_count = 3, .result_type = IR_F64 };
+        function.calls[1] = (IrCall){ .type_first = 3, .argument_count = many, .parameter_count = many, .result_type = IR_I128, .variadic = true };
+        function.calls[2] = (IrCall){ .type_first = 3 + many, .argument_count = 1, .parameter_count = 1, .result_type = IR_VOID, .abi = 1 };
+        function.calls[3] = (IrCall){ .type_first = 4 + many, .argument_count = 1, .parameter_count = 2, .result_type = IR_F80 };
+        function.calls[4] = (IrCall){ .type_first = 5 + many, .argument_count = 4, .parameter_count = 4, .result_type = IR_VOID, .abi = 2 };
+        function.calls[5] = (IrCall){ .type_first = 9 + many, .argument_count = 2, .parameter_count = 2, .result_type = IR_VOID, .abi = 3 };
+        function.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = UINT32_MAX }, .passed = 0, .result_size = 0 };
+        function.abi_calls[1] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 1, .result_size = 0 };
+        function.abi_calls[2] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 5, .result_size = 0 };
+        function.passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            const uint32_t reg = k < 4 ? k : k - 4;
+            const AbiLocation whole = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | reg), BUSTER_ABI_REGISTER_NONE } };
+            function.passed[1 + k] = (IrPassed){ .size = k < 4 ? 32 : 64, .location = whole };
+        }
+        static const uint8_t ops[7] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CALL, IR_CALL, IR_CONST };
+        static const uint8_t results[7] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_VOID, IR_VOID, IR_I32 };
+        for (uint32_t node = 0; node < 7; node += 1)
+        {
+            function.op[node] = ops[node];
+            function.type[node] = results[node];
+            function.b[node] = node < 6 ? node : 0;
+            function.c[node] = BUSTER_IR_NONE;
+        }
+        // A double and a long double, argument or result, are the boundary's since #141, and so is each of k's and m's
+        // records, and m's parts' zmm registers; the short isn't, nor the 17th argument, the __int128 result, the
+        // record's area, the missing argument or k's 16 slots past the 14. The 17th is still an __int128.
+        const uint32_t expected[7] = {
+            0,
+            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
+                1u << CHECK_TIER1_CALL_OTHER_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
+            1u << CHECK_TIER1_CALL_ABI_RECORD,
+            1u << CHECK_TIER1_CALL_ARGUMENT_COUNT,
+            1u << CHECK_TIER1_CALL_ABI_RECORD,
+            0,
+            0,
+        };
+        const uint32_t taken = 1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC;
+        for (uint32_t node = 0; node < 7; node += 1)
+        {
+            check_lanes_test_expect(tally, check_tier1_call_kinds(&function, node) == expected[node], "a refused call's kinds are its descriptor's shapes", ir_op_names[ops[node]]);
+            check_lanes_test_expect(tally, node == 6 || tier1_select_call_supported(&function, node) == ((check_tier1_call_kinds(&function, node) & ~taken) == 0),
+                                    "a call has a kind past indirect and variadic exactly where the selector refuses it", ir_op_names[ops[node]]);
+        }
+        CheckTier1Outcome outcome = check_tier1_failure(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 1, 0);
+        outcome.operation = IR_CALL_INDIRECT;
+        outcome.call_kinds = expected[1];
+        char line[512] = { 0 };
+        FILE* stream = fmemopen(line, sizeof(line) - 1, "w");
+        if (stream != NULL)
+        {
+            check_tier1_print_refusal(stream, (const uint8_t*)"f", 1, outcome);
+            outcome.call_kinds = 0;
+            check_tier1_print_refusal(stream, (const uint8_t*)"g", 1, outcome);
+            fclose(stream);
+        }
+        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,narrow-argument,other-argument,other-result\n") != NULL &&
+                                strstr(line, "tier1-refused\tg\t") != NULL && strstr(strstr(line, "tier1-refused\tg\t"), "call=") == NULL,
+                                "a refused call's line ends in its kinds, and another refusal's has none", line);
+        static CheckTier1Report report;
+        report.calls[CHECK_TIER1_CALL_NARROW_ARGUMENT] = 3;
+        report.calls[CHECK_TIER1_CALL_ABI_RECORD] = 1;
+        char printed[8192] = { 0 };
+        stream = fmemopen(printed, sizeof(printed) - 1, "w");
+        if (stream != NULL)
+        {
+            check_tier1_print_report(stream, &report);
+            fclose(stream);
+        }
+        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.narrow-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
+                                strstr(printed, "selection.call.indirect") == NULL,
+                                "the report counts refused calls by kind", NULL);
+    }
+    arena_release(&arena);
+}
+
+// benchmark-tier1-code-certificate's preparation takes a function's planning and emission as the outcomes do: a refusal
+// of its code, or a step out of memory or past a limit (the code certificate's capacity among them), fails it, so that it
+// never times a smaller corpus than the file's; an unsupported function, or one the emitter doesn't take, is left out.
+typedef struct CheckTier1BenchCase CheckTier1BenchCase;
+struct CheckTier1BenchCase
+{
+    Tier1SelectError selected;
+    Tier1EmitError emitted;
+    Tier1CodeCertBenchFailure failure;
+};
+
+static const CheckTier1BenchCase check_tier1_bench_cases[] = {
+    { TIER1_SELECT_OK, TIER1_EMIT_OK, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_ERROR_UNSUPPORTED, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_ERROR_TARGET, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_ERROR_MEMORY, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_ERROR_LIMIT, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_OK, TIER1_EMIT_UNSUPPORTED, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_OK, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_OK, TIER1_EMIT_MEMORY, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_OK, TIER1_EMIT_LIMIT, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_OK, TIER1_EMIT_CERTIFICATE, TIER1_CODE_CERT_BENCH_REFUSED },
+};
+
+static void check_tier1_test_code_benchmark(CheckLanesTestTally* tally)
+{
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_tier1_bench_cases); i += 1)
+    {
+        const CheckTier1BenchCase* test = check_tier1_bench_cases + i;
+        char detail[96];
+        snprintf(detail, sizeof(detail), "selection %u, emission %u", (unsigned)test->selected, (unsigned)test->emitted);
+        check_lanes_test_expect(tally, tier1_code_cert_bench_disposition(test->selected, test->emitted) == test->failure,
+                                "the code certificate benchmark fails on a refusal or a capacity, and leaves an unsupported function out", detail);
+    }
 }
 
 static bool check_tier1_test_cause(CheckTier1Outcome outcome, const CheckTier1FailureCase* test)
@@ -405,6 +566,8 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && x86_zen5_initialize();
     check_lanes_test_expect(tally, ready, "initialize Tier 1 outcome regression tables", NULL);
     check_tier1_test_classification(tally);
+    check_tier1_test_call_kinds(tally);
+    check_tier1_test_code_benchmark(tally);
     char source[PATH_MAX];
     char object[PATH_MAX];
     char errors[PATH_MAX];

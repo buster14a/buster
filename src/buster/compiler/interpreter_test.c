@@ -562,6 +562,86 @@ static void interpreter_test_atomic_rmw(InterpreterTestTally* tally, Arena* scra
     interpreter_test_expect(tally, result.status == INTERPRETER_MEMORY, "a misaligned atomic read/modify/write rejected");
 }
 
+// #1059's atomic compare-exchanges as one thread runs them: x = 5; cas x, 5, 9 (5, x 9); cas x, 5, 7 (9, x 9); their
+// old values plus x, 23 (21 had the second stored, 15 had the first not), the address in a U64 local the entry names; and
+// an address local of another class refused.
+static void interpreter_test_atomic_cas(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_CAS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_CAS,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_LOAD,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    uint64_t values[] = {
+        0,
+        5,
+        0,
+        0,
+        1,
+        5,
+        9,
+        BUSTER_TYPED_FENCE_SEQ_CST | UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT,
+        5,
+        7,
+        2 | UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+    };
+    Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = local_classes,
+        .local_count = 2,
+    };
+    InterpreterResult result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 23,
+                            "atomic compare-exchanges return old values and store the desired one where the old one is the expected one alone");
+    // The address in local 0, the int itself: no U64's.
+    values[10] = 2;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "an atomic compare-exchange whose address's local isn't a U64's rejected");
+}
+
 // The memories' disjoint prefix (InterpreterRuntime.disjoint_count, #1229) never changes which memory an access finds,
 // the first that holds it: a memory that overlaps one in the prefix stays past it, and the prefix's one, found first,
 // decides; a last-match hint that a removal left pointing at another memory isn't taken; the prefix stops growing at
@@ -1458,6 +1538,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
         interpreter_test_atomic_rmw(&tally, &scratch);
+        interpreter_test_atomic_cas(&tally, &scratch);
         interpreter_test_lookup(&tally);
         interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);

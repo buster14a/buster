@@ -147,14 +147,21 @@ typedef enum IrOp
     // fence). It reads and writes no value, but no pass moves a load, a store or a call across it, eliminates one past it
     // or drops it: an effect as an unknown call's on memory, without a call's registers. The typed stream's FENCE.
     IR_FENCE,
-    // The high 64 bits of an I64's unsigned product, a times b as 128 bits (#141): the high half of a 128-bit integer's
-    // product, which Tier 1's split of the 128-bit integers into halves makes (ir_wide.c), and x86's mul gives in rdx.
-    IR_MULHU,
+    // A pure operation of two integers of its type that C has no operator for (#141), `c` which one
+    // (BUSTER_IR_INTRINSIC_*): the high 64 bits of an I64's unsigned product, a times b as 128 bits (mulhu: the high half
+    // of a 128-bit integer's product, which Tier 1's split of the 128-bit integers into halves makes, ir_wide.c, and
+    // x86's mul gives in rdx), and the x86 builtins' scalar bit manipulations of an I32 or an I64, BMI2's pdep and pext
+    // (a's bits deposited at, or extracted from, mask b's set bits) and bzhi (a with its bits from b's low byte up
+    // cleared), and BMI1's bextr (a's bits from b's low byte up, as many as its second byte says), whose x86 rows the
+    // typed stream's lowering admits (ir_simd_typed.c).
+    IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
-    // 1, 2, 4 or 8 bytes), `c` its operation (BUSTER_IR_RMW_EXCHANGE or BUSTER_IR_RMW_ADD), and its flags BUSTER_IR_ATOMIC
-    // with its C memory order. It returns the object's old value and leaves the operand (an exchange) or the sum (an
-    // addition) in it, as one locked access; no pass moves an access across it or eliminates it, as an atomic store's and
-    // load's. The typed stream's ATOMIC_RMW.
+    // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
+    // (BUSTER_IR_RMW_OPERATION: an exchange, an addition or a compare-exchange, whose desired value, of the result's type,
+    // is its `c`, which the others haven't). It returns the object's old value and leaves the operand (an exchange), the
+    // sum (an addition) or, where the old value is the operand, the desired value (a compare-exchange) in it, as one
+    // locked access; no pass moves an access across it or eliminates it, as an atomic store's and load's. The typed
+    // stream's ATOMIC_RMW and ATOMIC_CAS.
     IR_ATOMIC_RMW,
     IR_OP_COUNT,
 } IrOp;
@@ -164,9 +171,19 @@ typedef enum IrOp
 #define BUSTER_IR_FENCE_ORDER 0x07u
 #define BUSTER_IR_FENCE_SIGNAL 0x08u
 #define BUSTER_IR_FENCE_SEQ_CST 5u
-// An IR_ATOMIC_RMW's operation (#1059), its `c`.
-#define BUSTER_IR_RMW_EXCHANGE 0u
-#define BUSTER_IR_RMW_ADD 1u
+// An IR_ATOMIC_RMW's operation (#1059), in its flags past its order: an exchange, an addition, or a compare-exchange,
+// whose desired value is its `c`.
+#define BUSTER_IR_RMW_OPERATION 0x60u
+#define BUSTER_IR_RMW_EXCHANGE 0x00u
+#define BUSTER_IR_RMW_ADD 0x20u
+#define BUSTER_IR_RMW_COMPARE 0x40u
+// An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, the others an I32's or an I64's.
+#define BUSTER_IR_INTRINSIC_MULHU 0u
+#define BUSTER_IR_INTRINSIC_PDEP 1u
+#define BUSTER_IR_INTRINSIC_PEXT 2u
+#define BUSTER_IR_INTRINSIC_BZHI 3u
+#define BUSTER_IR_INTRINSIC_BEXTR 4u
+#define BUSTER_IR_INTRINSIC_COUNT 5u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -500,8 +517,18 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "vselect",
     "lifetime",
     "fence",
-    "mulhu",
+    "intrinsic",
     "rmw",
+};
+
+// An intrinsic's operations' names in the text form (BUSTER_IR_INTRINSIC_*), after its operands as a comparison's
+// predicate is.
+static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
+    "mulhu",
+    "pdep",
+    "pext",
+    "bzhi",
+    "bextr",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -534,10 +561,11 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
-// is a full barrier, which every order takes.
+// is a full barrier, which every order takes; and of an exchange, an addition or a compare-exchange.
 static bool ir_rmw_flags_valid(uint8_t flags)
 {
-    return (flags & ~(BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)) == 0 && (flags & BUSTER_IR_ATOMIC) != 0 && (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT <= 5;
+    return (flags & ~(BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_RMW_OPERATION)) == 0 && (flags & BUSTER_IR_ATOMIC) != 0 &&
+           (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT <= 5 && (flags & BUSTER_IR_RMW_OPERATION) <= BUSTER_IR_RMW_COMPARE;
 }
 
 // Whether an atomic access may be of `type` aligned to 1 << `alignment_log2` bytes: an integer's of 1, 2, 4 or 8 bytes,
@@ -671,6 +699,7 @@ typedef enum IrRule
     IR_RULE_VECTOR_SELECT,
     IR_RULE_FENCE,
     IR_RULE_ATOMIC_RMW,
+    IR_RULE_INTRINSIC,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -742,19 +771,21 @@ typedef enum IrRule
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
     X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
-    X(IR_MULHU,         3, 3, 1u << IR_I64, IR_RULE_SAME, 0) \
+    X(IR_INTRINSIC,     3, 7, (1u << IR_I32) | (1u << IR_I64), IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
 #undef BUSTER_IR_OPERAND_ROW
 // The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
-// a return's value (a) and a call's destination for its aggregate result (c).
+// a return's value (a), a call's destination for its aggregate result (c) and an atomic compare-exchange's desired
+// value (c, #1059).
 static const uint8_t ir_optional_table[64] = {
     [IR_ADDRESS] = 2,
     [IR_RET] = 1,
     [IR_CALL] = 4,
     [IR_CALL_INDIRECT] = 4,
+    [IR_ATOMIC_RMW] = 4,
 };
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
@@ -936,7 +967,10 @@ static IrCheck ir_check(IrError error, uint32_t instruction, uint32_t detail)
     return result;
 }
 
-static bool ir_constant_fits(IrConstant value, uint8_t type)
+// Inlined into the verifier's per-instruction oracle, which every constant takes: as a call, its growth past the
+// inliner's budget cost --tier1 -c of sqlite3.c 0.47% more instructions (#141's intrinsics, buster-performance's
+// tier1-intrinsics-141-2026-11-03).
+static inline __attribute__((always_inline)) bool ir_constant_fits(IrConstant value, uint8_t type)
 {
     const uint32_t bits = ir_type_bits[type];
     bool result = true;
@@ -1130,7 +1164,15 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
-            case IR_RULE_ATOMIC_RMW: valid = ta == IR_PTR && tb == type && c <= BUSTER_IR_RMW_ADD && ir_atomic_access(type, f->alignment_log2[i]); break;
+            case IR_RULE_INTRINSIC: valid = ta == type && tb == type && c < BUSTER_IR_INTRINSIC_COUNT && (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64); break;
+            case IR_RULE_ATOMIC_RMW:
+            {
+                // A compare-exchange's desired value of its type (an optional use, which the operand loop leaves
+                // unchecked), and the others' none.
+                const bool compare = (f->flags[i] & BUSTER_IR_RMW_OPERATION) == BUSTER_IR_RMW_COMPARE;
+                valid = ta == IR_PTR && tb == type && (compare ? c < f->instruction_count && f->type[c] == type : c == BUSTER_IR_NONE) &&
+                        ir_atomic_access(type, f->alignment_log2[i]);
+            } break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -1306,7 +1348,11 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     bad |= fcmp & (_mm512_cmpneq_epi32_mask(ta, tb) | _mm512_cmpgt_epu32_mask(c, _mm512_set1_epi32(IR_GE)) | ~a_float);
     bad |= select & (_mm512_cmpneq_epi32_mask(ta, _mm512_set1_epi32(IR_I1)) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpneq_epi32_mask(tc, type));
     bad |= memory & _mm512_cmpneq_epi32_mask(ta, _mm512_set1_epi32(IR_PTR));
-    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | no_rule);
+    // An intrinsic's operands of its type, and an operation of its type's (mulhu an I64's alone).
+    const __mmask16 intrinsic = _mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_INTRINSIC));
+    const __mmask16 mulhu = _mm512_cmpeq_epi32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_MULHU)) & _mm512_cmpneq_epi32_mask(type, _mm512_set1_epi32(IR_I64));
+    bad |= intrinsic & (_mm512_cmpneq_epi32_mask(ta, type) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpge_epu32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT)) | mulhu);
+    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | intrinsic | no_rule);
     return active & (bad | defer);
 }
 
@@ -2163,10 +2209,16 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             };
                             fprintf(output, " %s", predicates[c]);
                         }
+                        if (op == IR_INTRINSIC)
+                        {
+                            fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
+                        }
                         if (op == IR_ATOMIC_RMW)
                         {
                             const uint32_t order = (f->flags[i] & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
-                            fprintf(output, " align=%" PRIu32 " %s %s", UINT32_C(1) << f->alignment_log2[i], c == BUSTER_IR_RMW_ADD ? "add" : "xchg",
+                            const uint32_t operation = f->flags[i] & BUSTER_IR_RMW_OPERATION;
+                            fprintf(output, " align=%" PRIu32 " %s %s", UINT32_C(1) << f->alignment_log2[i],
+                                    operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
                                     order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)

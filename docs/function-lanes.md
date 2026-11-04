@@ -77,31 +77,38 @@ tokens and the second none, and without growth the second ran its bodies on one
 lane after the first team had given its tokens back. Such a team, in the C
 driver's flow and under a jobserver, cuts its bodies' parts for every lane it may
 take (the lane rule's, the explicit cap's and the session's), 16 per lane rather
-than a round's 64, and takes them in one order: the costliest first, then the
-others in source order. Lane 0 takes most of the parts of a team that grows late
-or never, and each part, and cost order, costs it some of one lane's locality:
-on the 9700X, `sqlite3.c`'s `-c` under a jobserver without a spare token took
-1.36% more wall time than main's one-lane emission in cost order with 64 parts
-per lane, 0.83% in this order with 64, 0.70% with 32 and 0.20% with 16
-(`time-runs`, medians of 22 runs over two copies of each executable). Lane 0 takes
-them alone, or in a round of all those lanes once it has admitted another, where
-each lane past the admitted ones sleeps on the admission's word until lane 0
-admits it. Between its parts, at most every
+than a round's 64, and puts them in one order: the costliest first, then the
+others in source order. Each part is two items, its lowering and its code, and
+the team takes every part's lowering, in that order, before any part's code, in
+the same order; a part's code waits on the part's word until its lowering is
+done, as another lane may still be at it (`check_program_emit_item`). A lane
+that took each part's lowering and code by turns would refill its caches at
+each turn, and lane 0 takes most of the items of a team that grows late or
+never: on the 9700X, one lane's emission of `sqlite3.c` took 0.35% more user
+cycles with its bodies in 2 parts taken that way than in 1, 0.73% in 8, 0.79%
+in 16 and 0.92% in 128, with the same instructions and objects, and none in 128
+whose lowering all came first (one executable switched by an experiment, 30
+rounds each, #673). Lane 0 takes the items alone, or in a round of all those
+lanes once it has admitted another, where each lane past the admitted ones
+sleeps on the admission's word until lane 0 admits it, and then takes whichever
+items are left. Between its items, at most every
 100 µs, lane 0 reads the jobserver's spare tokens (`FIONREAD`,
 `worker_budget_available`). It takes them under a lease of its own
 (`worker_budget_grow`, a guardian like the first's), up to the lanes it may
-take and the parts left, when the parts left pay for the guardian's start:
-their tokens on the admitted lanes less on that many more must be at least
+take and the items left, when the work left pays for the guardian's start: the
+lowering's share (11 sixteenths, `sqlite3.c`'s on one lane) of the tokens of
+the parts not lowered yet and the code's share of those not coded yet, on the
+admitted lanes less on that many more, must be at least
 `BUSTER_CHECK_EMIT_GROW_TOKENS`, about a guardian's 160 µs of one lane's
-emission. With `--lanes N` the team grows whatever the parts left pay. A team
-holds up to eight leases. When lane 0 finds no part left it closes the
+emission. With `--lanes N` the team grows whatever the work left pays. A team
+holds up to eight leases. When lane 0 finds no item left it closes the
 admission, so that the lanes still asleep leave, and the round ends as every
 round does. Every lease is returned after the round, before a serial retry or
 the merge. The output is one lane's, whatever lanes took the parts.
 
-A team that starts on one lane and never grows takes its parts on lane 0 alone,
-without waking a lane, at the cost of the clock read per part and a `FIONREAD`
-per 100 µs, and of its parts' order and count. A team the jobserver granted
+A team that starts on one lane and never grows takes its items on lane 0 alone,
+without waking a lane, at the cost of the clock read per item and a `FIONREAD`
+per 100 µs. A team the jobserver granted
 some of its lanes starts its round at once on all of them: the lanes past the
 grant wake for the round, sleep until lane 0 admits them, and wake again as it
 closes, which the round's end waits for.
@@ -200,6 +207,44 @@ reruns the same harness on the 9700X, main `3ce71ec3` against `e7416f30` (#1161)
   never grows, −0.08% for one granted 4 of 8 lanes, +0.20% with every lane granted and −0.38%
   without a jobserver.
 
+### A growing team's halves
+
+Over six placements, a team that never grew took 0.73% more user cycles than one lane's emission
+before #1161, with the same instructions. The [two-phase record](https://github.com/buster14a/buster-performance/tree/073d1180c141c91485165fdb00d0f89456326d35/docs/measurements/two-phase-growth-673-2026-11-04) finds the cause in one
+executable, switched by an experiment's environment variable: each turn between a part's lowering and
+its code refills a lane's caches. On one lane, `sqlite3.c`'s bodies took 0.35% more user cycles in 2
+parts than in 1, 0.79% in 16 and 0.92% in 128, and none more in 128 with every part's lowering first.
+The team now takes them in that order ("A team that grows", above). Against main `747ab617`
+(#1161 merged), `09e22269`:
+
+- **Never grows** (a jobserver without a spare token, six placements): −0.96% user cycles (−1.26%
+  to −0.35% over placements, main against itself −0.69% to +0.55%) and −0.77% wall time.
+- **Grows from 4 of 8 lanes:** −1.34% user cycles and −1.09% wall time at one placement.
+- **Without a jobserver**, a path the change leaves alone: +0.03% user cycles over placements.
+- **Cohorts** (the same harness, 12 a policy in each of two rounds): every one within its spread,
+  the jobserver still the fastest on the uneven and eight-SQLite workloads. Eight compiles at once
+  don't show the compile's own 1%, and the record doesn't say why.
+
+### Physical traffic
+
+The same record counts both memory controllers' CAS commands (`amd_umc_0`, `amd_umc_1`, read and
+write apart), around each policy of #695's matched-affinity and real-make controls; buster-performance#49
+rejects the Data Fabric's bandwidth aliases on this CPU. Eight SQLite compiles on eight workers:
+
+| Policy | Read CAS (M) | Write CAS (M) | Page faults | Wall (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| One lane each, pinned or sharing CPUs 0–7 | 127.7–127.8 | 76.4–76.8 | 42,208 | 277.7 (shared) |
+| Default lanes, sharing CPUs 0–7 | 132.2 | 81.2 | 59,637 | 295.2 |
+| `make -j8`, jobserver | 127.0 | 77.0 | 45,572 | 278.8 |
+| `make -j8`, free eight | 132.4 | 81.1 | 62,906 | 300.2 |
+
+Uncoordinated lanes read 3.5% more and write 6% more, with 41% more faults, about 5% more CPU time
+and 6–8% more wall time: #673's loss, with its traffic. Affinity alone changes none of it, and the
+jobserver's cohorts match one lane's. A growing team spends traffic where it pays: in the uneven
+cohort it reads 7% more than cap one, for 6% less wall time. One SQLite compile reads about 1.0 GB and
+writes 0.6 GB (64 bytes a CAS command, which #49 leaves conditional), and eight at once move about
+47 GB/s of the memory's 83.2.
+
 ## The phase
 
 `check_program_emit_lanes` (`c_check_program_emit.c`) is the emission. Its
@@ -220,7 +265,9 @@ steps are source order's (`check_program_emit` before #151), cut differently:
    sizing, encoding into the lane's bytes, its unwind frame, its labels'
    offsets and with `-g` its raw rows, and what its fixups need. A lane makes
    its writer (`check_lower_writer_begin`) when it takes its first part, so a
-   lane that takes none costs nothing more than its start.
+   lane that takes none costs nothing more than its start. A growing team
+   ("A team that grows", above) takes every part's lowering before any part's
+   code instead.
 3. **The merge**, on the calling thread: the lowering's result
    (`check_lower_finish`), the attributes' checks, the link's capacity,
    names and symbols, the C runtime's binding (`bind_begin`, for an
