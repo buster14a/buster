@@ -1689,6 +1689,27 @@ clang's Sema builds it.
   are.
 - `__has_builtin` answers 1.
 
+### Checked, refused in code (#148)
+
+`__has_builtin` answers 1 for some builtins whose source checks are clang's
+but whose code `-c` refuses by name. Some are refused because clang can't
+compile them for x86-64 either: `__builtin_preserve_access_index` (BPF
+alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
+compile, and this compiler doesn't yet:
+
+- `__builtin_eh_return`, whose unwinding to a handler;
+- `__builtin___CFStringMakeConstantString` and
+  `__builtin___NSStringMakeConstantString`, whose `cfstring` object;
+- `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
+  writes over a `char *` that its 24-byte list overruns;
+- `__builtin_call_with_static_chain`, whose chain register (`r10`);
+- `__builtin_os_log_format` of data its items take out of order, or of
+  more than 8 bytes;
+- `__builtin_dump_struct`, whose generated calls.
+
+A unit that only checks them (`-fsyntax-only`) gets clang's answers. A unit
+that compiles one gets the refusal's message, at the call.
+
 `__builtin_eh_return(offset, handler)` (0x456, #148) is `void(size_t,
 void *)` and doesn't return, as clang's Sema takes it: each argument converts
 as a prototype's parameter. Clang's code generation unwinds the stack by the
@@ -1747,6 +1768,50 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
 - **Identities.** The miscellaneous builtins past 0x45f start at 0x4b0, past
   the `<stdbit.h>` library builtins' identities (0x460 to 0x4a5). A static
   assertion keeps them apart.
+
+`__builtin_os_log_format_buffer_size(format, data...)` and
+`__builtin_os_log_format(buffer, format, data...)` (0x4b1 and 0x4b2, #148) are
+clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
+`emitBuiltinOSLogFormat` make them.
+
+- **The format.** It must be an ordinary or UTF-8 string literal past its
+  parentheses and casts ("os_log() format argument is not a string
+  constant"). The reader reads it as clang's `ParsePrintfSpecifier` does,
+  with os_log's annotations (`c_check_os_log_input.c`).
+  - Annotations are `%{public}`, `%{private}`, `%{sensitive}` and
+    `%{mask.NAME}`, comma-separated. A privacy one counts where it is at
+    least as strict as those before it.
+  - Positions are `%N$`, and amounts are `*` and `*N$`.
+  - Length modifiers include C23's `H`, `D`, `DD`, `wN` and `wfN`.
+- **The layout.** The layout pass stops where clang's handler stops: at a
+  value without its data, or after a `%P` without its length. Each
+  specifier gives up to five items, in this order: its mask (8 bytes of its
+  name), its field width and precision when they are arguments, a string's
+  or pointer's count (from the precision's argument, or its constant as 4
+  bytes), and its value (none for `%m`). A data argument's size is its
+  promoted type's: arrays and functions as pointers, float and half as
+  double.
+- **The checks.** The checking pass goes on past a `%P` without its length,
+  as clang's `CheckFormatArguments` does. Each data argument is under 256
+  bytes, promoted ("argument N is too big"). For `__builtin_os_log_format`,
+  a mask of other than 1 to 8 bytes is refused, and so is a struct or
+  complex value that a specifier or an amount takes. Clang's `-Wformat`
+  warnings aren't given, as they aren't for printf here.
+- **The size.** `__builtin_os_log_format_buffer_size` is a `size_t` integer
+  constant expression whose data never runs: 2 header bytes, then 2 bytes
+  plus the data of each item. `__has_constexpr_builtin` answers 1 for it.
+- **The buffer.** `__builtin_os_log_format` writes what clang's helper
+  function writes, inline (`check_lower_os_log`), and its value is the
+  buffer.
+  - It writes the summary byte (0x1 for private items, 0x2 for items other
+    than scalars), the items' count, then each item's descriptor
+    (`kind << 4 | privacy`), its size and its data.
+  - clang evaluates the data in its items' order, once each. A format whose
+    items take the data other than once each in order (positions, a repeat,
+    an unused argument) is refused by name, and so is data of other than 1,
+    2, 4 or 8 bytes (a `long double`, an `__int128`).
+- **Limits.** At most 31 arguments are taken, and clang takes up to the
+  format's plus 255.
 
 `__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
 arguments never run. It is clang 23's allocation token: the reader works it

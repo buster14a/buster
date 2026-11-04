@@ -18,6 +18,10 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     {
         check_input_alloc_token_evidence(reader, first, closing, input->queries, input->first, input->end, &evidence);
     }
+    if (builtin == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || builtin == CBUILTIN_OS_LOG_FORMAT)
+    {
+        check_input_os_log_evidence(reader, first, closing, builtin == CBUILTIN_OS_LOG_FORMAT, count, &evidence);
+    }
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < closing)
     {
         check_input_annotation_evidence(reader, end, closing, &evidence);
@@ -65,6 +69,9 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .function_object_count = evidence.function_object_count,
             .ns_constant_string = constant_string ? check_input_ns_constant_string(reader) : 0,
             .alloc_token_known = evidence.alloc_token_known, .alloc_token = evidence.alloc_token,
+            .os_log_items = evidence.os_log_items, .os_log_count = evidence.os_log_count, .os_log_known = evidence.os_log_known,
+            .os_log_invalid_mask = evidence.os_log_invalid_mask,
+            .os_log_taken = { evidence.os_log_taken[0], evidence.os_log_taken[1], evidence.os_log_taken[2], evidence.os_log_taken[3] },
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

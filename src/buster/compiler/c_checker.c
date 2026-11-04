@@ -52,6 +52,13 @@ struct CheckBuiltinCall
     uint64_t alloc_token;
     // Whether __builtin_call_with_static_chain's first argument is a call as written, of no builtin (#148).
     bool static_chain_call;
+    // The os_log builtins' format (check_input_os_log_evidence, #148): its layout's items, whether it is a literal, whether
+    // a mask's size is invalid, and the data arguments its specifiers take.
+    const CheckOSLogItem* os_log_items;
+    uint32_t os_log_count;
+    bool os_log_known;
+    bool os_log_invalid_mask;
+    uint64_t os_log_taken[4];
     // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
     // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
     uint32_t function_objects[4];
@@ -2133,6 +2140,12 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alloc_token_known = witness != NULL && witness->alloc_token_known,
             .alloc_token = witness != NULL ? witness->alloc_token : 0,
             .static_chain_call = witness != NULL && witness->static_chain_call,
+            .os_log_items = witness != NULL ? witness->os_log_items : NULL,
+            .os_log_count = witness != NULL ? witness->os_log_count : 0,
+            .os_log_known = witness != NULL && witness->os_log_known,
+            .os_log_invalid_mask = witness != NULL && witness->os_log_invalid_mask,
+            .os_log_taken = { witness != NULL ? witness->os_log_taken[0] : 0, witness != NULL ? witness->os_log_taken[1] : 0,
+                              witness != NULL ? witness->os_log_taken[2] : 0, witness != NULL ? witness->os_log_taken[3] : 0 },
             .function_objects = witness != NULL ? witness->function_objects : NULL,
             .function_object_count = witness != NULL ? witness->function_object_count : 0,
             .string_bytes = witness != NULL ? witness->nan_payload : NULL,

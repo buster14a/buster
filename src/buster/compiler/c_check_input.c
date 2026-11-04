@@ -3707,6 +3707,7 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 static void check_input_alloc_token_evidence(CheckInputReader* reader, uint32_t first, uint32_t closing, const TypeId* queries, uint32_t query_first,
                                              uint32_t query_end, CheckBuiltinCall* evidence);
 #include "c_check_builtin_evidence.c"
+#include "c_check_os_log_input.c"
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
 // The plain library builtins' calls that clang folds (#148), defined after the implicit declarations below.

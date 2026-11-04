@@ -332,6 +332,33 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: call_with_static_chain of an int chain", .source = "int f(int);\nint g(int p)\n{\nreturn __builtin_call_with_static_chain(f(1), p);\n}\n", .rejected = true },
         { .name = "generic: call_with_static_chain of a null constant", .source = "int f(int);\nint g(void)\n{\nreturn __builtin_call_with_static_chain(f(1), 0);\n}\n", .rejected = true },
         { .name = "generic: call_with_static_chain of one", .source = "int f(int);\nint g(void)\n{\nreturn __builtin_call_with_static_chain(f(1));\n}\n", .rejected = true },
+        // The os_log builtins (#148): a buffer that converts to void *, a format that is an ordinary or UTF-8 literal past its
+        // parentheses and casts, data of less than 256 bytes each; the buffer's size a size_t integer constant expression of
+        // the layout, whatever its data's types; __builtin_os_log_format's format checks refusing a struct or a complex
+        // value a specifier takes and a mask of other than 1 to 8 bytes, one after a %P without its length too (the checks go
+        // on past it, as the layout doesn't).
+        { .name = "generic: os_log", .source =
+          "struct S { int a; };\n_Static_assert(__builtin_os_log_format_buffer_size(\"%d %s\", 1, \"x\") == 18, \"\");\n"
+          "enum { E = __builtin_os_log_format_buffer_size(\"%{mask.ab}d %m\", 1) };\n_Static_assert(E == 20, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%Lf %P\", 1.0L, 1) == 26, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%2$s %1$d\", 1, \"x\") == 18, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%.*s %{public, mask.abcdefghij}d\", 3, \"x\", 1, 2) == 34, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(u8\"%d\", (struct S){ 1 }) == 8, \"\");\n"
+          "void* f(void* b, char* c, int i, struct S s)\n{\nunsigned long n = __builtin_os_log_format_buffer_size(\"%d\", i++);\n"
+          "(void)__builtin_os_log_format(c, (\"%d\"), i);\n(void)__builtin_os_log_format(b, (const char*)\"%s %f\", \"x\", 1.5f);\n"
+          "(void)__builtin_os_log_format(b, \"%d\", 1, s);\n(void)__builtin_os_log_format(b, \"%P %{mask.ab}d\", n, 1);\n"
+          "return __builtin_os_log_format(b, \"%{private}s %%\", \"x\");\n}\n" },
+        { .name = "generic: os_log of an int buffer", .source = "void* f(int b)\n{\nreturn __builtin_os_log_format(b, \"%d\", 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a pointer format", .source = "void* f(void* b, const char* s)\n{\nreturn __builtin_os_log_format(b, s);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a wide format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size(L\"x\");\n}\n", .rejected = true },
+        { .name = "generic: os_log of a struct", .source = "struct S { int a; };\nvoid* f(void* b, struct S s)\n{\nreturn __builtin_os_log_format(b, \"%d\", s);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a complex width", .source = "void* f(void* b, _Complex double c)\n{\nreturn __builtin_os_log_format(b, \"%*d\", c, 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a long mask", .source = "void* f(void* b)\n{\nreturn __builtin_os_log_format(b, \"%{mask.abcdefghi}d\", 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a long mask after an unlengthened pointer", .source = "void* f(void* b)\n{\nreturn __builtin_os_log_format(b, \"%P %{mask.abcdefghi}d\", 4, 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of an empty mask", .source = "void* f(void* b)\n{\nreturn __builtin_os_log_format(b, \"%{mask.}d\", 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a big argument", .source = "struct T { char c[300]; };\nunsigned long f(struct T t)\n{\nreturn __builtin_os_log_format_buffer_size(\"%d\", t);\n}\n", .rejected = true },
+        { .name = "generic: os_log of no buffer", .source = "void* f(void)\n{\nreturn __builtin_os_log_format(\"%d\");\n}\n", .rejected = true },
+        { .name = "generic: os_log of no format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size();\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of none", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token();\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of void", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token((void)0);\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of no type", .source = "_Static_assert(__builtin_infer_alloc_token(1) == 0, \"\");\n", .rejected = true },
@@ -665,6 +692,31 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix(__builtin_infer_alloc_token(n * sizeof(struct V) << 1)); mix(__builtin_infer_alloc_token((sizeof(struct V) / 2) - 1)); mix((unsigned)i);\n"
         "return (int)(h ^ (h >> 32)); }\n",
         "generic-infer-alloc-token", clang);
+    // __builtin_os_log_format's buffers against clang's build (#148, the bytes of clang's helper's stores): privacy
+    // annotations (sensitive over a later public), scalars of each promoted size, %m and %%, a string's count from its
+    // precision's argument and from a constant, %.8P, masks, a field width and a precision of arguments, a double, a
+    // pointer, and an array (its address, compared in place, since the two builds place it apart); and buffer sizes of
+    // positions, of a %P without its length and of missing data.
+    check_test_program_source(test,
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "static unsigned char buffer[512]; static char arr[4] = { 1, 2, 3, 4 };\n"
+        "static void bytes(unsigned long n) { for (unsigned long i = 0; i < n; i++) mix(buffer[i]); } int tested(int n) { h = (unsigned)n;\n"
+        "const char* s = (const char*)(unsigned long)(0x1000 + n);\n"
+        "char c = (char)(n + 3); short w = (short)(n * 7); long long q = -n; float f = 1.5f * n; double d = 0.25 * n;\n"
+        "void* r = __builtin_os_log_format(buffer, \"%d %s %{public}s\", n, s, s);\n"
+        "mix(r == (void*)buffer); bytes(__builtin_os_log_format_buffer_size(\"%d %s %{public}s\", n, s, s));\n"
+        "__builtin_os_log_format(buffer, \"%{private}c %hd %lld %f %{sensitive, public}lu\", c, w, q, f, (unsigned long)n);\n"
+        "bytes(__builtin_os_log_format_buffer_size(\"%{private}c %hd %lld %f %{sensitive, public}lu\", c, w, q, f, (unsigned long)n));\n"
+        "__builtin_os_log_format(buffer, \"%m %% %.*s %.8P %{mask.abc}d %*.*d\", 3, s, s, n, 4, 2, n);\n"
+        "bytes(__builtin_os_log_format_buffer_size(\"%m %% %.*s %.8P %{mask.abc}d %*.*d\", 3, s, s, n, 4, 2, n));\n"
+        "__builtin_os_log_format(buffer, \"%{public,mask.xy}.16s %e %p %s\", s, d, (void*)s, arr);\n"
+        "unsigned long size = __builtin_os_log_format_buffer_size(\"%{public,mask.xy}.16s %e %p %s\", s, d, (void*)s, arr);\n"
+        "unsigned long v = 0; for (int i = 0; i < 8; i++) v |= (unsigned long)buffer[size - 8 + i] << (8 * i);\n"
+        "mix(v == (unsigned long)arr); bytes(size - 8);\n"
+        "mix(__builtin_os_log_format_buffer_size(\"plain\") + __builtin_os_log_format_buffer_size(\"%2$d %1$s\", s, n) * 100 +\n"
+        "__builtin_os_log_format_buffer_size(\"%P %d\", n, n) * 10000 + __builtin_os_log_format_buffer_size(\"%d %d\", n) * 1000000);\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-os-log", clang);
     // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
     // evaluated once, as the call's.
     check_test_program_source(test,

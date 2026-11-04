@@ -18,6 +18,34 @@
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_FRAME_LEVEL 0x10u
 #define BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNED_TO_ONE 0x20u
 
+// An os_log buffer's item (#148, clang/include/clang/AST/OSLog.h's OSLogBufferItem): its kind, the descriptor byte's high
+// nibble; its privacy flags, the low nibble; where its data comes from (none, an errno's; a data argument's value,
+// from the first after the format; or a constant: a precision's count of 4 bytes, or a mask's 8 bytes of its name).
+#define BUSTER_CHECK_OS_LOG_SCALAR 0u
+#define BUSTER_CHECK_OS_LOG_COUNT 1u
+#define BUSTER_CHECK_OS_LOG_STRING 2u
+#define BUSTER_CHECK_OS_LOG_POINTER 3u
+#define BUSTER_CHECK_OS_LOG_OBJC 4u
+#define BUSTER_CHECK_OS_LOG_WIDE_STRING 5u
+#define BUSTER_CHECK_OS_LOG_ERRNO 6u
+#define BUSTER_CHECK_OS_LOG_MASK 7u
+#define BUSTER_CHECK_OS_LOG_PRIVATE 0x1u
+#define BUSTER_CHECK_OS_LOG_PUBLIC 0x2u
+#define BUSTER_CHECK_OS_LOG_SENSITIVE 0x5u
+#define BUSTER_CHECK_OS_LOG_NONE 0u
+#define BUSTER_CHECK_OS_LOG_ARGUMENT 1u
+#define BUSTER_CHECK_OS_LOG_CONSTANT 2u
+
+typedef struct CheckOSLogItem CheckOSLogItem;
+struct CheckOSLogItem
+{
+    uint8_t kind;
+    uint8_t flags;
+    uint8_t source;
+    uint32_t argument;
+    uint64_t constant;
+};
+
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_FRAME_LEVEL 0x01u
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_ALIGNMENT 0x02u
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_COMPLEX 0x04u
@@ -61,6 +89,13 @@ struct CheckBuiltinMiscAction
     uint64_t alloc_token;
     // Whether __builtin_call_with_static_chain's first argument is a call as written (CheckBuiltinCall.static_chain_call).
     bool static_chain_call;
+    // The os_log builtins' format's layout (CheckBuiltinCall.os_log_items), whether its format is a literal, whether a
+    // mask's size is invalid there, and the data arguments its specifiers take (the format checks').
+    const CheckOSLogItem* os_log_items;
+    uint32_t os_log_count;
+    bool os_log_known;
+    bool os_log_invalid_mask;
+    uint64_t os_log_taken[4];
     // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and the objects of
     // the functions the first argument names (CheckBuiltinCall's, #1126's review).
     bool string_cast;
@@ -681,6 +716,28 @@ static int32_t check_builtin_misc_type_class(const TypeTable* table, TypeId type
 }
 
 // An int constant expression of `value`, as the generic builtins below fold: no operand runs.
+// An os_log data argument's bytes (#148): its type's after the default argument promotions (DefaultVariadicArgumentPromotion),
+// an array's or a function's as a pointer's, a float's and a half's as a double's, an integer's as its promotion's.
+static uint64_t check_builtin_misc_os_log_size(const TypeTable* table, TypeId type)
+{
+    const TypeId bare = type_is_valid(table, type) ? type_unqualified(type_strip_aligned(table, type)) : BUSTER_TYPE_INT;
+    const uint8_t kind = type_kind(table, bare);
+    const bool pointer = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_POINTER;
+    const bool narrow_floating = bare == BUSTER_TYPE_FLOAT || bare == BUSTER_TYPE_FLOAT16 || bare == BUSTER_TYPE_HALF || bare == BUSTER_TYPE_BF16;
+    const bool integer = check_action_is_integer(table, bare);
+    const uint64_t result = pointer || narrow_floating ? 8 : integer ? type_size(table, type_promote(table, bare)) : type_size(table, bare);
+    return result;
+}
+
+// The bytes of an os_log buffer item's data (#148): a data argument's (check_builtin_misc_os_log_size), a count's 4, a
+// mask's 8, an errno's none.
+static uint64_t check_builtin_misc_os_log_item_size(const TypeTable* table, const CheckBuiltinMiscAction* input, const CheckOSLogItem* item, uint32_t data)
+{
+    const uint64_t result = item->source == BUSTER_CHECK_OS_LOG_ARGUMENT ? check_builtin_misc_os_log_size(table, input->arguments[data + item->argument].type) :
+                            item->kind == BUSTER_CHECK_OS_LOG_MASK ? 8 : item->source == BUSTER_CHECK_OS_LOG_CONSTANT ? 4 : 0;
+    return result;
+}
+
 static void check_builtin_misc_fold_int(CheckBuiltinMiscResult* output, int32_t value)
 {
     output->action.value = (CheckValue){
@@ -1076,6 +1133,72 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || id == CBUILTIN_OS_LOG_FORMAT)
+    {
+        // clang's BuiltinOSLogFormat (#148): __builtin_os_log_format's buffer converts to void * as a prototype's
+        // parameter; the format is an ordinary or UTF-8 string literal past its parentheses and casts (os_log's "format
+        // argument is not a string constant"); each data argument, promoted, is less than 256 bytes ("argument N is too
+        // big"). __builtin_os_log_format's format checks then refuse a mask of other than 1 to 8 bytes and a struct or a
+        // complex argument a specifier takes. The buffer's size is its layout's: a summary and a count byte, then each
+        // item's descriptor and size bytes and its data, a size_t integer constant expression whose data never runs; the
+        // format's value is the buffer, its stores check_lower_os_log's.
+        const bool format = id == CBUILTIN_OS_LOG_FORMAT;
+        const uint32_t data = format ? 2 : 1;
+        CheckValue buffer = { 0 };
+        if (format)
+        {
+            buffer = check_builtin_misc_argument(table, input, output, 0);
+            check_builtin_misc_convert(table, input, output, &buffer, 0, type_pointer(table, BUSTER_TYPE_VOID));
+        }
+        if (output->action.diagnostic == CHECK_DIAG_NONE && !input->os_log_known)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, data - 1);
+        }
+        for (uint32_t i = data; i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+        {
+            const TypeId type = input->arguments[i].type;
+            if (!type_is_valid(table, type) || input->arguments[i].category > CHECK_FUNCTION || check_action_kind(table, type) == BUSTER_TYPE_KIND_VOID)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, i);
+            }
+            else if (check_builtin_misc_os_log_size(table, type) >= 256)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, i);
+            }
+        }
+        if (format && output->action.diagnostic == CHECK_DIAG_NONE && input->os_log_invalid_mask)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        for (uint32_t i = data; format && i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+        {
+            const uint32_t argument = i - data;
+            const uint8_t kind = check_action_kind(table, input->arguments[i].type);
+            const bool taken = argument < 256 && (input->os_log_taken[argument / 64] >> (argument % 64) & 1) != 0;
+            if (taken && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX))
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, i);
+            }
+        }
+        if (output->action.diagnostic == CHECK_DIAG_NONE && !format)
+        {
+            uint64_t size = 2;
+            for (uint32_t i = 0; i < input->os_log_count; i += 1)
+            {
+                size += 2 + check_builtin_misc_os_log_item_size(table, input, input->os_log_items + i, data);
+            }
+            output->evaluated_operands = 0;
+            output->action.value = (CheckValue){ .type = BUSTER_TYPE_ULONG, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE,
+                                                 .constant_kind = CHECK_CONSTANT_INTEGER, .integer = size };
+            output->constant_value = output->action.value;
+            output->constant_evaluated_operands = 0;
+        }
+        else if (output->action.diagnostic == CHECK_DIAG_NONE)
+        {
+            output->action.value = (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_VOID), .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT };
+            output->writes_memory = true;
+        }
+    }
     else if (id == CBUILTIN_CALL_WITH_STATIC_CHAIN)
     {
         // The call's value (#148), its first argument a call as written of no builtin (CheckBuiltinMiscAction.static_chain_call)
@@ -1315,6 +1438,9 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // size_t(...), at least one argument.
         case CBUILTIN_INFER_ALLOC_TOKEN: minimum = 1; maximum = 31; break;
         case CBUILTIN_CALL_WITH_STATIC_CHAIN: minimum = maximum = 2; break;
+        // A format, past __builtin_os_log_format's buffer, and its data, as many as the operands' mask holds.
+        case CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE: minimum = 1; maximum = 31; break;
+        case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 31; break;
         case CBUILTIN_OPERATOR_NEW:
         case CBUILTIN_OPERATOR_DELETE:
             // C++'s alone, refused with any arguments, before their count can reach the operands' 32-bit mask.
@@ -1362,7 +1488,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
                               input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || input->id == CBUILTIN_CPU_IS ||
                               input->id == CBUILTIN_CPU_SUPPORTS || input->id == CBUILTIN_INFER_ALLOC_TOKEN || input->id == CBUILTIN_CALL_WITH_STATIC_CHAIN ||
-                              refused;
+                              input->id == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || input->id == CBUILTIN_OS_LOG_FORMAT || refused;
         if (classify && !refused && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);

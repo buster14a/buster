@@ -237,6 +237,11 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         const bool call = close >= begin && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && (parent < begin || parent >= end);
         evidence->static_chain_call = call && !check_input_builtin_callee(reader, close);
     }
+    if (builtin == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || builtin == CBUILTIN_OS_LOG_FORMAT)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        check_input_os_log_evidence(reader, keyword < token ? keyword + 2 : token, token, builtin == CBUILTIN_OS_LOG_FORMAT, count, evidence);
+    }
     if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
     {
         const uint32_t keyword = reader->first_child[token];

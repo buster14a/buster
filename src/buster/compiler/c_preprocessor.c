@@ -17016,7 +17016,8 @@ static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, ui
 
 // buster's __has_builtin of a name (#806, #148): 1 for a builtin it implements, its source checking and Tier 0 lowering
 // shipped (the catalog's source capability, the x86 intrinsics' rows and leaves, the fortified builtins, the library
-// builtins compiled as calls of their functions and its own queries), that clang makes a builtin of the unit by its
+// builtins compiled as calls of their functions and its own queries), or whose source checking shipped and whose code -c
+// refuses by name (docs/c-builtins-integration.md's "Checked, refused in code"), that clang makes a builtin of the unit by its
 // language modes and whose required target features hold there, as clang answers (pp_builtin_language,
 // pp_builtin_features). Every __builtin_ library builtin is one of all of clang's languages without features, and a plain
 // one is a builtin where pp_library_builtin says so.
