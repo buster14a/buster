@@ -1033,10 +1033,11 @@ static inline __attribute__((always_inline)) bool ir_constant_fits(IrConstant va
 }
 
 // The IR type of a machine row's operand or result (#141, IrFunction.rows) of the typed stream's class `class` and, a
-// vector's or a mask's, `bytes`: an integer's of its bytes, whatever its signedness, a float's or a double's, a vector's
-// container of its bytes (v4i32, v8i32 or v16i32, whatever its elements: the row's records give its bits their meaning),
-// a mask's of its bytes, and void for a void result; IR_TYPE_COUNT for a class a row call doesn't take: a long double, a
-// 128-bit integer, and a vector of 4 or 8 bytes.
+// vector's or a mask's, `bytes`: an integer's of its bytes, whatever its signedness, a float's or a double's, a
+// vector's container of its bytes (v4i32, v8i32 or v16i32, whatever its elements: the row's records give its bits their
+// meaning; an SSE carrier's of 4 or 8 bytes f32 or f64, #1280, ir_typed_stack_type), a mask's of its bytes, and void
+// for a void result; IR_TYPE_COUNT for a class a row call doesn't take: a long double, a 128-bit integer, and a vector
+// of any other width.
 static uint32_t ir_row_type(uint32_t class, uint32_t bytes)
 {
     uint32_t type = IR_TYPE_COUNT;
@@ -1053,7 +1054,9 @@ static uint32_t ir_row_type(uint32_t class, uint32_t bytes)
         case BUSTER_TYPED_CLASS_U64: type = IR_I64; break;
         case BUSTER_TYPED_CLASS_F32: type = IR_F32; break;
         case BUSTER_TYPED_CLASS_F64: type = IR_F64; break;
-        case BUSTER_TYPED_CLASS_VECTOR: type = bytes == 16 ? IR_V4I32 : bytes == 32 ? IR_V8I32 : bytes == 64 ? IR_V16I32 : IR_TYPE_COUNT; break;
+        case BUSTER_TYPED_CLASS_VECTOR:
+            type = bytes == 4 ? IR_F32 : bytes == 8 ? IR_F64 : bytes == 16 ? IR_V4I32 : bytes == 32 ? IR_V8I32 : bytes == 64 ? IR_V16I32 : IR_TYPE_COUNT;
+            break;
         case BUSTER_TYPED_CLASS_MASK: type = bytes == 1 ? IR_M8 : bytes == 2 ? IR_M16 : bytes == 4 ? IR_M32 : bytes == 8 ? IR_M64 : IR_TYPE_COUNT; break;
         default: break;
     }

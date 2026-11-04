@@ -878,7 +878,7 @@ does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
 
 | Role | Register |
 | --- | --- |
-| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
+| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`; an SSE carrier's xmm register whole), the result moved from zmm16 into the destination last (an SSE carrier's zero-extended: `tier1_select_carrier_move`) |
 | `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
 | `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
@@ -898,6 +898,22 @@ node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code'
 certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
 it doesn't decode the rows' records.
 
+An SSE carrier (#1280), a vector of 4 or 8 bytes, is an f32 or f64 in the IR
+([the IR guide](ir.md)'s "Machine rows"), so it is the vector class's value as
+those are: their loads and stores (`movss`, `movsd`), constants (`xorps`, or the
+bits through the scratch register and `vmovd` or `vmovq`), copies, phis and
+spills move its bits alone, and no floating operation reads it, since only a row
+does. Its register holds zeros past its bytes, as Tier 0's does (Tier 0 reloads
+every operand by `vmovd` or `vmovq`). Rows rely on those zeros: a row of no
+records, the intrinsics' narrowing shuffle, has its wider operand's register as
+its result, and a narrow vector's floating operation at a 16-byte form computes
+its other lanes too, which must raise no exception. Loads, constants, copies and
+reloads keep the zeros. A row's narrow result makes them: it moves into its
+destination by `tier1_select_carrier_move`, which is `vmovq` for 8 bytes, and
+for 4 bytes `vinsertps` of element 0 with elements 1 to 3 zeroed (immediate
+0x0e), a shuffle that raises no exception. An operand moves into its role whole.
+So the zeros hold at the definition, whatever placement stages the operand.
+
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
 every function Tier 1's, by both paths and with and without rematerialization,
@@ -907,7 +923,22 @@ permutes and shuffles, shifts by immediates, by counts in general registers and 
 vectors, masked loads and stores, a store of no result and a compress, inserts,
 extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
-edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
+edge. Its SSE carriers' fixture (#1280) does the same for vectors of 4 and 8
+bytes:
+- the intrinsics' widening conversions of each width (`cvtepu8`, `cvtepi8`,
+  `cvtepu16`, `cvtepi16`);
+- `loadl` and `storel`, `loadu` and `storeu` of 4 and 8 bytes, `move_epi64`, and
+  `loadl_pi` and `storel_pi`;
+- the `movq` forms;
+- MMX's `__m64` operations, by value to and from clang's unit;
+- GNU C's operators on vectors of 4 and 8 bytes;
+- a signaling NaN's and -0's bits as constants;
+- a loop whose carriers cross its back edge;
+- under `FENV_ACCESS`, a product of two-float shuffles whose vectors' other
+  lanes would overflow. It raises no exception only where the zeros hold
+  (without `tier1_select_carrier_move`'s zeroing it raised overflow and inexact).
+
+Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
 refuses at selection, so that its function is Tier 0's, and the program runs as
 clang -O0's does.
