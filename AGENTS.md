@@ -381,7 +381,6 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler test-emission-metadata
-./build/compiler test-emitted-code --cross-check
 ./build/compiler benchmark-backend
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
@@ -433,7 +432,8 @@ acceptance boundaries. [Detailed section index](docs/commands/README.md#detailed
 - `test-diagnostics, benchmark-diagnostics` — `diagnostic.c` — [guide](docs/commands/determinism.md).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
-- `test-emission-metadata`, `test-emitted-code` — `emission_metadata.c`, `emitted_code.c` — [guides](docs/commands/emission-metadata.md), [emission](docs/commands/emission.md).
+- `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
+- `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
