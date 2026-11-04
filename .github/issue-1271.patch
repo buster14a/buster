@@ -1,0 +1,317 @@
+diff --git a/.github/workflows/9700x.yml b/.github/workflows/9700x.yml
+--- a/.github/workflows/9700x.yml
++++ b/.github/workflows/9700x.yml
+@@ -7,7 +7,5 @@
+ # This public repository must not execute unreviewed fork code on the host.
++# Every main update runs the full hosted suite, including documentation-only merges (#1271).
+ on:
+   push:
+     branches: [main]
+-    paths-ignore:
+-      - 'docs/**'
+-      - '**.md'
+@@ -52,10 +50,8 @@
+-# Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
+-# cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push replaces its
+-# pending run, which would only qualify a commit already superseded. A newer push to a PR also cancels the PR's run in
+-# progress, which is mostly a job waiting for the 9700X (the slot is held from then on, so a run waiting hours would
+-# otherwise still run for its stale commit); a push to main lets main's run finish. The daily run has a group of its
+-# own, so that a push to main doesn't replace it while it waits. The runner's job hooks serialize all jobs with the
+-# shared host lock (AGENTS.md).
++# Keep superseded PR runs in the same per-PR group, cancelling their stale work. Main pushes each get a run-specific
++# group: cancel-in-progress: false alone still replaces an older pending run in a shared group, losing that main
++# revision's sanitizer/fuzz coverage (#1271). Hosted work for distinct main revisions may run concurrently; the
++# runner hooks still serialize hardware jobs with the shared host lock (AGENTS.md). Daily and dispatched runs keep
++# their existing groups, separate from pushes.
+ concurrency:
+-  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
++  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && github.run_id) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+@@ -64,2 +60,2 @@
+ jobs:
+-  # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
++  # Whether a pull request changes anything but documentation (`docs/**` and `*.md`; pushes always test), on a
+ diff --git a/tools/ci/qualification.c b/tools/ci/qualification.c
+--- a/tools/ci/qualification.c
++++ b/tools/ci/qualification.c
+@@ -118,3 +118,4 @@
+ static bool qualification_no_code(const Qualification* input)
+ {
+-    bool selected = input->event == EVENT_PR || input->event == EVENT_PUSH;
++    // Only pre-merge PRs may claim the no-code exemption. Every main push needs its full hosted suite (#1271).
++    bool selected = input->event == EVENT_PR;
+@@ -178,4 +179,3 @@
+         { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+         { EVENT_PR, CODE_NO, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+-        { EVENT_PUSH, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+     };
+ diff --git a/tools/ci/changes.c b/tools/ci/changes.c
+--- a/tools/ci/changes.c
++++ b/tools/ci/changes.c
+@@ -1246,4 +1246,4 @@
+     if (input->push && !input->targeted)
+     {
+-        // push's paths-ignore leaves out documentation alone.
++        // Every push tests, including documentation alone; benchmark selection is a separate policy (#1271).
+         result.code = true;
+@@ -1965,2 +1965,30 @@
++    // Both push modes must test every file class, even an empty or documentation-only change (#1271).
++    const char* pushed_files[] = {
++        "",
++        "README.md AGENTS.md",
++        "docs/ci.md docs/notes.txt",
++        "src/buster/compiler/c_types.c",
++        "src/buster/compiler/c_checker_test.c",
++        "build.sh CMakeLists.txt cmake/BusterSettings.cmake",
++        ".github/workflows/9700x.yml",
++        "tools/ci/qualification.c",
++    };
++    for (uint32_t i = 0; i < sizeof(pushed_files) / sizeof(pushed_files[0]); i += 1)
++    {
++        for (uint32_t targeted = 0; targeted < 2; targeted += 1)
++        {
++            ChangesInput revision = {
++                .push = true,
++                .targeted = targeted != 0,
++                .files = changes_words(pushed_files[i]),
++                .base_workflow = workflow,
++                .head_workflow = workflow,
++                .root = root,
++            };
++            ChangesResult selected = changes_decide(&revision);
++            changes_expect(test, selected.code, "every main push tests in either measurement mode", text_c(pushed_files[i]));
++        }
++    }
++
+     ChangesInput nothing = {
+         .base_workflow = workflow,
+@@ -2474 +2502,105 @@
++// Main's full hosted coverage is independent of paths and of other main runs (#1271). This checks the workflow's
++// actual trigger, concurrency and hosted-job contract; the evidence glue's fixtures separately prove that every push
++// emits scope=full and hosted=run, including native reuse and either nightly mode. Like the other workflow policies,
++// this recognizes the repository's explicit layout, not arbitrary YAML or an Actions expression interpreter.
++static bool changes_main_policy(Text workflow)
++{
++    bool in_push = false;
++    bool main = false;
++    bool filtered = false;
++    bool group = false;
++    bool cancellation = false;
++    bool tests = false;
++    bool sanitizers = false;
++    bool extra_rows = false;
++    bool test_fail_fast = false;
++    bool fuzz = false;
++    bool fuzz_revision = false;
++    uint32_t job = 0;
++    size_t offset = 0;
++    Text line;
++    while (text_next_line(workflow, &offset, &line))
++    {
++        const size_t indent = changes_indent(line);
++        Text value = changes_skip(line, "");
++        if (value.length != 0 && value.data[0] != '#' && indent <= 2)
++        {
++            in_push = text_equal_c(line, "  push:");
++        }
++        main |= in_push && text_equal_c(line, "    branches: [main]");
++        filtered |= in_push && (text_starts_with(value, "paths:") || text_starts_with(value, "paths-ignore:") || text_starts_with(value, "branches-ignore:"));
++        group |= text_equal_c(line, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && github.run_id) || (github.event_name == 'schedule' && 'schedule') || github.ref }}");
++        cancellation |= text_equal_c(line, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}");
++        if (text_equal_c(line, "  test:"))
++        {
++            job = 1;
++        }
++        else if (text_equal_c(line, "  fuzz:"))
++        {
++            job = 2;
++        }
++        else if (value.length != 0 && value.data[0] != '#' && indent <= 2)
++        {
++            job = 0;
++        }
++        tests |= job == 1 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}");
++        sanitizers |= job == 1 && text_equal_c(line, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}");
++        // changes_shard_policy also verifies the complete O1 entries, architectures and shard counts.
++        extra_rows |= job == 1 && text_starts_with(line, "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{");
++        test_fail_fast |= job == 1 && text_equal_c(line, "      fail-fast: ${{ github.event_name == 'pull_request' }}");
++        fuzz |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}");
++        fuzz_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
++    }
++    return main && !filtered && group && cancellation && tests && sanitizers && extra_rows && test_fail_fast && fuzz && fuzz_revision;
++}
++
++static void changes_test_main_policy(ChangesTest* test, Text workflow)
++{
++    changes_expect(test, changes_main_policy(workflow), "main policy: every push keeps a full hosted run of its own revision", (Text){ 0 });
++    static const struct
++    {
++        const char* before;
++        const char* after;
++    } mutants[] = {
++        { "    branches: [main]\n", "    branches: [main]\n    paths-ignore: ['docs/**', '**.md']\n" },
++        { "    branches: [main]\n", "    branches: [main]\n    paths: ['src/**']\n" },
++        { "    branches: [main]\n", "    branches: [other]\n" },
++        { "(github.event_name == 'push' && github.run_id) || ", "" },
++        { "(github.event_name == 'push' && github.run_id)", "(github.event_name == 'push' && github.ref)" },
++        { "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: true" },
++        { "'[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]'", "'[\"none\", \"address\", \"undefined\", \"thread\"]'" },
++        { "'[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]'", "'[\"none\"]'" },
++        { "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]'", "          ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'push' || needs.evidence.outputs.scope == 'plain') && '[]'" },
++        { "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true" },
++        { "needs.evidence.outputs.hosted == 'run' && (needs.changes.result", "github.event_name == 'pull_request' && (needs.changes.result" },
++        { "needs.evidence.outputs.scope == 'full' && (needs.changes.result", "needs.evidence.outputs.scope == 'plain' && (needs.changes.result" },
++    };
++    const char* original = text_terminated(workflow);
++    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
++    {
++        const char* found = strstr(original, mutants[i].before);
++        Text changed = workflow;
++        if (found != NULL)
++        {
++            const size_t prefix = (size_t)(found - original);
++            const size_t suffix = prefix + strlen(mutants[i].before);
++            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
++                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
++        }
++        changes_expect(test, found != NULL && !changes_main_policy(changed), "main policy rejects lost or reduced post-merge coverage", text_c(mutants[i].before));
++    }
++    const char* job = strstr(original, "\n  fuzz:\n");
++    const char* revision = "          ref: ${{ github.sha }}";
++    const char* found = job != NULL ? strstr(job, revision) : NULL;
++    Text changed = workflow;
++    if (found != NULL)
++    {
++        const size_t prefix = (size_t)(found - original);
++        const size_t suffix = prefix + strlen(revision);
++        changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c("          ref: main")),
++                              (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
++    }
++    changes_expect(test, found != NULL && !changes_main_policy(changed), "main policy rejects fuzzing a later main tip", (Text){ 0 });
++}
++
+ // Reuse on the persistent host is safe only behind independent correctness on both hosted variants of this revision.
+@@ -2531,3 +2663,4 @@
+ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
+ {
++    changes_test_main_policy(test, workflow);
+     changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
+ diff --git a/tests/ci/nightly.sh b/tests/ci/nightly.sh
+--- a/tests/ci/nightly.sh
++++ b/tests/ci/nightly.sh
+@@ -171 +171,15 @@
++# Every landed revision gets the full hosted scope, including documentation-only changes and merges, with either
++# measurement mode. Missing PR evidence must not turn a push into a plain/no-code run (#1271).
++for mode in '' on; do
++    for revision in "$merge" "$docs" "$head"; do
++        git -C "$history" checkout -q --detach "$revision"
++        GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY="$mode" run_evidence "$history"
++        expect_line "$GITHUB_OUTPUT" 'scope=full' 'every main revision gets the full sanitizer/fuzz scope'
++        expect_line "$GITHUB_OUTPUT" 'hosted=run' 'every main revision runs its own hosted suite'
++        expect_line "$GITHUB_OUTPUT" 'retired=false' 'nightly mode never retires a main push'
++    done
++done
++git -C "$history" checkout -q main
++: > "$fixtures/calls.log"
++
+ # A draft pull request: hosted feedback, no hardware, and no API call.
+@@ -233,3 +247,7 @@
+ expect_line "$GITHUB_OUTPUT" 'hardware_reason=native-reused' 'and says why'
++expect_line "$GITHUB_OUTPUT" 'scope=full' 'native reuse does not remove main sanitizer/fuzz coverage'
++expect_line "$GITHUB_OUTPUT" 'hosted=run' 'native reuse does not reuse the main hosted suite'
+ GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
+ expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a push still measures every plain run'
++expect_line "$GITHUB_OUTPUT" 'scope=full' 'main also retains full scope without nightly mode'
++expect_line "$GITHUB_OUTPUT" 'hosted=run' 'main also runs its hosted suite without nightly mode'
+ diff --git a/docs/ci.md b/docs/ci.md
+--- a/docs/ci.md
++++ b/docs/ci.md
+@@ -1,2 +1,45 @@
+ # Hosted correctness, native vector correctness and Zen 5 benchmarks
+ 
++## Every update to main
++
++Every push to `main`, including a documentation/Markdown-only PR merge or a
++direct push, starts `9700x.yml` against that push's exact `github.sha` (#1271).
++Merge, squash and rebase merges use this same push trigger. Main has no path
++filter and no no-code exemption: it runs both hosted architectures, all four
++shards of every existing plain/sanitizer row (including the additional O1
++address/undefined checks), and the existing fuzz campaigns. A failed setup or
++test remains a failure, not a substitute for completed coverage.
++
++Each main push has a run-specific concurrency group. Later merges therefore
++cannot replace an older pending main run; `cancel-in-progress: false` in one
++shared group would not prevent that replacement. PR runs still share their
++PR's group and cancel superseded revisions. The host's existing lock still
++serializes hardware jobs without serializing the full hosted workflows.
++
++Nightly mode and successful PR native evidence never replace the post-merge
++hosted suite: the push evidence decision remains `scope=full`, `hosted=run`.
++Native-evidence reuse and nightly measurement selection retain their separate
++policies below; full hosted CI does not mean every nightly benchmark runs
++after every merge. The no-code exemption applies only to pre-merge PR checks.
++
++The selector's `--self-test` checks the unfiltered main trigger, independent
++push groups, full hosted gates/matrix and exact-revision fuzz checkout, with
++mutants for lost coverage. It also tests all file classes in both push
++selection modes. `tests/ci/nightly.sh` checks the real evidence glue on merged,
++documentation-only and direct-push fixtures, with nightly mode on/off and
++native reuse; `qualification --self-test` rejects an all-skipped main push.
++
++GitHub platform restrictions still apply: Actions must be enabled, and an
++automation must use a credential/event route that emits workflow events.
++Pushes made using a workflow's `GITHUB_TOKEN` do not automatically start other
++push workflows. Such merge automation must use an approved GitHub App or
++personal access token, or explicitly arrange an exact-revision run; a
++storage-policy check or a green PR check alone does not prove main coverage.
++Do not use commit-message skip directives when merging: they suppress push
++workflows before this policy can execute. See GitHub's
++[triggering rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow),
++[skip directives](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)
++and [concurrency behavior](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency).
++
++## Correctness and hardware qualification
++
+@@ -234,3 +277,4 @@
+ its own first parent, with native correctness first in the same job. A state
+-whose first-parent change is documentation alone (push's paths-ignore) needs
+-none, and the ledger says so. The cycle's snapshot also needs **full**
++whose first-parent change is documentation alone needs no backlog measurements,
++and the ledger says so; its push still runs the full hosted correctness suite.
++The cycle's snapshot also needs **full**
+ diff --git a/docs/commands/ci.md b/docs/commands/ci.md
+--- a/docs/commands/ci.md
++++ b/docs/commands/ci.md
+@@ -7,2 +7,21 @@
++## Main push coverage
++
++Every update to `main`, including documentation-only merges and direct pushes,
++runs the full hosted sanitizer matrix and fuzz campaigns at that push's exact
++SHA (#1271). There is no main path filter or no-code qualification exemption.
++Each push has a run-specific concurrency group so rapid merges retain every
++revision's run; only pre-merge PR runs cancel superseded revisions. Do not
++restore a shared main pending slot: disabling in-progress cancellation does
++not prevent pending-run replacement.
++
++Keep post-merge correctness separate from hardware reuse and nightly
++measurements. Main's evidence must remain `scope=full`, `hosted=run` in either
++nightly mode and when a PR's native evidence is reusable. Preserve all
++existing sanitizer configurations/shards and fuzz entries. The selector's
++main-policy mutants, its push fixtures, the evidence glue fixtures in
++`tests/ci/nightly.sh`, and the aggregate's exhaustive self-test pin this
++contract. The [CI guide](../../docs/ci.md#every-update-to-main) records platform
++event restrictions and the distinction from nightly benchmark coverage.
++
+ ## Sharing the 9700X
+ 
+ diff --git a/AGENTS.md b/AGENTS.md
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -112,3 +112,4 @@
+-Queues use that prefix per PR/ref, each holding one pending run (a newer push
+-replaces its PR's, and cancels the PR's run in progress); the runner hooks serialize every CI job with
+-the shared host lock. These are operational resources, not canonical repository URLs; do not rename
++Queues use that prefix per PR/ref, except main pushes use a run-specific group so later merges cannot replace
++pending main coverage (#1271). A newer PR push replaces its pending run and cancels its run in progress;
++the runner hooks still serialize hardware jobs with the shared host lock.
++These are operational resources, not canonical repository URLs; do not rename
