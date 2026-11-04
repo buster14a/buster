@@ -1627,6 +1627,62 @@ jobs:
               -- ./build/compiler $transitions "${options[@]}" -o "$RUNNER_TEMP/counted.o"
           done
 
+      - name: Compare check-expressions with the pull request's base over placements
+        # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
+        # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
+        # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
+        # functions' samples. The objects must be the same bytes.
+        if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
+        timeout-minutes: 6
+        env:
+          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          ab="$RUNNER_TEMP/check-expressions-ab"
+          rm -rf "$ab"
+          mkdir -p "$ab"
+          # The shallow checkout may lack the base: fetch that public commit alone, without credentials, into a
+          # worktree of its own, which leaves this checkout as it is.
+          if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
+              GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
+                  --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
+          fi
+          git worktree add --detach "$ab/base" "$AB_BASE_SHA"
+          trap 'git worktree remove --force "$ab/base"' EXIT
+          shifts=(0 1376 2752 4128)
+          (cd "$ab/base" && taskset -c 0-7 ./build.sh shifts --config Release "$ab/main" main_unit_checker.c "${shifts[@]}")
+          taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
+          "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
+          "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
+          cmp "$ab/main.o" "$ab/head.o"
+          builds=()
+          for build in main:main head:head main-again:main; do
+              for shift in "${shifts[@]}"; do
+                  builds+=(--build "${build%%:*}" "$ab/${build#*:}/compiler-$shift")
+              done
+          done
+          taskset -c 2 ./build/compiler time-runs --runs 5 --copies 2 "${builds[@]}" --list "${options[@]}" -o "$ab/runs.o"
+          for build in main head; do
+              echo "== $build: --time-stages' stages, medians of 11"
+              taskset -c 2 "$ab/$build/compiler-0" measure-compile --runs 11 -- "${options[@]}"
+          done
+          for build in main head; do
+              echo "== $build: counters"
+              taskset -c 2 perf stat -r 11 -e cycles:u,instructions:u,branch-misses:u,ls_bad_status2.stli_other:u \
+                  -- "$ab/$build/compiler-0" "${options[@]}" -o "$ab/counted.o"
+          done
+          for build in main head; do
+              echo "== $build: the checker's and the type table's functions in a profile of five compiles"
+              taskset -c 2 perf record -q -F 20000 -o "$ab/$build.data" -- \
+                  bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile "$ab/$build/compiler-0" "${options[@]}" -o "$ab/profiled.o"
+              perf report -i "$ab/$build.data" --stdio --no-children --sort symbol --percent-limit 0.15 > "$ab/$build-symbols.txt"
+              grep -E ' (check|type)_' "$ab/$build-symbols.txt" | head -40
+          done
+
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g
         # adds to the emission, after both paths agree.

@@ -925,9 +925,11 @@ static void check_action_conversion(const TypeTable* table, CheckValue* value, T
 
 #include "c_check_const_values.c"
 
-static CheckValue check_action_operand(TypeTable* table, const CheckAction* action, CheckActionResult* result, uint32_t index)
+// check_action_operand of `operand`, as operand `index` of `action`, whose context and guards alone the conversion reads of
+// it: a call's argument takes its call's (check_action_call), with no action of its own to copy the argument into (#1050).
+static CheckValue check_action_operand_value(TypeTable* table, const CheckAction* action, const CheckValue* operand, CheckActionResult* result, uint32_t index)
 {
-    CheckValue value = action->operands[index];
+    CheckValue value = *operand;
     CheckConversion* conversion = &result->conversions[index];
     conversion->type = value.type;
     const TypeId plain = type_strip_aligned(table, value.type);
@@ -1010,6 +1012,11 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         conversion->flags |= BUSTER_CHECK_CONVERT_LVALUE;
     }
     return value;
+}
+
+static CheckValue check_action_operand(TypeTable* table, const CheckAction* action, CheckActionResult* result, uint32_t index)
+{
+    return check_action_operand_value(table, action, &action->operands[index], result, index);
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_action_arithmetic.
@@ -2480,20 +2487,15 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
         }
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
-            CheckAction argument = { 0 };
-            argument.operands[0] = action->arguments[i];
-            argument.node = action->node;
-            argument.context = action->context;
-            argument.guards = action->guards;
             CheckActionResult converted = { 0 };
-            if (!type_is_valid(table, argument.operands[0].type))
+            if (!type_is_valid(table, action->arguments[i].type))
             {
                 check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, i + 1);
                 action->argument_conversions[i] = (CheckConversion){ 0 };
             }
             else
             {
-                CheckValue value = check_action_operand(table, &argument, &converted, 0);
+                CheckValue value = check_action_operand_value(table, action, &action->arguments[i], &converted, 0);
                 const bool parameter = (prototype || kr) && i < count;
                 if (!parameter)
                 {

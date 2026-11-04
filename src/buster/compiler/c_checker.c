@@ -606,32 +606,67 @@ struct CheckOptions
     bool verify_transitions;
 };
 
-// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628).
-static CheckValue check_stream_value(const CheckStream* stream, uint32_t node)
+_Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, category) == 4 && __builtin_offsetof(CheckValue, flags) == 8 && __builtin_offsetof(CheckValue, constant_kind) == 12 &&
+               __builtin_offsetof(CheckValue, integer) == 16 && __builtin_offsetof(CheckValue, object) == 64,
+               "check_stream_value_to writes a value as its first 64 bytes, its header and three payloads, and its last 32, from its object");
+
+// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), written to `destination` by
+// each case's own stores. On the vector path a value of columns is one 64-byte store of its header, the rest of those 64
+// bytes zero, and one 32-byte store of its object, the rest zero; a whole value is copied by the same two halves, so that
+// a load of a field, or of either half, lies within one store. Returned through a temporary instead, as check_stream_value
+// did, the columns' case was cleared by two overlapping 32-byte stores and copied into the action by a 32-byte load across
+// both, which no store can forward: the instruction most sampled in check-expressions of sqlite3.c's -c, at each operand
+// of each action (#1050). The scalar path is the same value by assignment.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_action, once per operand.
+static inline __attribute__((always_inline)) void check_stream_value_to(const CheckStream* stream, uint32_t node, CheckValue* destination)
 {
-    CheckValue result;
+    const CheckValue* whole = NULL;
     if (stream->dense_values != NULL)
     {
-        result = stream->dense_values[node];
+        whole = stream->dense_values + node;
     }
     else
     {
         const uint32_t row = stream->payload_rows[node];
-        if (row != 0 && row <= stream->payload_count)
-        {
-            result = stream->payloads[row - 1];
-        }
-        else
-        {
-            result = (CheckValue){
-                .type = stream->value_types[node],
-                .category = (CheckCategory)stream->value_categories[node],
-                .flags = stream->value_flags[node],
-                .constant_kind = (CheckConstantKind)stream->value_constants[node],
-                .object = stream->value_objects[node],
-            };
-        }
+        whole = row != 0 && row <= stream->payload_count ? stream->payloads + row - 1 : NULL;
     }
+#if BUSTER_HOST_VECTOR
+    uint8_t* bytes = (uint8_t*)destination;
+    if (whole != NULL)
+    {
+        const uint8_t* source = (const uint8_t*)whole;
+        _mm512_storeu_si512(bytes, _mm512_loadu_si512(source));
+        _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_loadu_si256((const __m256i*)(source + 64)));
+    }
+    else
+    {
+        const __m128i header = _mm_setr_epi32((int)stream->value_types[node], (int)stream->value_categories[node], (int)stream->value_flags[node],
+                                              (int)stream->value_constants[node]);
+        _mm512_storeu_si512(bytes, _mm512_zextsi128_si512(header));
+        _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)stream->value_objects[node])));
+    }
+#else
+    if (whole != NULL)
+    {
+        *destination = *whole;
+    }
+    else
+    {
+        *destination = (CheckValue){
+            .type = stream->value_types[node],
+            .category = (CheckCategory)stream->value_categories[node],
+            .flags = stream->value_flags[node],
+            .constant_kind = (CheckConstantKind)stream->value_constants[node],
+            .object = stream->value_objects[node],
+        };
+    }
+#endif
+}
+
+static CheckValue check_stream_value(const CheckStream* stream, uint32_t node)
+{
+    CheckValue result;
+    check_stream_value_to(stream, node, &result);
     return result;
 }
 
@@ -699,16 +734,21 @@ static bool check_stream_value_rest(const CheckValue* value)
 // gave it (check_graph_run clears `payload_rows` first), so that it has at most one, and `payloads` needs no more rows
 // than the stream has nodes, whatever its writes.
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_leaf, once per leaf.
-static inline __attribute__((always_inline)) void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
+// check_stream_set_value of `value` but its flags, which are `flags`: check_graph_store writes an action's result so, field
+// by field from where the action wrote it, rather than copying the whole result to change its flags, a wide reload of the
+// action's narrow stores just made (#1050).
+// Always inlined (#880), as profile-guided builds do; hot callers: check_graph_leaf and check_graph_store, once per node.
+static inline __attribute__((always_inline)) void check_stream_set_value_flags(CheckStream* stream, uint32_t node, const CheckValue* value, uint32_t flags)
 {
     if (stream->dense_values != NULL)
     {
         stream->dense_values[node] = *value;
+        stream->dense_values[node].flags = flags;
     }
     else
     {
         stream->value_types[node] = value->type;
-        stream->value_flags[node] = value->flags;
+        stream->value_flags[node] = flags;
         stream->value_objects[node] = value->object;
         stream->value_categories[node] = (uint8_t)value->category;
         stream->value_constants[node] = (uint8_t)value->constant_kind;
@@ -721,9 +761,16 @@ static inline __attribute__((always_inline)) void check_stream_set_value(CheckSt
         if (row != 0)
         {
             stream->payloads[row - 1] = *value;
+            stream->payloads[row - 1].flags = flags;
         }
         stream->payload_rows[node] = row;
     }
+}
+
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_leaf, once per leaf.
+static inline __attribute__((always_inline)) void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
+{
+    check_stream_set_value_flags(stream, node, value, value->flags);
 }
 
 // A VALUE node's leaf (CheckGraph.leaves).
@@ -1540,7 +1587,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
     {
         if (operands[i] != BUSTER_CHECK_NONE)
         {
-            action->operands[i] = check_stream_value(stream, operands[i]);
+            check_stream_value_to(stream, operands[i], &action->operands[i]);
         }
     }
     if (action->op == CHECK_OP_VALUE)
@@ -1553,7 +1600,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
         action->argument_count = graph->argument_counts[node];
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
-            arguments[i] = check_stream_value(stream, graph->argument_nodes[offset + i]);
+            check_stream_value_to(stream, graph->argument_nodes[offset + i], &arguments[i]);
         }
         action->arguments = arguments;
         action->argument_conversions = action->argument_count != 0 ? stream->argument_conversions + offset : 0;
@@ -1603,13 +1650,29 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per node.
+// A conversion record by its two fields, each one load: an action writes a record's type and flags by separate stores, and
+// a wide copy of records just written, as check_graph_store's memcpy of an action's three was, spans several of them, which
+// a store can forward only one of (#1050). Relaxed atomic loads, which the compiler doesn't merge into wider ones, keep the
+// two loads apart; nothing else accesses the record meanwhile.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_store, four times per action.
+static inline __attribute__((always_inline)) CheckConversion check_conversion_fields(const CheckConversion* conversion)
+{
+    const CheckConversion result = {
+        .type = __atomic_load_n(&conversion->type, __ATOMIC_RELAXED),
+        .flags = __atomic_load_n(&conversion->flags, __ATOMIC_RELAXED),
+    };
+    return result;
+}
+
 static inline __attribute__((always_inline)) void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
-    CheckValue value = result->value;
-    value.flags = check_value_source_flags((CheckOp)stream->graph->ops[node], value.flags);
-    check_stream_set_value(stream, node, &value);
-    memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
-    stream->conversions[node].store = result->store_conversion;
+    check_stream_set_value_flags(stream, node, &result->value, check_value_source_flags((CheckOp)stream->graph->ops[node], result->value.flags));
+    CheckNodeConversions* conversions = stream->conversions + node;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->conversions); i += 1)
+    {
+        conversions->operands[i] = check_conversion_fields(&result->conversions[i]);
+    }
+    conversions->store = check_conversion_fields(&result->store_conversion);
     stream->diagnostics[node] = result->diagnostic;
     stream->diagnostic_operands[node] = result->diagnostic_operand;
     stream->warnings[node] = result->warnings;
@@ -2974,31 +3037,56 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
     return found;
 }
 
+
+#define BUSTER_CHECK_CONTEXT_LANES 64u
+
 // Valid graphs are in postorder: one reverse pass marks each required context and all of its dependencies.
 // This proof changes no graph column and is retained with the output rather than in the scheduler's scratch.
-static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks)
+// Only a context and the nodes it reaches mark anything: the vector path passes over each 64 nodes that hold neither a
+// context nor a mark from a later node, as one test of their two columns, since in postorder only a later node marks one
+// (#1050). The scalar path takes every node.
+static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks, bool scalar)
 {
+    (void)scalar;
+
+    const uint8_t required = BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE;
     memset(marks, 0, graph->count);
-    for (uint32_t node = graph->count; node-- > 0;)
+    for (uint32_t node = graph->count; node > 0;)
     {
-        marks[node] |= graph->contexts != NULL && (graph->contexts[node] &
-            (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
-        if (marks[node] != 0)
+        bool skipped = false;
+#if BUSTER_HOST_VECTOR
+        if (!BUSTER_SCALAR_PATH(scalar) && graph->contexts != NULL && node >= BUSTER_CHECK_CONTEXT_LANES)
         {
-            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-            for (uint32_t i = 0; i < 3; i += 1)
+            const uint32_t first = node - BUSTER_CHECK_CONTEXT_LANES;
+            const __m512i contexts = _mm512_and_si512(_mm512_loadu_si512(graph->contexts + first), _mm512_set1_epi8((char)required));
+            skipped = _mm512_test_epi8_mask(_mm512_or_si512(contexts, _mm512_loadu_si512(marks + first)), _mm512_set1_epi8(-1)) == 0;
+        }
+#endif
+        if (skipped)
+        {
+            node -= BUSTER_CHECK_CONTEXT_LANES;
+        }
+        else
+        {
+            node -= 1;
+            marks[node] |= graph->contexts != NULL && (graph->contexts[node] & required) != 0;
+            if (marks[node] != 0)
             {
-                if (operands[i] != BUSTER_CHECK_NONE)
+                const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                for (uint32_t i = 0; i < 3; i += 1)
                 {
-                    marks[operands[i]] = 1;
+                    if (operands[i] != BUSTER_CHECK_NONE)
+                    {
+                        marks[operands[i]] = 1;
+                    }
                 }
-            }
-            if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
-            {
-                const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
-                for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+                if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
                 {
-                    marks[graph->argument_nodes[first + i]] = 1;
+                    const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+                    for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+                    {
+                        marks[graph->argument_nodes[first + i]] = 1;
+                    }
                 }
             }
         }
@@ -3131,7 +3219,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
             if (constant_contexts)
             {
-                check_graph_constant_contexts(graph, stream->constant_evaluated);
+                check_graph_constant_contexts(graph, stream->constant_evaluated, BUSTER_SCALAR_PATH(options->scalar));
             }
         }
         if (stream->argument_conversions != 0)
