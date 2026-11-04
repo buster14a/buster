@@ -421,6 +421,59 @@ static void check_test_literal_floating_classify(CheckTest* test)
     check_test_expect(test, mismatches == 0 && cases != 0, "the vector classifier of a table element's bytes equals its scalar twin");
 }
 
+// check_literal_table_classify's masked load against its scalar twin on spellings whose last byte is the last before a
+// PROT_NONE page (#1210's review), so that a read past the spelling faults: 1 to 72 bytes (the vector path up to 64, the
+// twin past it) of decimal and hexadecimal integers, floating literals, splices and '?', each for both formats, with and
+// without splice checks, trigraphs and rounding.
+static void check_test_literal_floating_classify_guarded(CheckTest* test)
+{
+    static const char* const stems[] = {
+        "9",
+        "0x",
+        "0.",
+        "1e",
+        "7\\",
+        "?",
+        "0b",
+        "1'",
+    };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = mapping != MAP_FAILED && page >= 128 && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, guarded, "the classifier's guarded fixture has a protected page");
+    uint32_t mismatches = 0;
+    uint32_t cases = 0;
+    for (uint32_t length = 1; guarded && length <= 72; length += 1)
+    {
+        for (uint32_t stem = 0; stem < BUSTER_ARRAY_LENGTH(stems); stem += 1)
+        {
+            uint8_t* bytes = mapping + page - length;
+            const uint32_t prefix = (uint32_t)strlen(stems[stem]);
+            for (uint32_t i = 0; i < length; i += 1)
+            {
+                bytes[i] = i < prefix ? (uint8_t)stems[stem][i] : (uint8_t)('1' + i % 9);
+            }
+            for (uint32_t flags = 0; flags < 16; flags += 1)
+            {
+                const uint32_t width = (flags & 1) != 0 ? 64 : 32;
+                const bool splices = (flags & 2) != 0;
+                const bool trigraphs = (flags & 4) != 0;
+                const bool round = (flags & 8) != 0;
+                const uint32_t vector = check_literal_table_classify(bytes, length, width, splices, trigraphs, round);
+                const uint32_t scalar = check_literal_table_classify_scalar(bytes, length, width, splices, trigraphs, round);
+                mismatches += vector != scalar;
+                cases += 1;
+            }
+        }
+    }
+    check_test_expect(test, mismatches == 0 && cases == 72 * BUSTER_ARRAY_LENGTH(stems) * 16,
+                      "the vector classifier reads no byte past a spelling that ends at a protected page, and equals its twin there");
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+}
+
 // Elements read in place and through check_input_spelling (check_literal_table_element): numbers with line splices in
 // them, exact and inexact once spliced; numbers from macros; and numbers that ## pastes, whose bytes are clean scratch
 // spellings in a range of their own. Each table against the ordinary path, scalar and vector.
@@ -476,6 +529,7 @@ static void check_test_literal_floating_tables(CheckTest* test, const char* clan
     check_test_literal_floating_integer_spellings(test);
     check_test_literal_floating_radix(test);
     check_test_literal_floating_classify(test);
+    check_test_literal_floating_classify_guarded(test);
     check_test_literal_floating_elements(test);
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
     char source[32768];
