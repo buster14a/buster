@@ -1711,10 +1711,11 @@ static inline __attribute__((always_inline)) void check_graph_store(CheckStream*
 #define BUSTER_CHECK_MARK_DONE 0x02u
 
 // Whether the vector path completes `node` as a leaf (check_graph_leaf): a VALUE without an overload set, about 45% of
-// sqlite3.c's body nodes.
+// sqlite3.c's body nodes. Without overload candidates no leaf has an overload set (check_graph_validate checks the leaves',
+// as check_graph_node_action relies on), and its record isn't read for it.
 static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 {
-    return graph->ops[node] == CHECK_OP_VALUE && check_graph_leaf_of(graph, node)->overload_head == 0;
+    return graph->ops[node] == CHECK_OP_VALUE && (graph->overload_candidate_count == 0 || check_graph_leaf_of(graph, node)->overload_head == 0);
 }
 
 // Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
