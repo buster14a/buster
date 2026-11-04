@@ -749,13 +749,12 @@ seq_cst store, its `xchg` where this is `mov` and `mfence`, the helpers' and
 GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for the
 9700X's measurements. A dynamic or invalid order (which the helper strengthens
 to seq_cst), a scoped family's, a floating object's and an unaligned or wider
-one keep their helper or libatomic's call. The planner reserves an implicit
-object's compare-exchange leaf for a width only where a compound assignment,
-increment or decrement updates such an object (but an integer's addition or
-subtraction: "Direct read/modify/writes", below), and a builtin's width's leaves
-where a builtin takes them; no leaf for a direct load or store, and a leaf for a
-generic form's or a representation's (a floating or another object's builtin)
-that keeps one. The compiler's own `main.c`, every function lowered
+one keep their helper or libatomic's call. The planner reserves no leaf for an
+implicit object's access or update (its update loop's compare-exchange is
+direct: "Direct compare-exchanges", below), and a width's load, store and
+exchange leaves only where a C11 or generic load, store or exchange of a native
+object takes its plan (a generic form's, or a representation's: a floating or
+another object's builtin, that keeps one). The compiler's own `main.c`, every function lowered
 (`--lower-all`), takes 91 atomic accesses directly and keeps 8 helper calls of
 them (its tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the
 unit plans no helper.
@@ -787,18 +786,79 @@ read/modify/writes"), an atomic access no pass moves, merges or drops, and Tier 
 selects the same instructions, the object's width and never its narrow value's
 32-bit register's, as a barrier no load folds past. clang -O0's code is the same
 (`xchg`, `lock xadd`); -O2's has a `lock add` where an addition's result is unused.
-A compare-exchange, the bitwise, minimum, maximum and floating operations, a
-dynamic order, a scoped family's and an implicit update of another operation keep
-their helper or loop. The compiler's own `main.c` calls 3 read/modify/write
-helpers where it called 19 (16 direct; 2 helpers planned where 7 were), and with
-every function lowered 305 where it called 403 (102 direct; 152 planned where 176
-were); SQLite 3.50.4 has none, and its object is unchanged.
+The bitwise, minimum and maximum operations are loops of compare-exchanges
+("Direct fetch loops", below); the floating operations, a dynamic order and a
+scoped family's keep their helper; an implicit update of another operation keeps
+its loop, whose compare-exchange is direct. The compiler's own `main.c` calls 3
+read/modify/write helpers where it called 19 (16 direct; 2 helpers planned where
+7 were), and with every function lowered 305 where it called 403 (102 direct; 152
+planned where 176 were); SQLite 3.50.4 has none, and its object is unchanged.
+
+**Direct compare-exchanges.** `check_program_direct_cas` admits
+`__atomic_compare_exchange_n`, `__c11_atomic_compare_exchange_strong` and
+`_weak`, `__sync_bool_compare_and_swap` and `__sync_val_compare_and_swap`,
+unscoped, without a `__sync` builtin's protected variables, of an integer's, an
+enumeration's or a pointer's object of 1, 2, 4 or 8 bytes, its value's size,
+known aligned to it (a native one, for C11's), of orders the checker knows (any
+of C's for either, `lock cmpxchg` being a full barrier; a `__sync` builtin's is
+seq_cst) whose arguments, and GNU's weak flag, evaluate for no effect. The
+lowering (`check_lower_atomic_cas_direct`) puts the pointer in a temporary, which
+the typed stream's `ATOMIC_CAS` names, and pushes the expected value and the
+desired one, converted to the object's type; `ATOMIC_CAS` of the object's class
+leaves the old value, which is the val form's result and whose equality with the
+expected one (in `int`, for a narrow object's) is the others'. GNU's and C11's
+expected value is where their second argument points: the lowering reads it
+there after evaluating the desired value, as clang does, and writes the old
+value back there only where the exchange failed, as their leaf does. Every
+plan's compare-exchange is direct too (`check_lower_atomic_direct_plan`): a
+generic `__atomic_compare_exchange`'s, a C11 one's of a representation, and the
+loop of an implicit `_Atomic` update that isn't an integer's addition or
+subtraction (`*=`, `<<=`, a floating object's `+=`, a bool's), which so calls
+nothing; its expected buffer takes the old bits whether or not it succeeded, as
+the leaf leaves it. Tier 0 swaps the expected value into `rax` where it isn't
+there, loads the address from its local's home into the stack's first free
+register, and emits `lock cmpxchg` of the object's width, swapping back and
+extending the old value as the class's load does ([the Tier 0
+guide](tier0.md)); the IR keeps it as `rmw ... cas` ([the IR guide](ir.md)'s
+"Atomic read/modify/writes"), and Tier 1 selects `lock cmpxchg` around `rax` the
+same way. A C11 compare-exchange of a floating object (whose bits its leaf
+compares), a dynamic order and a scoped family's keep their helper. The
+compiler's own `main.c` calls 1 read/modify/write helper where it called 3 (18
+direct; 1 helper planned where 2 were), and with every function lowered 281
+where it called 305 (126 direct; 144 planned where 152 were); SQLite 3.50.4 has
+none, and its object is unchanged.
+
+**Direct fetch loops.** `check_program_direct_fetch` admits the bitwise, minimum
+and maximum read/modify/writes, returning the old value or the new one: GNU's
+`__atomic_fetch_and`, `_or`, `_xor`, `_nand`, `_min` and `_max` and their
+`_fetch` forms, the `__sync` ones (clang's `__sync_fetch_and_min`, `_max`,
+`_umin` and `_umax` too) and C11's `__c11_atomic_fetch_and`, `_or`, `_xor`,
+`_nand`, `_min` and `_max`, unscoped, of an integer's or an enumeration's object
+(a bool's for and, or and xor alone, whose bits stay 0 or 1) of 1, 2, 4 or 8
+bytes, its value's size, known aligned to it (a native one, for C11's), of an
+order the checker knows (any of C's; a `__sync` builtin's is seq_cst) whose
+argument evaluates for no effect, its effect's shape its rule's. x86 has no
+instruction that leaves such an operation's old value, so that clang's code is
+a `lock cmpxchg` loop, and so is this one (`check_lower_atomic_fetch_direct`):
+the pointer and the operand converted to the object's type into temporaries, the
+object read by a relaxed atomic `LOAD`, and a loop that computes the new value
+from the old one (in `int` for a narrow object, converted back; nand's and
+complemented; the minimum or the maximum by the value type's ordering, an arm
+of each), runs `ATOMIC_CAS` of the old value and the new one, and goes round
+again, the old value its result, until that result is the old value. Its result
+is the old value or the kept new one. No helper is planned for one, and no new
+typed kind or IR operation is needed. clang's wrapping increment and decrement,
+the floating minimums and maximums, a pointer's, a dynamic order and a scoped
+family's keep their helper. The compiler's own `main.c` calls no
+read/modify/write helper where it called 1 (19 direct; none planned where 1
+was), and with every function lowered 194 where it called 281 (213 direct; 112
+planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
 forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
-`ATOMIC_RMW` and a fence's `FENCE` (but a seq_cst store's own), `helper`: the
+`ATOMIC_RMW` or `ATOMIC_CAS` and a fence's `FENCE` (but a seq_cst store's own), `helper`: the
 lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
 asm statement's alike, and `planned`: helpers emitted) and a line per family

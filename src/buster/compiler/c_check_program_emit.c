@@ -341,6 +341,10 @@ struct CheckTier1Counts
     uint32_t open_frames;
     uint32_t return_tails;
     uint32_t red_zones;
+    // With --verify (#939), whether its code passed the certificate decoded from its records, or was left uncertified
+    // for a shape the decoding doesn't take yet (Tier1EmitResult.code_reason).
+    uint32_t code_certified;
+    uint32_t code_uncertified;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -369,6 +373,8 @@ struct CheckTier1Report
     uint64_t open_frames;
     uint64_t return_tails;
     uint64_t red_zones;
+    uint64_t code_certified;
+    uint64_t code_uncertified;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
@@ -407,7 +413,7 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             const bool access = (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && class >= BUSTER_TYPED_CLASS_I8 &&
                                 class <= BUSTER_TYPED_CLASS_U64 && (function->values[e] & BUSTER_TYPED_ACCESS_ATOMIC) != 0;
             report->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += access;
-            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kind == BUSTER_TYPED_ATOMIC_RMW;
+            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
             report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE && !store;
             store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
         }
@@ -3487,6 +3493,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
         lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
         lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
+        lanes->tier1_report.code_certified += compiled ? counts->code_certified : 0;
+        lanes->tier1_report.code_uncertified += compiled ? counts->code_uncertified : 0;
     }
     if (!valid)
     {

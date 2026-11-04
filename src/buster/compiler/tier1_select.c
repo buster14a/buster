@@ -184,9 +184,13 @@ typedef enum Tier1SelectRule
     // TIER1_RULE_PHI's. Only the CFG consumer takes it.
     TIER1_RULE_VECTOR,
     // An atomic read/modify/write (IR_ATOMIC_RMW, #1059) of the object at the address in values[0], of values[1], by
-    // the operation `immediate` (BUSTER_IR_RMW_EXCHANGE or BUSTER_IR_RMW_ADD): the operand copied to the scratch
-    // register, xchg or lock xadd of it with the object, a full barrier every order takes, and its old value zero-extended
-    // into the destination, as a load's is. Never folded into a consumer, and a barrier no load folds past.
+    // the operation `immediate` (BUSTER_IR_RMW_OPERATION's: an exchange, an addition or a compare-exchange): the operand
+    // copied to the scratch register, xchg or lock xadd of it with the object, a full barrier every order takes, and its
+    // old value zero-extended into the destination, as a load's is; a compare-exchange's, with values[1] the expected
+    // value and values[2] the desired one, rax saved in the scratch register (and an operand in rax read from there),
+    // the expected value moved into rax, lock cmpxchg of the desired one with the object, the old value zero-extended
+    // from rax into the destination, and rax restored where the destination isn't it. Never folded into a consumer, and
+    // a barrier no load folds past.
     TIER1_RULE_ATOMIC_RMW,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
@@ -1025,16 +1029,34 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         break;
     case TIER1_RULE_ATOMIC_RMW:
-    {
-        const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
-        tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
-        const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
-                                  : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
-        tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
-        const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
-        tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        if (holes->immediate == BUSTER_IR_RMW_COMPARE)
+        {
+            const uint8_t scratch = BUSTER_TIER1_SELECT_SCRATCH;
+            const uint8_t address = holes->left == X86_REGISTER_RAX ? scratch : holes->left;
+            const uint8_t expected = holes->right == X86_REGISTER_RAX ? scratch : holes->right;
+            const uint8_t desired = holes->third == X86_REGISTER_RAX ? scratch : holes->third;
+            tier1_select_append(&result, tier1_select_move(8, scratch, X86_REGISTER_RAX));
+            tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RAX, expected));
+            const uint32_t form = width == 1 ? X86_FORM_LOCK_CMPXCHG_M8_R8 : width == 2 ? X86_FORM_LOCK_CMPXCHG_M16_R16 : width == 8 ? X86_FORM_LOCK_CMPXCHG_M64_R64 : X86_FORM_LOCK_CMPXCHG_M32_R32;
+            tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = desired, .rm = address, .mode = BUSTER_X86_MEMORY_BASE });
+            const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+            tier1_select_append(&result, tier1_select_register_record(extension, destination, X86_REGISTER_RAX));
+            if (destination != X86_REGISTER_RAX)
+            {
+                tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RAX, scratch));
+            }
+        }
+        else
+        {
+            const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+            const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
+                                      : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+            tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
+            const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+            tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        }
         break;
-    }
     case TIER1_RULE_PHI:
         break;
     case TIER1_RULE_ALLOCA:
@@ -1755,9 +1777,18 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
     // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
-    // an atomic read/modify/write.
+    // an atomic read/modify/write. These are the nodes with an effect, which the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
            (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+}
+
+// Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
+// doesn't carry a C access's volatility, so that an IR load without BUSTER_IR_VOLATILE may still be a volatile object's,
+// and two volatile reads must keep their order. A load still folds into its own consumer (tier1_select_load_folds:
+// the last of these before the consumer the load itself), but past no other load.
+static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
+{
+    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD;
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -1769,11 +1800,11 @@ static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t co
     for (uint32_t node = 0; node < count; node += 1)
     {
         barriers[node] = barrier;
-        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
+        barrier = tier1_select_fold_barrier(function, node) ? node + 1 : barrier;
     }
 }
 
-// The same, 16 nodes at a time: their kinds and flags compared at once, each barrier's lane its position plus one, the
+// The same, 16 nodes at a time: their kinds compared at once, each barrier's lane its position plus one, the
 // running maximum by four shifts of the lanes and the vectors' before, and each node's entry its lane before's. The
 // columns are read, and the entries written, with masked loads and stores.
 static void tier1_select_barriers(const IrFunction* function, uint32_t count, uint32_t* barriers)
@@ -1786,12 +1817,10 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const uint32_t left = count - first;
         const __mmask16 active = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
         const __m512i op = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->op + first));
-        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
-        const __mmask16 observable_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_OBSERVABLE));
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | observable_load) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -2387,12 +2416,14 @@ static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t pa
     return value != BUSTER_IR_NONE && value < parent && forest->uses[value] == 1 && forest->blocks[value] == forest->blocks[parent];
 }
 
-// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory,
-// call nor access a volatile object (no barrier between them), and itself not volatile.
+// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory, call,
+// fence nor load (no barrier between them: the last before the consumer the load itself, a barrier of its own), and itself
+// neither volatile nor atomic.
 static inline __attribute__((always_inline)) bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
 {
     const IrFunction* function = forest->function;
-    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load;
+    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) &&
+           forest->barriers[consumer] <= load + 1;
 }
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
@@ -3588,7 +3619,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)tier1_select_memory_width(type);
         base.values[0] = a;
         base.values[1] = b;
-        base.immediate = c;
+        base.immediate = function->flags[node] & BUSTER_IR_RMW_OPERATION;
+        base.values[2] = base.immediate == BUSTER_IR_RMW_COMPARE ? c : BUSTER_IR_NONE;
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }

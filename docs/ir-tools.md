@@ -41,8 +41,9 @@ is `lifetime.void $N start` or `lifetime.void $N end` (#177), and a fence
 `fence.void ORDER` or `fence.void ORDER signal` (#1059: `relaxed`, `consume`,
 `acquire`, `release`, `acq_rel` or `seq_cst`); both interpreters
 take it as reading and writing nothing. An atomic read/modify/write is
-`rmw.iN %ADDRESS, %OPERAND align=N xchg|add ORDER` (#1059, any of the six orders),
-which both interpreters run as one thread does. Both interpreter fronts
+`rmw.iN %ADDRESS, %OPERAND align=N xchg|add ORDER` or a compare-exchange's
+`rmw.iN %ADDRESS, %EXPECTED, %DESIRED align=N cas ORDER` (#1059, any of the six
+orders), which both interpreters run as one thread does. Both interpreter fronts
 execute the [shared dynamic-stack contract](ir.md#dynamic-stack-contract).
 `test-ir-lowering` includes their frame/lifetime, overflow/resource, transformation
 and native-refusal regressions; `test-ir-parse` includes a canonical stack fixture.

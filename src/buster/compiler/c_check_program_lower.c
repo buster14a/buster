@@ -5812,6 +5812,199 @@ static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t nod
     check_lower_operand(writer, node, 0 + 3, false, stream->argument_conversions[first].type);
 }
 
+// A direct atomic compare-exchange (#1059, check_program_direct_cas's `order`), in the typed stream, in its entries'
+// order: the pointer's operand, into a temporary, whose local ATOMIC_CAS names. __sync_bool_compare_and_swap's and
+// __sync_val_compare_and_swap's expected value (their second operand) and desired one, converted to the object's value
+// type, then ATOMIC_CAS of its class, which leaves the old value: the val form's result, and the bool form's whether it
+// is the expected one, which it keeps in a temporary (STORE_LOCAL). __atomic_compare_exchange_n's and C11's expected
+// value is where their second operand points: that pointer and the desired value into temporaries, then, as clang loads
+// it, the expected value read there (kept too), ATOMIC_CAS, its result whether the old value is the expected one, and the
+// old value stored where the pointer points where it isn't, as the leaf stores it, a store a successful exchange makes
+// nowhere. A narrow class's values are compared as I32, the class Tier 0 compares. The result converted to the node's
+// type; GNU's weak flag and the constant orders evaluated for nothing, as a direct fence's. The tasks run in reverse.
+static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t order)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = graph->argument_offsets[node];
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool legacy = id == CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP || id == CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP;
+    const bool boolean = id != CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP;
+    const TypeId object = effect->value_type;
+    const uint8_t class = check_lower_class(writer, object);
+    const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    const TypeId desired_type = stream->argument_conversions[first + 2].type;
+    const TypeId expected_type = stream->argument_conversions[first + 1].type;
+    const uint64_t cas = order | (uint64_t)address << BUSTER_TYPED_CAS_LOCAL_SHIFT;
+    const bool narrow = tier0_class_bytes(class) < 4;
+    // The expected value, kept for the comparison with the old one.
+    const uint32_t kept = boolean ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+    check_lower_convert(writer, boolean ? BUSTER_TYPE_INT : object, check_stream_type(stream, node));
+    if (legacy)
+    {
+        if (boolean)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            if (narrow)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, kept);
+            if (narrow)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+            }
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_ATOMIC_CAS, class, cas);
+        check_lower_convert(writer, desired_type, object);
+        check_lower_operand(writer, node, 2 + 3, false, desired_type);
+        if (boolean)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, kept);
+        }
+        check_lower_convert(writer, expected_type, object);
+        check_lower_operand(writer, node, 1 + 3, false, expected_type);
+    }
+    else
+    {
+        const uint32_t expected = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t desired = check_lower_temporary(writer, class);
+        const uint32_t old = check_lower_temporary(writer, class);
+        const uint32_t success = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
+        const uint32_t end = check_lower_label(writer);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, success);
+        check_lower_mark(writer, end);
+        check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, expected);
+        check_lower_instruction(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, end);
+        check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_I32, success);
+        check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        if (narrow)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, kept);
+        if (narrow)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, old);
+        check_lower_instruction(writer, BUSTER_TYPED_ATOMIC_CAS, class, cas);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, desired);
+        check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, kept);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, expected);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, desired);
+        check_lower_convert(writer, desired_type, object);
+        check_lower_operand(writer, node, 2 + 3, false, desired_type);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, expected);
+        check_lower_operand(writer, node, 1 + 3, false, expected_type);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+    check_lower_operand(writer, node, 0 + 3, false, stream->argument_conversions[first].type);
+}
+
+// A direct atomic bitwise, minimum or maximum read/modify/write (#1059, check_program_direct_fetch's `order`): a loop of
+// the typed stream's ATOMIC_CAS, as clang's code of an atomicrmw x86 has no instruction for, in its entries' order. The
+// pointer's operand into a temporary, whose local ATOMIC_CAS names; the operand's, converted to the object's value type,
+// into another; the object's value read by a relaxed atomic LOAD into a third, the old one. Then the loop: the new value
+// from the old one and the operand (and, or, xor; nand's and complemented; the minimum or the maximum, by the value type's
+// ordering, an arm of each), computed in int for a narrow object as C's promotions do and converted back, and kept for
+// a builtin that returns it; ATOMIC_CAS of the old value and the new one, its result into a fourth temporary; done where
+// that result is the old value (compared in I32 for a narrow class, the class Tier 0 compares), and otherwise the old
+// value is that result and the loop runs again. The result, the old value or the new one, converted to the node's type;
+// the constant order evaluated for nothing, as a direct fence's. The tasks run in reverse.
+static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t order)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = graph->argument_offsets[node];
+    const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(effect->runtime_builtin);
+    const CheckBuiltinAtomicRmwOperation operation = rule->operation;
+    const bool fresh = rule->return_kind == CHECK_BUILTIN_ATOMIC_RMW_NEW_BITS;
+    const TypeId object = effect->value_type;
+    const uint8_t class = check_lower_class(writer, object);
+    const bool narrow = tier0_class_bytes(class) < 4;
+    const TypeId arithmetic = narrow ? BUSTER_TYPE_INT : object;
+    const uint8_t computed = check_lower_class(writer, arithmetic);
+    const TypeId checked = stream->argument_conversions[first + 1].type;
+    const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    const uint32_t operand = check_lower_temporary(writer, class);
+    const uint32_t old = check_lower_temporary(writer, class);
+    const uint32_t seen = check_lower_temporary(writer, class);
+    const uint32_t kept = fresh ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+    const uint32_t loop = check_lower_label(writer);
+    const uint32_t done = check_lower_label(writer);
+    check_lower_convert(writer, object, check_stream_type(stream, node));
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, fresh ? kept : old);
+    check_lower_mark(writer, done);
+    check_lower_instruction(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, loop);
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, old);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, seen);
+    check_lower_instruction(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, done);
+    check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+    if (narrow)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
+    if (narrow)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, seen);
+    check_lower_instruction(writer, BUSTER_TYPED_ATOMIC_CAS, class, order | (uint64_t)address << BUSTER_TYPED_CAS_LOCAL_SHIFT);
+    if (fresh)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, kept);
+    }
+    if (operation == CHECK_BUILTIN_ATOMIC_RMW_MIN || operation == CHECK_BUILTIN_ATOMIC_RMW_MAX)
+    {
+        // The old value where it is the smaller (the larger), and otherwise the operand: two arms of the value's class.
+        const uint32_t other = check_lower_label(writer);
+        const uint32_t chosen = check_lower_label(writer);
+        check_lower_mark(writer, chosen);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, operand);
+        check_lower_mark(writer, other);
+        check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, class, chosen);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
+        check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, other);
+        check_lower_instruction(writer, operation == CHECK_BUILTIN_ATOMIC_RMW_MIN ? BUSTER_TYPED_LT : BUSTER_TYPED_GT, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_convert(writer, object, arithmetic);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, operand);
+        check_lower_convert(writer, object, arithmetic);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
+    }
+    else
+    {
+        const uint8_t kind = operation == CHECK_BUILTIN_ATOMIC_RMW_OR ? BUSTER_TYPED_OR : operation == CHECK_BUILTIN_ATOMIC_RMW_XOR ? BUSTER_TYPED_XOR : BUSTER_TYPED_AND;
+        check_lower_convert(writer, arithmetic, object);
+        if (operation == CHECK_BUILTIN_ATOMIC_RMW_NAND)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_NOT, computed, 0);
+        }
+        check_lower_instruction(writer, kind, computed, 0);
+        check_lower_convert(writer, object, arithmetic);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, operand);
+        check_lower_convert(writer, object, arithmetic);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
+    }
+    // The expected value, the old one.
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
+    check_lower_mark(writer, loop);
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, old);
+    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, BUSTER_TYPED_ACCESS_ATOMIC);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, operand);
+    check_lower_convert(writer, checked, object);
+    check_lower_operand(writer, node, 1 + 3, false, checked);
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+    check_lower_operand(writer, node, 0 + 3, false, stream->argument_conversions[first].type);
+}
+
 static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -9620,6 +9813,13 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const uint32_t access = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX ? check_program_direct_access(program, node, stream->atomics + atomic) : UINT32_MAX;
         const uint32_t rmw = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX && access == UINT32_MAX ? check_program_direct_rmw(program, node, stream->atomics + atomic)
                                                                                                          : UINT32_MAX;
+        // And a compare-exchange, its ATOMIC_CAS, and a bitwise, minimum or maximum one, a loop of it.
+        const uint32_t cas = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX && access == UINT32_MAX && rmw == UINT32_MAX
+                                 ? check_program_direct_cas(program, node, stream->atomics + atomic)
+                                 : UINT32_MAX;
+        const uint32_t fetch = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX && access == UINT32_MAX && rmw == UINT32_MAX && cas == UINT32_MAX
+                                   ? check_program_direct_fetch(program, node, stream->atomics + atomic)
+                                   : UINT32_MAX;
         if (fence != UINT32_MAX)
         {
             check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, fence);
@@ -9631,6 +9831,14 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else if (rmw != UINT32_MAX)
         {
             check_lower_atomic_rmw_direct(writer, node, stream->atomics + atomic, rmw);
+        }
+        else if (cas != UINT32_MAX)
+        {
+            check_lower_atomic_cas_direct(writer, node, stream->atomics + atomic, cas);
+        }
+        else if (fetch != UINT32_MAX)
+        {
+            check_lower_atomic_fetch_direct(writer, node, stream->atomics + atomic, fetch);
         }
         else if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {

@@ -24,8 +24,11 @@
 // The physical effects of a helper's code are x86_semantics.c's, read from its records (check_program_helper_physical),
 // never a list of this file's. A fence of a constant order lowers to the typed stream's FENCE
 // (check_program_direct_fence), and an aligned atomic load or store of an integer or a pointer, of a constant order, to
-// its LOAD or SET with an atomic marker (check_program_direct_access); neither plans a helper. Every other use keeps its
-// helper (CheckProgramHelpers.uses); --helper-report counts both in the lowered code (check_helper_report_add).
+// its LOAD or SET with an atomic marker (check_program_direct_access), an exchange and an addition to its ATOMIC_RMW
+// (check_program_direct_rmw), a compare-exchange to its ATOMIC_CAS (check_program_direct_cas, and every plan's:
+// check_lower_atomic_direct_plan), and a bitwise, minimum or maximum one to a loop of ATOMIC_CAS
+// (check_program_direct_fetch); none plans a helper. Every other use keeps its helper (CheckProgramHelpers.uses);
+// --helper-report counts both in the lowered code (check_helper_report_add).
 #ifndef BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 
@@ -152,9 +155,13 @@ static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PRO
         .direct = "an exchange (test-and-set's of its byte too), or an addition or a subtraction returning the old value or the new one, GNU's, __sync's "
                   "or C11's, unscoped, of an integer's or an enumeration's object (an exchange's of a pointer's or a bool's too) of 1, 2, 4 or 8 bytes known "
                   "aligned to its size, of a constant order (any: the locked access is a full barrier) evaluated for no effect: the typed stream's ATOMIC_RMW, "
-                  "xchg or lock xadd",
-        .helper = "every other read/modify/write of 1, 2, 4 or 8 bytes aligned to its size (a compare-exchange, the bitwise, minimum, maximum and floating "
-                  "operations, a dynamic order, a scoped family's), of integer, bool or GNU's float and double formats",
+                  "xchg or lock xadd; a compare-exchange, GNU's, __sync's or C11's, so admitted (of an integer's, an enumeration's or a pointer's object, its "
+                  "orders both constant), and every plan's (a generic one's, an implicit _Atomic object's update loop, a C11 one's of a representation): the "
+                  "typed stream's ATOMIC_CAS, lock cmpxchg; and a bitwise, minimum or maximum one, GNU's, __sync's or C11's, so admitted (of an integer's or "
+                  "an enumeration's object, a bool's for and, or and xor): a loop of ATOMIC_CAS after a relaxed atomic load",
+        .helper = "every other read/modify/write of 1, 2, 4 or 8 bytes aligned to its size (the floating operations, clang's wrapping increment and "
+                  "decrement, a C11 compare-exchange of a floating object, a dynamic order, a scoped family's), of integer, bool or GNU's float and double "
+                  "formats",
     },
     [CHECK_PROGRAM_HELPER_FENCE] = {
         .name = "fence",
@@ -462,6 +469,92 @@ static uint32_t check_program_direct_rmw(const CheckProgram* program, uint32_t n
     return value;
 }
 
+// An atomic compare-exchange that lowers to the typed stream's ATOMIC_CAS rather than its helper's call (#1059,
+// CHECK_PROGRAM_HELPER_ATOMIC_RMW's direct form): __atomic_compare_exchange_n, C11's compare_exchange_strong and _weak,
+// __sync_bool_compare_and_swap and __sync_val_compare_and_swap, unscoped, without a legacy builtin's protected variables,
+// of an integer's, an enumeration's or a pointer's object of 1, 2, 4 or 8 bytes, its value's size, known aligned to it (a
+// native one, for C11's), of orders the checker knows (any of C's for either: lock cmpxchg is a full barrier; a legacy
+// builtin's, which has none, is seq_cst) whose arguments, and GNU's weak flag, evaluate for no effect; `effect` is the
+// node's. Returns its ATOMIC_CAS order (its success order's), or UINT32_MAX for one its helper takes (a floating object's
+// C11 one too, whose bits its leaf compares). The planner and the lowering ask it alike.
+static uint32_t check_program_direct_cas(const CheckProgram* program, uint32_t node, const CheckBuiltinAtomicEffect* effect)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool c11 = id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK;
+    const bool matched = effect != NULL && effect->node == node && check_builtin_atomic_scope(id) == CHECK_BUILTIN_ATOMIC_SCOPE_NONE;
+    const CheckBuiltinAtomicRmwRule* rule = matched ? check_builtin_atomic_rmw_rule(effect->runtime_builtin) : NULL;
+    const bool compare = rule != NULL && rule->operation == CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE;
+    const uint32_t arguments = graph->argument_counts != NULL ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
+    // C11's has no weak flag: one argument fewer than __atomic_compare_exchange_n's.
+    const uint32_t fixed = compare ? rule->fixed_count - c11 : 0;
+    const uint64_t size = compare ? effect->object_size : 0;
+    const uint8_t kind = compare ? check_action_kind(program->types, effect->value_type) : BUSTER_TYPE_KIND_NONE;
+    const bool typed = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER;
+    const bool sized = (size == 1 || size == 2 || size == 4 || size == 8) && type_size(program->types, effect->value_type) == size;
+    const uint32_t known = BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER | BUSTER_CHECK_BUILTIN_ATOMIC_RMW_KNOWN_FAILURE_ORDER;
+    const bool ordered = compare && (rule->legacy || ((effect->known_orders & known) == known && effect->success_order <= BUSTER_TYPED_FENCE_SEQ_CST &&
+                                                      effect->failure_order <= BUSTER_TYPED_FENCE_SEQ_CST));
+    // Its effect's shape is its rule's, every fixed argument evaluated, as a direct read/modify/write's.
+    const bool shaped = compare && effect->rmw && arguments == fixed && fixed < 32 && effect->evaluated_operands == (UINT32_C(1) << fixed) - 1;
+    uint32_t value = UINT32_MAX;
+    if (shaped && typed && sized && ordered && effect->alignment_known && effect->minimum_alignment >= size && effect->unsupported == 0 &&
+        (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)))
+    {
+        // The arguments past its desired value, GNU's weak flag and the orders, which no code reads.
+        bool quiet = true;
+        for (uint32_t a = 3; a < arguments; a += 1)
+        {
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
+            quiet = quiet && (check_stream_flags(program->stream, argument) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+        }
+        value = quiet ? rule->legacy ? BUSTER_TYPED_FENCE_SEQ_CST : effect->success_order : UINT32_MAX;
+    }
+    return value;
+}
+
+// An atomic bitwise, minimum or maximum read/modify/write that lowers to a compare-exchange loop of the typed stream's
+// ATOMIC_CAS rather than its helper's call (#1059, CHECK_PROGRAM_HELPER_ATOMIC_RMW's direct form): GNU's, __sync's (clang's
+// legacy minimum and maximum too) and C11's and, or, xor and nand (__atomic_fetch_and ... __atomic_nand_fetch, the
+// __sync_ ones, C11's fetch_and, fetch_or, fetch_xor and fetch_nand) and minimum and maximum (__atomic_fetch_min ...
+// __atomic_max_fetch, __sync_fetch_and_min, _max, _umin and _umax, C11's fetch_min and fetch_max), returning the old value
+// or the new one, unscoped, without a legacy builtin's protected variables, of an integer's or an enumeration's object (a
+// bool's of and, or and xor alone, whose bits stay 0 or 1) of 1, 2, 4 or 8 bytes, its value's size, known aligned to it (a
+// native one, for C11's), of an order the checker knows (any of C's: lock cmpxchg is a full barrier; a legacy builtin's,
+// which has none, is seq_cst) whose argument evaluates for no effect, its effect's shape its rule's, as a direct
+// read/modify/write's; `effect` is the node's. Returns its ATOMIC_CAS order, or UINT32_MAX for one its helper takes (a
+// floating object's, a pointer's, clang's wrapping increment and decrement). The planner and the lowering ask it alike.
+static uint32_t check_program_direct_fetch(const CheckProgram* program, uint32_t node, const CheckBuiltinAtomicEffect* effect)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool c11 = check_builtin_atomic_c11(id);
+    const bool matched = effect != NULL && effect->node == node && check_builtin_atomic_scope(id) == CHECK_BUILTIN_ATOMIC_SCOPE_NONE;
+    const CheckBuiltinAtomicRmwRule* rule = matched ? check_builtin_atomic_rmw_rule(effect->runtime_builtin) : NULL;
+    const CheckBuiltinAtomicRmwOperation operation = rule != NULL ? rule->operation : CHECK_BUILTIN_ATOMIC_RMW_NONE;
+    const bool bitwise = operation == CHECK_BUILTIN_ATOMIC_RMW_AND || operation == CHECK_BUILTIN_ATOMIC_RMW_OR || operation == CHECK_BUILTIN_ATOMIC_RMW_XOR;
+    const bool other = operation == CHECK_BUILTIN_ATOMIC_RMW_NAND || operation == CHECK_BUILTIN_ATOMIC_RMW_MIN || operation == CHECK_BUILTIN_ATOMIC_RMW_MAX;
+    const uint32_t arguments = graph->argument_counts != NULL ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
+    const uint64_t size = rule != NULL ? effect->object_size : 0;
+    const uint8_t kind = rule != NULL ? check_action_kind(program->types, effect->value_type) : BUSTER_TYPE_KIND_NONE;
+    const bool boolean = rule != NULL && type_unqualified(effect->value_type) == BUSTER_TYPE_BOOL;
+    const bool typed = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM) && (bitwise || !boolean);
+    const bool sized = (size == 1 || size == 2 || size == 4 || size == 8) && type_size(program->types, effect->value_type) == size;
+    const bool known = rule != NULL && (rule->legacy || ((effect->known_orders & BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER) != 0 &&
+                                                         effect->success_order <= BUSTER_TYPED_FENCE_SEQ_CST));
+    const bool shaped = rule != NULL && effect->rmw && arguments == rule->fixed_count && rule->fixed_count < 32 &&
+                        effect->evaluated_operands == (UINT32_C(1) << rule->fixed_count) - 1;
+    uint32_t value = UINT32_MAX;
+    if ((bitwise || other) && shaped && typed && sized && effect->alignment_known && effect->minimum_alignment >= size && effect->unsupported == 0 && known &&
+        (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)))
+    {
+        const uint32_t order = rule->legacy ? BUSTER_CHECK_NONE : graph->argument_nodes[graph->argument_offsets[node] + arguments - 1];
+        const bool quiet = rule->legacy || (check_stream_flags(program->stream, order) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+        value = quiet ? rule->legacy ? BUSTER_TYPED_FENCE_SEQ_CST : effect->success_order : UINT32_MAX;
+    }
+    return value;
+}
+
 // Whether an implicit _Atomic object's update `node` (#1059) is the typed stream's ATOMIC_RMW, an addition (lock xadd),
 // rather than a compare-exchange's loop: an increment, a decrement, += or -= of an integer's or an enumeration's object
 // (no bool's, whose sum is 0 or 1, not its bits'; `value_type` the object's), its operands computed as integers (C's
@@ -750,46 +843,22 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     {
         result->status = CHECK_PROGRAM_INVALID;
     }
-    // The widths whose leaves are reserved (implicit_widths), all four, for the builtins whose objects take them, and the
-    // compare-exchange alone (update_widths) for an implicit _Atomic object's compound assignment, increment or decrement,
-    // whose loop takes it (check_lower_atomic_emit), but an addition's or a subtraction's of an integer, which is the typed
-    // stream's ATOMIC_RMW (check_program_atomic_update_direct). An implicit object's load and store, and the update's first load, are
-    // the typed stream's own (#1059: check_lower_atomic_direct_plan), with no leaf.
+    // The widths whose leaves are reserved (implicit_widths), a load's, a store's and an exchange's, for the builtins whose
+    // objects take them. An implicit _Atomic object's load, store and update, and every plan's compare-exchange, are the
+    // typed stream's own (#1059: check_lower_atomic_direct_plan), with no leaf.
     uint32_t implicit_widths = 0;
-    uint32_t update_widths = 0;
     uint32_t implicit_node = 0;
-    bool atomic_types = false;
-    for (uint32_t t = 0; valid && program->types != NULL && !atomic_types && t < program->types->types.count; t += 1)
-    {
-        atomic_types = program->types->types.kind[t] == BUSTER_TYPE_KIND_ATOMIC;
-    }
     const CheckGraph* graph = valid ? &program->input->graph : NULL;
-    for (uint32_t n = 0; atomic_types && n < graph->count; n += 1)
-    {
-        const CheckOp op = graph->ops[n];
-        const uint32_t target = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN ? graph->operand0[n] : BUSTER_CHECK_NONE;
-        const CheckValue checked_value = target < graph->count ? check_stream_value(program->stream, target) : (CheckValue){ 0 };
-        const CheckValue* value = &checked_value;
-        const TypeId type = target < graph->count ? type_strip_aligned(program->types, value->type) : 0;
-        if (target < graph->count && value->category == CHECK_LVALUE && type_kind(program->types, type) == BUSTER_TYPE_KIND_ATOMIC &&
-            program->parser != NULL && check_program_token_body(program, graph->tokens[target]) != 0)
-        {
-            const uint64_t bytes = type_size(program->types, type);
-            const TypeId plain = type_conversion_operand(program->types, type);
-            if (check_builtin_atomic_c11_native(program->types, CBUILTIN_C11_ATOMIC_LOAD, plain, bytes, true) && !check_program_atomic_update_direct(program, n, plain))
-            {
-                update_widths |= 1u << (bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3);
-                implicit_node = target;
-            }
-        }
-    }
     for (uint32_t a = 0; valid && a < program->stream->atomic_count; a += 1)
     {
-        // C11's builtins and GNU's generic forms (a scoped family's of them too) use the implicit widths' leaves where their
-        // objects are native ones (check_lower_atomic_prepare).
+        // C11's loads, stores and exchanges and GNU's generic ones (a scoped family's of them too) use the implicit widths'
+        // leaves where their objects are native ones (check_lower_atomic_prepare): their compare-exchanges and updates,
+        // ATOMIC_CAS's, none.
         const CheckBuiltinAtomicEffect* effect = program->stream->atomics + a;
         const CBuiltinId id = check_builtin_atomic_base((CBuiltinId)graph->members[effect->node]);
-        if ((check_builtin_atomic_c11(id) || check_builtin_atomic_generic(id)) && effect->object_type != 0 &&
+        const bool leaf = id == CBUILTIN_C11_ATOMIC_LOAD || id == CBUILTIN_ATOMIC_LOAD || id == CBUILTIN_C11_ATOMIC_STORE || id == CBUILTIN_C11_ATOMIC_INIT ||
+                          id == CBUILTIN_ATOMIC_STORE || id == CBUILTIN_C11_ATOMIC_EXCHANGE || id == CBUILTIN_ATOMIC_EXCHANGE;
+        if (leaf && effect->object_type != 0 &&
             check_program_direct_access(program, effect->node, effect) == UINT32_MAX && check_program_direct_rmw(program, effect->node, effect) == UINT32_MAX &&
             check_builtin_atomic_c11_native(program->types, CBUILTIN_C11_ATOMIC_LOAD, effect->value_type, effect->object_size,
                                             effect->alignment_known && effect->minimum_alignment >= effect->object_size))
@@ -801,7 +870,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     }
     uint32_t keys[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
     // At most a signature per builtin node, and per key.
-    const uint64_t candidates = valid ? (uint64_t)program->builtin_count + (uint32_t)__builtin_popcount(implicit_widths | update_widths) * 4 : 0;
+    const uint64_t candidates = valid ? (uint64_t)program->builtin_count + (uint32_t)__builtin_popcount(implicit_widths) * 3 : 0;
     const uint32_t signatures = candidates < BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES ? (uint32_t)candidates : BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES;
     CheckProgramHelperUse* uses = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelperUse, program->builtin_count) : 0;
     CheckProgramHelper* planned = signatures != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
@@ -810,22 +879,21 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     {
         result->status = CHECK_PROGRAM_RESOURCE;
     }
-    // Ordinary _Atomic expressions have no explicit builtin node. Reserve the existing raw-bit leaves once per
-    // represented width: every one for a builtin's width, the compare-exchange alone for an implicit update's.
-    const CBuiltinId implicit_ids[] = { CBUILTIN_ATOMIC_LOAD_N, CBUILTIN_ATOMIC_STORE_N, CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, CBUILTIN_ATOMIC_EXCHANGE_N };
+    // A plan's load, store and exchange of a builtin (check_lower_atomic_prepare) have no builtin helper of their own.
+    // Reserve the existing raw-bit leaves once per represented width.
+    const CBuiltinId implicit_ids[] = { CBUILTIN_ATOMIC_LOAD_N, CBUILTIN_ATOMIC_STORE_N, CBUILTIN_ATOMIC_EXCHANGE_N };
     for (uint32_t w = 0; result->status == CHECK_PROGRAM_OK && w < 4; w += 1)
     {
         for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(implicit_ids); operation += 1)
         {
             const CBuiltinId id = implicit_ids[operation];
-            const bool compare = operation == 2;
-            const bool rmw = operation >= 2;
-            const bool wanted = (implicit_widths & (1u << w)) != 0 || (compare && (update_widths & (1u << w)) != 0);
+            const bool rmw = operation == 2;
+            const bool wanted = (implicit_widths & (1u << w)) != 0;
             const uint32_t key = check_program_helper_key(id, 1u << w, rmw, CBUILTIN_ATOMIC_RMW_INTEGER_BITS);
             if (wanted && keys[key] == 0)
             {
                 CheckProgramHelper* helper = planned + result->count;
-                const uint32_t count = compare ? 6 : operation == 0 ? 2 : 3;
+                const uint32_t count = operation == 0 ? 2 : 3;
                 *helper = (CheckProgramHelper){
                     .id = id,
                     .bytes = 1u << w,
@@ -838,7 +906,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                 };
                 for (uint32_t p = 0; p < count; p += 1)
                 {
-                    helper->parameter_types[p] = p >= (compare ? 3 : operation == 0 ? 1 : 2) ? BUSTER_TYPE_INT : BUSTER_TYPE_ULONG;
+                    helper->parameter_types[p] = p >= (operation == 0 ? 1 : 2) ? BUSTER_TYPE_INT : BUSTER_TYPE_ULONG;
                 }
                 first_nodes[result->count] = implicit_node;
                 keys[key] = ++result->count;
@@ -1012,6 +1080,12 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         else if (check_program_direct_rmw(program, node, stream->atomics + atomic) != UINT32_MAX)
                         {
                             // The typed stream's ATOMIC_RMW: no helper.
+                            folded = true;
+                        }
+                        else if (check_program_direct_cas(program, node, stream->atomics + atomic) != UINT32_MAX ||
+                                 check_program_direct_fetch(program, node, stream->atomics + atomic) != UINT32_MAX)
+                        {
+                            // The typed stream's ATOMIC_CAS, or a loop of it: no helper.
                             folded = true;
                         }
                         else if (base == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || base == CBUILTIN_ATOMIC_IS_LOCK_FREE || check_builtin_atomic_generic(base))
