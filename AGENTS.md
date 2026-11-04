@@ -237,14 +237,15 @@ import wrapper; do not raise the limits to accommodate module detail.
 
 ## Sharing the 9700X
 
-Agent sessions and CI share the Ryzen 7 9700X. Run **every build, test, benchmark
-and perf run there** through `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`.
-Set `EXCLUSIVE_TITLE` to the session title and `EXCLUSIVE_LINK` to its private
-session, PR or issue link. The runner hooks take the same lock; sessions and CI
-wait alike, with neither taking priority. Hold it **per run, never around a
-series of runs**: CI times out waiting after 10 minutes. Keep PR jobs short.
-Benchmark timings come from this host under that lock, not from cloud runners
-or the owner's desktop. The `cores` queue below does not replace this lock.
+Agent sessions and CI share the Ryzen 7 9700X, `benchpress`. Sessions reach it
+themselves: `tailscale ssh david@benchpress` ([guide](docs/commands/benchpress.md)).
+Run **every build, test, benchmark and perf run there** through
+`EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`, with
+`EXCLUSIVE_TITLE` (session title) and `EXCLUSIVE_LINK` (session, PR or issue).
+The runner hooks take the same lock; sessions and CI wait alike. Hold it **per
+run, never around a series of runs**: CI times out waiting after 10 minutes.
+Keep PR jobs short. Benchmark timings come from this host under that lock, not
+cloud runners or the owner's desktop. The `cores` queue doesn't replace it.
 
 Read [CI and benchmark selection](docs/commands/ci.md) before changing gates,
 suite inventory, benchmark steps or harness pins; it retains the full hosted

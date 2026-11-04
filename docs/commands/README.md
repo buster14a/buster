@@ -29,6 +29,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-checker-asm` | `c_check_program_asm.c` | [checker-asm](checker-asm.md) |
 | `test-checker-corpus` | `c_check_corpus.c` | [checker-corpus](checker-corpus.md) |
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |
+| benchpress (the 9700X) over the tailnet | `.claude/hooks/join-tailnet.sh` | [benchpress](benchpress.md) |
 | `correctness.tests / CI selection` | `tools/ci/correctness.tests` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite` | `c_testsuite.c` | [c-testsuite](c-testsuite.md) |
