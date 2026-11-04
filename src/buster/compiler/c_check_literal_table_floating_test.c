@@ -308,10 +308,64 @@ static void check_test_literal_floating_tails(CheckTest* test, bool wide)
     arena_release(&scratch);
 }
 
+// The radix-aware early conversion end to end (#1210's review): 129-element tables whose elements 63 and 64 (either side
+// of the converted bitset's first word) and last are hexadecimal, octal, binary or long decimal integers at their
+// format's exact boundary or one past it. Exact ones publish the ordinary path's bytes, scalar and vector
+// (check_test_literal_table_case); one inexact anywhere refuses the whole table.
+static void check_test_literal_floating_radix(CheckTest* test)
+{
+    typedef struct RadixCase RadixCase;
+    struct RadixCase
+    {
+        const char* type;
+        const char* early;
+        const char* late;
+        bool compact;
+    };
+    static const RadixCase cases[] = {
+        { "float", "0xffffff", "077777777", true },
+        { "float", "077777777", "0b111111111111111111111111", true },
+        { "float", "16777216", "0x1000000", true },
+        { "float", "16777216", "0x1000001", false },
+        { "float", "0xffffff", "0100000001", false },
+        { "float", "077777777", "0b1000000000000000000000001", false },
+        { "float", "0x1000001", "1.5f", false },
+        { "double", "0xfffffffffffff", "077777777777777777", true },
+        { "double", "9007199254740992ULL", "0x20000000000000", true },
+        { "double", "0xfffffffffffff", "0x20000000000001", false },
+        { "double", "077777777777777777", "0400000000000000001", false },
+        { "double", "-9007199254740993LL", "0.5", false },
+    };
+    static const char* const fill[] = {
+        "1.5",
+        "-2",
+        "0.25f",
+        "7",
+        "-0x10",
+    };
+    char source[8192];
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        int used = snprintf(source, sizeof(source), "%s table[] = {", cases[c].type);
+        for (uint32_t i = 0; i < 129 && used > 0 && (uint64_t)used < sizeof(source); i += 1)
+        {
+            const char* element = i == 128 ? cases[c].late : i == 63 || i == 64 ? cases[c].early : fill[i % BUSTER_ARRAY_LENGTH(fill)];
+            used += snprintf(source + used, sizeof(source) - (uint64_t)used, "%s%s", element, i < 128 ? "," : "};\n");
+        }
+        const bool made = used > 0 && (uint64_t)used < sizeof(source);
+        check_test_expect(test, made, "radix boundary table source fits");
+        if (made)
+        {
+            check_test_literal_table_case(test, source, cases[c].compact, false);
+        }
+    }
+}
+
 static void check_test_literal_floating_tables(CheckTest* test, const char* clang)
 {
     check_test_literal_floating_values(test);
     check_test_literal_floating_integer_spellings(test);
+    check_test_literal_floating_radix(test);
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
     char source[32768];
     char table[8192];
