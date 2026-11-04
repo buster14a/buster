@@ -745,8 +745,6 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
-    bool lean;
-    uint64_t lean_nodes;
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
@@ -814,10 +812,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bits 128, 256 and 512 leave out the vector
-    // path's leaf path, its wrappers' and truth tests' path and its fragments' path; bit 1024 takes 3828a06c's lean steps
-    // (c_check_program_lean.c, `lean`), which leave out all three.
-    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -10295,7 +10289,6 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 
 #include "c_check_program_batch.c"
 #include "c_check_program_templates.c"
-#include "c_check_program_lean.c"
 
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
@@ -10384,32 +10377,19 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
 {
     uint64_t expression_nodes = 0;
-    uint64_t lean_nodes = 0;
-    const bool lean = !sources && !bit_ints && !templates && writer->lean;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTaskPacked* task = writer->tasks + --writer->depth;
         // The x86 host word has node bytes 0..3, kind 4, flags 5 and instruction class 6.
         const uint8_t* control = (const uint8_t*)&task->control;
-        uint8_t flags = control[5];
+        const uint8_t flags = control[5];
         const CheckLowerTaskKind kind = (CheckLowerTaskKind)control[4];
-        uint32_t node = (uint32_t)task->control;
+        const uint32_t node = (uint32_t)task->control;
         const TypeId type = (uint32_t)task->payload;
         const uint64_t value = task->payload;
         if (sources)
         {
             check_lower_task_source(writer, check_lower_task_unpack(*task));
-        }
-        uint32_t step = BUSTER_CHECK_LOWER_LEAN_NONE;
-        if (lean && kind == CHECK_LOWER_EXPRESSION)
-        {
-            step = check_lower_lean_step(writer, node, flags, &node, &flags);
-            while (step == BUSTER_CHECK_LOWER_LEAN_NEXT && writer->output->status == CHECK_PROGRAM_OK)
-            {
-                lean_nodes += 1;
-                step = check_lower_lean_step(writer, node, flags, &node, &flags);
-            }
-            lean_nodes += step != BUSTER_CHECK_LOWER_LEAN_NONE;
         }
         // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
@@ -10419,20 +10399,15 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             {
                 // A closed subtree of #1048's node templates: its entries copied from the body's pass (c_check_program_templates.c).
             }
-            else if (kind == CHECK_LOWER_EXPRESSION && step != BUSTER_CHECK_LOWER_LEAN_NONE)
-            {
-                // The lean steps took the node and the ones they continued with.
-            }
             else if (kind == CHECK_LOWER_EXPRESSION)
             {
                 // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
                 // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const uint32_t experiment = writer->experiment | (lean ? 896u : 0u);
-                const bool simple = !value_node && (experiment & 128) == 0 && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
+                const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
                                     check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
-                const bool plain = !value_node && !simple && (experiment & 256) == 0 && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && !simple && (experiment & 512) == 0 && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
+                const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
                                      check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
@@ -10534,8 +10509,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             check_lower_complex_task(writer, check_lower_task_unpack(*task));
         }
     }
-    writer->expression_nodes += expression_nodes + lean_nodes;
-    writer->lean_nodes += lean_nodes;
+    writer->expression_nodes += expression_nodes;
 }
 
 static void check_lower_drain(CheckLowerWriter* writer)
@@ -12558,11 +12532,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
-    writer->lean = (writer->experiment & 1024) != 0 && !sources && !writer->scalar && program->stream != NULL && program->stream->dense_values == NULL &&
-                   program->stream->value_types != NULL && program->stream->payload_rows != NULL;
-    writer->lean_nodes = 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
