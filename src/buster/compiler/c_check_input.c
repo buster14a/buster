@@ -5243,7 +5243,10 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
         input->resource |= grown == NULL;
         if (grown != NULL)
         {
-            memcpy(grown, input->marked_members, (uint64_t)input->marked_member_count * sizeof(*grown));
+            if (input->marked_member_count != 0)
+            {
+                memcpy(grown, input->marked_members, (uint64_t)input->marked_member_count * sizeof(*grown));
+            }
             input->marked_members = grown;
             input->marked_member_capacity = capacity;
         }
