@@ -732,9 +732,10 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
     {
         const uint64_t input_mark = test->input.length;
         const uint32_t parameters = shape == 0 ? 3 : 7;
-        const uint32_t second = shape == 0 ? 2 : 6;
+        const uint32_t second = 2;
+        const uint32_t second_argument = shape == 0 ? 2 : 6;
         const bool cfg = shape == 2;
-        const IrSizes sizes = { .instruction_count = parameters + 15 + cfg, .block_count = cfg ? 2 : 1, .parameter_count = parameters };
+        const IrSizes sizes = { .instruction_count = 18 + cfg, .block_count = cfg ? 2 : 1, .parameter_count = parameters };
         IrFunction function;
         const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
         tier1_emit_test_expect(test, created, "create shared signed parameter regression");
@@ -744,9 +745,12 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
             for (uint32_t p = 0; p < parameters; p += 1)
             {
                 function.parameter_types[p] = IR_I32;
-                tier1_select_test_node(&function, p, IR_PARAM, IR_I32, p, BUSTER_IR_NONE, BUSTER_IR_NONE);
             }
-            uint32_t next = parameters;
+            for (uint32_t p = 0; p < 3; p += 1)
+            {
+                tier1_select_test_node(&function, p, IR_PARAM, IR_I32, p == second ? second_argument : p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            uint32_t next = 3;
             if (cfg)
             {
                 tier1_select_test_node(&function, next++, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -806,10 +810,8 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                                     (unsigned)error, failed, (unsigned)diagnostic.cause, diagnostic.error);
                             if (error == TIER1_EMIT_CERTIFICATE)
                             {
-                                Tier1EmitOptions inspected = options;
-                                inspected.certify = false;
                                 Tier1EmitResult raw;
-                                if (tier1_emit_function(&plan, &inspected, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
+                                if (tier1_emit_cfg_function(&plan, &options, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
                                 {
                                     Tier1CertReport report = { 0 };
                                     Tier1CertEmittedStats stats = { 0 };
