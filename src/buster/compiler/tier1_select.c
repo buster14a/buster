@@ -2547,7 +2547,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             }
         }
     }
-    tier1_select_sign_requests(function, canonical, vector);
+    tier1_select_sign_requests(function, known, canonical, vector);
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
     {
         bool changed = false;
@@ -4163,7 +4163,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, projected);
         }
         // A bounded signed offset can be computed at 64 bits directly. Every skipped I32 add/sub must be proven not
-        // to overflow; the remaining base must be nonnegative with physically zero upper bits, including after spills.
+        // to overflow; the remaining base must have a physical signed-64 representation, including after spills.
         // This covers Lua's signed instruction fields: sext64((masked_i32 - bias) + 1), without assuming I32 wrapping
         // arithmetic in general is a 64-bit address expression. Eight signed imm32 additions cannot overflow int64_t.
         if (op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && base.rule == TIER1_RULE_SIGN_EXTEND && forest->known_bits != 0 && forest->canonical != 0)
@@ -4195,7 +4195,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 tier1_select_fold(forest, node, constant, &affine);
                 value = input;
             }
-            if (value != a && function->type[value] == IR_I32 && (forest->known_bits[value] & 255) < 32 && (forest->canonical[value] & BUSTER_TIER1_STORAGE_ZERO) != 0 && addend == (int64_t)(int32_t)addend)
+            if (value != a && function->type[value] == IR_I32 && (forest->canonical[value] & BUSTER_TIER1_STORAGE_SIGN) != 0 && addend == (int64_t)(int32_t)addend)
             {
                 affine.rule = addend == 0 ? TIER1_RULE_COPY : TIER1_RULE_LEA_ADD;
                 affine.width = 8;
@@ -4205,6 +4205,84 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 affine.displacement = (int32_t)addend;
                 affine.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, affine);
+            }
+            // Two bounded signed fields add without I32 overflow. Their actual sign-preserving storage lets one
+            // 64-bit LEA compute the sum and the walked constants, without materializing a narrowed intermediate.
+            if (function->op[value] == IR_ADD && tier1_select_tree_child(forest, node, value) && addend == (int64_t)(int32_t)addend)
+            {
+                const uint32_t left = function->a[value];
+                const uint32_t right = function->b[value];
+                if ((forest->known_bits[left] >> 8) < 32 && (forest->known_bits[right] >> 8) < 32 &&
+                    (forest->canonical[left] & forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    affine.rule = TIER1_RULE_LEA_ADD;
+                    affine.width = 8;
+                    affine.source_width = 0;
+                    affine.values[0] = left;
+                    affine.values[1] = right;
+                    affine.scale = 0;
+                    affine.displacement = (int32_t)addend;
+                    affine.intrinsic_cost = 1;
+                    tier1_select_fold(forest, node, value, &affine);
+                    tier1_select_add_candidate(forest, node, &candidates, affine);
+                }
+            }
+        }
+        // Sign extension commutes with bitwise operations, NOT and arithmetic right shift. Negation also fits when
+        // its operand needs fewer than 32 signed bits. Each source must already have the full signed representation;
+        // no assumption about an incoming register's upper half or a wrapping I32 addition enters these patterns.
+        if (op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && base.rule == TIER1_RULE_SIGN_EXTEND &&
+            tier1_select_tree_child(forest, node, a) && forest->canonical != 0 && forest->known_bits != 0)
+        {
+            const uint32_t operation = function->op[a];
+            const uint32_t left = function->a[a];
+            const uint32_t right = function->b[a];
+            const bool sign_left = left < function->instruction_count && function->type[left] == IR_I32 && (forest->canonical[left] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+            Tier1SelectPattern folded = base;
+            folded.width = 8;
+            folded.source_width = 0;
+            folded.values[0] = left;
+            folded.values[1] = BUSTER_IR_NONE;
+            folded.operation = (uint8_t)tier1_select_operation(operation);
+            folded.intrinsic_cost = 2;
+            uint32_t constant = BUSTER_IR_NONE;
+            bool supported = false;
+            if (sign_left && (operation == IR_NOT || (operation == IR_NEG && (forest->known_bits[left] >> 8) < 32)))
+            {
+                folded.rule = TIER1_RULE_UNARY;
+                supported = true;
+            }
+            else if (sign_left && operation == IR_ASHR && right < function->instruction_count && function->op[right] == IR_CONST && function->constants[function->a[right]].low < 32)
+            {
+                folded.immediate = function->constants[function->a[right]].low;
+                folded.rule = folded.immediate == 0 ? TIER1_RULE_COPY : TIER1_RULE_IMMEDIATE;
+                constant = right;
+                supported = true;
+            }
+            else if (operation == IR_AND || operation == IR_OR || operation == IR_XOR)
+            {
+                const uint32_t other = function->op[right] == IR_CONST ? left : right;
+                constant = function->op[right] == IR_CONST ? right : function->op[left] == IR_CONST ? left : BUSTER_IR_NONE;
+                if (constant != BUSTER_IR_NONE && (forest->canonical[other] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_IMMEDIATE;
+                    folded.values[0] = other;
+                    folded.immediate = (uint64_t)(int64_t)(int32_t)function->constants[function->a[constant]].low;
+                    supported = true;
+                }
+                else if (sign_left && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_REGISTER;
+                    folded.values[1] = right;
+                    folded.intrinsic_cost = 3;
+                    supported = true;
+                }
+            }
+            if (supported)
+            {
+                tier1_select_fold(forest, node, a, &folded);
+                tier1_select_fold(forest, node, constant, &folded);
+                tier1_select_add_candidate(forest, node, &candidates, folded);
             }
         }
         // Signed widening is transitive: sext64(sext32(i8)) needs only the final extension. Following single-use

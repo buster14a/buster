@@ -2601,14 +2601,14 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 tier1_select_known_bits(&function, 0, 0, 0, known, path != 0);
-                tier1_select_sign_requests(&function, storage, path != 0);
+                tier1_select_sign_requests(&function, known, storage, path != 0);
                 IrFunction scan = function;
                 scan.block_count = 2;
                 tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded type tails admit no induction certificate without a phi");
                 scan.op = type;
                 scan.type = void_types;
-                tier1_select_sign_requests(&scan, storage, path != 0);
+                tier1_select_sign_requests(&scan, known, storage, path != 0);
                 tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded opcode tails admit no induction certificate without an integer phi");
                 for (uint32_t n = 0; n < count; n += 1)

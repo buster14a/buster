@@ -380,7 +380,8 @@ to `I32` can leave a register untouched, so their proofs account for that.
 The same byte can instead certify a sign-preserving `I32` representation:
 all 64 register bits equal its signed value. A real signed-widening consumer
 requests it from an ordinary `I32` load or a byte/word sign extension to `I32`,
-through at most eight copies. The defining load or extension writes 64 bits
+through a worklist of at most eight nodes: copies, selects, small phis and
+the admitted expression patterns below. The defining load or extension writes 64 bits
 once, preserving its exact memory width. Later signed widening is a copy;
 unsigned widening still clears the upper half. Copies, selects and phis
 propagate only proven representations, and a nonnegative value makes the two
@@ -403,9 +404,18 @@ the memory instruction itself discards the unwanted upper bits, preserving
 the same address, byte count and observable access.
 For a signed 32-bit offset followed by extension to 64 bits, selection can
 combine a single-use chain of constant additions/subtractions into one 64-bit
-`lea`. Every intermediate operation must be proven nonoverflowing and the
-remaining base must have a zero sign bit and canonical storage. An unbounded
+`lea`. Two signed fields that each fit fewer than 32 signed bits also add
+without I32 overflow; their sum and walked constants can use one 64-bit `lea`.
+Every intermediate operation must be proven nonoverflowing and the remaining
+operands must have physical sign-preserving storage, including nonnegative
+canonical values. An unbounded
 32-bit subtraction retains its extension and wrapping semantics.
+For a single-use expression followed by signed widening, bitwise operations,
+NOT and constant arithmetic right shift commute with sign extension when the
+inputs already have that representation. Negation also does so when its input
+needs fewer than 32 signed bits. The native expression matrix checks negative
+fields and constants, full-width signed loads, poisoned ABI bits, and wrapping
+addition/negation controls that must retain their extensions.
 
 The bounds occupy two scratch bytes per node and the storage certificate one.
 The independent range seeds are classified in 32-node SIMD batches with masked

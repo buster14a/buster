@@ -272,3 +272,111 @@ static void tier1_storage_phi_tests(Tier1EmitTest* test)
     }
     arena_pop_to(&test->input, input_mark);
 }
+
+static void tier1_storage_expression_tests(Tier1EmitTest* test)
+{
+    const uint32_t samples[] = { 0, 1, 127, 32767, 32768, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX };
+    uint64_t random = UINT64_C(0x1219ab8071e5c034);
+    for (uint32_t shape = 0; shape < 18; shape += 1)
+    {
+        const bool full_load = shape >= 14;
+        const bool unbounded = shape == 1 || shape == 3 || shape == 13;
+        const bool negate = shape == 2 || shape == 3;
+        const bool invert = shape == 4 || shape == 15;
+        const bool shift = shape == 5 || shape == 14;
+        const bool immediate = shift || (shape >= 6 && shape <= 8) || shape == 12 || shape == 13 || shape == 16;
+        const bool signed_right = (shape >= 9 && shape <= 11) || shape == 17;
+        const uint32_t op = negate ? IR_NEG : invert ? IR_NOT : shift ? IR_ASHR : shape == 6 || shape == 10 ? IR_AND : shape == 7 || shape == 11 ? IR_OR :
+                            shape == 8 || shape == 9 || shape == 16 || shape == 17 ? IR_XOR : IR_ADD;
+        const uint32_t constant = shift ? (full_load ? 31 : 3) : shape == 12 || shape == 13 ? UINT32_MAX - 2 : UINT32_C(0x8000ffff);
+        const uint32_t expected_rule = unbounded ? TIER1_RULE_SIGN_EXTEND : negate || invert ? TIER1_RULE_UNARY : immediate ? (op == IR_ADD ? TIER1_RULE_LEA_ADD : TIER1_RULE_IMMEDIATE) :
+                                       op == IR_ADD ? TIER1_RULE_LEA_ADD : TIER1_RULE_REGISTER;
+        const uint64_t input_mark = test->input.length;
+        const IrSizes sizes = { .instruction_count = 9, .block_count = 1, .constant_count = 1, .parameter_count = 2 };
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create widened expression regression");
+        if (created)
+        {
+            function.parameter_types[0] = full_load ? IR_PTR : IR_I32;
+            function.parameter_types[1] = IR_I32;
+            function.result_type = IR_I64;
+            function.block_offsets[1] = 9;
+            function.constants[0].low = constant;
+            tier1_select_test_node(&function, 0, IR_PARAM, function.parameter_types[0], 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, full_load ? IR_LOAD : IR_TRUNC, full_load ? IR_I32 : IR_I16, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.alignment_log2[2] = full_load ? 2 : 0;
+            tier1_select_test_node(&function, 3, full_load ? IR_COPY : IR_SEXT, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, IR_TRUNC, IR_I16, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 5, immediate ? IR_CONST : signed_right ? IR_SEXT : IR_ZEXT, IR_I32, immediate ? 0 : 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, (uint8_t)op, IR_I32, unbounded ? 0 : 3, negate || invert ? BUSTER_IR_NONE : unbounded && !immediate ? 1 : 5, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 7, IR_SEXT, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                {
+                    const uint64_t output_mark = test->output.length;
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, path != 0, &plan, &failed);
+                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "widened expression selects");
+                    if (selected == TIER1_SELECT_OK)
+                    {
+                        tier1_emit_test_expect(test, plan.patterns[7].rule == expected_rule && plan.covered[6] == !unbounded,
+                                               "only a complete representation and overflow proof widens the expression");
+                        const Tier1EmitOptions options = {
+                            .certify = true,
+                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                            .vector = path != 0,
+                            .rematerialize = pressure != 0,
+                        };
+                        Tier1EmitResult emitted;
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "widened expression allocates and emits");
+                        if (error == TIER1_EMIT_OK)
+                        {
+                            void* executable = MAP_FAILED;
+                            uint64_t bytes = 0;
+                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            {
+                                for (uint32_t sample = 0; sample < 128; sample += 1)
+                                {
+                                    const uint32_t a = sample < 64 ? samples[sample / 8] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t b = sample < 64 ? samples[sample % 8] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t left = full_load || unbounded ? a : (uint32_t)(int32_t)(int16_t)a;
+                                    const uint32_t right = immediate ? constant : unbounded ? b : signed_right ? (uint32_t)(int32_t)(int16_t)b : (uint16_t)b;
+                                    uint32_t result = 0;
+                                    switch (op)
+                                    {
+                                    case IR_ADD: result = left + right; break;
+                                    case IR_NEG: result = 0u - left; break;
+                                    case IR_NOT: result = ~left; break;
+                                    case IR_AND: result = left & right; break;
+                                    case IR_OR: result = left | right; break;
+                                    case IR_XOR: result = left ^ right; break;
+                                    case IR_ASHR:
+                                        result = left >> right;
+                                        result |= (left & UINT32_C(0x80000000)) != 0 ? UINT32_MAX << (32 - right) : 0;
+                                        break;
+                                    }
+                                    const uint64_t expected = (uint64_t)(int64_t)(int32_t)result;
+                                    const uint64_t first = full_load ? (uint64_t)(uintptr_t)&a : UINT64_C(0xa55a870000000000) | a;
+                                    const uint64_t actual = tier1_emit_test_call(executable, first, UINT64_C(0xf17e200000000000) | b);
+                                    tier1_emit_test_expect(test, actual == expected, "widened fields, shifts and bitwise operations preserve exact signed bits and unbounded I32 wrapping");
+                                }
+                            }
+                            if (executable != MAP_FAILED)
+                            {
+                                munmap(executable, bytes);
+                            }
+                        }
+                    }
+                    arena_pop_to(&test->output, output_mark);
+                }
+            }
+        }
+        arena_pop_to(&test->input, input_mark);
+    }
+}
