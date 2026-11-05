@@ -624,6 +624,7 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
     {
         const CheckDriverDefaultWarningFixture* fixture = check_driver_default_warning_fixtures + f;
         const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
+        bool mismatch_printed = false;
         check_test_expect(test, written, "original default-warning fixture is written");
         for (uint32_t policy = 0; written && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
         {
@@ -671,7 +672,14 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
                         const int status = check_test_driver_spawn(arguments, &actual);
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
                                  fixture->name, policy, mode, lanes[lane], scalar != 0 ? "scalar" : "vector");
-                        check_test_expect(test, status == oracle && actual != NULL && strcmp(actual, expected) == 0, description);
+                        const bool same = status == oracle && actual != NULL && strcmp(actual, expected) == 0;
+                        check_test_expect(test, same, description);
+                        if (!same && !mismatch_printed)
+                        {
+                            fprintf(stderr, "%s: status %d (clang %d)\nBuster:\n%s\nClang:\n%s\n", description,
+                                    status, oracle, actual != NULL ? actual : "<no output>\n", expected);
+                            mismatch_printed = true;
+                        }
                         if (preserve)
                         {
                             FILE* retained = fopen(objects[scalar], "rb");
