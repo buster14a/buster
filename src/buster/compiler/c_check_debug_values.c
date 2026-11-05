@@ -98,6 +98,7 @@ struct CheckDebugValues
     TypeId* types;
     uint32_t type_count;
     uint32_t* enum_definitions;
+    uint32_t* enum_owners;
     uint32_t* local_ids;
     uint32_t* scopes;
     const uint32_t* ends;
@@ -269,6 +270,10 @@ static void check_debug_value_type(CheckDebugValues* values, TypeId type)
             }
             for (uint32_t e = low; e < input->enum_value_count && input->enum_values[e].token < definition.close; e += 1)
             {
+                if (values->enum_owners[e] != values->enum_definitions[index])
+                {
+                    continue;
+                }
                 const CheckInputEnumValue enumerator = input->enum_values[e];
                 // The checker keeps narrow signed constants as masked bits, not sign-extended host integers.
                 // Reuse its conversion rules before choosing SLEB128 or a wide constant's 16-byte representation.
@@ -542,13 +547,14 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.type_offsets = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : NULL;
     values.types = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, room) : NULL;
     values.enum_definitions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, table->types.count);
+    values.enum_owners = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->enum_value_count + 1);
     values.local_ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.scopes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
     // Reuse the bounded statement-end derivation without changing the already checked program's status.
     CheckProgram traversal = *program;
     values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
-    bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.local_ids != NULL && values.scopes != NULL && values.ends != NULL;
+    bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL && values.scopes != NULL && values.ends != NULL;
     if (valid)
     {
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
@@ -563,8 +569,30 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         }
         for (uint32_t e = 0; e < program->input->enum_definition_count; e += 1)
         {
-            values.enum_definitions[type_index(program->input->enum_definitions[e].type)] = e + 1;
+            const CheckInputEnumDefinition definition = program->input->enum_definitions[e];
+            values.enum_definitions[type_index(definition.type)] = e + 1;
+            values.local_ids[definition.open] = e;
         }
+        // Sweep opening braces in source order, which may differ from tag order when an enum's base type
+        // itself defines an enum. The innermost open definition owns each enumerator.
+        uint32_t depth = 0;
+        uint32_t e = 0;
+        for (uint32_t token = 0; token < tokens; token += 1)
+        {
+            while (depth != 0 && program->input->enum_definitions[values.scopes[depth - 1]].close <= token)
+            {
+                depth -= 1;
+            }
+            if (values.local_ids[token] != BUSTER_CHECK_NONE)
+            {
+                values.scopes[depth++] = values.local_ids[token];
+            }
+            if (e < program->input->enum_value_count && program->input->enum_values[e].token == token)
+            {
+                values.enum_owners[e++] = depth != 0 ? values.scopes[depth - 1] + 1 : 0;
+            }
+        }
+        memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
         // This bound grows: visiting a type can append its pointee, parameters, members and qualifier base.
         for (uint32_t t = 0; t < values.type_count; t += 1)
         {
