@@ -67,6 +67,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-lowering, benchmark-lowering-source` | `c_lowering.c` | [lowering](lowering.md) |
 | `measure-lowering-templates` | `c_check_lower_inventory.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
+| micro-architecture campaign (`run.sh`, `uarch test`) | `tools/microarch/run.sh`, `tools/microarch/uarch.c` | [microarch](microarch.md) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
 | `parallel, test-parallel, test-tool` | `parallel.c`, `test_tool.c` | [parallel](parallel.md) |
@@ -138,6 +139,7 @@ The original section titles are retained in their owning guides.
 - [Foreign benchmark](foreign.md#foreign-benchmark).
 - [Foreign corpus test](foreign-corpus.md#foreign-corpus-test).
 - [DCO sign-off tooling](dco.md#dco-sign-off-tooling).
+- [Micro-architecture campaign](microarch.md#micro-architecture-campaign).
 - [Dataflow tests](dataflow.md#dataflow-tests).
 - [Dataflow benchmark](dataflow.md#dataflow-benchmark).
 - [Preprocessor harness tests](preprocessor-fuzz.md#preprocessor-harness-tests).
