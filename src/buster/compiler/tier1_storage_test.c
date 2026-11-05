@@ -295,16 +295,16 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
 {
     const uint32_t samples[] = { 0, 1, 127, 32767, 32768, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX };
     uint64_t random = UINT64_C(0x1219ab8071e5c034);
-    for (uint32_t shape = 0; shape < 18; shape += 1)
+    for (uint32_t shape = 0; shape < 22; shape += 1)
     {
-        const bool full_load = shape >= 14;
-        const bool unbounded = shape == 1 || shape == 3 || shape == 13;
+        const bool full_load = shape >= 14 && shape <= 17;
+        const bool unbounded = shape == 1 || shape == 3 || shape == 13 || shape == 19 || shape == 21;
         const bool negate = shape == 2 || shape == 3;
         const bool invert = shape == 4 || shape == 15;
         const bool shift = shape == 5 || shape == 14;
         const bool immediate = shift || (shape >= 6 && shape <= 8) || shape == 12 || shape == 13 || shape == 16;
-        const bool signed_right = (shape >= 9 && shape <= 11) || shape == 17;
-        const uint32_t op = negate ? IR_NEG : invert ? IR_NOT : shift ? IR_ASHR : shape == 6 || shape == 10 ? IR_AND : shape == 7 || shape == 11 ? IR_OR :
+        const bool signed_right = (shape >= 9 && shape <= 11) || shape == 17 || shape == 18 || shape == 20;
+        const uint32_t op = shape >= 20 ? IR_MUL : shape >= 18 ? IR_SUB : negate ? IR_NEG : invert ? IR_NOT : shift ? IR_ASHR : shape == 6 || shape == 10 ? IR_AND : shape == 7 || shape == 11 ? IR_OR :
                             shape == 8 || shape == 9 || shape == 16 || shape == 17 ? IR_XOR : IR_ADD;
         const uint32_t constant = shift ? (full_load ? 31 : 3) : shape == 12 || shape == 13 ? UINT32_MAX - 2 : UINT32_C(0x8000ffff);
         const uint32_t expected_rule = unbounded ? TIER1_RULE_SIGN_EXTEND : negate || invert ? TIER1_RULE_UNARY : immediate ? (op == IR_ADD ? TIER1_RULE_LEA_ADD : TIER1_RULE_IMMEDIATE) :
@@ -369,6 +369,8 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
                                     switch (op)
                                     {
                                     case IR_ADD: result = left + right; break;
+                                    case IR_SUB: result = left - right; break;
+                                    case IR_MUL: result = left * right; break;
                                     case IR_NEG: result = 0u - left; break;
                                     case IR_NOT: result = ~left; break;
                                     case IR_AND: result = left & right; break;

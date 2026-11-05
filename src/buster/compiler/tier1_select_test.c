@@ -2667,6 +2667,20 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
     {
         munmap(memory, (size_t)page * 4);
     }
+    {
+        const uint8_t op[] = { IR_CBR, IR_BR, IR_BR, IR_BR_INDIRECT, IR_RET };
+        const uint32_t offsets[] = { 0, 1, 2, 3, 4, 5 };
+        const uint32_t a[] = { 0, 3, 4, 0, 0 };
+        const uint32_t b[] = { 1, 0, 0, BUSTER_IR_NONE, 0 };
+        const uint32_t c[] = { 2, 0, 0, BUSTER_IR_NONE, 0 };
+        const uint32_t labels[] = { 3, BUSTER_IR_NONE };
+        uint32_t predecessors[5];
+        const IrFunction function = { .instruction_count = 5, .block_count = 5, .label_count = 2, .op = (uint8_t*)op,
+                                      .block_offsets = (uint32_t*)offsets, .a = (uint32_t*)a, .b = (uint32_t*)b, .c = (uint32_t*)c, .labels = (uint32_t*)labels };
+        tier1_select_test_expect(test, tier1_select_range_predecessors(&function, predecessors) && predecessors[1] == 0 && predecessors[2] == 0 &&
+                                 predecessors[3] == BUSTER_IR_NONE - 1 && predecessors[4] == 2,
+                                 "indirect branches poison every possible label but preserve unrelated unique edges");
+    }
     // An unresolved phi cycle must not certify itself from its initial constant alone.
     Arena input = arena_reserve(1u << 20);
     const IrSizes sizes = { .instruction_count = 4, .block_count = 2, .constant_count = 1, .extra_count = 4 };

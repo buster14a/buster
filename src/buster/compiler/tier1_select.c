@@ -4260,6 +4260,15 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 constant = right;
                 supported = true;
             }
+            else if (sign_left && right < function->instruction_count && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0 &&
+                     ((operation == IR_SUB && (forest->known_bits[left] >> 8) < 32 && (forest->known_bits[right] >> 8) < 32) ||
+                      (operation == IR_MUL && (forest->known_bits[left] >> 8) + (forest->known_bits[right] >> 8) <= 32)))
+            {
+                folded.rule = TIER1_RULE_REGISTER;
+                folded.values[1] = right;
+                folded.intrinsic_cost = 3;
+                supported = true;
+            }
             else if (operation == IR_AND || operation == IR_OR || operation == IR_XOR)
             {
                 const uint32_t other = function->op[right] == IR_CONST ? left : right;

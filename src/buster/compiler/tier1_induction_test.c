@@ -7,7 +7,7 @@
 static void tier1_induction_tests(Tier1EmitTest* test)
 {
     const uint32_t ordinary[] = { 0, 1, 2, 127, 255, 1024, UINT32_C(0x80000000), UINT32_MAX };
-    for (uint32_t shape = 0; shape < 20; shape += 1)
+    for (uint32_t shape = 0; shape < 22; shape += 1)
     {
         const bool multiple_seeds = shape == 12 || shape == 13;
         const bool bridge = shape >= 14;
@@ -28,11 +28,11 @@ static void tier1_induction_tests(Tier1EmitTest* test)
         {
             const uint32_t initial = shape == 2 ? INT32_MAX - 2 : shape == 3 ? INT32_MAX : shape == 4 || shape == 5 || bypass || shape == 17 || shape == 18 ? INT32_MAX - 1 : shape == 11 ? UINT32_MAX : 0;
             const uint32_t stride = shape == 4 || shape == 10 || shape == 18 || shape == 19 ? 2 : 1;
-            const uint32_t mask = multiple_seeds || bypass ? 127 : shape == 10 || shape == 19 ? 65535 : shape == 18 ? INT32_MAX : UINT32_MAX;
+            const uint32_t mask = multiple_seeds || bypass || shape >= 20 ? 127 : shape == 10 || shape == 19 ? 65535 : shape == 18 ? INT32_MAX : UINT32_MAX;
             const uint32_t compared = shape == 5 ? 6 : 7;
             const uint32_t predicate = shape == 6 ? IR_LE : shape == 7 ? IR_GE : shape == 8 ? IR_GT : shape == 9 || shape == 10 || multiple_seeds || bypass || shape >= 18 ? IR_ULT : IR_LT;
             const uint32_t returned = shape == 0 || shape == 11 || header_guard ? 6 : 7;
-            const bool proven = shape <= 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12 || shape == 14 || shape == 16 || shape == 17 || shape == 19;
+            const bool proven = shape <= 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12 || shape == 14 || shape == 16 || shape == 17 || shape == 19 || shape == 20;
             const uint32_t widening = multiple_seeds ? 13 : bridge ? 11 : 10;
             function.parameter_types[0] = IR_I32;
             function.result_type = IR_I64;
@@ -124,6 +124,10 @@ static void tier1_induction_tests(Tier1EmitTest* test)
             }
             else if (header_guard)
             {
+                if (shape >= 20)
+                {
+                    function.extra[1] = shape == 20 ? 4 : 0;
+                }
                 function.block_offsets[2] = 9;
                 function.block_offsets[3] = 11;
                 function.block_offsets[4] = 13;
@@ -187,7 +191,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                                         input = sample;
                                     }
                                     const uint32_t limit = bypass ? 127 : input & mask;
-                                    uint32_t phi = multiple_seeds && input == 0 ? (shape == 12 ? 15 : INT32_MAX) : initial;
+                                    uint32_t phi = shape >= 20 ? (shape == 20 ? input & mask : input) : multiple_seeds && input == 0 ? (shape == 12 ? 15 : INT32_MAX) : initial;
                                     uint32_t step = 0;
                                     bool again = !header_guard || tier1_select_test_compare(predicate, 4, phi, limit) != 0;
                                     for (uint32_t iteration = 0; again && iteration < 65538; iteration += 1)

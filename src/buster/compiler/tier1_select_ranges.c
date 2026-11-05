@@ -2,18 +2,19 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Checked nonnegative induction bounds for #1219. This is an inductive certificate, not optimistic phi iteration:
-// every initial value is a nonnegative constant; every other incoming value adds a bounded nonnegative stride to
+// every initial value is independently nonnegative; every other incoming value adds a bounded nonnegative stride to
 // this phi. A strict upper-bound guard either checks that sum on the backedge or guards the phi before the increment.
 // One common bound covers ALL incoming edges; every executed sum must fit signed I32 before any subsequent guard.
 
 #define BUSTER_TIER1_INDUCTION_EDGES 8
 
 // This is the plan's dead positions workspace, before level ordering fills it, not another CFG allocation.
-// A scalar edge scatter records one predecessor or ambiguity per block. Indirect control flow leaves the map
-// unavailable: enumerating all of its possible label edges here could make an otherwise bounded scan quadratic.
+// A scalar edge scatter records one predecessor or ambiguity per block. If there is indirect control flow, all
+// address-taken labels are ambiguous. Marking them once avoids enumerating their edges per indirect branch.
 static bool tier1_select_range_predecessors(const IrFunction* function, uint32_t* predecessors)
 {
     bool complete = predecessors != 0;
+    bool indirect = false;
     if (complete)
     {
         memset(predecessors, 0xff, (uint64_t)function->block_count * sizeof(uint32_t));
@@ -26,13 +27,21 @@ static bool tier1_select_range_predecessors(const IrFunction* function, uint32_t
             const uint32_t terminator = end - 1;
             const uint32_t op = function->op[terminator];
             const uint32_t edges = op == IR_BR ? 1 : op == IR_CBR ? 2 : 0;
-            complete = edges != 0 || op == IR_RET || op == IR_UNREACHABLE;
+            complete = edges != 0 || op == IR_RET || op == IR_UNREACHABLE || op == IR_BR_INDIRECT;
+            indirect |= op == IR_BR_INDIRECT;
             for (uint32_t edge = 0; edge < edges; edge += 1)
             {
                 const uint32_t target = op == IR_BR ? function->a[terminator] : edge == 0 ? function->b[terminator] : function->c[terminator];
                 const uint32_t previous = predecessors[target];
                 predecessors[target] = previous == BUSTER_IR_NONE || previous == block ? block : BUSTER_IR_NONE - 1;
             }
+        }
+    }
+    for (uint32_t label = 0; complete && indirect && label < function->label_count; label += 1)
+    {
+        if (function->labels[label] < function->block_count)
+        {
+            predecessors[function->labels[label]] = BUSTER_IR_NONE - 1;
         }
     }
     return complete;
@@ -201,6 +210,14 @@ static bool tier1_select_induction_phi(const IrFunction* function, const IrDomin
         {
             const uint32_t initial = (uint32_t)function->constants[function->a[value]].low;
             valid = initial <= INT32_MAX;
+            maximum = maximum > initial ? maximum : initial;
+            seeded = true;
+        }
+        else if ((known[value] & 255) < 32)
+        {
+            // These facts were established from unknown backedges before this certificate. They cannot be an
+            // optimistic assumption about this loop; masked or zero-extended run-time seeds are safe too.
+            const uint64_t initial = (UINT64_C(1) << (known[value] & 255)) - 1;
             maximum = maximum > initial ? maximum : initial;
             seeded = true;
         }

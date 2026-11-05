@@ -133,7 +133,8 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
             uint32_t children[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
             const uint32_t sa = a < function->instruction_count ? known[a] >> 8 : 32;
             const uint32_t sb = b < function->instruction_count ? known[b] >> 8 : 32;
-            const bool binary = op == IR_ADD && sa < 32 && sb < 32;
+            const bool binary = (op == IR_ADD || op == IR_SUB) && sa < 32 && sb < 32;
+            const bool multiply = op == IR_MUL && sa + sb <= 32;
             const bool bitwise = op == IR_AND || op == IR_OR || op == IR_XOR;
             const bool constant = b < function->instruction_count && function->op[b] == IR_CONST;
             const bool subtract = op == IR_SUB && constant && sa < 32 && sb < 32;
@@ -142,7 +143,7 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
             {
                 children[0] = a;
             }
-            else if (binary || bitwise)
+            else if (binary || multiply || bitwise)
             {
                 children[0] = a;
                 children[1] = b;
