@@ -2222,10 +2222,10 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
     }
 }
 
-static void tier1_select_known_bits(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector)
+static void tier1_select_known_bits(const IrFunction* function, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
 {
     tier1_select_known_bits_passes(function, blocks, known, vector, true);
-    if (tier1_select_induction_bounds(function, blocks, known, vector))
+    if (tier1_select_induction_bounds(function, blocks, workspace, known, vector))
     {
         tier1_select_known_bits_passes(function, blocks, known, vector, false);
     }
@@ -4731,7 +4731,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     if (error == TIER1_SELECT_OK)
     {
-        tier1_select_known_bits(function, blocks, known_bits, vector);
+        tier1_select_known_bits(function, blocks, positions, known_bits, vector);
         tier1_select_canonical(function, blocks, known_bits, canonical);
     }
     if (error == TIER1_SELECT_OK)

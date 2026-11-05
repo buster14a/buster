@@ -8,6 +8,64 @@
 
 #define BUSTER_TIER1_INDUCTION_EDGES 8
 
+// This is the plan's dead positions workspace, before level ordering fills it, not another CFG allocation.
+// A scalar edge scatter records one predecessor or ambiguity per block. Indirect control flow leaves the map
+// unavailable: enumerating all of its possible label edges here could make an otherwise bounded scan quadratic.
+static bool tier1_select_range_predecessors(const IrFunction* function, uint32_t* predecessors)
+{
+    bool complete = predecessors != 0;
+    if (complete)
+    {
+        memset(predecessors, 0xff, (uint64_t)function->block_count * sizeof(uint32_t));
+    }
+    for (uint32_t block = 0; complete && block < function->block_count; block += 1)
+    {
+        const uint32_t end = function->block_offsets[block + 1];
+        if (end > function->block_offsets[block])
+        {
+            const uint32_t terminator = end - 1;
+            const uint32_t op = function->op[terminator];
+            const uint32_t edges = op == IR_BR ? 1 : op == IR_CBR ? 2 : 0;
+            complete = edges != 0 || op == IR_RET || op == IR_UNREACHABLE;
+            for (uint32_t edge = 0; edge < edges; edge += 1)
+            {
+                const uint32_t target = op == IR_BR ? function->a[terminator] : edge == 0 ? function->b[terminator] : function->c[terminator];
+                const uint32_t previous = predecessors[target];
+                predecessors[target] = previous == BUSTER_IR_NONE || previous == block ? block : BUSTER_IR_NONE - 1;
+            }
+        }
+    }
+    return complete;
+}
+
+// Follow only an unconditional chain with exactly one incoming predecessor at every link. The final conditional
+// edge is then necessary to reach this phi operand; a bridge with another entrance cannot borrow its guard.
+static uint32_t tier1_select_range_guard(const IrFunction* function, const uint32_t* predecessors, uint32_t predecessor, uint32_t* target)
+{
+    uint32_t guard = BUSTER_IR_NONE;
+    for (uint32_t depth = 0; depth < BUSTER_TIER1_SELECT_CANONICAL_PASSES && predecessor < function->block_count; depth += 1)
+    {
+        const uint32_t end = function->block_offsets[predecessor + 1];
+        if (end <= function->block_offsets[predecessor])
+        {
+            break;
+        }
+        const uint32_t terminator = end - 1;
+        if (function->op[terminator] == IR_CBR)
+        {
+            guard = terminator;
+            break;
+        }
+        if (function->op[terminator] != IR_BR || function->a[terminator] != *target || predecessors == 0)
+        {
+            break;
+        }
+        *target = predecessor;
+        predecessor = predecessors[predecessor];
+    }
+    return guard;
+}
+
 static uint32_t tier1_select_range_source(const IrFunction* function, uint32_t value)
 {
     for (uint32_t depth = 0; value < function->instruction_count && depth < BUSTER_TIER1_SELECT_CANONICAL_PASSES &&
@@ -64,7 +122,7 @@ static bool tier1_select_range_fact(uint16_t* known, uint32_t value, uint64_t ma
     return changed;
 }
 
-static bool tier1_select_induction_phi(const IrFunction* function, const uint32_t* blocks, uint16_t* known, uint32_t node)
+static bool tier1_select_induction_phi(const IrFunction* function, const uint32_t* blocks, const uint32_t* predecessors, uint16_t* known, uint32_t node)
 {
     const uint32_t block = blocks[node];
     const uint32_t incoming = function->b[node];
@@ -93,8 +151,7 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
         }
         else
         {
-            const uint32_t end = function->block_offsets[predecessor + 1];
-            valid = function->op[value] == IR_ADD && blocks[value] == predecessor && end > function->block_offsets[predecessor];
+            valid = function->op[value] == IR_ADD;
             if (!valid)
             {
                 break;
@@ -102,9 +159,10 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
             const uint32_t left = tier1_select_range_source(function, function->a[value]);
             const uint32_t right = tier1_select_range_source(function, function->b[value]);
             const uint32_t stride = left == node ? right : right == node ? left : BUSTER_IR_NONE;
-            const uint32_t branch = end - 1;
+            uint32_t target = block;
+            const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
             valid = stride < function->instruction_count && function->type[stride] == IR_I32 && (known[stride] & 255) < 32 &&
-                    function->op[branch] == IR_CBR && ((function->b[branch] == block) != (function->c[branch] == block));
+                    branch < function->instruction_count && ((function->b[branch] == target) != (function->c[branch] == target));
             if (!valid)
             {
                 break;
@@ -124,7 +182,7 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
             const bool less_when_true = predicate == IR_LT || predicate == IR_GT || predicate == IR_ULT || predicate == IR_UGT;
             const uint32_t limit = forward ? b : a;
             valid = (forward || reversed) && limit < function->instruction_count && function->type[limit] == IR_I32 &&
-                    (((function->b[branch] == block) != negated) == less_when_true);
+                    (((function->b[branch] == target) != negated) == less_when_true);
             if (!valid)
             {
                 break;
@@ -157,11 +215,12 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
     return changed;
 }
 
-static bool tier1_select_induction_bounds(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector)
+static bool tier1_select_induction_bounds(const IrFunction* function, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
 {
     bool changed = false;
     if (blocks != 0 && function->block_count >= 2)
     {
+        const uint32_t* predecessors = tier1_select_range_predecessors(function, workspace) ? workspace : 0;
         if (BUSTER_VECTOR_PATH(vector))
         {
             for (uint32_t first = 0; first < function->instruction_count;)
@@ -173,7 +232,7 @@ static bool tier1_select_induction_bounds(const IrFunction* function, const uint
                 uint32_t candidates = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_PHI)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I32));
                 while (candidates != 0)
                 {
-                    changed |= tier1_select_induction_phi(function, blocks, known, first + (uint32_t)__builtin_ctz(candidates));
+                    changed |= tier1_select_induction_phi(function, blocks, predecessors, known, first + (uint32_t)__builtin_ctz(candidates));
                     candidates &= candidates - 1;
                 }
                 first += left < 32 ? left : 32;
@@ -185,7 +244,7 @@ static bool tier1_select_induction_bounds(const IrFunction* function, const uint
             {
                 if (function->op[node] == IR_PHI && function->type[node] == IR_I32)
                 {
-                    changed |= tier1_select_induction_phi(function, blocks, known, node);
+                    changed |= tier1_select_induction_phi(function, blocks, predecessors, known, node);
                 }
             }
         }

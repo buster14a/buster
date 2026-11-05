@@ -88,7 +88,7 @@ static bool tier1_burs_check_prepare(const IrFunction* function, Arena* scratch,
             level_nodes[cursors[depths[node]]++] = node;
         }
         tier1_select_barriers_scalar(function, count, barriers);
-        tier1_select_known_bits(function, blocks, known_bits, false);
+        tier1_select_known_bits(function, blocks, cursors, known_bits, false);
         tier1_select_canonical(function, blocks, known_bits, canonical);
     }
     return valid;

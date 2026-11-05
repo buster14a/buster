@@ -347,8 +347,12 @@ in at most eight sweeps per round. Unresolved cycles retain the full range.
 
 A checked induction certificate can then establish a nonnegative I32 loop
 index. Every initial edge must supply a nonnegative constant. Every other edge
-must add a known nonnegative stride to that same phi, in its predecessor block,
-then take a strict upper-bound guard on the sum back to the phi. One maximum
+must add a known nonnegative stride to that same phi and take a strict
+upper-bound guard on the sum back to the phi. At most eight unconditional
+bridge blocks may separate that edge from its guard, each with exactly one
+incoming predecessor; an alternate entrance refuses the proof. The predecessor
+map reuses selection's positions workspace before level ordering. Indirect
+control flow disables bridge walking. One maximum
 covers all starts and all admitted backedge values; adding the largest stride
 must still fit signed I32 before the guard. Unsigned guards also require a
 proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated

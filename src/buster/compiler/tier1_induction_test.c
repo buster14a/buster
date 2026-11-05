@@ -7,13 +7,15 @@
 static void tier1_induction_tests(Tier1EmitTest* test)
 {
     const uint32_t ordinary[] = { 0, 1, 2, 127, 255, 1024, UINT32_C(0x80000000), UINT32_MAX };
-    for (uint32_t shape = 0; shape < 14; shape += 1)
+    for (uint32_t shape = 0; shape < 16; shape += 1)
     {
-        const bool multiple_seeds = shape >= 12;
+        const bool multiple_seeds = shape == 12 || shape == 13;
+        const bool bridge = shape >= 14;
+        const bool bypass = shape == 15;
         const uint64_t input_mark = test->input.length;
         const IrSizes sizes = {
-            .instruction_count = multiple_seeds ? 15 : 12,
-            .block_count = multiple_seeds ? 4 : 3,
+            .instruction_count = multiple_seeds ? 15 : bridge ? 13 : 12,
+            .block_count = bypass ? 5 : multiple_seeds || bridge ? 4 : 3,
             .constant_count = multiple_seeds ? 4 : 3,
             .extra_count = multiple_seeds ? 6 : 4,
             .parameter_count = 1,
@@ -23,14 +25,14 @@ static void tier1_induction_tests(Tier1EmitTest* test)
         tier1_emit_test_expect(test, created, "create guarded induction regression");
         if (created)
         {
-            const uint32_t initial = shape == 2 ? INT32_MAX - 2 : shape == 3 ? INT32_MAX : shape == 4 || shape == 5 ? INT32_MAX - 1 : shape == 11 ? UINT32_MAX : 0;
+            const uint32_t initial = shape == 2 ? INT32_MAX - 2 : shape == 3 ? INT32_MAX : shape == 4 || shape == 5 || bypass ? INT32_MAX - 1 : shape == 11 ? UINT32_MAX : 0;
             const uint32_t stride = shape == 4 || shape == 10 ? 2 : 1;
-            const uint32_t mask = multiple_seeds ? 127 : shape == 10 ? 65535 : UINT32_MAX;
+            const uint32_t mask = multiple_seeds || bypass ? 127 : shape == 10 ? 65535 : UINT32_MAX;
             const uint32_t compared = shape == 5 ? 6 : 7;
-            const uint32_t predicate = shape == 6 ? IR_LE : shape == 7 ? IR_GE : shape == 8 ? IR_GT : shape == 9 || shape == 10 || multiple_seeds ? IR_ULT : IR_LT;
+            const uint32_t predicate = shape == 6 ? IR_LE : shape == 7 ? IR_GE : shape == 8 ? IR_GT : shape == 9 || shape == 10 || multiple_seeds || bypass ? IR_ULT : IR_LT;
             const uint32_t returned = shape == 0 || shape == 11 ? 6 : 7;
-            const bool proven = shape <= 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12;
-            const uint32_t widening = multiple_seeds ? 13 : 10;
+            const bool proven = shape <= 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12 || shape == 14;
+            const uint32_t widening = multiple_seeds ? 13 : bridge ? 11 : 10;
             function.parameter_types[0] = IR_I32;
             function.result_type = IR_I64;
             function.constants[0].low = initial;
@@ -81,6 +83,44 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                 tier1_select_test_node(&function, 13, IR_SEXT, IR_I64, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 tier1_select_test_node(&function, 14, IR_RET, IR_VOID, 13, BUSTER_IR_NONE, BUSTER_IR_NONE);
             }
+            else if (shape == 14)
+            {
+                function.block_offsets[2] = 10;
+                function.block_offsets[3] = 11;
+                function.block_offsets[4] = 13;
+                function.extra[2] = 2;
+                tier1_select_test_node(&function, 9, IR_CBR, IR_VOID, 8, 2, 3);
+                tier1_select_test_node(&function, 10, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 11, IR_SEXT, IR_I64, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 12, IR_RET, IR_VOID, 11, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else if (bypass)
+            {
+                // The bridge has two entrances. The first trip bypasses the unsigned guard and admits INT_MAX;
+                // the second sum wraps negative. A guard on only the other entrance is not an invariant.
+                function.block_offsets[1] = 4;
+                function.block_offsets[2] = 8;
+                function.block_offsets[3] = 10;
+                function.block_offsets[4] = 11;
+                function.block_offsets[5] = 13;
+                function.extra[0] = 0;
+                function.extra[1] = 0;
+                function.extra[2] = 3;
+                function.extra[3] = 5;
+                tier1_select_test_node(&function, 0, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 1, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 2, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 3, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_PHI, IR_I32, 0, 2, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 5, IR_ADD, IR_I32, 4, 1, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 6, IR_ICMP, IR_I1, 4, 0, IR_EQ);
+                tier1_select_test_node(&function, 7, IR_CBR, IR_VOID, 6, 3, 2);
+                tier1_select_test_node(&function, 8, IR_ICMP, IR_I1, 5, 2, IR_ULT);
+                tier1_select_test_node(&function, 9, IR_CBR, IR_VOID, 8, 3, 4);
+                tier1_select_test_node(&function, 10, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 11, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 12, IR_RET, IR_VOID, 11, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 for (uint32_t pressure = 0; pressure < 2; pressure += 1)
@@ -115,7 +155,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                             uint64_t bytes = 0;
                             if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                             {
-                                const uint32_t samples = shape >= 2 && shape <= 5 ? 1 : BUSTER_ARRAY_LENGTH(ordinary);
+                                const uint32_t samples = (shape >= 2 && shape <= 5) || bypass ? 1 : BUSTER_ARRAY_LENGTH(ordinary);
                                 for (uint32_t sample = 0; sample < samples; sample += 1)
                                 {
                                     uint32_t input = ordinary[sample];
@@ -131,7 +171,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                                     {
                                         input = sample;
                                     }
-                                    const uint32_t limit = input & mask;
+                                    const uint32_t limit = bypass ? 127 : input & mask;
                                     uint32_t phi = multiple_seeds && input == 0 ? (shape == 12 ? 15 : INT32_MAX) : initial;
                                     uint32_t step = 0;
                                     bool again = true;
@@ -140,6 +180,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                                         step = phi + stride;
                                         const uint32_t tested = shape == 5 ? phi : step;
                                         again = tier1_select_test_compare(predicate, 4, shape == 8 ? limit : tested, shape == 8 ? tested : limit) != (shape == 7);
+                                        again |= bypass && phi == initial;
                                         if (again)
                                         {
                                             phi = step;
