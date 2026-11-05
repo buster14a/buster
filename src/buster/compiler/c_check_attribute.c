@@ -5849,10 +5849,10 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
             valid = false;
         }
         if (!attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) &&
-            attributes->object_sizes == NULL)
+            attributes->object_sizes == NULL && !check_graph_system_token(&reader->output->graph, attribute->first))
         {
-            // These advisory conditions belong to #1361's unchecked size wrappers. General conditional
-            // diagnostics/overload filtering remain unsupported rather than silently accepting user contracts.
+            // #1361's unchecked wrappers include system-header functions without size annotations (glibc 2.44's
+            // openat2). General user diagnostics/filtering remain unsupported outside this compatibility path.
             check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }

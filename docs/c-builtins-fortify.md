@@ -54,6 +54,14 @@ byte per parameter only when at least one parameter carries a size attribute.
 The declaration index distinguishes ordinary and size-annotated signatures,
 and the existing scalar/vector conversion comparison prefers a size-annotated
 candidate when conversions tie. Function addresses select ordinary overloads.
+`check_input_declarator_end` publishes the modes and count through
+`CheckInputAttributes`; `check_input_overload_declare` shares them with the
+immutable candidates. `check_overload_declare_chain` validates repeated
+annotations and `check_overload_better` resolves tied conversions. The bytes
+live in the checked unit's output arena through emission, with no readable
+padding or mutable aliases; allocation failure follows the normal resource
+error path. Only annotated signatures allocate this payload, and no subsequent
+consumer rescans the parameter tokens to reconstruct it.
 
 This is the issue's conservative, unchecked compatibility path. Within a
 wrapper, queries of its pointer parameters use the existing unknown-size
@@ -68,12 +76,15 @@ rules would otherwise defer the call to an external definition. This retains
 the wrapper's checking calls and printf security flags and avoids publishing
 duplicate definitions when several translation units include the same header.
 
-On size-annotated wrappers, the accompanying `diagnose_if(condition, message, severity)` attributes retain
+On size-annotated wrappers and in system headers, the accompanying
+`diagnose_if(condition, message, severity)` attributes retain
 their ranges and validate their strings, but do not issue conditional call-site
 diagnostics. `enable_if` accepts an integer constant true condition, as used by
 glibc's unconditional overload preference; conditional candidate filtering is
-still refused. Both attributes remain unsupported on functions without size
-annotations. These limits are separate from libc's runtime checking calls.
+still refused. Both attributes remain unsupported on user functions without
+size annotations. The system-header case includes glibc 2.44's `openat2`
+wrapper, whose diagnostic concerns a structure size rather than a hidden
+object size. These limits are separate from libc's runtime checking calls.
 
 The real-header regression now also runs on glibc 2.40 and newer. It includes
 `stdio.h`, `string.h`, `strings.h`, `stdlib.h`, `unistd.h`, `wchar.h`, `poll.h`,
@@ -81,6 +92,8 @@ The real-header regression now also runs on glibc 2.40 and newer. It includes
 on scalar/vector and eager/lazy header paths. It exercises copying, formatted
 output, an ordinary function address, file reads, wide conversion, polling and
 socket I/O. Direct builtin, ABI, symbol and overflow tests remain independent.
+The suite also links two translation units containing the same wrappers and
+checks writable-format `%n` rejection through the real stdio headers.
 
 ## Validation
 

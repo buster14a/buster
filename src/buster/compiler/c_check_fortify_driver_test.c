@@ -49,6 +49,13 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
     } cases[] =
     {
         {
+            "system-header diagnostic wrapper without size annotations",
+            "# 1 \"fortify-system.h\" 1 3\n"
+            "static inline int header_wrapper(int n) __attribute__((diagnose_if((n>8),(\"too large\"),\"warning\"))){return n;}\n"
+            "# 1 \"fortify.c\" 2\nint main(void){return header_wrapper(3)!=3;}\n",
+            0
+        },
+        {
             "object-size attributes use conservative unknown bounds",
             "#define Q(N,A,M,B) static __attribute__((noinline)) unsigned long N(char*const p __attribute__((A(M))))"
             "{char*q=p;unsigned long n=B(q++,M);return q==p?n:99;}\n"
