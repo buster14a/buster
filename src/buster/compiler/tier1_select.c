@@ -635,10 +635,10 @@ static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
     switch (operation)
     {
     case X86_OPERATION_ADD:
-        form = width == 8 ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32;
+        form = width == 8 ? X86_FORM_ADD_R64_RM64 : width == 2 ? X86_FORM_ADD_R16_RM16 : width == 1 ? X86_FORM_ADD_R8_RM8 : X86_FORM_ADD_R32_RM32;
         break;
     case X86_OPERATION_SUB:
-        form = width == 8 ? X86_FORM_SUB_R64_RM64 : X86_FORM_SUB_R32_RM32;
+        form = width == 8 ? X86_FORM_SUB_R64_RM64 : width == 2 ? X86_FORM_SUB_R16_RM16 : width == 1 ? X86_FORM_SUB_R8_RM8 : X86_FORM_SUB_R32_RM32;
         break;
     case X86_OPERATION_AND:
         form = width == 8 ? X86_FORM_AND_R64_RM64 : X86_FORM_AND_R32_RM32;
@@ -1216,7 +1216,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction)
         {
             .rm = destination,
-            .form = holes->operation == X86_OPERATION_NEG ? (width == 8 ? X86_FORM_NEG_RM64 : X86_FORM_NEG_RM32) : (width == 8 ? X86_FORM_NOT_RM64 : X86_FORM_NOT_RM32),
+            .form = holes->operation == X86_OPERATION_NEG ? (width == 8 ? X86_FORM_NEG_RM64 : width == 2 ? X86_FORM_NEG_RM16 : width == 1 ? X86_FORM_NEG_RM8 : X86_FORM_NEG_RM32) :
+                                                          (width == 8 ? X86_FORM_NOT_RM64 : width == 2 ? X86_FORM_NOT_RM16 : width == 1 ? X86_FORM_NOT_RM8 : X86_FORM_NOT_RM32),
         });
         break;
     case TIER1_RULE_REGISTER:
@@ -4137,6 +4138,34 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
         }
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A narrow ALU write preserves an already-zero upper part while wrapping only the result's byte or word.
+        // Copying its left input at 32 bits first (when needed) keeps that certificate. Both inputs must fit and have
+        // physical zero storage, since the commutative register pattern may exchange them when the destination aliases.
+        if (op == IR_TRUNC && (type == IR_I8 || type == IR_I16) && function->type[a] == IR_I32 && tier1_select_tree_child(forest, node, a) &&
+            forest->known_bits != 0 && forest->canonical != 0)
+        {
+            const uint32_t operation = function->op[a];
+            const uint32_t left = function->a[a];
+            const uint32_t right = function->b[a];
+            const uint32_t bits = ir_type_bits[type];
+            const bool unary = operation == IR_NEG || operation == IR_NOT;
+            const bool binary = operation == IR_ADD || operation == IR_SUB;
+            const bool first = left < function->instruction_count && (forest->known_bits[left] & 255) <= bits && (forest->canonical[left] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+            const bool second = unary || (right < function->instruction_count && (forest->known_bits[right] & 255) <= bits && (forest->canonical[right] & BUSTER_TIER1_STORAGE_ZERO) != 0);
+            if ((unary || binary) && first && second)
+            {
+                Tier1SelectPattern narrow = base;
+                narrow.rule = unary ? TIER1_RULE_UNARY : TIER1_RULE_REGISTER;
+                narrow.width = (uint8_t)(bits / 8);
+                narrow.source_width = 0;
+                narrow.values[0] = left;
+                narrow.values[1] = unary ? BUSTER_IR_NONE : right;
+                narrow.operation = (uint8_t)tier1_select_operation(operation);
+                narrow.intrinsic_cost = 2;
+                tier1_select_fold(forest, node, a, &narrow);
+                tier1_select_add_candidate(forest, node, &candidates, narrow);
+            }
+        }
         // Undo a truncation of an already sign-extended value without manufacturing the intermediate masked value.
         // The original definition must have the destination's type and canonical storage, so future zero extensions
         // remain valid even if this copy coalesces. Effective uses keep it alive when the truncation has other users.

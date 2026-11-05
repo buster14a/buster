@@ -400,3 +400,91 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
         arena_pop_to(&test->input, input_mark);
     }
 }
+
+static void tier1_storage_narrow_arithmetic_tests(Tier1EmitTest* test)
+{
+    const uint32_t samples[] = { 0, 1, 127, 128, 255, 256, 32767, 32768, 65535, 65536, INT32_MAX, UINT32_MAX };
+    const uint32_t operations[] = { IR_ADD, IR_SUB, IR_NEG, IR_NOT, IR_ADD, IR_SUB };
+    uint64_t random = UINT64_C(0xc0031219f00d0091);
+    for (uint32_t word = 0; word < 2; word += 1)
+    {
+        for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(operations); shape += 1)
+        {
+            const bool unary = shape == 2 || shape == 3;
+            const bool folded = shape < 4;
+            const uint32_t type = word != 0 ? IR_I16 : IR_I8;
+            const uint32_t mask = word != 0 ? UINT16_MAX : UINT8_MAX;
+            const uint64_t input_mark = test->input.length;
+            const IrSizes sizes = { .instruction_count = 10, .block_count = 1, .parameter_count = 2 };
+            IrFunction function;
+            const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+            tier1_emit_test_expect(test, created, "create narrow arithmetic storage regression");
+            if (created)
+            {
+                function.parameter_types[0] = IR_I32;
+                function.parameter_types[1] = IR_I32;
+                function.result_type = IR_I64;
+                function.block_offsets[1] = 10;
+                tier1_select_test_node(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 2, IR_TRUNC, (uint8_t)type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 3, IR_ZEXT, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_TRUNC, (uint8_t)type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 5, IR_ZEXT, IR_I32, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 6, (uint8_t)operations[shape], IR_I32, shape == 4 ? 0 : 3, unary ? BUSTER_IR_NONE : shape == 5 ? 1 : 5, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 7, IR_TRUNC, (uint8_t)type, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 8, IR_ZEXT, IR_I64, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                    {
+                        const uint64_t output_mark = test->output.length;
+                        Tier1SelectPlan plan;
+                        uint32_t failed = BUSTER_IR_NONE;
+                        const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, path != 0, &plan, &failed);
+                        tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "narrow arithmetic selects");
+                        if (selected == TIER1_SELECT_OK)
+                        {
+                            tier1_emit_test_expect(test, plan.patterns[7].rule == (folded ? unary ? TIER1_RULE_UNARY : TIER1_RULE_REGISTER : TIER1_RULE_TRUNCATE) && plan.covered[6] == folded,
+                                                   "a byte or word ALU fold requires both semantic range and actual zero storage");
+                            const Tier1EmitOptions options = {
+                                .certify = true,
+                                .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                                .vector = path != 0,
+                                .rematerialize = pressure != 0,
+                            };
+                            Tier1EmitResult emitted;
+                            const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                            tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "narrow arithmetic allocation and code certify");
+                            if (error == TIER1_EMIT_OK)
+                            {
+                                void* executable = MAP_FAILED;
+                                uint64_t bytes = 0;
+                                if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                                {
+                                    for (uint32_t sample = 0; sample < 208; sample += 1)
+                                    {
+                                        const uint32_t a = sample < 144 ? samples[sample / 12] : (uint32_t)tier1_emit_test_random(&random);
+                                        const uint32_t b = sample < 144 ? samples[sample % 12] : (uint32_t)tier1_emit_test_random(&random);
+                                        const uint32_t left = shape == 4 ? a : a & mask;
+                                        const uint32_t right = shape == 5 ? b : b & mask;
+                                        const uint32_t result = operations[shape] == IR_ADD ? left + right : operations[shape] == IR_SUB ? left - right : operations[shape] == IR_NEG ? 0u - left : ~left;
+                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0x9876a55a00000000) | a, UINT64_C(0x2345f17e00000000) | b);
+                                        tier1_emit_test_expect(test, actual == (result & mask), "byte and word wrapping preserves every canonical upper bit, including aliased and poisoned inputs");
+                                    }
+                                }
+                                if (executable != MAP_FAILED)
+                                {
+                                    munmap(executable, bytes);
+                                }
+                            }
+                        }
+                        arena_pop_to(&test->output, output_mark);
+                    }
+                }
+            }
+            arena_pop_to(&test->input, input_mark);
+        }
+    }
+}
