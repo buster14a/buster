@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 6946ecfed627f0b2dd6f435d75de39ed2c33eaeb
+          ref: 23622f494ecbf5468d50c858aefa80da91089400
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
@@ -35,3 +35,25 @@ jobs:
       - name: Check translation units
         if: success() || failure()
         run: build/compiler test-check-units
+  linkage-oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang
+        run: bash tools/ci/setup-hosted.sh
+      - name: Probe linkage pragma symbol effects
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          for case in {1..38}; do
+            echo "LINKAGE CASE=$case"
+            clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" -S -emit-llvm tools/issue1447-linkage-pragmas.c -o "$RUNNER_TEMP/linkage.ll" 2>&1
+            status=$?
+            echo "STATUS=$status"
+            if [ "$status" = 0 ]; then grep -E '^@|^define|^declare' "$RUNNER_TEMP/linkage.ll" || true; fi
+          done
+          exit 0
