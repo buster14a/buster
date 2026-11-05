@@ -2198,8 +2198,9 @@ folds.
 
 `__builtin_stdarg_start` is the old name of `__builtin_va_start`, which clang's
 Sema checks as that: the catalogue resolves it to `va_start`'s entry
-(`cbuiltin_alias_entry`). In C23 it takes its second argument still, where
-`va_start` takes one alone; that difference is pending.
+(`cbuiltin_alias_entry`). Both take two arguments in every standard, as clang
+23's do. C23's `va_start` with one argument is `<stdarg.h>`'s, by
+`__builtin_c23_va_start`.
 
 Sixteen others are leaves, per-unit helpers of clang -O0's instructions
 (`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
@@ -2261,9 +2262,9 @@ features. Their prototypes are clang's metadata's:
   clang's two errors at the call (`check_input_longjmp_argument`).
 
 A call's size of `memcpy_inline` and `memset_inline` must be an integer
-constant expression (the prototype's `I`). A non-constant one is refused at the
-argument, as the x86 builtins' are; clang's message ("argument to ... must be
-a constant integer", at the call) is pending for both.
+constant expression (the prototype's `I`). A non-constant one is clang's error
+"argument to '__builtin_memcpy_inline' must be a constant integer", at the call,
+as for the x86 builtins (`test-checker-driver`'s generic builtins' fixtures).
 
 `verbose_trap`'s two arguments must each be a constant string without a `$`,
 as clang's Sema reads them (`check_input_verbose_trap_arguments`, in the source
