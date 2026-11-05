@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: f76f99e15e96269e4680478e0b6b6417d1eb3a55
+          ref: 861a2355397cf537f9eb62081f04fc04bcdd08b4
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
