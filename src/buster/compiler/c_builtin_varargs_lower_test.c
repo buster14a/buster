@@ -577,7 +577,8 @@ static void cbuiltin_va_lower_test_shape_oracle(va_list oracle, uint32_t shape, 
     else if (shape == 9)
     {
         const CBuiltinVaTestHigh value = va_arg(oracle, CBuiltinVaTestHigh);
-        memcpy(bytes, &value, sizeof(value));
+        // The unnamed first eightbyte is padding, not a value to copy into the comparison oracle.
+        memcpy(bytes + 8, &value.b, sizeof(value.b));
     }
     else if (shape == 10)
     {
