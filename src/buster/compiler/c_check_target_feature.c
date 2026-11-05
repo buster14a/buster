@@ -602,6 +602,8 @@ struct CheckTargetFeatureEmission
     // belongs to one body, including its appended regions. Several labels can share its ancestor chain; cache the
     // control lookup rather than rescan that body for each label and each ancestor.
     uint32_t* starts;
+    // Default labels are absent from the CASE controls; map each switch head to its default's syntax token.
+    uint32_t* defaults;
     // Per expression, whether its subtree holds a label: a statement expression's whose block does
     // (check_target_feature_labeled's answer, memoized over the graph, whose operands precede their node). A `sizeof`
     // or `__alignof__` operand's labels count, as ContainsLabel is syntactic.
@@ -937,6 +939,7 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
         emission->min_case_owner = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         emission->label_prefix = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         emission->starts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+        emission->defaults = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         emission->type_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES);
         emission->node_labeled = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->graph.count);
         // The postorder and the positions column parse_tree_links writes are this fill's alone: the kept columns
@@ -947,7 +950,7 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
         uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
         valid = emission->extent_first != NULL && emission->ends != NULL && emission->first_child != NULL &&
                 emission->next_child != NULL && emission->subtree_bits != NULL && emission->min_case_owner != NULL &&
-                emission->label_prefix != NULL && emission->starts != NULL && emission->type_names != NULL && emission->node_labeled != NULL &&
+                emission->label_prefix != NULL && emission->starts != NULL && emission->defaults != NULL && emission->type_names != NULL && emission->node_labeled != NULL &&
                 postorder != NULL && positions != NULL && last_children != NULL;
         if (valid)
         {
@@ -963,6 +966,15 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
             memset(emission->subtree_bits, 0, (uint64_t)count + 1);
             memset(emission->min_case_owner, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
             memset(emission->starts, 0xff, slots * sizeof(uint32_t));
+            memset(emission->defaults, 0xff, slots * sizeof(uint32_t));
+            for (uint32_t i = 0; i < program->case_count; i += 1)
+            {
+                const CheckProgramCase* item = program->cases + i;
+                if (item->fallback && item->owner < count)
+                {
+                    emission->defaults[item->owner] = item->token;
+                }
+            }
             memset(emission->type_names, 0xff, BUSTER_CHECK_TARGET_FEATURE_TYPE_NAMES * sizeof(uint32_t));
             memset(emission->node_labeled, 0, input->graph.count);
             // The postorder computes the subtree answers bottom up: a token's children all precede it.
@@ -1403,6 +1415,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
     {
         next += 1;
     }
+    const uint32_t fallback_token = emission->defaults[entry->token];
     if (!known)
     {
         // Each case opens a block, and every statement enclosing it inside this switch emits from its own start.
@@ -1412,6 +1425,10 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
             const CheckProgramCase* item = program->cases + controls[i].target;
             check_target_feature_label_roots(walk, emission, item->token, entry->token, 0, walk->body->count);
             check_x86_diagnostic_push(walk, item->target, true);
+        }
+        if (fallback_token != BUSTER_CHECK_NONE)
+        {
+            check_target_feature_label_roots(walk, emission, fallback_token, entry->token, 0, walk->body->count);
         }
         check_x86_diagnostic_push(walk, next, true);
         return;
@@ -1440,16 +1457,10 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
         }
     }
     // The control after the case table jumps to the default label or the switch's end.
-    const CheckProgramCase* fallback = NULL;
-    for (uint32_t i = index + 1; i < next; i += 1)
-    {
-        const CheckProgramCase* item = program->cases + controls[i].target;
-        fallback = item->fallback && item->owner == entry->token ? item : fallback;
-    }
-    if (!whole && selected == BUSTER_CHECK_NONE && fallback != NULL)
+    if (!whole && selected == BUSTER_CHECK_NONE && fallback_token != BUSTER_CHECK_NONE)
     {
         selected = controls[next].target;
-        selected_token = fallback->token;
+        selected_token = fallback_token;
     }
     // The body's statements, from the control after the table's jump.
     const uint32_t statements = next + 1;
@@ -1541,6 +1552,10 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
             const CheckProgramCase* item = program->cases + controls[i].target;
             check_target_feature_label_roots(walk, emission, item->token, entry->token, 0, walk->body->count);
             check_x86_diagnostic_push(walk, item->target, true);
+        }
+        if (fallback_token != BUSTER_CHECK_NONE)
+        {
+            check_target_feature_label_roots(walk, emission, fallback_token, entry->token, 0, walk->body->count);
         }
         check_x86_diagnostic_push(walk, controls[next].target, true);
     }

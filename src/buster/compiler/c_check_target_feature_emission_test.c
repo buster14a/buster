@@ -74,6 +74,21 @@ static void cc_compat_target_feature_emission(CCCompatibilityTest* test)
             3,
         },
         {
+            "runtime switch: default alone inside if roots its condition",
+            "int f(int x) { switch (x) { if (h(1)) { default: x = h(2); break; } case 0: x = h(3); } return x; }\n",
+            3,
+        },
+        {
+            "constant switch: plain default is collected",
+            "int f(int x) { switch (9) { default: x = h(1); break; case 0: x = h(2); } return x; }\n",
+            1,
+        },
+        {
+            "constant switch: matching case does not root unselected default",
+            "int f(int x) { switch (0) { case 0: x = h(1); break; if (h(2)) { default: x = h(3); } } return x; }\n",
+            1,
+        },
+        {
             "each enclosing if emits before its nested case",
             "int f(int x) { switch (0) { if (h(1)) { if (h(2)) { case 0: x = h(3); break; } } case 1: x = h(4); } return x; }\n",
             4,
