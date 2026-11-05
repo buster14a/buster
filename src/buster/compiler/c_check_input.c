@@ -7597,7 +7597,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             // Repeated loader declarations describe the same uninitialized definition. They remain definitions for
             // a later initializer's conflict, but two such declarations do not define the variable twice.
             const uint32_t definition = reader->definition_origins[previous];
-            const bool repeated_loader = kind == C_BINDING_OBJECT && definition != 0 &&
+            const bool has_attributes = check_sparse_wide_present(reader->output->attributes);
+            const bool repeated_loader = has_attributes && kind == C_BINDING_OBJECT && definition != 0 &&
                 check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL &&
                 check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
             if (reader->declaration_kinds[previous] != kind || check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token) ||
@@ -7607,8 +7608,9 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             {
                 const uint32_t before = reader->output->report_count;
                 check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
-                const bool loader = (definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
-                                    check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+                const bool loader = has_attributes &&
+                    ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
+                     check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL);
                 if (reader->output->report_count > before && kind == C_BINDING_OBJECT && compatible == TYPE_ANSWER_YES && loader &&
                     reader->definition_origins[token] != 0 && reader->definition_origins[previous] != 0)
                 {
