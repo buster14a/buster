@@ -5,21 +5,36 @@ on:
 permissions:
   contents: read
 jobs:
-  diagnostics-debug:
+  bool-vector-oracle:
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_DEBUG_INFO: '1'
-      BUSTER_HOST_SSP: off
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-          ref: fcab74faf28d9e65b6eff6d121615d1111364b85
-      - name: Install pinned Clang and debug tools
+      - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Build exact diagnostic snapshot with debug information
-        run: ./build.sh --config Release
-      - name: Capture checker failure
-        run: gdb -batch -ex run -ex 'thread apply all bt full' --args ./build/compiler test-checker --seed 133 --part 1/4
+      - name: Probe boolean elementwise behavior
+        shell: bash
+        run: |
+          set -u
+          mkdir -p build/issue1447-oracle
+          for op in {1..13}; do
+            for lanes in 1 3 8 65 1024; do
+              stem="build/issue1447-oracle/op${op}-lanes${lanes}"
+              echo "CASE op=$op lanes=$lanes"
+              if clang -O0 -march=x86-64 -std=gnu17 -Wno-psabi -DOP="$op" -DLANES="$lanes" tools/issue1447-bool-builtins.c -o "$stem" > "$stem.compile.log" 2>&1; then
+                timeout 10 "$stem"
+                echo "run status=$?"
+              else
+                echo "compile status=$?"
+                sed -n '1,16p' "$stem.compile.log"
+              fi
+            done
+            stem="build/issue1447-oracle/op${op}-ir"
+            if clang -O0 -march=x86-64 -std=gnu17 -Wno-psabi -DOP="$op" -DLANES=8 -S -emit-llvm tools/issue1447-bool-builtins.c -o "$stem.ll" > "$stem.log" 2>&1; then
+              sed -n '/define.*@operation/,/^}/p' "$stem.ll"
+            else
+              sed -n '1,12p' "$stem.log"
+            fi
+          done
