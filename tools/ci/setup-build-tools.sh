@@ -24,7 +24,7 @@ if [ ! -f "$destination/.complete" ] || [ "$(cat "$destination/.complete")" != "
     temporary=$(mktemp -d "$destination.XXXXXXXX")
     trap 'rm -rf "$temporary"' EXIT
     archive="cmake-$cmake_version-linux-x86_64"
-    curl --fail --location --retry 3 --silent --show-error \
+    curl --fail --location --retry 8 --retry-max-time 240 --silent --show-error \
         "https://github.com/Kitware/CMake/releases/download/v$cmake_version/$archive.tar.gz" \
         --output "$temporary/cmake.tar.gz"
     printf '%s  %s\n' "$cmake_digest" "$temporary/cmake.tar.gz" | sha256sum --check --status
@@ -34,7 +34,7 @@ if [ ! -f "$destination/.complete" ] || [ "$(cat "$destination/.complete")" != "
         "$archive/bin/cmake" "$archive/bin/ctest" "$archive/share/cmake-${cmake_version%.*}" \
         "$archive/doc/cmake/LICENSE.rst"
     rm "$temporary/cmake.tar.gz"
-    curl --fail --location --retry 3 --silent --show-error \
+    curl --fail --location --retry 8 --retry-max-time 240 --silent --show-error \
         "https://github.com/ninja-build/ninja/releases/download/v$ninja_version/ninja-linux.zip" \
         --output "$temporary/ninja.zip"
     printf '%s  %s\n' "$ninja_digest" "$temporary/ninja.zip" | sha256sum --check --status
