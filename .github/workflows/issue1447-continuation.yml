@@ -5,44 +5,38 @@ on:
 permissions:
   contents: read
 jobs:
-  linkage-oracle:
+  declaration-debug:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-      - name: Install pinned Clang
-        run: bash tools/ci/setup-hosted.sh
-      - name: Probe linkage pragma semantics
-        shell: bash
-        run: |
-          set +e
-          ulimit -c 0
-          for case in {1..38}; do
-            echo "LINKAGE CASE=$case"
-            clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" -S -emit-llvm tools/issue1447-linkage-pragmas.c -o "$RUNNER_TEMP/linkage.ll" 2>&1
-            status=$?
-            echo "STATUS=$status"
-            if [ "$status" = 0 ]; then rg '^@|^define|^declare' "$RUNNER_TEMP/linkage.ll"; fi
-          done
-          exit 0
-  selectany-checker-backtrace:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
     env:
       BUSTER_HOST_ARCH: x86-64
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: bc64d7bb16944b7104a0c743041ce1f997766e48
+          ref: 280fa88a10e4f1c309cd596041e296d0a558ff8b
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Build the failing revision with debug information
-        run: ./build.sh --config Release --jobs 4
-      - name: Capture checker backtrace
+      - name: Build debug compiler
+        run: ./build.sh --config Debug --jobs 4
+      - name: Locate null declaration failure
         shell: bash
         run: |
           if ! command -v gdb; then sudo apt-get update && sudo apt-get install -y gdb; fi
-          gdb --batch -ex 'set pagination off' -ex run -ex 'thread apply all bt full' --args build/compiler test-checker --part 1/4
+          cat > "$RUNNER_TEMP/empty.c" <<'EOF'
+          __attribute__((unused));
+          EOF
+          cat > "$RUNNER_TEMP/empty.gdb" <<'EOF'
+          set pagination off
+          break check_input_report if message == CHECK_INPUT_DECLARATION
+          commands
+          silent
+          printf "GENERIC DECLARATION ERROR token=%u\n", token
+          bt 6
+          p reader->specifier_free_standing
+          p reader->specifier_owner
+          continue
+          end
+          run
+          EOF
+          gdb --batch -x "$RUNNER_TEMP/empty.gdb" --args build/compiler -std=gnu17 -fsyntax-only -fno-caret-diagnostics "$RUNNER_TEMP/empty.c"
