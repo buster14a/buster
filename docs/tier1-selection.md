@@ -340,7 +340,7 @@ declined explicitly.
 
 Selection keeps two semantic range bounds per integer value: the number of
 possibly nonzero low bits and the smallest signed width. Constants, masks,
-shifts, extensions and truncations supply the bounds; copies, selects and phis
+shifts, bounded arithmetic, extensions and truncations supply the bounds; copies, selects and phis
 propagate them. They start unknown, including on loop backedges, and improve
 in at most eight sweeps. Unresolved cycles retain the full range.
 

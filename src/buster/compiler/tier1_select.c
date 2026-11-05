@@ -2059,6 +2059,14 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 static void tier1_select_known_bits(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector)
 {
     const uint32_t count = function->instruction_count;
+    // The caller's fresh scratch column is disjoint from this immutable IR and its arrays. Cache the stable array
+    // addresses across known's stores, without relying on the host build's disabled type-based alias analysis.
+    const uint8_t* const types = function->type;
+    const uint8_t* const operations = function->op;
+    const uint32_t* const inputs_a = function->a;
+    const uint32_t* const inputs_b = function->b;
+    const uint32_t* const inputs_c = function->c;
+    const IrConstant* const constants = function->constants;
     if (BUSTER_VECTOR_PATH(vector))
     {
         // Independent seed classification, 32 nodes at a time. Both loads and stores are masked at the logical tail.
@@ -2066,7 +2074,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
         {
             const uint32_t left = count - first;
             const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
-            const __m512i type = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(active, function->type + first));
+            const __m512i type = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(active, types + first));
             __m512i bits = _mm512_set1_epi16(64);
             bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I1)), _mm512_set1_epi16(1));
             bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I8)), _mm512_set1_epi16(8));
@@ -2079,7 +2087,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
     {
         for (uint32_t node = 0; node < count; node += 1)
         {
-            const uint32_t bits = tier1_select_width(function->type[node]) != 0 ? ir_type_bits[function->type[node]] : 64;
+            const uint32_t bits = tier1_select_width(types[node]) != 0 ? ir_type_bits[types[node]] : 64;
             known[node] = (uint16_t)(bits | (bits << 8));
         }
     }
@@ -2088,13 +2096,13 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
         bool changed = false;
         for (uint32_t node = 0; node < count; node += 1)
         {
-            const uint32_t type = function->type[node];
+            const uint32_t type = types[node];
             if (tier1_select_width(type) != 0)
             {
                 const uint32_t bits = ir_type_bits[type];
-                const uint32_t op = function->op[node];
-                const uint32_t a = function->a[node];
-                const uint32_t b = function->b[node];
+                const uint32_t op = operations[node];
+                const uint32_t a = inputs_a[node];
+                const uint32_t b = inputs_b[node];
                 const uint32_t ua = a < count ? known[a] & 255 : bits;
                 const uint32_t ub = b < count ? known[b] & 255 : bits;
                 const uint32_t sa = a < count ? known[a] >> 8 : bits;
@@ -2104,7 +2112,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
                 if (op == IR_CONST || op == IR_UNDEF)
                 {
                     const uint64_t mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
-                    const uint64_t value = op == IR_CONST ? function->constants[a].low & mask : 0;
+                    const uint64_t value = op == IR_CONST ? constants[a].low & mask : 0;
                     const uint64_t magnitude = (value >> (bits - 1)) != 0 ? (~value & mask) : value;
                     unsigned_bits = value == 0 ? 0 : 64 - (uint32_t)__builtin_clzll(value);
                     signed_bits = magnitude == 0 ? 1 : 65 - (uint32_t)__builtin_clzll(magnitude);
@@ -2112,7 +2120,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
                 else if (op == IR_COPY || op == IR_TRUNC || op == IR_BITCAST || op == IR_INTTOPTR || op == IR_PTRTOINT)
                 {
                     // Only equal-width integer bitcasts preserve these facts; masks have no integer facts here.
-                    if (a < count && tier1_select_width(function->type[a]) != 0)
+                    if (a < count && tier1_select_width(types[a]) != 0)
                     {
                         unsigned_bits = ua;
                         signed_bits = sa;
@@ -2125,7 +2133,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
                 else if (op == IR_SEXT)
                 {
                     signed_bits = sa;
-                    unsigned_bits = ua < ir_type_bits[function->type[a]] ? ua : bits;
+                    unsigned_bits = ua < ir_type_bits[types[a]] ? ua : bits;
                 }
                 else if (op == IR_ICMP || op == IR_FCMP)
                 {
@@ -2140,10 +2148,21 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
                 {
                     signed_bits = sa;
                 }
+                else if (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_NEG)
+                {
+                    const uint32_t maximum_unsigned = ua > ub ? ua : ub;
+                    const uint32_t maximum_signed = sa > sb ? sa : sb;
+                    unsigned_bits = op == IR_ADD ? maximum_unsigned + 1 : op == IR_MUL ? (ua == 0 || ub == 0 ? 0 : ua + ub) : bits;
+                    signed_bits = op == IR_NEG ? sa + 1 : op == IR_MUL ? sa + sb : maximum_signed + 1;
+                }
+                else if (op == IR_UDIV || op == IR_UREM)
+                {
+                    unsigned_bits = op == IR_UREM && ub < ua ? ub : ua;
+                }
                 else if (op == IR_LSHR || op == IR_ASHR || op == IR_SHL)
                 {
-                    const bool constant = b < count && function->op[b] == IR_CONST;
-                    const uint64_t shift = constant ? function->constants[function->a[b]].low : 0;
+                    const bool constant = b < count && operations[b] == IR_CONST;
+                    const uint64_t shift = constant ? constants[inputs_a[b]].low : 0;
                     if (shift < bits && (op != IR_SHL || constant))
                     {
                         unsigned_bits = op == IR_SHL ? ua + (uint32_t)shift : op == IR_LSHR || ua < bits ? (ua > shift ? ua - (uint32_t)shift : 0) : bits;
@@ -2152,7 +2171,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
                 }
                 else if (op == IR_SELECT)
                 {
-                    const uint32_t c = function->c[node];
+                    const uint32_t c = inputs_c[node];
                     unsigned_bits = ub > (known[c] & 255) ? ub : known[c] & 255;
                     signed_bits = sb > (known[c] >> 8) ? sb : known[c] >> 8;
                 }

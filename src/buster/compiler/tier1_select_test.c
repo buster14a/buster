@@ -2194,9 +2194,9 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
     Arena scratch = arena_reserve(1u << 20);
     const uint64_t samples[] = { 0, 1, 0x7f, 0x80, 0xff, 0x100, 0x7fff, 0x8000, 0xffff, INT32_MAX, UINT32_MAX, UINT64_C(0xa55a120080000000), UINT64_MAX };
     uint64_t random = UINT64_C(0x1219b175a55a9001);
-    for (uint32_t shape = 0; shape < 19; shape += 1)
+    for (uint32_t shape = 0; shape < 23; shape += 1)
     {
-        const bool load = shape >= 15;
+        const bool load = shape >= 15 && shape <= 18;
         const bool wide = shape == 1 || shape == 11 || shape == 12 || shape == 13 || shape == 14;
         const bool dynamic = shape == 9;
         const IrSizes sizes = { .instruction_count = 8, .block_count = 1, .constant_count = !dynamic, .parameter_count = 1 + dynamic };
@@ -2215,10 +2215,10 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
             }
             else
             {
-                function.constants[0].low = shape == 2 || shape == 11 ? 255 : shape == 3 ? UINT64_C(0x80000000) : shape == 12 ? 65535 : shape == 5 || shape == 10 ? 0 : 1;
+                function.constants[0].low = shape == 2 || shape == 11 || shape == 22 ? 255 : shape == 3 ? UINT64_C(0x80000000) : shape == 12 || shape >= 19 ? 65535 : shape == 5 || shape == 10 ? 0 : 1;
                 tier1_select_test_node(&function, 1, IR_CONST, wide ? IR_I64 : IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             }
-            const uint32_t op = shape == 0 ? IR_COPY : shape == 1 || shape == 13 || shape == 14 ? IR_TRUNC : shape == 2 || shape == 3 || shape == 11 || shape == 12 ? IR_AND :
+            const uint32_t op = shape == 0 ? IR_COPY : shape == 1 || shape == 13 || shape == 14 ? IR_TRUNC : shape == 2 || shape == 3 || shape == 11 || shape == 12 || shape >= 19 ? IR_AND :
                                 shape == 4 || shape == 5 || dynamic ? IR_LSHR : shape == 10 ? IR_SHL : shape == 6 ? IR_ADD : load ? IR_LOAD : IR_MUL;
             const uint32_t narrow = shape == 16 ? IR_I16 : shape == 17 ? IR_I32 : IR_I8;
             const uint32_t type = load || shape == 13 || shape == 14 ? narrow : shape == 11 || shape == 12 ? IR_I64 : IR_I32;
@@ -2235,6 +2235,11 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
                 tier1_select_test_node(&function, 3, IR_SEXT, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 tier1_select_test_node(&function, 4, IR_TRUNC, IR_I8, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 converted = 5;
+            }
+            else if (shape >= 19)
+            {
+                tier1_select_test_node(&function, 3, shape == 19 ? IR_ADD : shape == 20 ? IR_SUB : IR_MUL, IR_I32, 2, 2, BUSTER_IR_NONE);
+                converted = 4;
             }
             const bool sign = shape == 2 || shape == 3 || shape == 4 || shape == 12 || shape >= 13;
             tier1_select_test_node(&function, converted, sign ? IR_SEXT : IR_ZEXT, shape == 13 ? IR_I32 : IR_I64, converted - 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -2255,7 +2260,7 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
                 tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "known-bit regression selects by both paths");
                 if (planned == TIER1_SELECT_OK)
                 {
-                    const uint32_t rule = load && shape != 18 ? TIER1_RULE_LOAD_ADDRESS : shape == 2 || shape == 4 || shape == 6 || shape == 11 || shape == 13 ? TIER1_RULE_COPY :
+                    const uint32_t rule = load && shape != 18 ? TIER1_RULE_LOAD_ADDRESS : shape == 2 || shape == 4 || shape == 6 || shape == 11 || shape == 13 || shape == 19 || shape == 22 ? TIER1_RULE_COPY :
                                           sign ? TIER1_RULE_SIGN_EXTEND : TIER1_RULE_ZERO_EXTEND;
                     tier1_select_test_expect(test, plan.patterns[converted].rule == rule, "range and physical-storage proofs choose the required extension");
                     uint8_t registers[8];
@@ -2302,6 +2307,18 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
                                 break;
                             case 17:
                                 expected = (uint64_t)(int64_t)(int32_t)value;
+                                break;
+                            case 19:
+                                expected = 2 * (w & 65535);
+                                break;
+                            case 20:
+                                expected = 0;
+                                break;
+                            case 21:
+                                expected = (uint64_t)(int64_t)(int32_t)((w & 65535) * (w & 65535));
+                                break;
+                            case 22:
+                                expected = (w & 255) * (w & 255);
                                 break;
                             default:
                                 break;
