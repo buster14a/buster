@@ -2290,39 +2290,61 @@ static void oracle_test_replays(OracleTest* test)
     bool restored = first && second;
     for (uint32_t s = 0; restored && s < steps; s += 1)
     {
-        restored = oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 1ull << s, &replay) && !replay.taken && replay.ran &&
-                   (s <= replayed ? replay.seen : replay.contract) && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
+        const bool ready = oracle_test_replay_reset_writable(directory, false);
+        char original[1024];
+        char after_restore[1024];
+        size_t contract = 0;
+        size_t after_contract = 0;
+        oracle_test_replay_seen(directory, original, sizeof(original), &contract);
+        oracle_test_replay_run(test, &cache, directory, 1ull << s, &replay);
+        oracle_test_replay_seen(directory, after_restore, sizeof(after_restore), &after_contract);
+        const bool untouched = replay.went && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory);
+        const bool refused = !replay.went && !replay.taken && !replay.ran && contract == after_contract && memcmp(original, after_restore, contract) == 0;
+        restored = ready && (s <= replayed ? untouched : refused) && oracle_test_replay_kept(directory, false) == 0;
     }
-    oracle_test_expect(test, restored, "replays: each failing step leaves or restores the tool's inputs");
-    // A second fault refuses exactly when it hits restoration of one of the two changed files.
-    printf("oracle cache: takes made to fail on purpose, each file that couldn't be put back named on the next lines:\n");
+    oracle_test_expect(test, restored, "replays: untouched failures fall back; changed files are restored and the run refuses");
+    // Every touched replay refuses, whether or not the second fault also prevents restoration.
+    printf("oracle cache: takes made to fail on purpose are reported on the next lines:\n");
     fflush(stdout);
     bool exact = restored;
-    uint32_t refusals = 0;
+    uint32_t restoration_failures = 0;
     for (uint32_t a = 0; exact && a < steps; a += 1)
     {
         for (uint32_t b = a + 1; exact && b < steps + 2; b += 1)
         {
-            const bool restoration = a > replayed && b <= a + (a - replayed);
+            const bool touched = a > replayed;
+            const bool restoration = touched && b <= a + (a - replayed);
             const bool ready = oracle_test_replay_reset_writable(directory, false);
+            char original[1024];
+            char after_restore[1024];
+            size_t contract = 0;
+            size_t after_contract = 0;
+            oracle_test_replay_seen(directory, original, sizeof(original), &contract);
             oracle_test_replay_run(test, &cache, directory, (1ull << a) | (1ull << b), &replay);
-            const bool fell_back = replay.went && !replay.taken && replay.ran && (a <= replayed ? replay.seen : replay.contract) && oracle_test_replay_after(directory);
+            oracle_test_replay_seen(directory, after_restore, sizeof(after_restore), &after_contract);
+            const bool fell_back = replay.went && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory);
             const bool refused = !replay.went && !replay.taken && !replay.ran;
-            exact = ready && (restoration ? refused : fell_back);
-            refusals += refused;
+            const bool put_back = contract == after_contract && memcmp(original, after_restore, contract) == 0;
+            exact = ready && (touched ? refused && (restoration || put_back) : fell_back);
+            restoration_failures += refused && restoration;
         }
     }
-    oracle_test_expect(test, exact && refusals == 3, "replays: exactly the takes whose restorations fail refuse, their tool not run");
+    oracle_test_expect(test, exact && restoration_failures == 3, "replays: all touched takes refuse, including each failed restoration");
     oracle_test_replay_place = directory;
     oracle_replay_between = oracle_test_replay_other;
     oracle_replay_restoring = oracle_test_replay_restoring;
     bool other = true;
     struct stat status;
     uint64_t length = 0;
-    // A replacement of the second output is left for the tool after the first rewrite is restored.
+    // A replacement of the second output is left intact; the first rewrite is restored and the run refuses.
     oracle_test_replay_change = 1;
-    other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
-             strstr(replay.output, "replay-made 7 ") != 0 && oracle_test_replay_after(directory) && lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode;
+    other &= oracle_test_replay_reset_writable(directory, false) && !oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && !replay.ran &&
+             lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode;
+    char* theirs = oracle_test_read(made, &length);
+    char* original = oracle_test_read(counter, &length);
+    other &= theirs != 0 && strcmp(theirs, "theirs\n") == 0 && original != 0 && strcmp(original, "1\n") == 0;
+    free(theirs);
+    free(original);
     oracle_test_replay_change = 2;
     other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran;
     char* count = oracle_test_read(counter, &length);

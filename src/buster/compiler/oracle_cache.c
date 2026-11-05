@@ -3358,8 +3358,8 @@ static bool oracle_run_keep(OracleRun* run)
 }
 
 // What a take did (oracle_run_take): took nothing and changed nothing, so that the tool runs and sees what it would
-// have without the cache; took the entry, so that the tool doesn't run; or changed the run's files and couldn't put them
-// back, so that the run fails without its tool, which would see them changed.
+// have without the cache; took the entry, so that the tool doesn't run; or changed the run's files before failing,
+// so that the run fails without its tool even if their restorable state was put back.
 typedef enum OracleTake
 {
     ORACLE_TAKE_MISSED,
@@ -3626,8 +3626,8 @@ static bool oracle_replay_write(const OracleRun* run, const OracleEntry* entry, 
 // it); and one it made moved aside, where no other process's file can be in its place, and removed if it is that file
 // as the replay left it, checked through its descriptor after (else moved back: another process's left, one the replay
 // made that another has written since, not). False if one can't be, with a line on the errors naming it (and the name a
-// moved one is kept under, then left). What no call gives back, and what a tool's result mustn't depend on as the cache
-// has it (a file's status-change time, its link count and access time, and its directory's times), may differ.
+// moved one is kept under, then left). Status-change time and directory times may still differ; a take that touched a
+// file fails without starting the tool even after restoration succeeds.
 static bool oracle_replay_restore(const OracleRun* run, const OracleEntry* entry, OracleReplay* replays, uint64_t take)
 {
     bool result = true;
@@ -3750,9 +3750,8 @@ static void oracle_replay_release(const OracleRun* run, OracleReplay* replays, u
 // them (ORACLE_TAKE_TAKEN: the tool doesn't run). What can fail without changing a file comes first, and changes
 // nothing (its output's and errors' copies, each file's state, oracle_replay_prepare), so that a take that can't happen
 // leaves them as they were (ORACLE_TAKE_MISSED: the tool runs). A replay that fails after it has changed some, or finds a
-// file another process has changed since, puts back what it changed (oracle_replay_restore), and if it can't, the take
-// fails (ORACLE_TAKE_FAILED): the tool would see them changed, which for a tool that reads a file it writes
-// (oracle_run_probes keeps such a file as it was before the run) isn't the run.
+// file another process has changed since, puts back what it changed (oracle_replay_restore). It fails without its tool
+// if any file was touched, even after successful restoration, because ctime and directory times cannot be restored.
 static OracleTake oracle_run_take(OracleRun* run)
 {
     OracleEntry entry;
@@ -3780,7 +3779,17 @@ static OracleTake oracle_run_take(OracleRun* run)
     }
     const bool written = prepared && oracle_replay_write(run, &entry, replays, takes);
     const bool restored = !prepared || written || oracle_replay_restore(run, &entry, replays, takes);
+    bool touched = false;
+    for (uint32_t f = 0; f < run->file_count; f += 1)
+    {
+        touched |= replays[f].changed;
+    }
     oracle_replay_release(run, replays, takes);
+    if (!written && restored && touched)
+    {
+        fprintf(stderr, "oracle cache: a take (%s) changed outputs before failing; their metadata cannot be fully restored, so the run fails without its tool\n",
+                run->purpose != 0 ? run->purpose : "");
+    }
     if (written)
     {
         memcpy(output, entry.output, entry.output_length);
@@ -3799,7 +3808,7 @@ static OracleTake oracle_run_take(OracleRun* run)
         free(errors);
     }
     oracle_entry_release(&entry);
-    return written ? ORACLE_TAKE_TAKEN : restored ? ORACLE_TAKE_MISSED : ORACLE_TAKE_FAILED;
+    return written ? ORACLE_TAKE_TAKEN : restored && !touched ? ORACLE_TAKE_MISSED : ORACLE_TAKE_FAILED;
 }
 
 // Starts a run: in use mode takes its entry if it can (OracleRun.taken), in check mode finds the entry it would have

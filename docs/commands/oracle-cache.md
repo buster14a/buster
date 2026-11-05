@@ -231,12 +231,11 @@ Contents are compared in bounded chunks, without a second file-sized copy.
 If a write fails or a later output changed, the take restores each file it
 changed only if it remains as the replay left it. It restores bytes and mode
 in place, restores times, and verifies mode, owner, size, modification time and
-extended attributes. A failure to restore, including a file capability that
-cannot be restored, fails the run without starting the tool. There remains a
-window between a check and the following call, as for a tool that reads then
-writes its file. After a successful rollback the tool sees the prior state
-covered by the cache contract; status-change time, link counts, access time
-and directory times may differ and are excluded by that contract.
+extended attributes. Because status-change and directory times cannot be fully
+restored, the run fails without starting the tool whenever the replay touched
+an output, even when restoration succeeds. A failure before any change remains
+a normal miss and runs the tool. There remains a window between a check and the
+following call, as for a tool that reads then writes its file.
 
 The twelve standalone `test-check-builtins` commands (the base command and
 `-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
@@ -388,8 +387,8 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   entry; a missing output is instead produced by the tool;
 - replays (#1317): fault injection for the result buffers, existing-file reads
   and each replay step verifies that unchanged files are left alone, changed
-  ones are restored, and a failed restoration does not start the tool. Paired
-  failures assert exactly which cases refuse. Concurrent replacements, in-place
+  ones are restored, and every touched replay fails without starting the tool.
+  Paired failures assert which restorations fail. Concurrent replacements, in-place
   writes and a file appearing where the entry removes an absent output are left
   to the tool or fail restoration. A present removal and an absent creation,
   including a write-only creation under umask 0444, miss before any mutation;
