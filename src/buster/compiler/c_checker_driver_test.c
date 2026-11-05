@@ -6,6 +6,7 @@
 // --executable also tests the production command's default C route, independently of its explicit check command.
 
 #include "c_driver_compatibility_test.c"
+#include "c_driver_mixed_test.c"
 
 typedef struct CheckDriverFixture CheckDriverFixture;
 struct CheckDriverFixture
@@ -4061,7 +4062,8 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     check_test_expect(test, parallel_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
                       "an explicit driver command takes precedence over -E");
     free(text);
-    char* const end_options[] = { compiler, "--", "-E", source, NULL };
+    // Force C for this extensionless name: automatic classification treats unknown suffixes as linker inputs.
+    char* const end_options[] = { compiler, "-x", "c", "--", "-E", source, NULL };
     text = NULL;
     const int end_status = check_test_driver_spawn(end_options, &text);
     check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "can't read '-E'") != NULL &&
@@ -4309,7 +4311,7 @@ static bool check_test_driver_clock_text(char* text, size_t capacity, bool syste
 static void check_test_driver_clock_printer(CheckTest* test)
 {
     bool printed = true;
-    for (uint32_t failed = 0; failed < 2; failed += 1)
+    for (uint32_t failed = 0; failed < 4; failed += 1)
     {
         CheckClock stage_clock;
         check_clock_start(&stage_clock);
@@ -4317,14 +4319,15 @@ static void check_test_driver_clock_printer(CheckTest* test)
         // one part in ten thousand, which the parts' ratios below allow.
         stage_clock.monotonic.tv_sec -= 1;
         stage_clock.last = stage_clock.start + 1000000000ull;
-        stage_clock.expression_ticks = 110000000ull;
+        stage_clock.deferred_expression_parts = failed >= 2;
+        stage_clock.expression_ticks = failed >= 2 ? 50000000ull : 110000000ull;
         for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
         {
             stage_clock.expression_part_ticks[p] = 10000000ull * (p + 1);
         }
         stage_clock.expression_system_us = 1234;
         stage_clock.expression_faults = 5678;
-        stage_clock.expression_usage_failed = failed != 0;
+        stage_clock.expression_usage_failed = (failed & 1) != 0;
         FILE* stream = tmpfile();
         char text[32768] = { 0 };
         if (stream != NULL)
@@ -4336,13 +4339,13 @@ static void check_test_driver_clock_printer(CheckTest* test)
             fclose(stream);
         }
         double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
-        bool valid = stream != NULL && check_clock_read_walk(text, parts) && parts[0] > 0;
+        bool valid = stream != NULL && check_clock_read_walk(text, parts) && parts[0] > 0 && check_clock_walk_work(text) == (failed >= 2);
         for (uint32_t p = 1; valid && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
         {
             const double ratio = parts[p] / parts[0];
             valid = ratio > (double)(p + 1) - 0.001 && ratio < (double)(p + 1) + 0.001;
         }
-        printed = printed && valid && (failed != 0 ? parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == -1 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == -1
+        printed = printed && valid && ((failed & 1) != 0 ? parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == -1 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == -1
                                                    : parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == 1.234 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == 5678);
     }
     check_test_expect(test, printed, "--time-stages prints each of the walk's parts under its own name, and its usage in order or as unavailable");
@@ -4360,7 +4363,7 @@ static void check_test_driver_clock_printer(CheckTest* test)
     char text[4096] = { 0 };
     if (stream != NULL)
     {
-        check_clock_print_walk(stream, median, low, high, 100.0);
+        check_clock_print_walk(stream, median, low, high, 100.0, false);
         rewind(stream);
         const size_t length = fread(text, 1, sizeof(text) - 1, stream);
         text[length] = 0;
@@ -4922,8 +4925,12 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             {
                 const uint32_t index = (uint32_t)first[token];
                 const uint32_t phase = (uint32_t)(first[token] >> 32);
-                const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                     check_driver_input_report_message(input, input->reports + index);
+                // Share the text renderer, not the sparse walk's selection or ordering. The exact semantic
+                // catalogue separately compares this spelling and its caret against Clang (#1107).
+                uint32_t location = phase == 2 ? extra[index].token : token;
+                const char* message = phase == 2 ? extra[index].message :
+                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, scratch) :
+                                                   check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                 {
@@ -4937,7 +4944,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 }
                 else
                 {
-                    check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
+                    check_driver_diagnose(parser, pp, location, message);
                 }
             }
         }
@@ -6748,6 +6755,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
 #include "c_check_symbol_driver_test.c"
+#include "c_check_symbol_pragma_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
 #include "c_check_attribute_effects_driver_test.c"
@@ -7998,6 +8006,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_symbols(&test, clang, executable, directory);
+                check_test_driver_symbol_pragmas(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -8323,6 +8332,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_expect(&test, driver_compatibility_tests(executable, clang) == 0, "CC dependency, stdin, probe and link-mode compatibility");
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_expect(&test, driver_mixed_tests(executable, clang) == 0, "mixed C, assembly, object and archive driver");
             }
             if (!lazy && check_test_driver_takes())
             {

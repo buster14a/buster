@@ -71,7 +71,7 @@ static EmissionSourceEvent test_origin(uint32_t boundary, uint32_t side, uint32_
     return event;
 }
 
-static EmissionFrameEvent test_frame(uint32_t boundary, uint32_t side, uint8_t kind, uint16_t reg, int32_t value)
+static EmissionFrameEvent test_frame(uint32_t boundary, uint32_t side, uint8_t kind, uint16_t reg, int64_t value)
 {
     const EmissionFrameEvent event = {
         .at = {
@@ -1012,6 +1012,38 @@ static void test_capacity_spare(void)
     BUSTER_EMISSION_TEST(memcmp(frames + 1, frame_pattern + 1, 3 * sizeof(EmissionFrameRow)) == 0);
 }
 
+// Values, unlike code offsets, are signed 64-bit: retain both CFA magnitudes and negative saved-slot offsets.
+static void test_wide_frame_values(void)
+{
+    const uint32_t starts[] = { 0 };
+    const uint32_t ends[] = { 1 };
+    const EmissionLayout layout = { .starts = starts, .ends = ends, .count = 1, .size = 1 };
+    const int64_t values[] = { INT32_MAX, INT64_C(2147483648), INT64_C(2147483703), INT64_MAX, INT32_MIN, INT64_C(-2147483703), INT64_MIN };
+    EmissionFrameEvent events[(sizeof(values) / sizeof(values[0]))];
+    for (uint32_t i = 0; i < (sizeof(values) / sizeof(values[0])); i += 1)
+    {
+        events[i] = test_frame(1, EMISSION_LEFT, values[i] >= 0 ? EMISSION_FRAME_CFA_OFFSET : EMISSION_FRAME_OFFSET, values[i] >= 0 ? 0 : 3, values[i]);
+    }
+    const EmissionMetadata metadata = { .frames = events, .frame_count = (sizeof(events) / sizeof(events[0])), .register_count = BUSTER_EMISSION_X86_REGISTERS };
+    EmissionFrameRow rows[2][(sizeof(values) / sizeof(values[0]))];
+    memset(rows, 0xa5, sizeof(rows));
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        const EmissionStorage storage = { .frames = rows[scalar], .frame_capacity = (sizeof(values) / sizeof(values[0])) };
+        EmissionResolved resolved;
+        BUSTER_EMISSION_TEST(emission_metadata_resolve(&metadata, &layout, &storage, scalar != 0, &resolved).error == EMISSION_OK);
+        for (uint32_t i = 0; i < (sizeof(values) / sizeof(values[0])); i += 1)
+        {
+            BUSTER_EMISSION_TEST(rows[scalar][i].value == values[i] && rows[scalar][i].offset == 1);
+        }
+        events[0] = test_frame(1, EMISSION_LEFT, EMISSION_FRAME_REGISTER, 3, INT64_C(0x100000006));
+        const EmissionCheck bad = emission_metadata_check(&metadata, &layout, scalar != 0);
+        BUSTER_EMISSION_TEST(bad.error == EMISSION_INVALID && bad.part == EMISSION_FRAME && bad.index == 0);
+        events[0] = test_frame(1, EMISSION_LEFT, EMISSION_FRAME_CFA_OFFSET, 0, values[0]);
+    }
+    BUSTER_EMISSION_TEST(memcmp(rows[0], rows[1], sizeof(rows[0])) == 0);
+}
+
 int run_emission_metadata_tests(int argc, char** argv)
 {
     uint32_t seed = 1056;
@@ -1053,6 +1085,7 @@ int run_emission_metadata_tests(int argc, char** argv)
         test_properties(seed);
         test_frame_vocabulary();
         test_limits_and_state_stack();
+        test_wide_frame_values();
 #if defined(BUSTER_HOST_VECTOR) && BUSTER_HOST_VECTOR
         const uint32_t vector = 1;
 #else

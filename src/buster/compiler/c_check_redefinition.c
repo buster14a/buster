@@ -14,7 +14,7 @@ typedef enum CheckRedeclarationKind
 } CheckRedeclarationKind;
 
 static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t token, uint32_t previous,
-                                             TypeAnswer compatible, bool repeatable, bool parameter_conflict)
+                                             TypeAnswer compatible, bool repeatable, bool parameter_conflict, CheckInputMessage message)
 {
     CheckInput* input = reader->output;
     CheckRedeclarationKind detail = CHECK_REDECLARATION_GENERIC;
@@ -57,7 +57,7 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
         }
     }
     const uint32_t before = input->report_count;
-    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+    check_input_report_subject(reader, token, message, previous);
     if (input->report_count > before && !input->resource && detail != CHECK_REDECLARATION_GENERIC)
     {
         CheckInputReport* report = input->reports + before;
@@ -81,7 +81,7 @@ static void check_input_parameter_redefinition(CheckInputReader* reader, uint32_
         previous = reader->parser->tokens.names[p] == name ? p : BUSTER_CHECK_NONE;
     }
     const uint32_t before = reader->output->report_count;
-    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+    check_input_report_subject(reader, token, CHECK_INPUT_REDECLARATION, previous);
     if (reader->output->report_count > before && !reader->output->resource && previous != BUSTER_CHECK_NONE)
     {
         CheckInputReport* report = reader->output->reports + before;

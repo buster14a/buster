@@ -723,6 +723,7 @@ int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
 
+#if BUSTER_UNIT == BUSTER_UNIT_DRIVER
 #include "buster/compiler/c_driver_information.c"
 
 // Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
@@ -745,40 +746,7 @@ static bool main_preprocessing(int count, char** arguments)
     }
     return result;
 }
-
-// Keep the historical -c assembly spelling while sending C compilation to the semantic driver. Options which
-// take a separate argument cannot make an output or include path look like an assembly input.
-static bool main_assembly_source(int count, char** arguments)
-{
-    bool compile = false;
-    bool assembly = false;
-    bool explicit_c = false;
-    for (int i = 0; i < count; i += 1)
-    {
-        const char* argument = arguments[i];
-        if (strcmp(argument, "-c") == 0)
-        {
-            compile = true;
-        }
-        else if (strcmp(argument, "-x") == 0 && i + 1 < count)
-        {
-            explicit_c = strcmp(arguments[++i], "c") == 0;
-        }
-        else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 ||
-                  strcmp(argument, "-U") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
-                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "--predefines") == 0 ||
-                  strcmp(argument, "-Xlinker") == 0) && i + 1 < count)
-        {
-            i += 1;
-        }
-        else if (argument[0] != '-')
-        {
-            const uint64_t length = strlen(argument);
-            assembly = length >= 2 && (strcmp(argument + length - 2, ".s") == 0 || strcmp(argument + length - 2, ".S") == 0);
-        }
-    }
-    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments) && !main_information(count, arguments, NULL);
-}
+#endif
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
 // is, so that the other units' branches fold to false (at the top). What no unit takes runs the compiler itself
@@ -812,10 +780,9 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_diagnostic_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && (strcmp(argv[1], "assemble") == 0 || main_assembly_source(argc - 1, argv + 1)))
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "assemble") == 0)
     {
-        const int skip = strcmp(argv[1], "assemble") == 0 ? 2 : 1;
-        result = run_assembler_command(argc - skip, argv + skip);
+        result = run_assembler_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-x86-semantics") == 0)
     {
@@ -1719,7 +1686,7 @@ static int main_driver(int argc, char** argv)
     // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
     // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
     // compile needs nothing else of.
-    if (!found && argc >= 2 && argv[1][0] == '-' && !main_assembly_source(argc - 1, argv + 1))
+    if (!found && argc >= 2 && argv[1][0] == '-')
     {
         result = main_source_command(argc, argv);
         found = true;
