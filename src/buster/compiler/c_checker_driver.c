@@ -4019,8 +4019,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckInitDiagnostic earlier = { 0 };
                         const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
+                        // Under -w too: its unavailable members' errors are its events' (#147), which publication keeps alone.
                         CheckInitWarningSink warnings = {
-                            .capacity = !quiet ? tokens : 0,
+                            .capacity = tokens,
                             .events = &initializer_warnings,
                             .event_keys = &initializer_warning_keys,
                         };
@@ -4028,7 +4029,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const bool storage = warnings.capacity == 0 || warnings.tokens != NULL;
                         const bool diagnosed = storage && initializers.status != CHECK_INIT_RESOURCE &&
                                                check_initializers_diagnose_warnings(&earlier, &input, &stream, checking, &types, before,
-                                                                                     output_arena, scratch, !quiet ? &warnings : NULL);
+                                                                                     output_arena, scratch, &warnings);
                         if (!storage || initializers.status == CHECK_INIT_RESOURCE)
                         {
                             earlier.status = CHECK_INIT_RESOURCE;

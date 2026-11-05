@@ -289,10 +289,14 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
     unlink(source);
     rmdir(system_directory);
     // An unavailable member's use in an initializer is clang's error under -w too (#147, check_init_member_use): each use,
-    // at its place, with its note, by both paths.
-    static const char unavailable_text[] = "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct S a = { .u = 1 };\n"
-                                           "struct S b = { 2, 3 };\nvoid f(void) { struct S c = { .w = 1, .u = 2 }; (void)c; }\n";
-    if (parse_test_write(source, unavailable_text, strlen(unavailable_text)))
+    // at its place, with its note, by both paths; and where another declaration's error sends the initializers to the
+    // diagnostic walk.
+    static const char* const unavailable_texts[] = {
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct S a = { .u = 1 };\n"
+        "struct S b = { 2, 3 };\nvoid f(void) { struct S c = { .w = 1, .u = 2 }; (void)c; }\n",
+        "struct S { int u __attribute__((unavailable(\"gone\"))); };\nstruct S a = { .u = 1 };\nvoid *bad = &(int){1} + nope;\n",
+    };
+    for (uint32_t u = 0; u < BUSTER_ARRAY_LENGTH(unavailable_texts) && parse_test_write(source, unavailable_texts[u], strlen(unavailable_texts[u])); u += 1)
     {
         char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-color-diagnostics", "-w", source, NULL };
         char* reference = NULL;
@@ -310,8 +314,8 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
             const bool actual_valid = check_test_cleanup_errors(text, 0, actual, sizeof(actual));
             free(text);
             char description[512];
-            snprintf(description, sizeof(description), "an unavailable member's initializer uses under -w, by the %s path: clang's (status %d)\n%sagainst (status %d)\n%s",
-                     scalar != 0 ? "scalar" : "vector", oracle, expected, status, actual);
+            snprintf(description, sizeof(description), "an unavailable member's initializer uses under -w (%u), by the %s path: clang's (status %d)\n%sagainst (status %d)\n%s",
+                     u, scalar != 0 ? "scalar" : "vector", oracle, expected, status, actual);
             check_test_expect(test, oracle == 1 && status == oracle && expected_valid && actual_valid && strcmp(expected, actual) == 0, description);
         }
     }
