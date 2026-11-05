@@ -354,6 +354,8 @@ With both facts, a nonnegative signed extension becomes a zero extension,
 and a zero extension of already canonical storage becomes a coalescible copy.
 A truncation of a value already in the unsigned destination range is a copy;
 sign extension can bypass a truncation of an already sign-extended value.
+Successive sign extensions read the original narrow value directly, including
+a folded signed load through an intermediate integer promotion.
 A single-use ordinary load followed by sign extension becomes one exact-width
 `movsx`/`movsxd` load, under the existing memory-order and address-fold rules.
 Volatile and atomic accesses retain their separate access.

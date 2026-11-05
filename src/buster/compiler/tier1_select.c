@@ -3803,20 +3803,36 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
-        // Read and extend once. The existing load-fold proof preserves exact access width and ordering and excludes
-        // volatile/atomic accesses; the load's other users, if any, keep its original zero-extended definition.
-        if (op == IR_SEXT && (type == IR_I32 || type == IR_I64) && tier1_select_load_folds(forest, node, a))
+        // Signed widening is transitive: sext64(sext32(i8)) needs only the final extension. Following single-use
+        // extensions also exposes their original load, avoiding movsbl followed by movslq for a signed-byte index.
+        uint32_t signed_source = a;
+        Tier1SelectPattern widened = base;
+        for (uint32_t depth = 0; op == IR_SEXT && base.rule == TIER1_RULE_SIGN_EXTEND && depth < BUSTER_TIER1_SELECT_WALK &&
+                                 function->op[signed_source] == IR_SEXT && tier1_select_tree_child(forest, node, signed_source); depth += 1)
         {
-            Tier1SelectPattern folded = base;
+            tier1_select_fold(forest, node, signed_source, &widened);
+            signed_source = function->a[signed_source];
+            widened.values[0] = signed_source;
+            widened.source_width = (uint8_t)tier1_select_memory_width(function->type[signed_source]);
+        }
+        if (signed_source != a)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, widened);
+        }
+        // Read and extend once. The existing load-fold proof preserves exact access width and ordering and excludes
+        // volatile/atomic accesses, including when pure sign extensions separated the load from this consumer.
+        if (op == IR_SEXT && (type == IR_I32 || type == IR_I64) && tier1_select_load_folds(forest, node, signed_source))
+        {
+            Tier1SelectPattern folded = widened;
             folded.rule = TIER1_RULE_LOAD_ADDRESS;
             folded.operation = X86_OPERATION_MOVSX;
-            folded.width = (uint8_t)tier1_select_memory_width(function->type[a]);
+            folded.width = (uint8_t)tier1_select_memory_width(function->type[signed_source]);
             folded.source_width = (uint8_t)tier1_select_memory_width(type);
-            folded.values[0] = function->a[a];
+            folded.values[0] = function->a[signed_source];
             folded.values[1] = BUSTER_IR_NONE;
             folded.intrinsic_cost = 1;
-            tier1_select_fold(forest, node, a, &folded);
-            tier1_select_memory(forest, node, function->a[a], &folded, 0);
+            tier1_select_fold(forest, node, signed_source, &folded);
+            tier1_select_memory(forest, node, function->a[signed_source], &folded, 0);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
         // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
