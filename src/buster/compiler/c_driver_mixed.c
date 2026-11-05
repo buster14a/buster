@@ -18,7 +18,7 @@ static int check_driver_assembly(const CheckDriverCommand* command, const PPOpti
     if (preprocess)
     {
         ready = asm_preprocess_unit(unit->path, options, &lane->arena, &source, &lane->identifiers, &lane->pp,
-                                    &unit->dependency, &lane->kept, command->output, errors);
+                                    &unit->dependency, &lane->kept, command->output, errors, &unit->fatal);
     }
     else if (strcmp(unit->path, "-") == 0)
     {

@@ -66,7 +66,7 @@ static bool asm_read_file(const char* path, Arena* arena, String8* source)
 // avoids a subprocess or a temporary source file. The returned slice belongs to the assembler's arena.
 static bool asm_preprocess_unit(const char* path, PPOptions options, Arena* arena, String8* source,
                                 InternTable* table, Preprocessor* pp, DependencyOutput* dependency, Arena* dependency_arena,
-                                const char* output, FILE* errors)
+                                const char* output, FILE* errors, bool* fatal)
 {
     options.assembly = true;
     options.expansion_starts = true;
@@ -75,7 +75,12 @@ static bool asm_preprocess_unit(const char* path, PPOptions options, Arena* aren
     bool result = source->pointer != 0;
     if (result)
     {
-        result = pp_initialize(pp, &options, table) && pp_run_input(pp, path);
+        const bool initialized = pp_initialize(pp, &options, table);
+        result = initialized && pp_run_input(pp, path);
+        if (fatal != NULL)
+        {
+            *fatal = !initialized || pp->fatal;
+        }
         FILE* stream = result ? fmemopen(source->pointer, BUSTER_ASM_MAX_SOURCE + 1, "w") : 0;
         result = stream != 0 && pp_print(pp, stream, true);
         if (stream != 0)
@@ -92,6 +97,10 @@ static bool asm_preprocess_unit(const char* path, PPOptions options, Arena* aren
         }
         pp_release(pp);
     }
+    else if (fatal != NULL)
+    {
+        *fatal = true;
+    }
     arena_pop_to(arena, result ? (uint64_t)((uint8_t*)source->pointer - arena->base) + source->length + 1 : saved);
     if (!result)
     {
@@ -104,7 +113,7 @@ static bool asm_preprocess_file(const char* path, PPOptions options, Arena* aren
 {
     static InternTable table;
     static Preprocessor pp;
-    const bool result = intern_initialize(&table) && asm_preprocess_unit(path, options, arena, source, &table, &pp, NULL, NULL, NULL, stderr);
+    const bool result = intern_initialize(&table) && asm_preprocess_unit(path, options, arena, source, &table, &pp, NULL, NULL, NULL, stderr, NULL);
     intern_release(&table);
     return result;
 }

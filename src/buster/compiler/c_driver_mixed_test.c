@@ -66,6 +66,8 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
                      cc_compat_write(&test, "preprocessed.txt", preprocessing) &&
                      cc_compat_write(&test, "unused.c", "extern int unavailable(void); int unused(void) { return unavailable(); }\n") &&
                      cc_compat_write(&test, "bad.s", ".text\nthis_is_not_an_instruction\n") &&
+                     cc_compat_write(&test, "fatal.S", "#error FIRST_ASSEMBLY_ERROR\n") &&
+                     cc_compat_write(&test, "later.c", "#error LATER_C_ERROR\n") &&
                      cc_compat_write(&test, "broken.o", "not an ELF object or valid linker script\n") &&
                      cc_compat_write(&test, "extra.S", "#ifndef __ASSEMBLER__\n#error wrong mode\n#endif\n.data\n.globl extra\nextra: .long BASE\n");
         cc_compat_expect(&test, files, "write mixed-input fixtures");
@@ -156,6 +158,12 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         cc_mixed_refusal(&test, "-x none cancels stdin language", language_reset, "requires -x");
         cc_mixed_refusal(&test, "linker option cannot consume a source operand", missing_link_value, "missing");
         cc_mixed_refusal(&test, "mixed multiple -c -o rejected", multiple_output, "multiple output");
+        const char* const fatal_order[] = { "-c", "-Wfatal-errors", "fatal.S", "later.c", NULL };
+        CCCompatibilityRun fatal = cc_compat_run(&test, test.compiler, NULL, fatal_order);
+        cc_compat_expect(&test, fatal.status != 0 && fatal.errors != NULL && strstr(fatal.errors, "FIRST_ASSEMBLY_ERROR") != NULL &&
+                                strstr(fatal.errors, "LATER_C_ERROR") == NULL,
+                         "fatal assembly preprocessing stops later units' diagnostics");
+        cc_compat_release(&fatal);
         cc_compat_cleanup(&test);
     }
     printf("mixed driver: %u checks, %u failures\n", test.checks, test.failures);
