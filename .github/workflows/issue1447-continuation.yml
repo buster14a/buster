@@ -17,7 +17,9 @@ jobs:
       - name: Probe boolean elementwise behavior
         shell: bash
         run: |
+          set +e
           set -u
+          ulimit -c 0
           mkdir -p build/issue1447-oracle
           for op in {1..13}; do
             for lanes in 1 3 8 65 1024; do
@@ -38,3 +40,29 @@ jobs:
               sed -n '1,12p' "$stem.log"
             fi
           done
+  diagnostic-occurrence-oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang
+        run: bash tools/ci/setup-hosted.sh
+      - name: Probe diagnostic type spellings and recovery
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          for case in {1..24}; do
+            echo "OCCURRENCE CASE=$case"
+            clang -std=c23 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-diagnostic-occurrences.c 2>&1
+          done
+          for case in {1..24}; do
+            echo "RECOVERY CASE=$case"
+            standard=gnu17
+            if [ "$case" -eq 6 ]; then standard=c89; fi
+            if [ "$case" -eq 1 ] || [ "$case" -eq 21 ] || [ "$case" -eq 22 ]; then standard=c23; fi
+            clang -std="$standard" -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-recovery-oracles.c 2>&1
+          done
+          exit 0
