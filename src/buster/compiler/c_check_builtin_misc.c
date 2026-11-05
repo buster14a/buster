@@ -1079,6 +1079,35 @@ static uint64_t check_builtin_cpu_lookup(const CheckBuiltinCpuName* names, uint3
     return result;
 }
 
+// Whether __builtin_dump_struct of a record of `record` dumps a bit-field that no format prints (#148): a named one of
+// a _BitInt or a 128-bit integer type, among its fields, its anonymous members' and its fields' records' (by an explicit
+// stack, at most 64 deep).
+static bool check_builtin_misc_dump_bit_field(const TypeTable* table, TypeId record)
+{
+    uint32_t stack[64];
+    uint32_t depth = 0;
+    bool found = false;
+    stack[depth++] = table->types.index[type_index(record)];
+    while (!found && depth != 0)
+    {
+        const uint32_t tag = stack[--depth];
+        for (uint32_t m = 0; !found && m < table->tags.member_count[tag]; m += 1)
+        {
+            const uint32_t member = table->tags.member_begin[tag] + m;
+            const TypeId bare = type_unqualified(type_strip_aligned(table, table->members.type[member]));
+            const uint8_t kind = type_kind(table, bare);
+            const bool bits = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+            found = bits && table->members.name[member] != 0 &&
+                    (kind == BUSTER_TYPE_KIND_BIT_INT || bare == BUSTER_TYPE_INT128 || bare == BUSTER_TYPE_UINT128);
+            if (!bits && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && depth < 64)
+            {
+                stack[depth++] = table->types.index[type_index(bare)];
+            }
+        }
+    }
+    return found;
+}
+
 // The last of clang's generic builtins of #148 that its Sema checks itself:
 // - __arithmetic_fence(x): x, lvalue-converted, of a floating type, a complex one or a vector of either (its type before
 //   conversion: an _Atomic one is refused), a constant where x is; at -O0 a fence keeps nothing apart;
@@ -1185,7 +1214,7 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
         // operands: (rest..., format) for a brace's line and up to five operands more for a field's. A prototype must
         // take each of those calls: it is variadic, with no more parameters than the rest and the format, the rest
         // converting to its first parameters and the format, a char *, to the next ("too many" or "too few arguments"
-        // otherwise). The calls' code is the printing function's, which this compiler doesn't make (check_lower_unsupported).
+        // otherwise). The calls' code is check_lower_dump_struct's, of check_lower_dump_prepare's plan.
         CheckValue record = check_builtin_misc_argument(table, input, output, 0);
         const TypeId pointer = type_strip_aligned(table, record.type);
         const bool is_pointer = output->action.diagnostic == CHECK_DIAG_NONE && check_action_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER;
@@ -1237,6 +1266,12 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
             {
                 check_action_diagnose(&output->action, scratch.action.diagnostic, i < rest ? 2 + i : 1);
             }
+        }
+        if (output->action.diagnostic == CHECK_DIAG_NONE && check_builtin_misc_dump_bit_field(table, pointee))
+        {
+            // A bit-field no format prints (a _BitInt's or an __int128's) prints its address, which clang's Sema refuses:
+            // "address of bit-field requested".
+            check_action_diagnose(&output->action, CHECK_DIAG_BIT_FIELD, 0);
         }
         if (output->action.diagnostic == CHECK_DIAG_NONE)
         {
