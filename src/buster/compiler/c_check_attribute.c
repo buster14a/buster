@@ -200,8 +200,9 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
-    // An unknown spelling retained only to warn when each declarator processes its attributes (#147).
-    bool unrecognized;
+    // C23 attributes after declaration specifiers apply to that base type, before declarator chunks (#147).
+    bool specifier_type;
+    bool specifier_ignored;
     // Ignored by the subject check (check_input_attribute_subjects) of the declarator that read it last: a record that
     // declaration specifiers' attributes share among their declarators is checked again by each.
     bool subject_ignored;
@@ -244,10 +245,24 @@ struct CheckInputAttribute
 #define BUSTER_CHECK_COUNT_LEAST 2
 #define BUSTER_CHECK_COUNT_MOST 3
 
+typedef struct CheckInputUnknownAttribute CheckInputUnknownAttribute;
+struct CheckInputUnknownAttribute
+{
+    CheckInputUnknownAttribute* next;
+    uint32_t first;
+    uint32_t name_token;
+    uint32_t name;
+    uint32_t end;
+    bool standard;
+};
+
 typedef struct CheckInputAttributes CheckInputAttributes;
 struct CheckInputAttributes
 {
     CheckInputAttribute* records;
+    // Diagnostic-only spellings are separate from the semantic records. Prefix lists replay them per declarator.
+    CheckInputUnknownAttribute* unknown_begin;
+    CheckInputUnknownAttribute* unknown_end;
     uint32_t count;
     uint32_t capacity;
     uint32_t error_first;
@@ -1002,6 +1017,31 @@ static bool check_input_visibility_known(String8 text)
            check_input_attribute_equal(text, "internal");
 }
 
+static bool check_input_attribute_unknown_append(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputUnknownAttribute attribute)
+{
+    CheckInputUnknownAttribute* record = arena_push_array(reader->arena, 1, sizeof(CheckInputUnknownAttribute), 8);
+    const bool valid = record != NULL;
+    if (valid)
+    {
+        *record = attribute;
+        record->next = NULL;
+        if (attributes->unknown_end != NULL)
+        {
+            attributes->unknown_end->next = record;
+        }
+        else
+        {
+            attributes->unknown_begin = record;
+        }
+        attributes->unknown_end = record;
+    }
+    else
+    {
+        check_input_attribute_error(reader, attributes, attribute.first, attribute.end, CHECK_ATTRIBUTE_ERROR_RESOURCE);
+    }
+    return valid;
+}
+
 static bool check_input_attribute_append(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute attribute)
 {
     bool valid = true;
@@ -1040,10 +1080,16 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
     destination->records = 0;
     destination->capacity = 0;
     destination->count = 0;
+    destination->unknown_begin = NULL;
+    destination->unknown_end = NULL;
     bool valid = source->error == CHECK_ATTRIBUTE_ERROR_NONE;
     for (uint32_t i = 0; valid && i < source->count; i += 1)
     {
         valid = check_input_attribute_append(reader, destination, source->records[i]);
+    }
+    for (const CheckInputUnknownAttribute* unknown = source->unknown_begin; valid && unknown != NULL; unknown = unknown->next)
+    {
+        valid = check_input_attribute_unknown_append(reader, destination, *unknown);
     }
     return valid;
 }
@@ -1057,6 +1103,10 @@ static bool check_input_attribute_merge(CheckInputReader* reader, const CheckInp
     for (uint32_t i = 0; valid && i < suffix->count; i += 1)
     {
         valid = check_input_attribute_append(reader, output, suffix->records[i]);
+    }
+    for (const CheckInputUnknownAttribute* unknown = suffix->unknown_begin; valid && unknown != NULL; unknown = unknown->next)
+    {
+        valid = check_input_attribute_unknown_append(reader, output, *unknown);
     }
     if (valid)
     {
@@ -2739,7 +2789,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
 {
     const Parser* parser = reader->parser;
     uint32_t i = *cursor;
-    CheckInputAttribute attribute = { .first = i, .name_token = i, .standard = standard };
+    CheckInputAttribute attribute = { .first = i, .name_token = i, .standard = standard,
+                                      .specifier_type = standard && place == BUSTER_CHECK_PLACE_SPECIFIERS };
     bool valid = i < end && parser->tokens.names[i] != 0;
     bool namespace_known = true;
     bool scoped = false;
@@ -3125,9 +3176,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 check_input_warning_event(reader, &event, NULL, 0);
             }
             attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first + 1;
-            attribute.unrecognized = deferred;
-            attribute.ignored = deferred;
-            unknown = !deferred;
+            if (deferred)
+            {
+                const CheckInputUnknownAttribute diagnostic = {
+                    .first = attribute.first, .name_token = attribute.name_token, .name = attribute.name, .end = attribute.end, .standard = attribute.standard,
+                };
+                valid = check_input_attribute_unknown_append(reader, attributes, diagnostic);
+            }
+            unknown = true;
         }
         if (valid && !unknown)
         {
@@ -3474,6 +3530,17 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
     {
         CheckInputAttribute* attribute = &attributes->records[i];
         CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
+        if (attribute->specifier_type && deduced)
+        {
+            TypeId function = result;
+            uint8_t kind = type_kind(reader->types, function);
+            while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+            {
+                function = reader->types->types.base[type_index(function)];
+                kind = type_kind(reader->types, function);
+            }
+            attribute->specifier_ignored = kind != BUSTER_TYPE_KIND_FUNCTION;
+        }
         if (attribute->kind == CHECK_ATTRIBUTE_MODE && type_kind(reader->types, type_strip_aligned(reader->types, result)) == BUSTER_TYPE_KIND_FUNCTION)
         {
             // A function's, which clang's subject check refuses before the mode is read (check_input_attribute_subjects).
@@ -3525,6 +3592,21 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         if (!valid)
         {
             check_input_attribute_error(reader, attributes, attribute->first, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
+        }
+    }
+    // A convention ignored on a C23 specifier type must not become the later declarator's ABI. Recompute the compact
+    // requested convention from the retained records; an ordinary prefix convention still reaches the full type.
+    if (deduced)
+    {
+        attributes->calling_convention = CHECK_CALL_DEFAULT;
+        for (uint32_t i = 0; i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            if (attributes->calling_convention == CHECK_CALL_DEFAULT && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
+                !attribute->specifier_ignored && attribute->value != CHECK_CALL_IGNORED_X86_32)
+            {
+                attributes->calling_convention = (CheckInputCallingConvention)attribute->value;
+            }
         }
     }
     // clang's CheckAlignasUnderalignment: the greatest of all the alignments (GNU aligned's too) where one is _Alignas's.
@@ -3598,7 +3680,7 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = attributes->records + i;
-                if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value != CHECK_CALL_IGNORED_X86_32)
+                if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && attribute->value != CHECK_CALL_IGNORED_X86_32)
                 {
                     check_input_attribute_conflict(reader, attributes, attribute, (uint32_t)attribute->value, check_input_abi_call((TypeFunctionABI)(origin - 1)));
                 }
@@ -3627,7 +3709,7 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     for (uint32_t i = 0; is_function && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_pcs(reader, attributes, attribute))
+        if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && check_input_attribute_pcs(reader, attributes, attribute))
         {
             const uint32_t call = attribute->value == CHECK_CALL_IGNORED_X86_32 ? CHECK_CALL_SYSV : (uint32_t)attribute->value;
             // (A GPU kernel's convention is a function's declaration's alone, not a pointer's to one.)
@@ -5062,14 +5144,19 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
     const uint32_t pointer_variable = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER;
     const uint32_t subjects = declaration | ((declaration & pointer_variable) == pointer_variable ? BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE : 0);
     bool valid = true;
-    for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
+    const CheckInputUnknownAttribute* unknown = attributes != NULL ? attributes->unknown_begin : NULL;
+    for (uint32_t i = 0; valid && attributes != NULL && (i < attributes->count || unknown != NULL);)
     {
-        CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->unrecognized)
+        if (unknown != NULL && (i == attributes->count || unknown->first < attributes->records[i].first))
         {
-            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE, CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE);
+            const CheckInputAttribute attribute = {
+                .first = unknown->first, .name_token = unknown->name_token, .name = unknown->name, .end = unknown->end, .standard = unknown->standard,
+            };
+            check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE, CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE);
+            unknown = unknown->next;
             continue;
         }
+        CheckInputAttribute* attribute = attributes->records + i++;
         const bool scoped = attribute->standard && attribute->first != attribute->name_token;
         const uint32_t scope_name = scoped ? parser->tokens.names[attribute->first] : 0;
         const String8 scope = scoped ? check_input_attribute_name(reader, scope_name) : (String8){ "", 0 };
