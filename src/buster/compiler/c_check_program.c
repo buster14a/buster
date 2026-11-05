@@ -299,6 +299,13 @@ struct CheckProgram
     uint32_t asm_target_count;
     uint32_t object_count;
     uint32_t symbol_count;
+    // The unit's constant CFStrings' calls (#148, CheckDataPrepared's), each of which takes its canonical call's symbol
+    // (check_program_alias_number), and the object of the __CFConstantStringClassReference they point to, which is the
+    // program's own where `cfstring_class_own` (the emission names it, an undefined global).
+    const CheckDataCFString* cfstrings;
+    uint32_t cfstring_count;
+    uint32_t cfstring_class;
+    bool cfstring_class_own;
     uint32_t token;
     uint32_t diagnostic_position;
     CheckProgramStatus status;
@@ -2713,6 +2720,18 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         }
         else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
         {
+            if (op == CHECK_OP_BUILTIN_MISC && (graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || graph->members[node] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING))
+            {
+                // A constant CFString's call (#148), whose value is its object's address (check_data_cfstring_keys' object).
+                const CheckValue value = check_stream_value(program->stream, node);
+                if (value.constant_kind == CHECK_CONSTANT_ADDRESS && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && value.object != 0 &&
+                    value.object < program->object_count && seen[value.object] != epoch)
+                {
+                    seen[value.object] = epoch;
+                    needed[value.object] = 1;
+                    references[reference_count++] = (uint64_t)value.object << 32;
+                }
+            }
             if (op == CHECK_OP_STATEMENT_VALUE)
             {
                 const uint32_t selected = program->input->expression_regions[graph->tokens[node]];
@@ -3896,6 +3915,13 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
         // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
+        if (options.prepared_data != NULL)
+        {
+            program->cfstrings = options.prepared_data->cfstrings;
+            program->cfstring_count = options.prepared_data->cfstring_count;
+            program->cfstring_class = options.prepared_data->cfstring_class;
+            program->cfstring_class_own = options.prepared_data->cfstring_class_own;
+        }
         const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, &target_events) :
                                                               check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), &target_events);
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)

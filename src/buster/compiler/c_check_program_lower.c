@@ -8073,7 +8073,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     }
     else if (runtime == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || runtime == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
     {
-        check_lower_unsupported(writer, "a constant CFString or NSString, whose object this compiler doesn't make");
+        check_lower_unsupported(writer, "an NSString of no string literal, whose object clang's code makes from the literal its argument isn't");
     }
     else if (runtime == CBUILTIN_CPU_INIT)
     {

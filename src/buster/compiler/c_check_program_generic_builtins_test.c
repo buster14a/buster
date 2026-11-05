@@ -268,6 +268,12 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "(void)__builtin___CFStringMakeConstantString(((const char*)(\"a\" \"b\")));\n(void)sizeof(__builtin___CFStringMakeConstantString(\"\"));\n"
           "long n = __builtin___CFStringMakeConstantString(\"abc\")->length;\n__typeof__(__builtin___CFStringMakeConstantString(\"x\")) p = 0;\n"
           "(void)n;\n(void)p;\nreturn __builtin___NSStringMakeConstantString(s);\n}\n" },
+        // A constant CFString of a literal is an address constant (#148): a static initializer of one, cast to long or offset,
+        // and NSString's, at file scope and in a function.
+        { .name = "generic: constant strings in static initializers", .source =
+          "static const void* p = __builtin___CFStringMakeConstantString(\"x\");\nstatic long l = (long)__builtin___CFStringMakeConstantString(\"y\");\n"
+          "static const char* q = (const char*)__builtin___CFStringMakeConstantString(\"w\") + 1;\n"
+          "const void* f(void)\n{\nstatic const void* s = __builtin___NSStringMakeConstantString(\"v\");\n(void)p;\n(void)l;\n(void)q;\nreturn s;\n}\n" },
         { .name = "generic: eh_return of one", .source = "void f(void)\n{\n__builtin_eh_return(1);\n}\n", .rejected = true },
         { .name = "generic: eh_return of a pointer offset", .source = "void f(void)\n{\n__builtin_eh_return((void*)0, 0);\n}\n", .rejected = true },
         { .name = "generic: eh_return's value", .source = "int f(void)\n{\nreturn __builtin_eh_return(1, 0);\n}\n", .rejected = true },

@@ -1701,8 +1701,8 @@ alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
 compile, and this compiler doesn't yet:
 
 - `__builtin_eh_return`, whose unwinding to a handler;
-- `__builtin___CFStringMakeConstantString` and
-  `__builtin___NSStringMakeConstantString`, whose `cfstring` object;
+- `__builtin___NSStringMakeConstantString` of no string literal, whose
+  object clang's code makes from what isn't one;
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns;
 - `__builtin_call_with_static_chain`, whose chain register (`r10`);
@@ -1742,16 +1742,45 @@ scope `sizeof`'s).
   `pp_utf8_sequence`) is clang's `-WCFString-literal`, "input conversion
   stopped due to an input byte that does not belong to the input codeset
   UTF-8", at the literal (`check_input_cfstring_literal`).
-- **Code.** Clang makes a `cfstring` section object pointing at
-  `__CFConstantStringClassReference` and the literal; this compiler refuses
-  either call by name ("unsupported: a constant CFString or NSString, whose
-  object this compiler doesn't make").
-- **Difference.** Clang's evaluator takes either call as an address constant
-  (`IsOpaqueConstantCall`), so a static initializer of one (`static const void
-  *p = __builtin___CFStringMakeConstantString("x");`, cast to `long` or
-  `_Bool` too, or plus an offset) is accepted. This checker's isn't, and
-  refuses it as "initializer is not a constant expression": it has no object
-  to give the address of, as its code generation doesn't.
+- **The value.** Of a literal, either call is an address constant, as clang's
+  evaluator takes it (`IsOpaqueConstantCall`): the address of its call's own
+  object (its `)`'s token plus one, `CheckBuiltinMiscAction.cfstring_object`),
+  a static one. So a static initializer of one (`static const void *p =
+  __builtin___CFStringMakeConstantString("x");`, cast to `long` or plus an
+  offset) is accepted, and its code is the object's address: no operand runs.
+- **The objects.** `check_data_cfstring_keys` (`c_check_data_input.c`) makes what
+  clang's `GetAddrOfConstantCFString` makes:
+  - **The record:** one `__NSConstantString` record of 32 bytes of each
+    literal's characters, writable data in the section `cfstring`, 8-aligned.
+    Its fields are `__CFConstantStringClassReference`'s address, its flags
+    (`0x7c8`, or `0x7d0` for UTF-16), its characters' address and their
+    length.
+  - **Its characters:** an ASCII literal's (no byte past `0x7f` and no NUL) are
+    its own string literal. Any other's are the UTF-16 units of LLVM's strict
+    conversion, which stops at the first byte that begins no sequence, then a
+    NUL unit. They go in a constant array of their own, 2-aligned (at the
+    call's `(`), and the length counts the units.
+  - **One per literal:** each call's object takes the symbol of the lowest
+    object of its characters, as weakrefs take their targets' at numbering
+    (`check_program_alias_number`). So two calls of one literal, a CFString's
+    and an NSString's among them, have one address, as clang's.
+  - **The class:** the unit's file-scope declaration of
+    `__CFConstantStringClassReference` (`check_input_cfstring_class`), or else
+    an undefined global of that name, the program's own.
+- **Code of no literal.** An NSString of what isn't a literal stays a value:
+  clang's code makes its object from the literal its argument isn't (a
+  `cast<StringLiteral>` of another expression), and `-c` refuses it by name
+  ("unsupported: an NSString of no string literal, whose object clang's code
+  makes from the literal its argument isn't").
+- **Differences.**
+  - Clang's evaluator takes an NSString of no literal as an address constant
+    too, and accepts a static initializer of one; this checker refuses it as
+    "initializer is not a constant expression".
+  - A static `_Bool` of one is refused, as one of any address is
+    (`static _Bool b = &x;`).
+  - Clang's ELF object also has an `objc_imageinfo` section where it makes a
+    CFString, and keeps the characters in `.rodata`, which this compiler's
+    string pool (`.rodata.str1.1`) holds.
 
 A miscellaneous builtin's argument of the other signedness of a `char`
 pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
