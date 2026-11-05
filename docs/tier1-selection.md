@@ -379,8 +379,12 @@ loop's numeric range from its initial value alone.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
-`cmp`/`test`, `setcc`, then `movzx`; clearing the destination before comparison
-would corrupt an aliased input, so the zero extension follows `setcc`.
+canonical 32-bit storage and `setcc`. An independent destination is cleared with
+`xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
+`mov r32, 0` clears the destination while preserving the flags. A floating
+comparison's result is in the general class and its inputs in the vector class,
+so it can always clear the result before `ucomis`. Its parity combination for
+unordered equality/inequality touches only the already canonical low byte.
 
 The body uses only RAX, RCX, RDX, RSI, RDI and R8–R10. R11 is reserved for
 operand-overlap repairs. Parameters must be an entry-block prefix, with up to

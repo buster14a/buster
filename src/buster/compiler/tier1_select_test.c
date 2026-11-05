@@ -2045,7 +2045,7 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
                                 const uint32_t first = plan->effective_use_offsets[converted];
                                 if (from == 0)
                                 {
-                                    // A comparison's truth value as an integer is the comparison's own setcc and movzx.
+                                    // A comparison's truth value as an integer is the comparison's canonical result.
                                     tier1_select_test_expect(test, plan->patterns[converted].rule == TIER1_RULE_COMPARE_IMMEDIATE && plan->patterns[converted].condition == IR_NE &&
                                                                        plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == 0 &&
                                                                        plan->covered[1] && plan->covered[2] && !plan->covered[converted],

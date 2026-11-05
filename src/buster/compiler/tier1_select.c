@@ -134,8 +134,8 @@ typedef enum Tier1SelectRule
     // from memory where it folds a load (FLOAT_LOAD_OPERAND, values[1] and values[2] the address's base and index). A
     // negation, xorps of the sign bit, which the scratch general register moves into the vector class's scratch
     // register. A load and a store as the integer ones, the store's value in values[2], each one movss or movsd, which stays its node's last record (the CFG consumer patches a frame object's
-    // base and offset into it). A comparison's truth value, `condition` its IR predicate (EQ to GE): ucomis, setcc and
-    // movzx, and for == and != the parity flag's setcc and their and or or, since unordered operands set ZF too. A branch
+    // base and offset into it). A comparison's truth value, `condition` its IR predicate (EQ to GE): clear the general
+    // result, ucomis and setcc, and for == and != the parity flag's setcc and their and or or, since unordered sets ZF. A branch
     // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
     // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
     // !(a >= b), true. The conversions (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others,
@@ -1098,10 +1098,23 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_COMPARE:
     case TIER1_RULE_COMPARE_IMMEDIATE:
+    {
+        // A zeroed destination stays canonical when setcc writes its low byte. Clear before the comparison where the
+        // destination is independent of its inputs. An aliased input must be read first; mov-immediate then preserves
+        // the flags, unlike the xor zero idiom. Neither sequence depends on a partial-register result's movzx.
+        const bool aliases = destination == holes->left || (!holes->compare_immediate && destination == holes->right);
+        if (!aliases)
+        {
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
+        }
         tier1_select_compare(&result, holes);
+        if (aliases)
+        {
+            tier1_select_append(&result, tier1_select_constant_move(4, destination, 0));
+        }
         tier1_select_append(&result, (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] });
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
         break;
+    }
     case TIER1_RULE_BRANCH_COMPARE:
         tier1_select_compare(&result, holes);
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
@@ -1510,6 +1523,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const bool swapped = condition == IR_LT || condition == IR_LE;
         const uint8_t first = (swapped ? holes->right : holes->left) & 15;
         const uint8_t second = (swapped ? holes->left : holes->right) & 15;
+        // Floating inputs are in the vector class, so clearing this general-register result cannot alias either one.
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
         tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, first, second));
         if (condition == IR_EQ || condition == IR_NE)
         {
@@ -1523,7 +1538,6 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const bool strict = condition == IR_LT || condition == IR_GT;
             tier1_select_append(&result, (X86Instruction){ .form = strict ? X86_FORM_SETA_RM8 : X86_FORM_SETAE_RM8, .rm = destination });
         }
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
         break;
     }
     case TIER1_RULE_FLOAT_BRANCH_COMPARE:
@@ -2211,7 +2225,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
 //   IR_LOAD              MOVZX_R32_RM8/RM16 (byte/word loads zero-extend)
 //   IR_TRUNC             MOVZX_R32_RM8/RM16 (a truncation to I8/I16)
 //   IR_SEXT              MOVSX, then the I16 MOVZX
-//   IR_ICMP, IR_FCMP     setcc (an FCMP's == and != with the parity's), then MOVZX_R32_RM8
+//   IR_ICMP, IR_FCMP     zeroed general-register storage, then setcc (FCMP's == and != combine the parity's too)
 //   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
 //   IR_FPTOSI/FPTOUI     cvtts*2si, then MOVZX_R32_RM8/RM16 (a narrow result's, #141)
 // I32 ALU operations and loads also clear the upper half; I32 parameters, calls and machine rows do not promise it.
@@ -3765,7 +3779,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // A canonical source already has zero bits past its type, including I32 results of actual 32-bit writes.
         // A proven nonnegative signed extension is a zero extension; a truncation whose discarded bits are known zero
         // is a copy too. Neither semantic range facts alone nor an ABI's unspecified upper bits certify a copy.
-        // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the comparison's own setcc/movzx;
+        // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the canonical comparison result;
         // this copy covers a comparison the fold leaves alone.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         const uint32_t source_bits = ir_type_bits[function->type[a]];
@@ -3881,7 +3895,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
         // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
-        // setcc and movzx already the extension's 32 (or 64) bits.
+        // canonical truth result already holds the extension's 32 (or 64) bits.
         Tier1SelectPattern folded = base;
         bool negated = false;
         const uint32_t tested = op == IR_ZEXT && function->type[a] == IR_I1 && a + 1 == node ? tier1_select_truth(forest, node, a, &folded, &negated) : BUSTER_IR_NONE;
