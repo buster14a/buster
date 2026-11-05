@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  selectany-object-oracle:
+  recovery-conversion-oracle:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -14,9 +14,17 @@ jobs:
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Inspect selectany group signatures and relocation membership
+      - name: Probe declaration recovery and conversion diagnostics
         shell: bash
         run: |
-          mkdir -p build/issue1447-oracle
-          clang -std=gnu17 -O0 -fcommon -c tools/issue1447-selectany-object.c -o build/issue1447-oracle/first.o
-          readelf -g -W -S -s build/issue1447-oracle/first.o
+          set +e
+          ulimit -c 0
+          for case in {1..20}; do
+            echo "DECLARATION CASE=$case"
+            clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-declaration-recovery.c 2>&1
+          done
+          for case in {1..24}; do
+            echo "CONVERSION CASE=$case"
+            clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-conversions.c 2>&1
+          done
+          exit 0
