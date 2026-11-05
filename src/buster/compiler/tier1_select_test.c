@@ -2616,6 +2616,50 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
                     const uint32_t width = widths[n % BUSTER_ARRAY_LENGTH(types)];
                     tier1_select_test_expect(test, known[n] == (width | width << 8), "unknown incoming values keep their full semantic range, including every SIMD tail");
                 }
+                uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
+                tier1_select_storage_components(&function, storage, parents, path != 0);
+                tier1_select_storage_components(&scan, storage, parents, path != 0);
+            }
+        }
+        // Spill-width obligations must cross chains longer than the semantic proof budget, in either order. An
+        // opaque member acquires storage alone, never SIGN; a disconnected component must remain four bytes.
+        uint8_t word_types[65];
+        uint32_t firsts[65];
+        uint32_t counts[65];
+        uint32_t extra[130];
+        memset(word_types, IR_I32, sizeof(word_types));
+        for (uint32_t count = 0; count <= 65; count += 1)
+        {
+            uint8_t* op = memory + page - count;
+            uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
+            for (uint32_t shape = 0; shape < 3; shape += 1)
+            {
+                const uint32_t seed = shape == 1 && count != 0 ? count - 1 : 0;
+                for (uint32_t n = 0; n < count; n += 1)
+                {
+                    const bool phi = shape == 0 ? n != 0 : shape == 1 ? n + 1 < count : n >= 2;
+                    op[n] = phi ? IR_PHI : IR_LOAD;
+                    firsts[n] = n * 2;
+                    counts[n] = phi;
+                    extra[n * 2] = 0;
+                    extra[n * 2 + 1] = shape == 1 ? n + 1 : n - (shape == 2 ? 2 : 1);
+                }
+                const IrFunction function = { .instruction_count = count, .op = op, .type = word_types, .a = firsts, .b = counts, .extra = extra };
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    for (uint32_t n = 0; n < count; n += 1)
+                    {
+                        storage[n] = n == seed ? BUSTER_TIER1_STORAGE_SIGN : shape == 2 && n == 1 ? BUSTER_TIER1_STORAGE_ZERO : 0;
+                    }
+                    tier1_select_storage_components(&function, storage, parents, path != 0);
+                    for (uint32_t n = 0; n < count; n += 1)
+                    {
+                        const uint32_t facts = n == seed ? BUSTER_TIER1_STORAGE_SIGN : shape == 2 && n == 1 ? BUSTER_TIER1_STORAGE_ZERO : 0;
+                        const bool wide = shape != 2 || (n & 1) == 0;
+                        tier1_select_test_expect(test, storage[n] == (facts | (wide ? BUSTER_TIER1_STORAGE_WIDE : 0)),
+                                                 "phi storage closes long chains without inventing upper-bit facts or crossing components");
+                    }
+                }
             }
         }
     }
@@ -2645,8 +2689,9 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
         const uint32_t blocks[] = { 0, 0, 1, 1 };
         uint16_t known[4];
         uint8_t canonical[4];
+        uint32_t storage_workspace[4];
         tier1_select_known_bits(&loop, 0, blocks, 0, known, true);
-        tier1_select_canonical(&loop, blocks, known, canonical, true);
+        tier1_select_canonical(&loop, blocks, known, canonical, storage_workspace, true);
         tier1_select_test_expect(test, known[2] == (32 | 32 << 8) && canonical[2] == 0, "a backedge does not invent a range or register-storage proof");
     }
     arena_release(&input);

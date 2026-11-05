@@ -89,7 +89,7 @@ static bool tier1_burs_check_prepare(const IrFunction* function, const IrDominan
         }
         tier1_select_barriers_scalar(function, count, barriers);
         tier1_select_known_bits(function, dominance, blocks, cursors, known_bits, false);
-        tier1_select_canonical(function, blocks, known_bits, canonical, false);
+        tier1_select_canonical(function, blocks, known_bits, canonical, cursors, false);
     }
     return valid;
 }

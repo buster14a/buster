@@ -2492,7 +2492,7 @@ static void tier1_select_known_bits(const IrFunction* function, const IrDominanc
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
 // probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
 // rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
-static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, bool vector)
+static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, uint32_t* workspace, bool vector)
 {
     const uint32_t count = function->instruction_count;
     for (uint32_t node = 0; node < count; node += 1)
@@ -2637,6 +2637,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             break;
         }
     }
+    tier1_select_storage_components(function, canonical, workspace, vector);
 }
 
 // A call's argument's type: a fixed parameter's, or an unnamed one's (a variadic call's past its parameters) its value's,
@@ -3678,7 +3679,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         .stack_object = BUSTER_IR_NONE,
         .operation = (uint8_t)tier1_select_operation(op),
         .width = (uint8_t)(sign_storage ? 8 : width),
-        .storage_width = sign_storage ? 8 : 0,
+        .storage_width = type == IR_I32 && forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_STORAGE_WIDE) != 0 ? 8 : 0,
     };
     const bool integer = type == IR_I32 || type == IR_I64;
     // A mask's operations (#179): the stored mask's width for a store, the result's for the others; and a floating
@@ -5150,7 +5151,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     if (error == TIER1_SELECT_OK)
     {
         tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
-        tier1_select_canonical(function, blocks, known_bits, canonical, vector);
+        tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
     }
     if (error == TIER1_SELECT_OK)
     {
