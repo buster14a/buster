@@ -617,7 +617,8 @@ rm -rf "$errors" "$directory"
 # neither tier keeps one. The depth follows the control flow (#1415's review): an early return's epilogue takes nothing
 # from the deeper path after it (168 bytes, where the instructions' address order would say 128), a jump table's target
 # takes its indirect jump's depth (assumed), and two paths that join at different depths are unresolved and left out of
-# the comparison. A command without files prints its usage and fails.
+# the comparison. rbp's depth is each path's too: two arms that set it at different depths, each with its own `leave`,
+# make an 80-byte frame, resolved. A command without files prints its usage and fails.
 directory=$(mktemp -d)
 printf 'int g(char*);\nint f(int x) { char b[4096]; b[x & 4095] = 1; return g(b); }\nint leaf(int x) { return x + 1; }\n' > "$directory/f.c"
 "$BUSTER_COMPILER" -c -o "$directory/t0.o" "$directory/f.c"
@@ -638,7 +639,9 @@ printf '%s\n' '    .text' '    .globl early' '    .type early, @function' 'early
     'conflict:' '    test %edi, %edi' '    je 3f' '    push %rbx' '3:' '    ret' '    .size conflict, .-conflict' '    .globl tail' '    .type tail, @function' \
     'tail:' '    push %rbx' '    test %edi, %edi' '    je 4f' '    pop %rbx' '    jmp elsewhere' '4:' '    sub $16, %rsp' '    add $16, %rsp' '    pop %rbx' '    ret' \
     '    .size tail, .-tail' '    .globl padded' '    .type padded, @function' 'padded:' '    push %rbx' '    test %edi, %edi' '    je 5f' '    jmp 6f' '    nop' \
-    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' > "$directory/paths.s"
+    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' \
+    '    .globl split' '    .type split, @function' 'split:' '    test %edi, %edi' '    je 8f' '    push %rbp' '    mov %rsp, %rbp' '    sub $32, %rsp' '    leave' \
+    '    ret' '8:' '    push %rbx' '    push %rbp' '    mov %rsp, %rbp' '    sub $64, %rsp' '    leave' '    pop %rbx' '    ret' '    .size split, .-split' > "$directory/paths.s"
 "$BUSTER_COMPILER" -c -o "$directory/paths.o" "$directory/paths.s"
 "$BUSTER_COMPILER" measure-frames --functions paths="$directory/paths.o" > "$directory/paths.txt"
 grep -q "$(printf '^frame\tpaths\tearly\t168\t0\t0\t0\tresolved$')" "$directory/paths.txt"
@@ -649,7 +652,9 @@ grep -q "$(printf '^frame\tpaths\tconflict\t[0-9]*\t0\t0\t0\tunresolved$')" "$di
 grep -q "$(printf '^frame\tpaths\ttail\t24\t0\t0\t0\tresolved$')" "$directory/paths.txt"
 # An indirect tail call gives the code no edge reaches its depth, but not the nop that pads a loop's head after a jump.
 grep -q "$(printf '^frame\tpaths\tpadded\t8\t0\t0\t0\tresolved$')" "$directory/paths.txt"
-grep -q "$(printf '^frames\tpaths\tfunctions=5\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=4\texcluded=1\t')" "$directory/paths.txt"
+# Each arm sets rbp at its own depth (8 and 16) and its `leave` goes back to it: the deeper arm's 80 bytes, resolved.
+grep -q "$(printf '^frame\tpaths\tsplit\t80\t0\t1\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frames\tpaths\tfunctions=6\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=5\texcluded=1\t')" "$directory/paths.txt"
 if "$BUSTER_COMPILER" measure-frames > /dev/null 2> "$directory/errors"; then exit 1; fi
 grep -q '^usage: compiler measure-frames' "$directory/errors"
 rm -rf "$directory"
