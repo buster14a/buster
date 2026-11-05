@@ -90,9 +90,11 @@
 //     that oracle's reader on texts of /proc/cpuinfo's shape (lane_test_cpuinfo_controls): four processors' blocks with
 //     long flags lines of names with digits, values at and past their bounds, malformed values and near-miss keys.
 //   - Unwinding (#652), in a static executable: backtrace from two of the test's calls deep walks them and every frame
-//     below them to the process's start. glibc unwinds a lane's thread for pthread_exit and pthread_cancel through
-//     libgcc, which finds a static executable's frames through _dl_find_object, as its start doesn't register them
-//     (main.c's __wrap___register_frame_info).
+//     below them to the process's start. glibc unwinds a thread for pthread_exit and pthread_cancel through libgcc,
+//     which finds a static executable's frames through _dl_find_object, as its start doesn't register them (main.c's
+//     __wrap___register_frame_info): so a thread three of the test's frames below the one that pushed its cleanup
+//     handler is cancelled in pause, and another calls pthread_exit there; each must run its handler and join with its
+//     value (PTHREAD_CANCELED, or the one it exits with).
 //
 // A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
 // the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
@@ -158,6 +160,8 @@
 // three below main (__libc_start_call_main, __libc_start_main and _start).
 #define BUSTER_LANE_TEST_UNWIND_FRAMES 64
 #define BUSTER_LANE_TEST_UNWIND_LEAST 7
+// The value a thread that the unwinding check ends with pthread_exit exits with.
+#define BUSTER_LANE_TEST_UNWIND_EXIT 42
 
 static const uint32_t lane_test_counts[] = { 1, 2, 3, 8 };
 static const uint64_t lane_test_record_counts[] = { 0, 1, 2, 3, 63, 64, 65, 1000, 100000 };
@@ -3126,11 +3130,86 @@ static __attribute__((noinline)) uint32_t lane_test_unwind_outer(void)
     return count;
 }
 
+// A thread that forced unwinding ends: pthread_exit's where it `exits`, or else pthread_cancel's once it is `waiting` at
+// its cancellation point; `cleaned` once the cleanup handler its first frame pushed has run.
+typedef struct LaneTestForced LaneTestForced;
+struct LaneTestForced
+{
+    bool exits;
+    uint32_t waiting;
+    uint32_t cleaned;
+};
+
+static void lane_test_forced_cleanup(void* argument)
+{
+    LaneTestForced* forced = argument;
+    __atomic_store_n(&forced->cleaned, 1, __ATOMIC_RELEASE);
+}
+
+// The thread's third frame below its handler's: pthread_exit, or pause, a cancellation point, until it is cancelled.
+static __attribute__((noinline)) void lane_test_forced_end(LaneTestForced* forced)
+{
+    if (forced->exits)
+    {
+        pthread_exit((void*)(uintptr_t)BUSTER_LANE_TEST_UNWIND_EXIT);
+    }
+    __atomic_store_n(&forced->waiting, 1, __ATOMIC_RELEASE);
+    while (true)
+    {
+        pause();
+    }
+}
+
+static __attribute__((noinline)) void lane_test_forced_middle(LaneTestForced* forced)
+{
+    lane_test_forced_end(forced);
+    __asm__ volatile("" : : "r"(forced) : "memory");
+}
+
+static __attribute__((noinline)) void lane_test_forced_outer(LaneTestForced* forced)
+{
+    lane_test_forced_middle(forced);
+    __asm__ volatile("" : : "r"(forced) : "memory");
+}
+
+static void* lane_test_forced_main(void* argument)
+{
+    LaneTestForced* forced = argument;
+    pthread_cleanup_push(lane_test_forced_cleanup, forced);
+    lane_test_forced_outer(forced);
+    pthread_cleanup_pop(0);
+    return 0;
+}
+
+// A thread ended by forced unwinding (pthread_exit's where `exits`, or else pthread_cancel's): whether its handler ran and
+// it joined with its value, BUSTER_LANE_TEST_UNWIND_EXIT or PTHREAD_CANCELED.
+static bool lane_test_forced(bool exits)
+{
+    LaneTestForced forced = { .exits = exits };
+    pthread_t thread;
+    const bool started = pthread_create(&thread, 0, lane_test_forced_main, &forced) == 0;
+    while (started && !exits && __atomic_load_n(&forced.waiting, __ATOMIC_ACQUIRE) == 0)
+    {
+        sched_yield();
+    }
+    const bool cancelled = started && (exits || pthread_cancel(thread) == 0);
+    void* value = 0;
+    const bool joined = cancelled && pthread_join(thread, &value) == 0;
+    const void* const expected = exits ? (void*)(uintptr_t)BUSTER_LANE_TEST_UNWIND_EXIT : PTHREAD_CANCELED;
+    const bool result = joined && value == expected && __atomic_load_n(&forced.cleaned, __ATOMIC_ACQUIRE) == 1;
+    printf("unwinding: a thread %s three frames below its cleanup handler: %s\n", exits ? "calling pthread_exit" : "cancelled in pause",
+           result ? "the handler ran, and it joined with its value" : "FAILED");
+    return result;
+}
+
 static bool lane_test_unwinds(void)
 {
     const uint32_t frames = lane_test_unwind_outer();
     printf("unwinding: backtrace walked %u frames, of at least %u\n", frames, BUSTER_LANE_TEST_UNWIND_LEAST);
-    return frames >= BUSTER_LANE_TEST_UNWIND_LEAST;
+    bool result = frames >= BUSTER_LANE_TEST_UNWIND_LEAST;
+    result = lane_test_forced(false) && result;
+    result = lane_test_forced(true) && result;
+    return result;
 }
 #else
 static bool lane_test_unwinds(void)
