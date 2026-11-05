@@ -178,8 +178,10 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
 {
     // GNU as binds each section-name expression to the last-created namesake, not the current group.
     static const char section_names[] =
-        ".long .debug_macro\n.long plain\n"
-        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
+        ".long .debug_macro\n.long plain\n.long early\n.long .early\n"
+        ".section early,\"\",@progbits\n.long early\n"
+        ".section .early,\"\",@progbits\n.long .early\n"
+        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n.long early\n.long .early\n"
         ".section .debug_macro,\"G\",@progbits,second,comdat\n.long .debug_macro\n"
         ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
         ".section plain,\"G\",@progbits,first,comdat\n.long plain\n"
