@@ -1477,6 +1477,51 @@ preprocessing latency and 6.4–6.7% lower tiny object latency. SQLite is a
 neutral control. Those timings apply to the recorded revisions, not a later
 integration; its exact-head correctness and CI validation remain separate.
 
+### The start's fixed work, part 3
+
+What a compile still did at its start on the 9700X after #1237 and #1279
+(main `483e5f70`: an empty file's `-fsyntax-only` took 0.59 ms, 373 page
+faults and 60% of its cycles in the kernel), and what this part takes out:
+
+- **The parser's tables** (`parse_tables_initialize`, 17 KB, 4.8% of the
+  empty file's cycles) are baked with the backend's ("Baked tables", above),
+  in the frontend unit, their home (`BUSTER_BAKED_FRONTEND`).
+- **`RLIMIT_AS` once.** Without a pool every reservation read the limit, 30
+  `getrlimit` calls; a compile's commands read it once (`arena_limits_fix`,
+  `docs/arena-memory.md`).
+- **The emission lanes off the stack.** `CheckProgramLanes`, 98 KB of every
+  lane's arenas, was zeroed on the driver's stack for every command: 24
+  pages, a page fault each. The driver's is in `.bss` now, and an emission's
+  release reads only the lanes it used (`arenas_used`).
+- **A compile outside `main_command`'s frame.** The driver unit's
+  `main_command` inlines the tests' commands, 140 KB of locals, and a compile
+  ran below it, touching whichever of its pages the inlining placed its
+  spills in; it runs from `main_driver` now (`main_source_command`).
+- **No libm.** Loading `libm.so.6` took 24 µs and 12 faults of a process's
+  start, for six exact operations the compiler now has itself
+  (`host_math.h`); its tests reach libm through `dlopen` (`test_libm.c`) and
+  the link takes libm only as needed.
+- **The local calendar at the first `__DATE__` or `__TIME__`.** Its first
+  conversion read the time zone's file, 7 system calls of every unit's start.
+
+Against main with main again as the floor, over four placements of the
+checker unit's code (record `small-unit-start-652-2026-11-05` in
+buster-performance):
+
+| input | wall | user cycles | minor faults |
+| --- | --- | --- | --- |
+| empty `-fsyntax-only` | −8.77% | −17.21% | 390 → 353 |
+| empty `-E -P` | −4.91% | −5.80% | 296 → 286 |
+| `tiny.c`'s `-c` | −7.12% | −11.19% | 462 → 427 |
+| `sqlite3.c`'s `-fsyntax-only` | −0.01% (floor +0.10%) | −0.00% | |
+
+What remains, measured there: the dynamic loader (the same objects linked
+`-static` take 8% to 12% less task-clock, but a static glibc executable's
+`dlsym(RTLD_DEFAULT, ...)` finds nothing, which the interpreter's `--bind`
+and the SSA tests' natives use), and each arena a small unit touches, about
+1.7 µs at its start for a separate reservation (its `mmap`, first commit
+and page tables) against 0.36 µs as one of an arena of tables.
+
 ## How it is measured
 
 **The stage clock.** `--time-stages` (`c_check_clock.c`) makes the C driver
