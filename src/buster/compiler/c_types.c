@@ -606,6 +606,16 @@ struct TypeKeys
     const uint64_t* extents;
 };
 
+// Parentheses belonging to one declarator occurrence, outside the type at this level of its base chain. Canonical
+// TypeIds keep no syntax. A chain has no repeated type, so its type identifies a level without affecting parameters
+// or another occurrence of that type. A caller expands typedef sugar by omitting this view too.
+typedef struct TypePrintParen TypePrintParen;
+struct TypePrintParen
+{
+    TypeId type;
+    uint32_t count;
+};
+
 // The spellings of identifier ids, for the printer: id i's bytes are bytes[i], lengths[i] of them, for i below count.
 typedef struct TypeNames TypeNames;
 struct TypeNames
@@ -633,6 +643,8 @@ struct TypeNames
     uint32_t* alias_order_printed;
     const String8* anonymous;
     uint32_t anonymous_count;
+    const TypePrintParen* parentheses;
+    uint32_t parenthesis_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
@@ -5428,6 +5440,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
 #define BUSTER_TYPE_PRINT_EXT_VECTOR_END 10
 #define BUSTER_TYPE_PRINT_NAME 11
 #define BUSTER_TYPE_PRINT_FUNCTION_ABI 12
+#define BUSTER_TYPE_PRINT_PAREN_END 13
 
 typedef struct TypePrintFrame TypePrintFrame;
 struct TypePrintFrame
@@ -5439,6 +5452,8 @@ struct TypePrintFrame
     bool saved;
     // printBefore's: whether the qualifiers go after the specifier.
     bool after;
+    // The outer declarator's occurrence, whose TypeNames.parentheses may name a level; nested TYPE frames have none.
+    bool root_spelling;
 };
 
 typedef struct TypePrinter TypePrinter;
@@ -5451,6 +5466,7 @@ struct TypePrinter
     uint32_t options;
     bool empty;
     bool valid;
+    bool root_spelling;
     char* begin;
     uint64_t length;
     void* frames;
@@ -5544,6 +5560,7 @@ static void type_print_push(TypePrinter* printer, uint8_t operation, TypeId type
             .operation = operation,
             .saved = saved,
             .after = after,
+            .root_spelling = printer->root_spelling,
         };
         printer->depth += 1;
     }
@@ -5617,6 +5634,20 @@ static bool type_print_aliased(const TypePrinter* printer, TypeId type, uint32_t
         result = type_print_alias(names, type) != UINT32_MAX || type_print_alias(names, type_unqualified(type)) != UINT32_MAX;
     }
     return result;
+}
+
+// printParenBefore/After's groups: an empty placeholder suppresses them at the call site, and a function already
+// supplies the innermost one. An alias at that level is a typedef occurrence rather than a function's own spelling.
+static uint32_t type_print_parentheses(const TypePrinter* printer, TypeId type, bool aliased)
+{
+    uint32_t count = 0;
+    const TypeNames* names = printer->names;
+    for (uint32_t i = 0; printer->root_spelling && names != NULL && i < names->parenthesis_count; i += 1)
+    {
+        count += names->parentheses[i].type == type ? names->parentheses[i].count : 0;
+    }
+    const bool function = !aliased && type_kind(printer->table, type) == BUSTER_TYPE_KIND_FUNCTION;
+    return function && count != 0 ? count - 1 : count;
 }
 
 // The specifiers, and printBefore of each kind; `type` is unqualified and not ALIGNED.
@@ -5732,7 +5763,8 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
         const TypeId pointee = type_strip_aligned(table, base);
-        if (type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, printer->step + 1))
+        if (type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, printer->step + 1) &&
+            type_print_parentheses(printer, pointee, false) == 0)
         {
             type_print_text(printer, ")");
         }
@@ -5780,10 +5812,12 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
 static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
 {
     const TypeTable* table = printer->table;
+    printer->root_spelling = frame.root_spelling;
     if (frame.operation == BUSTER_TYPE_PRINT_TYPE)
     {
         // TypePrinter::print: the placeholder is empty but at the top, where it is the name.
         const bool named = frame.after && printer->name.length != 0;
+        printer->root_spelling = frame.after;
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, frame.type, printer->empty, false, 0);
         printer->empty = !named;
         const uint32_t level = printer->frames_typed++ << 8;
@@ -5804,6 +5838,11 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         const TypeId unqualified = type_unqualified(type);
         uint32_t whole = UINT32_MAX;
         const uint32_t sugar = type_print_sugar(printer, type, &whole);
+        const uint32_t parentheses = !printer->empty ? type_print_parentheses(printer, type, sugar != UINT32_MAX) : 0;
+        if (parentheses != 0)
+        {
+            type_print_push(printer, BUSTER_TYPE_PRINT_PAREN_END, type, false, false, parentheses);
+        }
         if (sugar != UINT32_MAX)
         {
             printer->occurrence += 1;
@@ -5866,7 +5905,13 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         // including under another level's qualifiers (#992).
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        if (!type_print_aliased(printer, type, frame.step))
+        const bool aliased = type_print_aliased(printer, type, frame.step);
+        const uint32_t parentheses = !printer->empty ? type_print_parentheses(printer, type, aliased) : 0;
+        for (uint32_t i = 0; i < parentheses; i += 1)
+        {
+            type_print_text(printer, ")");
+        }
+        if (!aliased)
         {
             printer->step = frame.step;
             type_print_after_kind(printer, unqualified);
@@ -5875,7 +5920,8 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)
     {
         const TypeId pointee = type_strip_aligned(table, table->types.base[type_index(frame.type)]);
-        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, frame.step + 1);
+        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, frame.step + 1) &&
+                             type_print_parentheses(printer, pointee, false) == 0;
         type_print_text(printer, wrapped ? "(*" : "*");
         printer->empty = frame.saved;
     }
@@ -5886,6 +5932,13 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             type_print_text(printer, "(");
         }
         printer->empty = frame.saved;
+    }
+    else if (frame.operation == BUSTER_TYPE_PRINT_PAREN_END)
+    {
+        for (uint32_t i = 0; i < frame.step; i += 1)
+        {
+            type_print_text(printer, "(");
+        }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_PARAMETERS)
     {

@@ -1912,6 +1912,28 @@ static void check_test_program_x86_rows(CheckTest* test)
     // tier0_operation_valid asks the effects tables (#760).
     check_test_expect(test, x86_encoder_initialize() && tier0_initialize(), "the encoder's, the effects' and Tier 0's tables");
     check_test_program_x86_float_predicates(test);
+    // Clang's masked half conversions: reversed reg/rm roles, and SAE only for the 512-bit controls 8..12. Controls
+    // such as 13, 15 and 255 retain their plain immediate despite bit 3 being set (the pinned assembly oracle).
+    static const struct { const char* name; uint16_t form; uint8_t result_bytes; } halves[] = {
+        { "__builtin_ia32_vcvtps2ph_mask", X86_FORM_VCVTPS2PH_XM64_X_IMM8_EVEX, 16 },
+        { "__builtin_ia32_vcvtps2ph256_mask", X86_FORM_VCVTPS2PH_XM128_Y_IMM8_EVEX, 16 },
+        { "__builtin_ia32_vcvtps2ph512_mask", X86_FORM_VCVTPS2PH_YM256_Z_IMM8, 32 },
+    };
+    for (uint32_t h = 0; h < BUSTER_ARRAY_LENGTH(halves); h += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rule(halves[h].name, strlen(halves[h].name));
+        for (uint32_t immediate = 0; immediate < 256; immediate += 1)
+        {
+            Tier0Operation row;
+            const bool built = rule != NULL && check_x86_lower_row_of(&every, rule, immediate, 4, 0, false, &row) == NULL;
+            const bool sae = h == 2 && immediate >= 8 && immediate <= 12;
+            check_test_expect(test, built && row.record_count == 3 && row.operand_count == 3 && row.result_bytes == halves[h].result_bytes &&
+                                   row.records[1].form == (sae ? X86_FORM_VCVTPS2PH_Y_Z_SAE_IMM8 : halves[h].form) &&
+                                   row.records[1].reg == BUSTER_TIER0_ROLE_VECTOR(0) && row.records[1].rm == BUSTER_TIER0_ROLE_VECTOR(1) &&
+                                   row.records[1].decorations == 1 && row.records[1].immediate == (int32_t)(sae ? immediate - 8 : immediate),
+                              "masked half conversion keeps source/destination roles and Clang's exact SAE controls");
+        }
+    }
     uint32_t rows = 0;
     uint32_t invalid = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)

@@ -196,9 +196,41 @@ static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* ha
         CheckInputVisibilityPragma* records = history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputVisibilityPragma, capacity) : NULL;
         uint8_t* stack = records != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, capacity) : NULL;
         uint32_t* links = stack != NULL && complete_tree ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)reader->parser->tokens.count + 1) : NULL;
-        valid = stack != NULL && (!complete_tree || links != NULL);
+        const Parser* parser = reader->parser;
+        uint8_t* skipped = stack != NULL && !complete_tree ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, parser->tokens.pragma_count) : NULL;
+        valid = stack != NULL && (complete_tree ? links != NULL : skipped != NULL);
         if (valid)
         {
+            if (skipped != NULL)
+            {
+                memset(skipped, 0, parser->tokens.pragma_count);
+                // A valid visibility directive is an annotation token in Clang. When a preceding declarator lacks
+                // its semicolon, recovery consumes that annotation without applying its push/pop. Its handler's
+                // syntax warnings still exist. Find these insertion points in the monotone pragma column, without
+                // rescanning all diagnostics for every directive.
+                for (uint32_t d = 0; d < parser->diagnostic_count; d += 1)
+                {
+                    const ParseDiagnostic* diagnostic = parser->diagnostics + d;
+                    if (!diagnostic->error || (diagnostic->message != PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR &&
+                                              diagnostic->message != PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION))
+                    {
+                        continue;
+                    }
+                    uint32_t low = 0;
+                    uint32_t high = parser->tokens.pragma_count;
+                    while (low < high)
+                    {
+                        const uint32_t middle = low + (high - low) / 2;
+                        const bool before = parser->tokens.pragma_positions[middle] < diagnostic->token;
+                        low = before ? middle + 1 : low;
+                        high = before ? high : middle;
+                    }
+                    for (uint32_t p = low; p < parser->tokens.pragma_count && parser->tokens.pragma_positions[p] == diagnostic->token && skipped[p] == 0; p += 1)
+                    {
+                        skipped[p] = 1;
+                    }
+                }
+            }
             *history = (CheckInputVisibilityPragmas){ .records = records };
             previous_end = 0;
             previous_token = 0;
@@ -212,6 +244,11 @@ static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* ha
                 CheckInputVisibilityPragma record;
                 if (check_input_visibility_record(reader, p, &previous_end, &previous_token, &record))
                 {
+                    if (skipped != NULL && skipped[p] != 0 && record.warning != 1)
+                    {
+                        handled[p] = 1;
+                        continue;
+                    }
                     check_input_visibility_placement(reader, &record, links, &cursor, &group, &structs);
                     if (record.push)
                     {
@@ -266,7 +303,8 @@ static void check_input_visibility_declare(CheckInputReader* reader, uint32_t to
             high = middle;
         }
     }
-    uint8_t visibility = low != 0 ? history->records[low - 1].after : 0;
+    const bool private_extern = reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN;
+    uint8_t visibility = private_extern ? 3 : low != 0 ? history->records[low - 1].after : 0;
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : NULL;
     bool explicit_visibility = false;
     for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)

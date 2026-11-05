@@ -2889,10 +2889,16 @@ static void check_test_program_return_marks(CheckTest* test)
             const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
                                        .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
             CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
-            CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+            // Lifetime flags 0 and 1 must not visit the unrelated expression nodes with those indices.
+            CheckControl entries[] = {
+                { .kind = CHECK_CONTROL_LIFETIME, .node = 0 },
+                { .kind = CHECK_CONTROL_LIFETIME, .node = 1 },
+                { .kind = CHECK_CONTROL_RETURN, .node = 0 },
+                { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE },
+            };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, marks, stack, NULL, true);
+            check_program_return_flow(&writer, &body, marks, stack, NULL, true, true);
             const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
             bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
                         marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);
@@ -4123,16 +4129,23 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
             "float x=1.0+0x1p-24;int a=x>1.0f;int f=fp_state();change_rounding(0);return a*100+f;}",
             "fenv-implicit-narrowing-conversion", clang);
-        // The Microsoft spelling maps to STDC FENV_ACCESS's runtime policy: clang compiles the STDC oracle, ours
-        // the extension spelling, and both builds must agree under each runtime rounding mode.
-        check_test_program_against(test,
+        // Linux Clang ignores the Microsoft spelling: it must not activate runtime environment semantics.
+        check_test_program_source(test,
             "#pragma fenv_access(on)\n"
             "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
             "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
-            "#pragma STDC FENV_ACCESS ON\n"
-            "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
-            "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
-            false, "fenv-access-extension-matches-stdc", clang);
+            "fenv-access-extension-ignored-on-linux", clang);
+        check_test_program_source(test,
+            "int clear_fp(void);int fp_state(void);\n#pragma float_control(except, on, push)\n"
+            "int strict_part(void){clear_fp();1.0/3.0;return fp_state();}\n#pragma float_control(pop)\n"
+            "int ordinary_part(void){clear_fp();1.0/3.0;return fp_state();}\n"
+            "int tested(int n){return strict_part()*100+ordinary_part()+n;}",
+            "float-control-exception-stack", clang);
+        check_test_program_source(test,
+            "#pragma clang fp exceptions(strict) contract(off)\nint clear_fp(void);int fp_state(void);\n"
+            "int tested(int n){clear_fp();int a=0;{\n#pragma clang fp exceptions(ignore)\n1.0/3.0;a=fp_state();}"
+            "clear_fp();1.0/3.0;return a*100+fp_state()+n;}",
+            "clang-fp-exception-scope", clang);
     }
     if (!check_test_program_daz())
     {

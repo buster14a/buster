@@ -4889,12 +4889,13 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                     const bool promoted = severity >= CHECK_WARNING_ERROR;
                     const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) :
                                          promoted ? " [-Werror]" : "";
-                    const char* message = warning == CHECK_WARNING_POINTER_SIGN ?
-                                          check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                    uint32_t located = token;
+                    const char* message = warning == CHECK_WARNING_POINTER_SIGN || warning == CHECK_WARNING_DISCARDED_QUALIFIERS ?
+                                          check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
-                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s%s", message, suffix);
+                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[located], "%s%s", message, suffix);
                     }
                 }
                 flags &= flags - 1;
@@ -6295,6 +6296,9 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_musttail_driver_test.c"
 #include "c_check_label_attribute_driver_test.c"
 #include "c_check_resume_driver_test.c"
+#include "c_check_empty_declaration_driver_test.c"
+#include "c_check_resume_corpus_test.c"
+#include "c_check_kr_recovery_driver_test.c"
 #include "c_check_lane_attribute_driver_test.c"
 #include "c_check_generic_builtin_driver_test.c"
 #include "c_checker_driver_const_test.c"
@@ -6744,6 +6748,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
+#include "c_check_noderef_driver_test.c"
 #include "c_check_attribute_effects_driver_test.c"
 #include "c_check_attribute_arguments_driver_test.c"
 #include "c_check_parse_note_driver_test.c"
@@ -7887,6 +7892,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_resumed_declarations(&test, clang, executable, directory);
+            check_test_driver_empty_declarations(&test, clang, executable, directory);
+            check_test_corpus_resumed_declarations(&test, clang, directory);
+            check_test_driver_kr_recovery(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

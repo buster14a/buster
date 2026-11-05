@@ -496,6 +496,61 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             false,
         },
         {
+            // Every SSE4.2 string result: index, compact/expanded mask and A/C/O/S/Z flags. The controls cover each
+            // element kind, aggregation and polarity, both index/mask formats, and the whole byte's boundaries. Calls
+            // with the same and different controls share a unit, while the vectors remain live across all the leaves.
+            "x86-rest-string-compares",
+            "#pragma clang diagnostic ignored \"-Wconstant-conversion\"\n"
+            "#define S(I) {int r[]={__builtin_ia32_pcmpestri128(a,la,b,lb,I),__builtin_ia32_pcmpestria128(a,la,b,lb,I),"
+            "__builtin_ia32_pcmpestric128(a,la,b,lb,I),__builtin_ia32_pcmpestrio128(a,la,b,lb,I),"
+            "__builtin_ia32_pcmpestris128(a,la,b,lb,I),__builtin_ia32_pcmpestriz128(a,la,b,lb,I),"
+            "__builtin_ia32_pcmpistri128(a,b,I),__builtin_ia32_pcmpistria128(a,b,I),__builtin_ia32_pcmpistric128(a,b,I),"
+            "__builtin_ia32_pcmpistrio128(a,b,I),__builtin_ia32_pcmpistris128(a,b,I),__builtin_ia32_pcmpistriz128(a,b,I)};"
+            "v16qi m[]={__builtin_ia32_pcmpestrm128(a,la,b,lb,I),__builtin_ia32_pcmpistrm128(a,b,I)};FOLD(r);FOLD(m);}\n"
+            "int tested(int n){unsigned h=2166136261u;v16qi a,b;fill(&a,16,n);fill(&b,16,n+1);"
+            "static const int lengths[]={0,1,-1,7,-8,15,16,17,31,-31,2147483647,-2147483647-1};"
+            "for(int k=0;k<12;k++){int la=lengths[k],lb=lengths[(k+5)%12];a[k]=b[(k+3)&15];a[(k+2)&15]=0;b[(k+6)&15]=0;"
+            "S(0)S(1)S(2)S(3)S(4)S(8)S(12)S(16)S(32)S(48)S(64)S(96)S(127)S(128)S(255)S(256)S(-1)S(0)FOLD(a);FOLD(b);}"
+            "return (int)h;}",
+            BUSTER_X86_FEATURE(SSE42),
+            false,
+        },
+        {
+            // SSE4a's length and index are two separate immediate bytes, taken modulo 64. Keep length+index within
+            // the defined low quadword, and inspect that quadword alone: EXTRQ's upper quadword is unspecified.
+            "x86-rest-sse4a-immediates",
+            "#define E(L,I) {v2di x=__builtin_ia32_extrqi(a,L,I),y=__builtin_ia32_insertqi(a,b,L,I);"
+            "long long r[]={x[0],y[0]};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v2di a,b;fill(&a,16,n);fill(&b,16,n+1);"
+            "E(0,0)E(1,0)E(1,63)E(5,11)E(11,5)E(31,32)E(32,31)E(63,1)E(64,64)E(65,127)E(69,75)"
+            "FOLD(a);FOLD(b);return (int)h;}",
+            BUSTER_X86_FEATURE(SSE4A),
+            false,
+        },
+        {
+            // AVX-512's narrowing conversions encode the source in ModRM.reg and destination in r/m. Nonzero
+            // passthroughs and zero/sparse/full masks expose a reversed copy; the 128-bit result's high half must zero.
+            // Controls 8..12 suppress exceptions only at 512 bits. Exercise every low control and MXCSR rounding mode, with
+            // ties, signed zero, overflow, subnormals, infinities and a quiet NaN, and restore the caller's MXCSR.
+            "x86-rest-masked-halves",
+            "#define H(I) {__builtin_ia32_ldmxcsr(setting);v8hi x[]={__builtin_ia32_vcvtps2ph_mask(a,I,w,0),__builtin_ia32_vcvtps2ph_mask(a,I,w,k),"
+            "__builtin_ia32_vcvtps2ph_mask(a,I,w,255),__builtin_ia32_vcvtps2ph256_mask(b,I,w,0),"
+            "__builtin_ia32_vcvtps2ph256_mask(b,I,w,k),__builtin_ia32_vcvtps2ph256_mask(b,I,w,255)};FOLD(x);"
+            "unsigned status=__builtin_ia32_stmxcsr()&0x603fu;FOLD(status);__builtin_ia32_ldmxcsr(setting);"
+            "v16hi y[]={__builtin_ia32_vcvtps2ph512_mask(c,I,z,0),__builtin_ia32_vcvtps2ph512_mask(c,I,z,j),"
+            "__builtin_ia32_vcvtps2ph512_mask(c,I,z,65535)};FOLD(y);status=__builtin_ia32_stmxcsr()&0x603fu;FOLD(status);}\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf a;v8sf b;v16sf c;v8hi w;v16hi z;fill(&w,16,n);fill(&z,32,n+1);"
+            "static const unsigned bits[]={0,0x80000000u,0x3f801000u,0xbf801000u,0x477ff000u,0xc77ff000u,0x33000000u,0xb3000000u,"
+            "0x7f800000u,0xff800000u,0x7fc12345u,0x3f803000u,0x38800000u,0x33800000u,0x3f000000u,0xbf000000u};"
+            "for(int i=0;i<16;i++){union{unsigned u;float f;}v;v.u=bits[(i+n)&15];c[i]=v.f;if(i<8)b[i]=v.f;if(i<4)a[i]=v.f;}"
+            "unsigned char k=(unsigned char)mask(n);unsigned short j=(unsigned short)(mask(n)>>8);unsigned csr=__builtin_ia32_stmxcsr();"
+            "for(unsigned mode=0;mode<4;mode++){unsigned setting=(csr&~0x603fu)|0x1f80u|(mode<<13);"
+            "H(0)H(1)H(2)H(3)H(4)H(5)H(6)H(7)H(8)H(9)H(10)H(11)H(12)H(13)H(14)H(15)H(255)"
+            "}__builtin_ia32_ldmxcsr(csr);return (int)h;}",
+            BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL),
+            false,
+        },
+        {
             // The leaves of the system builtins (#148): lzcnt_u16 of every 16-bit edge, rdtsc's order, the fences, a line
             // flushed and read again, and MXCSR stored, its rounding changed, an inexact sum rounded by it, and restored.
             "x86-rest-system-leaves",

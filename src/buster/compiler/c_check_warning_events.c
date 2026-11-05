@@ -70,6 +70,11 @@ enum
     CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 78,
     CHECK_WARNING_ID_INDEPENDENT_CLASS = 79,
     CHECK_WARNING_ID_ASSUME = 80,
+    CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 81,
+    CHECK_WARNING_ID_NODEREF = 82,
+    CHECK_WARNING_ID_DUPLICATE_DECLSPEC = 83,
+    CHECK_WARNING_ID_INVALID_NORETURN = 84,
+    CHECK_WARNING_ID_PRIVATE_EXTERN = 85,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -111,7 +116,9 @@ typedef enum CheckWarningEventKind
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
     // A function type's attribute on a declarator of no function type (#147, check_input_attribute_type_warnings):
-    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling.
+    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling;
+    // payload.token its declarator name (an abstract declarator's position) and second_type its full type retain
+    // occurrence-specific parentheses.
     CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_NONSTRING_TYPE,
     CHECK_WARNING_EVENT_TRANSPARENT_UNION,
@@ -234,6 +241,22 @@ typedef enum CheckWarningEventKind
     // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
     // CHECK_WARNING_NOTE_UNAVAILABLE_HERE, at the member's name.
     CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+    CHECK_WARNING_EVENT_THREAD_CAPABILITY,
+    CHECK_WARNING_EVENT_THREAD_ARGUMENT,
+    CHECK_WARNING_EVENT_THREAD_METHOD,
+    CHECK_WARNING_EVENT_THREAD_POINTER,
+    CHECK_WARNING_EVENT_THREAD_CONTEXT,
+    CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER,
+    CHECK_WARNING_EVENT_THREAD_PARAMETER,
+    CHECK_WARNING_EVENT_NODEREF_PLACEMENT,
+    CHECK_WARNING_EVENT_NODEREF_DEREFERENCE,
+    CHECK_WARNING_EVENT_NODEREF_CONVERSION,
+    // Repeated declaration specifiers: payload.name is Clang's canonical keyword spelling.
+    CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC,
+    // A return written in a noreturn function, including unreachable returns; payload.name names the function.
+    CHECK_WARNING_EVENT_NORETURN_RETURN,
+    CHECK_WARNING_EVENT_NORETURN_FALLS,
+    CHECK_WARNING_EVENT_PRIVATE_EXTERN,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -257,6 +280,8 @@ typedef enum CheckWarningNoteKind
     // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
     CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+    CHECK_WARNING_NOTE_NODEREF_DECLARATION,
+    CHECK_WARNING_NOTE_PRIVATE_EXTERN,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

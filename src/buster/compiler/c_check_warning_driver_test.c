@@ -19,6 +19,232 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "file initializer discards pointer qualifiers at its declaration",
+        .source = "const int b=1;\nint *c=&b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "local initializer discards pointer qualifiers",
+        .source = "int f(void){const int b=1;int *c=&b;return *c;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "assignment discards pointer qualifiers",
+        .source = "void f(const int *a,int *b){b=a;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "return discards pointer qualifiers at its expression",
+        .source = "const int b=1;\nint *f(void){return &b;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers follow named policy",
+        .source = "const int b=1;\nint *c=&b;\n",
+        .options = { "-Wno-incompatible-pointer-types-discards-qualifiers" },
+    },
+    {
+        .name = "discarded pointer qualifiers honor source severity",
+        .source = "#pragma clang diagnostic error \"-Wincompatible-pointer-types-discards-qualifiers\"\nconst int b=1;\nint *c=&b;\n",
+        .errors = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers retain typedef spellings",
+        .source = "typedef const int CI;CI b=1;typedef int *P;P c=&b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded array qualifiers retain the source array type",
+        .source = "const int b[2]={1,2};int *c=b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers retain outer const spelling",
+        .source = "const int b=1;int *const c=&b;\n"
+                  "void f(const int *const a){int *const b=a;(void)b;}\n"
+                  "int *g(const int *const a){return a;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "plain char pointer initializer and return conversion",
+        .source = "unsigned char a[2];char *b=a;\nchar *f(void){return a;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "nonconstant file initializer",
+        .source = "int a;\nint b=a;\n",
+        .errors = 1,
+    },
+    {
+        .name = "nonconstant aggregate initializer element",
+        .source = "int a;\nint values[2]={1,a};\n",
+        .errors = 1,
+    },
+    {
+        .name = "nonconstant static local initializer",
+        .source = "int read(void);\nint f(void){static int value=read();return value;}\n",
+        .errors = 1,
+    },
+    {
+        .name = "duplicate qualifiers and declaration specifiers",
+        .source = "const const int a;\nvolatile volatile int b;\n_Atomic _Atomic int c;\nextern extern int d;\n"
+                  "static static int e;\ntypedef typedef int T;\nunsigned unsigned int f;\n",
+        .warnings = 7,
+    },
+    {
+        .name = "duplicate function specifiers",
+        .source = "inline inline void f(void){}\n_Noreturn _Noreturn void g(void){for(;;){}}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate separated noreturn specifiers",
+        .source = "_Noreturn void _Noreturn f(void){for(;;){}}\n_Noreturn extern _Noreturn void g(void);\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate parameter and pointer qualifiers",
+        .source = "int f(const const int x,int *volatile volatile p){return x+*p;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate declaration specifier group disabled",
+        .source = "const const int value;\n",
+        .options = { "-Wno-duplicate-decl-specifier" },
+    },
+    {
+        .name = "duplicate declaration specifier source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wduplicate-decl-specifier\"\nconst const int value;\n",
+    },
+    {
+        .name = "noreturn fall off",
+        .source = "_Noreturn void f(void){}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn explicit return",
+        .source = "_Noreturn void f(void){return;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn valued return",
+        .source = "__attribute__((noreturn)) int f(void){return 1;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn dead explicit return",
+        .source = "_Noreturn void f(void){if(0)return;for(;;){}}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn ordinary call can return",
+        .source = "void g(void);_Noreturn void f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn call ends the path",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+    },
+    {
+        .name = "noreturn partial terminal path",
+        .source = "_Noreturn void g(void);_Noreturn void f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn trap ends the path",
+        .source = "_Noreturn void f(void){__builtin_trap();}\n",
+    },
+    {
+        .name = "noreturn cast terminal path",
+        .source = "_Noreturn int g(void);_Noreturn void f(void){(void)g();}\n",
+    },
+    {
+        .name = "noreturn partial cast terminal path",
+        .source = "_Noreturn int g(void);_Noreturn void f(int x){if(x)(void)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn partial trap path",
+        .source = "_Noreturn void f(int x){if(x)__builtin_trap();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn independent of return type warning policy",
+        .source = "_Noreturn void f(void){}\n",
+        .options = { "-Wno-return-type" },
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn group disabled",
+        .source = "_Noreturn void f(void){return;}\n",
+        .options = { "-Wno-invalid-noreturn" },
+    },
+    {
+        .name = "noreturn source policy",
+        .source = "#pragma clang diagnostic ignored \"-Winvalid-noreturn\"\n_Noreturn void f(void){}\n",
+    },
+    {
+        .name = "scalar return fall off after ordinary call",
+        .source = "void g(void);int f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return partial terminal path",
+        .source = "_Noreturn void g(void);int f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return terminal call",
+        .source = "_Noreturn int g(void);int f(void){(void)g();}\n",
+    },
+    {
+        .name = "scalar return partial trap path",
+        .source = "int f(int x){if(x)__builtin_trap();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "private extern declarations",
+        .source = "__private_extern__ int x;\n__private_extern__ int f(void);\nvoid g(void){__private_extern__ int y;}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "private extern definitions",
+        .source = "__private_extern__ int x=7;\n__private_extern__ int f(void){return x;}\n",
+    },
+    {
+        .name = "private extern thread local declaration",
+        .source = "__private_extern__ __thread int x;\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "private extern redeclarations",
+        .source = "__private_extern__ int x;int x;\nint y;__private_extern__ int y;\n__private_extern__ int z;int z=3;\n",
+        .warnings = 3,
+        .notes = 3,
+    },
+    {
+        .name = "private extern multiple declarators",
+        .source = "__private_extern__ int x,y=2,z;\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "private extern duplicate specifier",
+        .source = "__private_extern__ __private_extern__ int x;\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        .name = "private extern group disabled",
+        .source = "__private_extern__ int x;\n",
+        .options = { "-Wno-private-extern" },
+    },
+    {
+        .name = "private extern source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wprivate-extern\"\n__private_extern__ int x;\n",
+    },
+    {
         .name = "nonliteral integer zero pointer conversion",
         .source = "int*p=1-1;\n",
         .warnings = 1,

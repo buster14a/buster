@@ -894,6 +894,19 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int x) { switch (x) { default: __attribute__((__noinline__)) } }\n", "1:69: expected statement", 0 },
     { "void f(void) { __attribute__((__always_inline__, noinline)) }\n", "1:61: expected statement", 0 },
     { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // An existing ordinary name after a declaration's GNU prefix is an expression annotation, which clang cannot
+    // read as a declarator. Unbound names keep implicit int; typedefs, statement attributes and labels keep their paths.
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", 0 },
+    { "void f(int x) { __attribute__(()) x = 1; }\n", "1:35: expected identifier or '('", 0 },
+    { "void f(void) { int x; __attribute__((unused)) x; }\n", "1:47: expected identifier or '('", 0 },
+    { "enum { x }; void f(void) { __attribute__((unused)) x; }\n", "1:52: expected identifier or '('", 0 },
+    { "void g(void); void f(void) { __attribute__(()) g(); }\n", "1:48: expected identifier or '('", 0 },
+    { "void f(void) { { int x; } __attribute__(()) x; }\n", "1:45: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(void) { __attribute__(()) x = 1; }\n", "1:34: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; __attribute__(()) x = 1;\n", "1:26: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "typedef int T; void f(void) { __attribute__(()) T x; }\n", "", 0 },
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", "c89" },
+    { "void f(void) { __attribute__(()) x = 1; }\n", "", "c89" },
     { "void f(void) { __attribute__((unused)) __extension__ int x; }\n", "1:40: expected identifier or '('", 0 },
     { "void f(void) { L: __attribute__((unused)) __extension__ int x; }\n", "1:57: expected expression", 0 },
     // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
@@ -904,6 +917,8 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x __attribute__ (( (unused)));\n", "1:23: expected ')'", 0 },
     { "int x __attribute__ ((aligned(4 4)));\n", "1:32: expected ')'", 0 },
     { "int x __attribute__ ((aligned(;)));\n", "1:31: expected expression", 0 },
+    { "int x __attribute__((section(,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0 },
+    { "int x __attribute__((section(1,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0 },
     { "int x __attribute__ ( unused));\n", "1:22: expected '(' after '('", 0 },
     // A for-statement's missing `;` is at the token clang finds instead.
     { "void f(int n) { for (int i = 0; i n < ; i++) { } }\n", "1:35: expected ';' in 'for' statement specifier", 0 },
@@ -2307,7 +2322,8 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
         {
             const ParseDiagnostic* a = &full->diagnostics[d];
             const ParseDiagnostic* b = &tree.diagnostics[d];
-            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error;
+            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error &&
+                   a->note == b->note && a->resumed == b->resumed && a->resume_delete == b->resume_delete && a->resume_end == b->resume_end;
         }
         if (same && parsed)
         {
@@ -3353,7 +3369,8 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
     {
         const ParseDiagnostic* x = &a->diagnostics[d];
         const ParseDiagnostic* y = &b->diagnostics[d];
-        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ? "diagnostics" : 0;
+        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ||
+                 x->note != y->note || x->resumed != y->resumed || x->resume_delete != y->resume_delete || x->resume_end != y->resume_end ? "diagnostics" : 0;
     }
     return result;
 }

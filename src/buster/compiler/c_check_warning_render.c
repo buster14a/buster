@@ -56,9 +56,8 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
-// The text of the string literal at parser token `token` as written, between its quotes (past an encoding prefix), in
-// `scratch`; empty for none.
-static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+// A string token's complete spelling in scratch, including its quotes and encoding prefix.
+static String8 check_warning_string_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
     String8 result = { 0 };
     const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : UINT32_MAX;
@@ -69,15 +68,33 @@ static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp,
         uint8_t* buffer = capacity < (UINT64_C(1) << 20) ? arena_push(scratch, capacity, 1) : NULL;
         const uint8_t* bytes = NULL;
         const uint32_t length = buffer != NULL ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
-        uint32_t open = 0;
-        while (open < length && bytes[open] != '"')
-        {
-            open += 1;
-        }
-        const bool quoted = open + 1 < length && bytes[length - 1] == '"';
-        result = quoted ? (String8){ (char*)bytes + open + 1, length - open - 2 } : result;
+        result = (String8){ (char*)bytes, length };
     }
     return result;
+}
+
+// The text of the string literal as written, between its quotes (past an encoding prefix); empty for none.
+static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+    uint64_t open = 0;
+    while (open < spelling.length && spelling.pointer[open] != '"')
+    {
+        open += 1;
+    }
+    const bool quoted = open + 1 < spelling.length && spelling.pointer[spelling.length - 1] == '"';
+    return quoted ? (String8){ spelling.pointer + open + 1, spelling.length - open - 2 } : (String8){ 0 };
+}
+
+// Attribute handlers classify decoded bytes, so their diagnostic excerpts must use the same bytes. An escape's
+// source width is unrelated to the offsets retained in CHECK_WARNING_EVENT_TARGET_UNSUPPORTED's payload.
+static String8 check_warning_string_value(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+    const CheckStringPart part = { .bytes = (const uint8_t*)spelling.pointer, .length = spelling.length };
+    const CheckStringLiteral decoded = spelling.length != 0 ? check_literal_strings(&part, 1, pp->options.language.standard >= 2023, scratch) :
+                                                             (CheckStringLiteral){ 0 };
+    return decoded.valid && decoded.byte_count != 0 ? (String8){ (char*)decoded.bytes, decoded.byte_count - 1 } : (String8){ 0 };
 }
 
 // One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
@@ -247,12 +264,130 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
     return promoted;
 }
 
+typedef struct CheckWarningParen CheckWarningParen;
+struct CheckWarningParen
+{
+    CheckWarningParen* next;
+    uint32_t close;
+    uint32_t pointers;
+    uint32_t depth;
+};
+
+// The parentheses of this declarator occurrence, for the shared type printer. Prefix stars and suffix chunks count
+// the levels from its name outwards; a group's level is the chunks inside it. Skip attribute arguments, array bounds
+// and parameter lists, and start again at a sibling declarator or the parameter list containing the name. This cold
+// walk allocates only for actual enclosing groups and keeps no token-wide spelling column in checked input.
+static bool check_driver_warning_parentheses(const Parser* parser, const TypeTable* types, uint32_t name, TypeId declared,
+                                             Arena* scratch, TypeNames* names)
+{
+    CheckWarningParen* groups = NULL;
+    uint32_t count = 0;
+    uint32_t pointers = 0;
+    bool valid = true;
+    const bool contextual = name < parser->tokens.count && type_is_valid(types, declared);
+    const bool named = contextual && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && parser->tree.roles[name] == PARSE_ROLE_OPERAND;
+    const uint32_t begin = contextual ? check_input_declaration_begin(parser, name) : 0;
+    for (uint32_t i = begin; contextual && valid && i < name;)
+    {
+        if (check_input_attribute_starts(parser, i, name))
+        {
+            const uint32_t after = check_input_skip_attributes(parser, i, name);
+            i = after > i ? after : i + 1;
+            continue;
+        }
+        const uint8_t kind = parser->tokens.kinds[i];
+        const uint8_t role = parser->tree.roles[i];
+        const uint32_t close = parser->tree.parents[i];
+        const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        if (open && close > i && close < name)
+        {
+            i = close + 1;
+            continue;
+        }
+        if (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_EQUAL || (open && close >= name && role != PARSE_ROLE_OPEN_GROUP))
+        {
+            groups = NULL;
+            count = 0;
+            pointers = 0;
+        }
+        else if (open && close >= name && role == PARSE_ROLE_OPEN_GROUP)
+        {
+            CheckWarningParen* group = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningParen, 1);
+            valid = group != NULL;
+            if (valid)
+            {
+                *group = (CheckWarningParen){ .next = groups, .close = close, .pointers = pointers, .depth = UINT32_MAX };
+                groups = group;
+                count += 1;
+            }
+        }
+        pointers += kind == PARSE_KIND_STAR && role == PARSE_ROLE_PREFIX;
+        i += 1;
+    }
+    CheckWarningParen* pending = groups;
+    uint32_t suffixes = 0;
+    for (uint32_t i = contextual ? name + named : parser->tokens.count; valid && i < parser->tokens.count;)
+    {
+        if (check_input_attribute_starts(parser, i, parser->tokens.count))
+        {
+            const uint32_t after = check_input_skip_attributes(parser, i, parser->tokens.count);
+            i = after > i ? after : i + 1;
+        }
+        else if (pending != NULL && i == pending->close)
+        {
+            pending->depth = pointers - pending->pointers + suffixes;
+            pending = pending->next;
+            i += 1;
+        }
+        else if ((parser->tree.roles[i] == PARSE_ROLE_OPEN_FUNCTION || parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE) &&
+                 parser->tree.parents[i] > i && parser->tree.parents[i] < parser->tokens.count)
+        {
+            suffixes += 1;
+            i = parser->tree.parents[i] + 1;
+        }
+        else
+        {
+            break;
+        }
+    }
+    TypePrintParen* parentheses = valid && pending == NULL && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypePrintParen, count) : NULL;
+    valid &= pending != NULL || count == 0 || parentheses != NULL;
+    uint32_t kept = 0;
+    uint32_t depth = 0;
+    TypeId type = contextual ? type_strip_aligned(types, declared) : 0;
+    for (CheckWarningParen* group = groups; valid && parentheses != NULL && group != NULL; group = group->next)
+    {
+        while (depth < group->depth && type_is_valid(types, type))
+        {
+            const uint8_t kind = type_kind(types, type);
+            const bool derived = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind);
+            type = derived ? type_strip_aligned(types, types->types.base[type_index(type)]) : 0;
+            depth += 1;
+        }
+        if (type_is_valid(types, type))
+        {
+            if (kept != 0 && parentheses[kept - 1].type == type)
+            {
+                parentheses[kept - 1].count += 1;
+            }
+            else
+            {
+                parentheses[kept++] = (TypePrintParen){ .type = type, .count = 1 };
+            }
+        }
+    }
+    names->parentheses = parentheses;
+    names->parenthesis_count = kept;
+    return valid;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
 // unnamed tag's typedef name or its `(unnamed at file:line:col)`.
-static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
-                                         CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling)
+static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                            CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling,
+                                            uint32_t declaration, TypeId declared)
 {
     String8 result = { 0 };
     if (type != 0 && type_is_valid(types, type))
@@ -292,7 +427,8 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                 names.alias_names = &alias_name;
                 names.alias_count = 1;
             }
-            const String8 sugared = type_print(types, scratch, type, (String8){ 0 }, &names, options);
+            const bool contextual = check_driver_warning_parentheses(parser, types, declaration, declared, scratch, &names);
+            const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
             if (names.alias_count != 0)
             {
@@ -300,6 +436,7 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                 // typedef stays, since it is that record's own name.
                 TypeNames expand = names;
                 expand.alias_count = 0;
+                expand.parenthesis_count = 0;
                 canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
             }
             // The returned text carries its own quotes: clang's `(aka '...')` sits outside the type's, so the
@@ -321,6 +458,7 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                 const uint64_t count = described ? types->types.extent[type_index(vector)] : 0;
                 TypeNames plain = names;
                 plain.alias_count = 0;
+                plain.parenthesis_count = 0;
                 const String8 element = described ? type_print(types, scratch, types->types.base[type_index(vector)], (String8){ 0 }, &plain, options) : (String8){ 0 };
                 const char* quoted = described ? check_warning_text(scratch, "'%.*s' (vector of %llu '%.*s' %s)", (int)sugared.length, sugared.pointer,
                                                                     (unsigned long long)count, (int)element.length, element.pointer, count > 1 ? "values" : "value") :
@@ -330,6 +468,12 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
         }
     }
     return result;
+}
+
+static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling)
+{
+    return check_driver_warning_type_at(parser, pp, input, types, spell, scratch, type, spelling, BUSTER_CHECK_NONE, 0);
 }
 
 // An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
@@ -448,6 +592,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
+        case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
+            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NORETURN_RETURN:
+            result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NORETURN_FALLS:
+            result = "function declared 'noreturn' should not return";
+            break;
         case CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE:
             result = "'gnu_inline' attribute requires function to be marked 'inline', attribute ignored";
             break;
@@ -540,7 +693,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE:
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
+                                                              payload->token, payload->second_type);
             result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to function types; type here is %.*s", (int)name.length, name.pointer,
                                                            (int)type.length, type.pointer) : NULL;
             break;
@@ -602,6 +756,38 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         attribute.pointer, ending);
             break;
         }
+        case CHECK_WARNING_EVENT_THREAD_CAPABILITY:
+        case CHECK_WARNING_EVENT_THREAD_ARGUMENT:
+        case CHECK_WARNING_EVENT_THREAD_METHOD:
+        case CHECK_WARNING_EVENT_THREAD_POINTER:
+        case CHECK_WARNING_EVENT_THREAD_CONTEXT:
+        case CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER:
+        case CHECK_WARNING_EVENT_THREAD_PARAMETER:
+        {
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const bool typed = event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER;
+            const String8 type = typed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->token) : (String8){ "", 0 };
+            const char* suffix = event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY ?
+                                 "attribute requires arguments whose type is annotated with 'capability' attribute; type here is " :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ? "only applies to pointer types; type here is " :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_METHOD ?
+                                 "attribute without capability arguments can only be applied to non-static methods of a class" :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_PARAMETER ?
+                                 "attribute applies to function parameters only if their type is a reference to a 'scoped_lockable'-annotated type" :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER ?
+                                 (payload->token != 0 ? "attribute on a field requires the field to be of function pointer type" :
+                                                       "attribute on a variable requires the variable to be of function pointer type") :
+                                 "attribute can only be applied in a context annotated with 'capability' attribute";
+            result = event->kind == CHECK_WARNING_EVENT_THREAD_ARGUMENT ?
+                     check_warning_text(scratch, "ignoring '%.*s%s%.*s' attribute because its argument is invalid", (int)scope.length, scope.pointer,
+                                        scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                     check_warning_text(scratch, "'%.*s%s%.*s' %s%.*s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                        (int)attribute.length, attribute.pointer, suffix, (int)type.length, type.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
         {
             static const char* const keywords[] = { "struct", "union", "enum" };
@@ -621,6 +807,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                           check_warning_text(scratch, "'%.*s' is unavailable", (int)name.length, name.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_NODEREF_PLACEMENT:
+            result = "'noderef' can only be used on an array or pointer type";
+            break;
+        case CHECK_WARNING_EVENT_NODEREF_DEREFERENCE:
+            result = name.length == 0 ? "dereferencing expression marked as 'noderef'" :
+                     check_warning_text(scratch, "dereferencing %.*s; was declared with a 'noderef' type", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NODEREF_CONVERSION:
+            result = "casting to dereferenceable pointer removes 'noderef' attribute";
+            break;
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
@@ -729,7 +925,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                  token += 1)
             {
                 const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING;
-                const String8 text = string ? check_warning_string_text(parser, pp, token, scratch) :
+                const String8 text = string ? (target ? check_warning_string_value(parser, pp, token, scratch) : check_warning_string_text(parser, pp, token, scratch)) :
                                               check_warning_attribute_normalized(check_driver_warning_name(pp, parser->tokens.names[token]));
                 const uint32_t copied = text.length < sizeof(argument) - 1 - length ? (uint32_t)text.length : (uint32_t)(sizeof(argument) - 1 - length);
                 memcpy(argument + length, text.pointer, copied);
@@ -884,6 +1080,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
     const char* result = NULL;
     switch (note->kind)
     {
+        case CHECK_WARNING_NOTE_PRIVATE_EXTERN:
+            result = "use __attribute__((visibility(\"hidden\"))) attribute instead";
+            break;
         case CHECK_WARNING_NOTE_PRIOR_INITIALIZATION:
             result = note->payload.data != 0 ? "previous initialization with side effects is here (side effects will not occur at run time)" :
                                               "previous initialization is here";
@@ -911,6 +1110,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         }
         case CHECK_WARNING_NOTE_UNAVAILABLE_HERE:
             result = check_warning_text(scratch, "'%.*s' has been explicitly marked unavailable here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_NODEREF_DECLARATION:
+            result = check_warning_text(scratch, "%.*s declared here", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {
@@ -955,6 +1157,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                    event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
                    event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
                    event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT ||
+                   event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ||
                    (event->kind == CHECK_WARNING_EVENT_DEPRECATED_USE && event->note_count != 0 && event->note_first < view->note_count &&
                     view->notes[event->note_first].payload.data == BUSTER_CHECK_DEPRECATED_TYPE_NAME));
     }
@@ -1012,9 +1215,17 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                    if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
+                    if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE)
+                    {
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED)
+                    {
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER) &&
                              event->completion_kind != CHECK_WARNING_COMPLETE_TU_END)
