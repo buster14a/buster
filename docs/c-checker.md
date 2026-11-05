@@ -6071,7 +6071,41 @@ arguments against the function. The checker now gives these as clang does.
   begin such a declaration are clang's parser's error, "misplaced attributes;
   expected attributes here" just after a file-scope tag declaration's keyword,
   else "an attribute list cannot appear here", with "declaration does not
-  declare anything" at the specifiers after them.
+  declare anything" at the specifiers after them. Specifiers without a type
+  specifier (`const;`, `static;`, `_Alignas(8);`, a calling convention's
+  keyword, `_Nonnull`) are int's, in any language, without a word, and
+  declare nothing; a list whose specifiers are all such keywords and GNU
+  attributes is a declaration, not a null statement's attributes. Its errors
+  come first, in clang's order whatever their places', then its warnings:
+  "restrict requires a pointer or reference" at its first restrict, whatever
+  the type, "'inline' can only appear on functions", then "'_Noreturn' can
+  only appear on functions".
+- **Declarations after a missing `;`** (`check_prefix_resume`,
+  `c_check_prefix.c`). Where a declaration's `;` is missing before a
+  declaration specifier, clang's `ParseDeclGroup` goes on as if it were
+  there, so `int x _Alignas(3);` declares `x`, and `_Alignas(3);` is a
+  declaration that declares nothing (-Wmissing-declarations). The parser
+  marks such an error (`ParseDiagnostic.resumed`, `docs/c-parser.md`), and a
+  failed parse's checking takes a view of the unit with a synthetic `;`
+  before each such specifier, parsed again: in rounds, each for the missing
+  `;`s before the parse's first other error, as a body's after its first
+  show up only once the body is parsed past it. The rounds go on until one
+  finds none (a body with k of them takes k), within a budget of 256 times
+  the unit's tokens parsed in all, past which the last view stands with its
+  errors; the two views' columns take turns, so the memory is the unit's
+  size whatever the rounds, and the errors of all rounds are merged in order
+  by a stable merge sort (50,000 bodies of two each: 0.66 s, clang's
+  output). A view without errors is
+  checked whole, as a prefix is (no translation unit's end); one with errors
+  takes the repair and prefix views of its own first error. The view's
+  tokens are its own (the synthetic `;`s take the next token's place), and
+  the parse's errors printed are each round's missing `;`s' and the last
+  view's, at the original's tokens: so a body's second missing `;`, which the
+  parser's recovery skips with the rest of the body, is clang's error too. A
+  pragma that clang's parser reads as a token between the declarator and the
+  specifier (`#pragma pack`, `weak`, `GCC visibility`: any but those its
+  preprocessor takes alone, such as `message` and the diagnostic ones) stops
+  the recovery, as it does clang's.
 - **Alignment specifiers** (`check_input_alignas_error`, C11 6.7.5). On a
   parameter, a `register` variable or a bit-field, "'_Alignas' attribute cannot
   be applied to a function parameter" (and the others); on a typedef or a
@@ -6158,11 +6192,14 @@ arguments against the function. The checker now gives these as clang does.
     made (nor `-Wreturn-type` but for a function returning an aggregate).
   - `annotate`'s arguments after its string must be constant expressions,
     clang's error with its evaluator's notes otherwise; they are taken here.
-  - `int x _Alignas(3);` stops at clang's "expected ';' after top level
-    declarator", where clang's recovery also reads `_Alignas(3);` as a
-    declaration that declares nothing (-Wmissing-declarations). That is the
-    parser's recovery (`docs/c-parser.md`), which keeps no declaration after
-    the error for the reader to warn of.
+  - After a missing `;`'s recovery, as everywhere, a declaration's checker
+    error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
+    stops at "requested alignment is not a power of 2", where clang goes on
+    to the second declaration's errors); a unit's later parse errors are
+    printed. A pragma that clang's recovery skips (`GCC visibility push`) is
+    still applied. `-Wduplicate-decl-specifier` (`inline inline;`) isn't
+    made, and `__private_extern__` is refused by name, with or without a
+    declarator.
   - A function type's attribute's warnings come in clang's order
     (`check_input_attribute_type_warnings`) but for three places. A parameter's
     attributes' warnings, which clang gives as it reads the parameter list,
@@ -6220,6 +6257,11 @@ arguments against the function. The checker now gives these as clang does.
   - an attribute's count after its subject and its arguments' parser
     errors, with or without arguments, and a declarator's type's convention
     warnings before the declaration's attributes'.
+  - declarations after a missing `;` and declarations of no declarator
+    without a type specifier, with a function specifier or with restrict,
+    under gnu17 and gnu23 and the warnings' options
+    (`check_test_driver_resumed_declarations`,
+    `c_check_resume_driver_test.c`).
   - bodies' redeclarations with attributes after a definition and of mutual
     exclusions, against the declarations each sees, by both paths and with the
     bodies on 1, 2 and 4 lanes (`check_test_driver_lane_attributes`,

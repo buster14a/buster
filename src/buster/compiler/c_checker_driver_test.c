@@ -6293,6 +6293,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_cleanup_driver_test.c"
 #include "c_check_musttail_driver_test.c"
 #include "c_check_label_attribute_driver_test.c"
+#include "c_check_resume_driver_test.c"
 #include "c_check_lane_attribute_driver_test.c"
 #include "c_check_generic_builtin_driver_test.c"
 #include "c_checker_driver_const_test.c"
@@ -7881,6 +7882,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_label_attributes(&test, clang, executable, directory);
             check_test_driver_unknown_attributes(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_resumed_declarations(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

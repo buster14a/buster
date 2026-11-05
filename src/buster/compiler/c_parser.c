@@ -1104,6 +1104,9 @@ struct ParseDiagnostic
     bool error;
     // The opener clang's "to match this '('" note is at, of an expected closer's error (#147), or BUSTER_PARSE_NONE.
     uint32_t note;
+    // A missing `;` after a declaration's declarator before what clang takes for a declaration specifier (#147): clang's
+    // ParseDeclGroup goes on as if the `;` were there, and reads the specifier as the next declaration's first.
+    bool resumed;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1495,6 +1498,8 @@ struct ParseScalar
     uint32_t error_note;
     uint8_t error_message;
     uint8_t error_place;
+    // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).
+    bool error_resumed;
     // The diagnostics, in order.
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
@@ -1648,6 +1653,25 @@ BUSTER_INLINE bool parse_scalar_starts_declaration(const ParseScalar* parser, ui
     const bool label = block && parser->kinds[i] == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON;
     return !label && (parse_scalar_starts_type(parser, i) || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_ALIGNAS ||
                       kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_CALLING_CONVENTION);
+}
+
+// Whether token `i` is what clang's isDeclarationSpecifier takes for one, in C: a type name's start, a storage class, a
+// function specifier, typedef, an alignment specifier or a calling convention; not _Static_assert, __extension__ or a
+// C23 attribute list. Clang's ParseDeclGroup reads one where a declaration's `;` is missing as the next declaration's
+// (#147).
+BUSTER_INLINE bool parse_scalar_declaration_specifier(const ParseScalar* parser, uint32_t i)
+{
+    const uint8_t kind = parser->kinds[i];
+    return parse_scalar_starts_type(parser, i) || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_ALIGNAS ||
+           kind == PARSE_KIND_CALLING_CONVENTION;
+}
+
+// Whether clang's recovery reads past a declaration's missing `;` at token `i` (ParseDiagnostic.resumed): a declaration
+// specifier there, which a `#pragma pack` before it doesn't come between, as its annotation token would (#147). The
+// checker's view leaves the other pragmas clang's parser takes as tokens (check_prefix_resume).
+BUSTER_INLINE bool parse_scalar_resumes(const ParseScalar* parser, uint32_t i)
+{
+    return (parser->flags[i] & BUSTER_PARSE_AFTER_PRAGMA_PACK) == 0 && parse_scalar_declaration_specifier(parser, i);
 }
 
 // Whether `i` is a keyword after a parameter's declarator that has no name, which clang takes for the name it would be,
@@ -2383,6 +2407,8 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     }
     else if (frame->role == PARSE_ROLE_NONE)
     {
+        parser->error_resumed = parser->error_token == BUSTER_PARSE_NONE && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) &&
+                                parse_scalar_resumes(parser, i);
         parse_scalar_error(parser, i, (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) ? PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR : PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN,
                            (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) ? BUSTER_PARSE_AFTER_PREVIOUS : BUSTER_PARSE_AT_TOKEN);
     }
@@ -2390,6 +2416,8 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     {
         const uint8_t message = (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) ? PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION :
                                 frame->statement == PARSE_ITEM_RETURN ? PARSE_MESSAGE_EXPECTED_SEMI_AFTER_RETURN : PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION;
+        parser->error_resumed = parser->error_token == BUSTER_PARSE_NONE && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) &&
+                                parse_scalar_resumes(parser, i);
         parse_scalar_error(parser, i, message, BUSTER_PARSE_AFTER_PREVIOUS);
     }
     else if (frame->role == PARSE_ROLE_OPEN_STRUCT)
@@ -5409,13 +5437,17 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->typeless_function = 0;
     parser->kept_count = 0;
     parser->error_token = BUSTER_PARSE_NONE;
+    parser->error_resumed = false;
 }
 
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
 // the declaration skipped. Its tokens become ERROR leaves of the root, the parse goes on at file scope, and the names
-// it bound are unbound. Returns the declaration's last token.
+// it bound are unbound. Returns the declaration's last token. A file-scope declaration's missing `;` before a declaration
+// specifier ends the declaration before it instead, where clang's ParseDeclGroup reads the specifier as the next
+// declaration's (#147): the parse goes on there, so that the next declaration's errors are clang's too.
 static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 {
+    const bool resumed = parser->error_resumed && parser->frame_count == 1 && stopped == parser->error_token && stopped > parser->item_begin;
     if (parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -5425,11 +5457,12 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .place = parser->error_place,
             .error = true,
             .note = parser->error_note,
+            .resumed = parser->error_resumed,
         };
         parser->diagnostic_count += 1;
     }
     parser->errors += 1;
-    const uint32_t end = parse_scalar_skip(parser, stopped, parser->brackets);
+    const uint32_t end = resumed ? stopped - 1 : parse_scalar_skip(parser, stopped, parser->brackets);
     for (uint32_t t = parser->item_begin; t <= end && t < parser->count; t += 1)
     {
         parser->roles[t] = PARSE_ROLE_ERROR;
