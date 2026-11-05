@@ -188,6 +188,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_RESTRICT_NOT_POINTER: result = "restrict requires a pointer or reference"; break;
         case CHECK_INPUT_INLINE_NOT_FUNCTION: result = "'inline' can only appear on functions"; break;
         case CHECK_INPUT_NORETURN_NOT_FUNCTION: result = "'_Noreturn' can only appear on functions"; break;
+        case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
     }
     return result;
 }
@@ -415,8 +416,10 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
     const CheckInputSectionDiagnostic* section = check_input_section_report(input, report);
     const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
     const CheckInputFpPragma* fp = check_input_fp_report(input, report);
+    const CheckInputMsPragma* layout = check_input_ms_report(input, report);
     return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
-           section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) : check_driver_input_message(report->message);
+           section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
+           layout != NULL ? "this pragma cannot appear in struct declaration" : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)

@@ -5737,7 +5737,7 @@ arguments against the function. The checker now gives these as clang does.
     Objective-C's) is kept with no effect, for its subject's check and its
     argument count's;
   - so are some whose own handlers check what is checked here: `minsize`,
-    `optnone`, `noescape`, `annotate`, `uninitialized`, `gcc_struct`,
+    `optnone`, `noescape`, `annotate`, `uninitialized`,
     `no_sanitize_memory`, `analyzer_noreturn` and `carries_dependency`. With
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
@@ -5948,7 +5948,7 @@ arguments against the function. The checker now gives these as clang does.
 
   The rest stay refused by name: `selectany` (a COMDAT),
   `no_caller_saved_registers` (a calling convention), and the attributes
-  whose handlers clang has its own (`pass_object_size`, `ms_struct`,
+  whose handlers clang has its own (`pass_object_size`,
   `interrupt` and others).
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
@@ -6332,8 +6332,33 @@ TARGET` also remains refused because it can create a typed alias declaration
 without a C declarator. These boundaries are separate from ordinary weak binding
 and renaming before use.
 
+`#pragma ms_struct on`, `off` and `reset` select the layout sampled by subsequent
+record definitions. The state follows source order across function boundaries;
+forward declarations do not capture it. Macro operands expand when the semantic
+preprocessor retains the directive. Malformed state names, missing operands and
+extra tokens warn under `-Wignored-pragmas` and leave the previous state intact.
+A directive between struct members is a hard placement error.
+
+Explicit `ms_struct` and `gcc_struct` attributes attach to structs and unions,
+including attributes inherited from a forward declaration. `gcc_struct` selects
+ordinary layout even while the pragma is on. Both attributes on one declaration
+conflict, with a note at the earlier one; Clang permits them across separate
+declarations, where `gcc_struct` wins. The type table implements complete
+bit-field storage units, same-size sharing, zero-width and union rules, and
+packed/aligned interactions in both layout paths (see [types](c-types.md)).
+Units whose byte size is not a power of two, such as a `_BitInt(129)` bit-field,
+are explicitly refused because their Microsoft alignment cannot fit the current
+type representation. A raw preprocessor client without semantic pragma expansion
+also refuses a macro-dependent setting instead of guessing its expanded state.
+
+The reader fixtures check all four parser schedules and retained state across
+function boundaries; the driver compares warning controls and exact diagnostic
+locations with Clang. Separately compiled Clang and Buster callers/callees exchange
+ordinary, packed, zero-width and union records in both directions at `-O0` and
+`-O2`, with fixed layout assertions and scalar/vector object equality.
+
 Other unsupported semantic effects remain hard, named errors, including
-`ms_struct` and layout-changing `align=packed`.
+layout-changing `align=packed`.
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 

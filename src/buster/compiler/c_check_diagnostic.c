@@ -578,6 +578,16 @@ static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, ui
             origin = check_diagnostic_pragma_source(record);
         }
     }
+    const CheckInputMsPragmas* ms = input->ms_pragmas;
+    for (uint32_t i = 0; ms != NULL && i < ms->count; i += 1)
+    {
+        const CheckInputMsPragma* record = ms->records + i;
+        if (record->error && record->token < before_token && record->token < first)
+        {
+            first = record->token;
+            origin = record->source + 2;
+        }
+    }
     *token = first;
     *source = origin;
     return first != BUSTER_CHECK_NONE;
@@ -627,6 +637,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         valid = check_input_diagnostic_pragmas(&reader, handled);
         valid = valid && check_input_visibility_pragmas(&reader, handled, false);
         valid = valid && check_input_symbol_pragmas(&reader, handled, false);
+        valid = valid && check_input_ms_pragmas(&reader, handled, false);
         if (valid && result->visibility_pragmas != NULL)
         {
             CheckInputVisibilityPragmas* history = result->visibility_pragmas;
@@ -669,6 +680,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     {
         valid = check_input_ignored_pragmas(&reader, handled);
         valid = valid && check_input_symbol_syntax_warnings(&reader);
+        valid = valid && check_input_ms_warnings(&reader);
     }
     if (valid)
     {

@@ -226,6 +226,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_RESTRICT_NOT_POINTER,
     CHECK_INPUT_INLINE_NOT_FUNCTION,
     CHECK_INPUT_NORETURN_NOT_FUNCTION,
+    // The current type table stores alignments as powers of two; some wide Microsoft bit-field units need others.
+    CHECK_INPUT_MS_STRUCT_ALIGNMENT,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -340,6 +342,10 @@ static const char* const check_input_messages[] =
     "attribute requires parameter 1 to be int or bool",
     "attribute parameter is out of bounds",
     "invalid attribute argument",
+    [CHECK_INPUT_RESTRICT_NOT_POINTER] = "restrict requires a pointer or reference",
+    [CHECK_INPUT_INLINE_NOT_FUNCTION] = "'inline' can only appear on functions",
+    [CHECK_INPUT_NORETURN_NOT_FUNCTION] = "'_Noreturn' can only appear on functions",
+    [CHECK_INPUT_MS_STRUCT_ALIGNMENT] = "ms_struct bit-field storage with non-power-of-two size is not supported",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -487,6 +493,7 @@ typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputVisibilityPragmas CheckInputVisibilityPragmas;
 typedef struct CheckInputSymbolPragmas CheckInputSymbolPragmas;
+typedef struct CheckInputMsPragmas CheckInputMsPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
 typedef struct CheckInputPackedMember CheckInputPackedMember;
@@ -588,6 +595,8 @@ struct CheckInput
     CheckInputPackPragmas* pack_pragmas;
     CheckInputVisibilityPragmas* visibility_pragmas;
     CheckInputSymbolPragmas* symbol_pragmas;
+    CheckInputMsPragmas* ms_pragmas;
+    uint8_t* ms_struct;
     uint8_t* object_visibility;
     bool visibility_error;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
@@ -3865,6 +3874,7 @@ static inline __attribute__((always_inline)) bool check_input_spelling(CheckInpu
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
 #include "c_check_symbol_pragma.c"
+#include "c_check_ms_struct_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
@@ -5391,6 +5401,7 @@ struct CheckTagFrame
     uint32_t negative_bits;
     uint32_t positive_bits;
     uint8_t pack_log2;
+    bool ms_struct;
     CheckInputAttributes* attributes;
     CheckConstantInput* enum_job;
     CheckInputAttributes* enumerator_attributes;
@@ -5507,6 +5518,7 @@ static bool check_input_tag_frame(CheckInputReader* reader, CheckTagFrame* frame
             .first = BUSTER_CHECK_NONE,
             .last = BUSTER_CHECK_NONE,
             .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[body] : 0,
+            .ms_struct = reader->output->ms_struct != NULL && reader->output->ms_struct[token] != 0,
             .attributes = check_input_attributes_at(reader->output, token),
         };
         *depth += 1;
@@ -5550,6 +5562,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             .first = BUSTER_CHECK_NONE,
             .last = BUSTER_CHECK_NONE,
             .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[open] : 0,
+            .ms_struct = reader->output->ms_struct != NULL && reader->output->ms_struct[token] != 0,
             .attributes = check_input_attributes_at(reader->output, token),
         };
         reader->ignored[open] = true;
@@ -5626,8 +5639,13 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     .pack_log2 = frame->pack_log2,
                     .packed = frame->attributes != 0 && frame->attributes->packed,
                     .alignment_log2 = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0,
+                    .ms_struct = check_input_record_ms_struct(frame->attributes, frame->ms_struct),
                 };
                 valid = valid && type_complete_record(reader->types, frame->type, packed, frame->count, attributes);
+                if (!valid && reader->types->last_error == TYPE_ERROR_MS_STRUCT_ALIGNMENT)
+                {
+                    check_input_report(reader, frame->token, CHECK_INPUT_MS_STRUCT_ALIGNMENT);
+                }
                 // The marked members, by the indexes the completion gave the record's members in order (#147).
                 const uint32_t record_tag = valid ? reader->types->types.index[type_index(frame->type)] : 0;
                 uint32_t position = valid ? reader->types->tags.member_begin[record_tag] : 0;
@@ -10907,12 +10925,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_visibility_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_symbol_pragmas(&reader, handled, true);
+                prepared = prepared && check_input_ms_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_ignored_pragmas(&reader, handled);
                 prepared = prepared && check_input_symbol_syntax_warnings(&reader);
+                prepared = prepared && check_input_ms_warnings(&reader);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;

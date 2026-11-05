@@ -6075,6 +6075,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_undeclared_test.c"
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
+#include "c_check_ms_struct_driver_test.c"
 #include "c_check_ignored_pragma_driver_test.c"
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"

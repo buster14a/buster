@@ -1658,7 +1658,8 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
     {
         equal = x->tags.type[i] == y->tags.type[i] && x->tags.name[i] == y->tags.name[i] && x->tags.member_begin[i] == y->tags.member_begin[i] &&
                 x->tags.member_count[i] == y->tags.member_count[i] && x->tags.completion[i] == y->tags.completion[i] &&
-                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
+                x->tags.packed[i] == y->tags.packed[i] && x->tags.ms_struct[i] == y->tags.ms_struct[i] &&
+                x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
                 x->tags.lookup[i] == y->tags.lookup[i] && x->tags.lookup_log2[i] == y->tags.lookup_log2[i];
     }
     for (uint32_t i = 1; equal && i < x->members.count; i += 1)
@@ -1807,12 +1808,15 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     const CheckInputPackPragmas* pack_b = b->pack_pragmas;
     const CheckInputSymbolPragmas* symbols_a = a->symbol_pragmas;
     const CheckInputSymbolPragmas* symbols_b = b->symbol_pragmas;
+    const CheckInputMsPragmas* ms_a = a->ms_pragmas;
+    const CheckInputMsPragmas* ms_b = b->ms_pragmas;
     const bool contents = !a->resource && !b->resource;
     bool equal = (x == NULL) == (y == NULL) && a->fp_pragma_count == b->fp_pragma_count &&
                  (a->fp_environments == NULL) == (b->fp_environments == NULL) &&
                  (a->cx_limited_ranges == NULL) == (b->cx_limited_ranges == NULL) && (nonnull_a == NULL) == (nonnull_b == NULL) &&
                  (a->pack_log2 == NULL) == (b->pack_log2 == NULL) && (pack_a == NULL) == (pack_b == NULL) &&
-                 (symbols_a == NULL) == (symbols_b == NULL);
+                 (symbols_a == NULL) == (symbols_b == NULL) && (ms_a == NULL) == (ms_b == NULL) &&
+                 (a->ms_struct == NULL) == (b->ms_struct == NULL);
     if (equal && contents && x != NULL)
     {
         equal = x->count == y->count && x->final_state == y->final_state && x->maximum_depth == y->maximum_depth &&
@@ -1868,6 +1872,18 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
                     p->kind == q->kind && p->warning == q->warning && p->supported == q->supported;
         }
     }
+    if (equal && contents && ms_a != NULL)
+    {
+        equal = ms_a->count == ms_b->count;
+        for (uint32_t i = 0; equal && i < ms_a->count; i += 1)
+        {
+            const CheckInputMsPragma* p = ms_a->records + i;
+            const CheckInputMsPragma* q = ms_b->records + i;
+            equal = p->pragma == q->pragma && p->source == q->source && p->token == q->token &&
+                    p->diagnostic_source == q->diagnostic_source && p->diagnostic_location == q->diagnostic_location &&
+                    p->warning == q->warning && p->after == q->after && p->supported == q->supported && p->error == q->error;
+        }
+    }
     for (uint32_t i = 0; equal && contents && i < a->fp_pragma_count; i += 1)
     {
         const CheckInputFpPragma* p = a->fp_pragmas + i;
@@ -1887,6 +1903,10 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     for (uint32_t token = 0; equal && contents && a->pack_log2 != NULL && token <= a->token_count; token += 1)
     {
         equal = a->pack_log2[token] == b->pack_log2[token];
+    }
+    for (uint32_t token = 0; equal && contents && a->ms_struct != NULL && token <= a->token_count; token += 1)
+    {
+        equal = a->ms_struct[token] == b->ms_struct[token];
     }
     return equal;
 }

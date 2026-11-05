@@ -441,7 +441,6 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         { "#pragma weak alias = target\nint target;\n", "weak", NULL, NULL, NULL },
         { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
-        { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
@@ -522,6 +521,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     check_test_driver_fp_pragma_errors(test, clang, executable, directory);
     check_test_driver_symbol_pragma_diagnostics(test, clang, executable, directory);
     check_test_driver_symbol_pragma_objects(test, clang, executable, directory);
+    check_test_driver_ms_diagnostics(test, clang, executable, directory);
+    check_test_driver_ms_abi(test, clang, executable, directory);
     unlink(source);
     unlink(object);
 }
