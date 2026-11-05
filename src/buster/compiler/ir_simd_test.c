@@ -245,11 +245,126 @@ static void ir_test_simd_lanes(IrTestTally* test, Arena* output, Arena* scratch)
     arena_pop_to(output, mark);
 }
 
+// One lane case for the executor: op (of lanes op_lane) on A and B, VCMP lanes select_lane A < B, VSELECT of the op where it holds, B elsewhere.
+typedef struct IrTestLaneExecution
+{
+    IrOp op;
+    IrSimdLane op_lane;
+    IrSimdLane select_lane;
+    uint64_t a[2];
+    uint64_t b[2];
+    const char* message;
+} IrTestLaneExecution;
+
+// The expected result, from C's own arithmetic on the lanes rather than the SIMD model's.
+static void ir_test_lane_expected(const IrTestLaneExecution* lane_case, uint8_t expected[16])
+{
+    uint8_t a[16];
+    uint8_t b[16];
+    uint8_t operation[16];
+    memcpy(a, lane_case->a, sizeof(a));
+    memcpy(b, lane_case->b, sizeof(b));
+    for (uint32_t lane = 0; lane < 16; lane += 1)
+    {
+        operation[lane] = (uint8_t)(a[lane] + b[lane]);
+    }
+    if (lane_case->op_lane == IR_SIMD_LANE_F32)
+    {
+        for (uint32_t lane = 0; lane < 4; lane += 1)
+        {
+            float x;
+            float y;
+            memcpy(&x, a + lane * 4, sizeof(x));
+            memcpy(&y, b + lane * 4, sizeof(y));
+            const float sum = x + y;
+            memcpy(operation + lane * 4, &sum, sizeof(sum));
+        }
+    }
+    const uint32_t bytes = lane_case->select_lane == IR_SIMD_LANE_F32 ? 4 : 2;
+    for (uint32_t lane = 0; lane < 16 / bytes; lane += 1)
+    {
+        bool less = false;
+        if (lane_case->select_lane == IR_SIMD_LANE_F32)
+        {
+            float x;
+            float y;
+            memcpy(&x, a + lane * 4, sizeof(x));
+            memcpy(&y, b + lane * 4, sizeof(y));
+            less = x < y;
+        }
+        else
+        {
+            int16_t x;
+            int16_t y;
+            memcpy(&x, a + lane * 2, sizeof(x));
+            memcpy(&y, b + lane * 2, sizeof(y));
+            less = x < y;
+        }
+        memcpy(expected + lane * bytes, (less ? operation : b) + lane * bytes, bytes);
+    }
+}
+
+// Lane-typed operations run through ir_simd_execute as well as the model and the shared interpreter (#1413's review):
+// their flags name lanes, so they must not read as a volatile access.
+static void ir_test_simd_lane_execution(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrTestLaneExecution cases[] = {
+        {
+            .op = IR_ADD,
+            .op_lane = IR_SIMD_LANE_I8,
+            .select_lane = IR_SIMD_LANE_I16,
+            .a = { UINT64_C(0x80017fff00ff01fe), UINT64_C(0xfffe000100020003) },
+            .b = { UINT64_C(0x7fff800100010102), UINT64_C(0x0001fffe00030002) },
+            .message = "add.v16i8 wraps each byte and vcmp lanes=i16 selects its words through ir_simd_execute",
+        },
+        {
+            .op = IR_FADD,
+            .op_lane = IR_SIMD_LANE_F32,
+            .select_lane = IR_SIMD_LANE_F32,
+            // 1.5, -2.0, 3.25, 0.5 against 2.0, -3.0, 1.0, 0.75.
+            .a = { UINT64_C(0xc00000003fc00000), UINT64_C(0x3f00000040500000) },
+            .b = { UINT64_C(0xc040000040000000), UINT64_C(0x3f4000003f800000) },
+            .message = "fadd.v4f32 and an ordered vcmp lanes=f32 select their floats through ir_simd_execute",
+        },
+    };
+    const uint64_t mark = output->length;
+    for (uint32_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index += 1)
+    {
+        const IrTestLaneExecution* lane_case = cases + index;
+        IrFunction function = { 0 };
+        const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .vector_constant_count = 2 };
+        if (ir_create(output, &sizes, &function) == IR_OK)
+        {
+            function.result_type = IR_V4I32;
+            function.block_offsets[1] = 6;
+            memcpy(function.vector_constants[0].words, lane_case->a, sizeof(lane_case->a));
+            memcpy(function.vector_constants[1].words, lane_case->b, sizeof(lane_case->b));
+            ir_test_instruction(&function, 0, IR_VCONST, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_VCONST, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, lane_case->op, IR_V4I32, 0, 1, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 3, IR_VCMP, IR_M8, 0, 1, IR_LT);
+            ir_test_instruction(&function, 4, IR_VSELECT, IR_V4I32, 3, 2, 1);
+            ir_test_instruction(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.flags[2] = lane_case->op_lane;
+            function.flags[3] = lane_case->select_lane;
+            function.flags[4] = lane_case->select_lane;
+            ir_test_pair(test, &function, scratch, NULL, true, lane_case->message);
+            uint8_t expected[16];
+            ir_test_lane_expected(lane_case, expected);
+            const IrSimdExecution executed = ir_simd_execute(&function, NULL, 0, NULL, scratch);
+            ir_test_expect(test, executed.status == IR_SIMD_EXECUTION_OK && executed.type == IR_V4I32 && memcmp(executed.value.words, expected, sizeof(expected)) == 0,
+                           lane_case->message);
+        }
+        arena_pop_to(output, mark);
+    }
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
     ir_test_simd_bitcasts(test, output, scratch);
     ir_test_simd_rows(test, output, scratch);
     ir_test_simd_lanes(test, output, scratch);
+    ir_test_simd_lane_execution(test, output, scratch);
     const uint64_t mark = output->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {
@@ -293,7 +408,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
             ir_test_pair(test, &function, scratch, NULL, false, "ordinary two-word constants cannot masquerade as wide vector constants");
             function.op[0] = IR_VCONST;
             function.flags[4] = BUSTER_IR_VOLATILE;
-            ir_test_pair(test, &function, scratch, NULL, false, "pure vector selection cannot carry unmodeled memory effects");
+            ir_test_pair(test, &function, scratch, NULL, false, "a vector selection's flags name lanes, not memory effects: i8 lanes need their own mask");
         }
         arena_pop_to(output, mark);
     }

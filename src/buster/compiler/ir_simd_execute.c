@@ -194,7 +194,7 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
             action.predicate = op == IR_VCMP ? (IrSimdPredicate)c : IR_SIMD_EQ;
             // A vector operation's lanes (#141's element types); a load's and a store's flags are their access's.
             action.lane = ir_lane_operation(op) != IR_SIMD_OPERATION_COUNT ? (IrSimdLane)function->flags[node] : IR_SIMD_LANE_I32;
-            action.volatile_memory = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0;
+            action.volatile_memory = (op == IR_LOAD || op == IR_STORE) && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0;
             if (op == IR_STORE)
             {
                 operands[0] = operands[1];
