@@ -1120,23 +1120,58 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
-static const char* check_driver_pointer_sign_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                                     const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, Arena* scratch)
+static const char* check_driver_pointer_conversion_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                           const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning,
+                                                           uint32_t* located, Arena* scratch)
 {
     const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-    const char* result = "converts between pointers to integer types with different sign";
-    if (stream != NULL && types != NULL && node < stream->count && stream->graph != NULL && stream->graph->ops[node] == CHECK_OP_ASSIGN)
+    const char* result = check_diagnostic_message(warning);
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const CheckOp op = graph != NULL && node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool returning = op == CHECK_OP_CONVERT && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+    if (types != NULL && graph != NULL && (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || returning))
     {
-        const uint32_t left = stream->graph->operand0[node];
-        const uint32_t right = stream->graph->operand1[node];
-        const String8 left_name = left < stream->count ?
-                                  check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, left), 0) : (String8){ 0 };
+        const uint32_t right = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
+        const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, node), 0);
         const String8 right_name = right < stream->count ?
                                    check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), 0) : (String8){ 0 };
         if (left_name.length != 0 && right_name.length != 0)
         {
-            result = check_warning_text(scratch, "assigning to %.*s from %.*s converts between pointers to integer types with different sign",
-                                        (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
+            const char* action = op == CHECK_OP_INITIALIZE ? "initializing %.*s with an expression of type %.*s %s" :
+                                 returning ? "returning %.*s from a function with result type %.*s %s" : "assigning to %.*s from %.*s %s";
+            const String8 first = returning ? right_name : left_name;
+            const String8 second = returning ? left_name : right_name;
+            const TypeId destination = type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)));
+            const TypeId source = type_unqualified(type_strip_aligned(types, check_stream_type(stream, right)));
+            const TypeId left_element = type_kind(types, destination) == BUSTER_TYPE_KIND_POINTER ?
+                                        type_unqualified(type_strip_aligned(types, type_element(types, destination))) : 0;
+            const TypeId right_element = type_kind(types, source) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(type_kind(types, source)) ?
+                                         type_unqualified(type_strip_aligned(types, type_element(types, source))) : 0;
+            const bool plain_char = left_element == BUSTER_TYPE_CHAR || right_element == BUSTER_TYPE_CHAR;
+            const char* conversion = warning == CHECK_WARNING_DISCARDED_QUALIFIERS ? "discards qualifiers" : plain_char ?
+                                     "converts between pointers to integer types where one is of the unique plain 'char' type and the other is not" :
+                                     "converts between pointers to integer types with different sign";
+            result = check_warning_text(scratch, action, (int)first.length, first.pointer, (int)second.length, second.pointer, conversion);
+            if (op == CHECK_OP_INITIALIZE && check_sparse_present(input->initializer_begins))
+            {
+                // Initializers diagnose their declarator, whose sparse range starts just after this '='. Search
+                // only this declaration; parameter names in a pointer declarator cannot match that range.
+                bool found = false;
+                for (uint32_t at = token; !found && at != 0;)
+                {
+                    at -= 1;
+                    found = check_sparse_get(input->initializer_begins, at) == token + 1;
+                    if (found)
+                    {
+                        *located = at;
+                    }
+                    found = found || check_input_declaration_boundary(parser->tree.roles[at]);
+                }
+            }
+            else if ((returning || op == CHECK_OP_ASSIGN) && token + 1 < parser->tokens.count)
+            {
+                *located = token + 1;
+            }
         }
     }
     return result;
@@ -1428,10 +1463,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                          promoted ? " [-Werror]" : "";
                     if (suffix != NULL)
                     {
-                        const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN ?
-                                              check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                        uint32_t located = token;
+                        const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN || warning_flag == CHECK_WARNING_DISCARDED_QUALIFIERS ?
+                                              check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
                                               check_diagnostic_message(warning_flag);
-                        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase, "%s%s", message, suffix);
+                        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
                     }
                 }
                 flags &= flags - 1;

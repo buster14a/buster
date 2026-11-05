@@ -4888,12 +4888,13 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                     const bool promoted = severity >= CHECK_WARNING_ERROR;
                     const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) :
                                          promoted ? " [-Werror]" : "";
-                    const char* message = warning == CHECK_WARNING_POINTER_SIGN ?
-                                          check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                    uint32_t located = token;
+                    const char* message = warning == CHECK_WARNING_POINTER_SIGN || warning == CHECK_WARNING_DISCARDED_QUALIFIERS ?
+                                          check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
-                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s%s", message, suffix);
+                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[located], "%s%s", message, suffix);
                     }
                 }
                 flags &= flags - 1;

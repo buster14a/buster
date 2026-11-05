@@ -19,6 +19,58 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "file initializer discards pointer qualifiers at its declaration",
+        .source = "const int b=1;\nint *c=&b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "local initializer discards pointer qualifiers",
+        .source = "int f(void){const int b=1;int *c=&b;return *c;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "assignment discards pointer qualifiers",
+        .source = "void f(const int *a,int *b){b=a;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "return discards pointer qualifiers at its expression",
+        .source = "const int b=1;\nint *f(void){return &b;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers follow named policy",
+        .source = "const int b=1;\nint *c=&b;\n",
+        .options = { "-Wno-incompatible-pointer-types-discards-qualifiers" },
+    },
+    {
+        .name = "discarded pointer qualifiers honor source severity",
+        .source = "#pragma clang diagnostic error \"-Wincompatible-pointer-types-discards-qualifiers\"\nconst int b=1;\nint *c=&b;\n",
+        .errors = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers retain typedef spellings",
+        .source = "typedef const int CI;CI b=1;typedef int *P;P c=&b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded array qualifiers retain the source array type",
+        .source = "const int b[2]={1,2};int *c=b;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "discarded pointer qualifiers retain outer const spelling",
+        .source = "const int b=1;int *const c=&b;\n"
+                  "void f(const int *const a){int *const b=a;(void)b;}\n"
+                  "int *g(const int *const a){return a;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "plain char pointer initializer and return conversion",
+        .source = "unsigned char a[2];char *b=a;\nchar *f(void){return a;}\n",
+        .warnings = 2,
+    },
+    {
         .name = "nonconstant file initializer",
         .source = "int a;\nint b=a;\n",
         .errors = 1,
