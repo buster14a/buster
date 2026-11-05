@@ -925,7 +925,15 @@ static void asm_bind_forward_section(AsmParser* parser, String8 name, uint32_t s
     if (id != 0)
     {
         AsmSymbol* symbol = &parser->symbols[id];
-        if (symbol->referenced && !symbol->defined && !symbol->alias && !symbol->section_start && symbol->common == 0)
+        if (symbol->group != 0)
+        {
+            asm_fail(parser, symbol->location, "section group signatures that name sections are not supported");
+        }
+        else if ((symbol->defined && !symbol->absolute && !symbol->alias) || symbol->common != 0)
+        {
+            asm_fail(parser, symbol->location, "section name already defined as a symbol");
+        }
+        else if (symbol->referenced && !symbol->defined && !symbol->alias && !symbol->section_start)
         {
             symbol->section_start = true;
             symbol->section_index = section;
@@ -2952,7 +2960,13 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
     }
     else
     {
-        const uint32_t id = asm_symbol(parser, asm_name_text(parser, parser->at++), location);
+        const String8 name = asm_name_text(parser, parser->at++);
+        const uint32_t id = asm_symbol(parser, name, location);
+        const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+        if (section != 0)
+        {
+            asm_fail(parser, location, "section name already defined as a symbol");
+        }
         asm_expect(parser, ',', "expected ',' after symbol");
         const __int128 size = asm_absolute(parser, end);
         __int128 alignment = 0;
@@ -3355,7 +3369,13 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         }
         else
         {
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
+            const String8 name = asm_name_text(parser, parser->at++);
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+            if (section != 0 && (asm_is(parser, token, ".equ") || asm_is(parser, token, ".equiv") || asm_is(parser, token, ".set")))
+            {
+                asm_fail(parser, location, "section name already defined as a symbol");
+            }
             asm_expect(parser, ',', "expected ',' after symbol");
             if (asm_is(parser, token, ".type"))
             {
@@ -3738,6 +3758,11 @@ static void asm_parse(AsmParser* parser)
             else
             {
                 id = asm_symbol(parser, name, location);
+                const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+                if (section != 0)
+                {
+                    asm_fail(parser, location, "section name already defined as a symbol");
+                }
                 if ((name.pointer[0] >= '0' && name.pointer[0] <= '9') || (name.length == 1 && name.pointer[0] == '.'))
                 {
                     asm_fail(parser, location, "invalid label (numeric labels are 0 through 9)");

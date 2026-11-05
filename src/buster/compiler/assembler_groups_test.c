@@ -248,6 +248,15 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
         ".section .x,\"aG\",@progbits,g,comdat\n.section .x,\"awG\",@progbits,g,comdat\n",
         ".section .x,\"aMG\",@progbits,0,g,comdat\n",
         ".section .x,\"G\",@progbits,g,comdat\n.set g,1\n",
+        "foo: nop\n.section foo,\"G\",@progbits,g,comdat\n",
+        ".comm foo,8,8\n.section foo,\"G\",@progbits,g,comdat\n",
+        ".section foo,\"G\",@progbits,g,comdat\nfoo: nop\n",
+        ".section foo,\"G\",@progbits,g,comdat\n.comm foo,8,8\n",
+        ".section foo,\"G\",@progbits,g,comdat\n.lcomm foo,8\n",
+        ".section foo,\"G\",@progbits,g,comdat\n.set foo,1\n",
+        ".section foo,\"G\",@progbits,foo,comdat\n.long foo\n",
+        ".section foo,\"\",@progbits\n.section bar,\"G\",@progbits,foo,comdat\n",
+        ".section bar,\"G\",@progbits,foo,comdat\n.section foo,\"\",@progbits\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {

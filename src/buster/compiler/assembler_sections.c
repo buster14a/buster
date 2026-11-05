@@ -244,6 +244,11 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 {
                     asm_fail(parser, location, "expected section group signature");
                 }
+                else if ((signature_name.length == name.length && memcmp(signature_name.pointer, name.pointer, name.length) == 0) ||
+                         (parser->section_name_slots != 0 ? asm_find_latest_section(parser, signature_name) : asm_find_section(parser, signature_name, 0)) != 0)
+                {
+                    asm_fail(parser, location, "section group signatures that name sections are not supported");
+                }
                 else
                 {
                     parser->at += 1;

@@ -315,8 +315,9 @@ Sections with the same name in different groups, and an ungrouped section of
 that name, remain distinct. Reopening one preserves its group and attributes;
 `.pushsection`, `.popsection` and `.previous` retain the full section identity.
 The same path handles executable `"axG"`, mergeable `"aMSG"` and TLS zero-fill
-groups. Other linkage spellings and changes to an existing group's flags are
-diagnosed.
+groups. Other linkage spellings, changes to an existing group's flags, and group
+signatures that name sections are diagnosed. The last case needs the writer to
+use an ELF section symbol as the group signature.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its
