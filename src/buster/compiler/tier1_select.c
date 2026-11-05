@@ -4342,9 +4342,12 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     {
         bool supported = function->parameter_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_result_supported(function->result_abi, function->result_size) &&
                          (function->result_size == 0 || function->result_type == IR_PTR) && function->result_size <= BUSTER_TIER1_SELECT_MAX_RESULT_COPY;
+        // A parameter's record never r10, a static chain's (#148), which only a call's argument may be.
         for (uint32_t p = 0; supported && p < function->parameter_count; p += 1)
         {
-            supported = tier1_select_record_supported(tier1_select_parameter_record(function, p), function->parameter_types[p]);
+            const IrPassed* record = tier1_select_parameter_record(function, p);
+            supported = tier1_select_record_supported(record, function->parameter_types[p]) &&
+                        !(record->location.kind == BUSTER_ABI_LOCATION_REGISTERS && record->location.registers[0] == BUSTER_ABI_R10);
         }
         error = supported ? error : TIER1_SELECT_ERROR_UNSUPPORTED;
     }
