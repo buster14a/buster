@@ -1,5 +1,21 @@
 # preprocessor
 
+## Numeric constants in conditional directives
+
+Malformed numeric constants in evaluated `#if` and `#elif` expressions use the
+checker's cold `check_literal_diagnose` classifier. The error names the fault
+and points at its character, including across LF and CRLF line splices.
+Well-formed floating constants retain the preprocessor-specific rejection;
+integer overflow retains its existing diagnostic. Valid integer evaluation
+does not run the extra diagnostic scan.
+
+The directive diagnostic fixtures in `c_preprocessor_directives_test.c` check
+exact messages and columns with both kernels, independently of Clang.
+`test-preprocessor --clang` also compares them with Clang's complete diagnostic
+text. They cover malformed digits, suffixes, exponents and separators, floating
+and overflow controls, splices, selected and skipped conditionals, and syntax
+errors in short-circuited expressions.
+
 Run commands and resolve source paths from the repository root. Follow the
 [shared agent rules](../../AGENTS.md), including the 9700X lock and `cores`
 requirements. [Command index](README.md).

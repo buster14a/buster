@@ -15036,6 +15036,8 @@ static uint32_t pp_binary_operator(uint8_t kind)
     return result;
 }
 
+#include "c_preprocessor_literal.c"
+
 // Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
 // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
 static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
@@ -15128,9 +15130,7 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     valid &= digits || radix == 8;
     if (!valid)
     {
-        const bool floating = memchr(spelling, '.', length) != 0 || (radix != 16 && (memchr(spelling, 'e', length) != 0 || memchr(spelling, 'E', length) != 0));
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, floating ? "floating point literal in preprocessor expression" : "invalid integer constant '%.*s' in preprocessor expression",
-                    (int)length, (const char*)spelling);
+        pp_diagnose_integer(pp, spelling, length, location);
     }
     else if (overflow)
     {
