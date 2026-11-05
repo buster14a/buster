@@ -7,6 +7,7 @@
 // One common bound covers ALL incoming edges; every executed sum must fit signed I32 before any subsequent guard.
 
 #define BUSTER_TIER1_INDUCTION_EDGES 8
+#define BUSTER_TIER1_RANGE_NONNEGATIVE_USE 8u
 
 // This is the plan's dead positions workspace, before level ordering fills it, not another CFG allocation.
 // A scalar edge scatter records one predecessor or ambiguity per block. If there is indirect control flow, all
@@ -129,6 +130,117 @@ static bool tier1_select_range_fact(uint16_t* known, uint32_t value, uint64_t ma
     const bool changed = known[value] != next;
     known[value] = next;
     return changed;
+}
+
+static bool tier1_select_range_positive_edge(const IrFunction* function, const uint16_t* known, uint32_t limit, uint32_t predicate)
+{
+    const bool bounded = (known[limit] & 255) < 32;
+    const bool constant = function->op[limit] == IR_CONST;
+    const int64_t bound = constant ? (int32_t)function->constants[function->a[limit]].low : INT64_MIN;
+    const uint64_t unsigned_bound = constant ? (uint32_t)function->constants[function->a[limit]].low : UINT64_MAX;
+    const bool lower = (predicate == IR_GE || predicate == IR_GT) && (bounded || bound >= (predicate == IR_GT ? -1 : 0));
+    const bool upper = (predicate == IR_ULT || predicate == IR_ULE) && (bounded || unsigned_bound <= (predicate == IR_ULT ? UINT64_C(0x80000000) : INT32_MAX));
+    const bool equal = predicate == IR_EQ && bounded;
+    return lower || upper || equal;
+}
+
+static void tier1_select_range_scoped_use(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks,
+                                          const uint32_t* guards, uint8_t* storage, uint32_t node)
+{
+    const uint32_t input = function->a[node];
+    if (function->type[input] == IR_I32 && (storage[input] & 1) != 0)
+    {
+        const uint32_t source = tier1_select_range_source(function, input);
+        const uint32_t target = guards[source];
+        const uint32_t block = blocks[node];
+        const bool dominated = target < function->block_count && dominance->leave[target] != 0 && dominance->leave[block] != 0 &&
+                               dominance->enter[target] <= dominance->enter[block] && dominance->leave[target] >= dominance->leave[block];
+        // This is a fact about the conversion's use, not the source everywhere. Attach it only after storage's
+        // union-find has removed its temporary ranks, and never propagate it as a register-representation proof.
+        storage[node] |= dominated ? BUSTER_TIER1_RANGE_NONNEGATIVE_USE : 0;
+    }
+}
+
+// One conservative guard per SSA value, in source order. A selected successor must have only that conditional
+// predecessor and dominate the conversion. Another entrance, including any address-taken label, refuses the fact.
+// Both scratch columns are dead here, before the plan orders levels or uses its pending worklist; no allocation.
+static void tier1_select_scoped_ranges(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks,
+                                       const uint16_t* known, uint8_t* storage, uint32_t* guards, uint32_t* predecessors, bool vector)
+{
+    const bool enabled = dominance != 0 && blocks != 0 && function->block_count >= 2 && tier1_select_range_predecessors(function, predecessors);
+    if (enabled)
+    {
+        memset(guards, 0xff, (uint64_t)function->instruction_count * sizeof(uint32_t));
+        static const uint8_t reverse[IR_PREDICATE_COUNT] = { IR_EQ, IR_NE, IR_GT, IR_GE, IR_LT, IR_LE, IR_UGT, IR_UGE, IR_ULT, IR_ULE };
+        static const uint8_t negate[IR_PREDICATE_COUNT] = { IR_NE, IR_EQ, IR_GE, IR_GT, IR_LE, IR_LT, IR_UGE, IR_UGT, IR_ULE, IR_ULT };
+        for (uint32_t block = 0; block < function->block_count; block += 1)
+        {
+            const uint32_t end = function->block_offsets[block + 1];
+            const uint32_t branch = end != function->block_offsets[block] ? end - 1 : BUSTER_IR_NONE;
+            if (branch == BUSTER_IR_NONE || function->op[branch] != IR_CBR || function->b[branch] == function->c[branch])
+            {
+                continue;
+            }
+            bool negated = false;
+            const uint32_t condition = tier1_select_range_condition(function, function->a[branch], &negated);
+            if (condition >= function->instruction_count || function->op[condition] != IR_ICMP)
+            {
+                continue;
+            }
+            const uint32_t a = tier1_select_range_source(function, function->a[condition]);
+            const uint32_t b = tier1_select_range_source(function, function->b[condition]);
+            if (function->type[a] != IR_I32 || function->type[b] != IR_I32)
+            {
+                continue;
+            }
+            for (uint32_t edge = 0; edge < 2; edge += 1)
+            {
+                const uint32_t target = edge == 0 ? function->b[branch] : function->c[branch];
+                if (predecessors[target] != block)
+                {
+                    continue;
+                }
+                const uint32_t predicate = (edge == 0) != negated ? function->c[condition] : negate[function->c[condition]];
+                for (uint32_t side = 0; side < 2; side += 1)
+                {
+                    const uint32_t source = side == 0 ? a : b;
+                    const uint32_t limit = side == 0 ? b : a;
+                    const uint32_t comparison = side == 0 ? predicate : reverse[predicate];
+                    if (guards[source] == BUSTER_IR_NONE && tier1_select_range_positive_edge(function, known, limit, comparison))
+                    {
+                        guards[source] = target;
+                    }
+                }
+            }
+        }
+        if (BUSTER_VECTOR_PATH(vector))
+        {
+            for (uint32_t first = 0; first < function->instruction_count;)
+            {
+                const uint32_t left = function->instruction_count - first;
+                const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
+                const __m256i op = _mm256_maskz_loadu_epi8(active, function->op + first);
+                const __m256i type = _mm256_maskz_loadu_epi8(active, function->type + first);
+                uint32_t uses = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_SEXT)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I64));
+                while (uses != 0)
+                {
+                    tier1_select_range_scoped_use(function, dominance, blocks, guards, storage, first + (uint32_t)__builtin_ctz(uses));
+                    uses &= uses - 1;
+                }
+                first += left < 32 ? left : 32;
+            }
+        }
+        else
+        {
+            for (uint32_t node = 0; node < function->instruction_count; node += 1)
+            {
+                if (function->op[node] == IR_SEXT && function->type[node] == IR_I64)
+                {
+                    tier1_select_range_scoped_use(function, dominance, blocks, guards, storage, node);
+                }
+            }
+        }
+    }
 }
 
 // The selected edge must imply tested < limit. Return a conservative nonnegative upper bound on that limit.

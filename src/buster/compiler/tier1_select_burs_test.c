@@ -32,7 +32,7 @@ struct Tier1BursCheck
 // depth (a non-phi operand's depth plus one, as the plan orders its choices), and the nodes in levels. Returns whether
 // the function is one the plan reads (operands in range and before their users within a block).
 static bool tier1_burs_check_prepare(const IrFunction* function, const IrDominance* dominance, Arena* scratch, uint32_t* blocks, uint32_t* uses, uint32_t* users, uint32_t* barriers, uint8_t* canonical, uint16_t* known_bits,
-                                     uint32_t* level_offsets, uint32_t* level_nodes, uint32_t* maximum_depth)
+                                     uint32_t* level_offsets, uint32_t* level_nodes, uint32_t* scope_workspace, uint32_t* maximum_depth)
 {
     const uint32_t count = function->instruction_count;
     uint32_t* depths = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
@@ -90,6 +90,7 @@ static bool tier1_burs_check_prepare(const IrFunction* function, const IrDominan
         tier1_select_barriers_scalar(function, count, barriers);
         tier1_select_known_bits(function, dominance, blocks, cursors, known_bits, false);
         tier1_select_canonical(function, blocks, known_bits, canonical, cursors, false);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, cursors, scope_workspace, false);
     }
     return valid;
 }
@@ -121,7 +122,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         valid = valid && columns[path][0] != 0 && columns[path][1] != 0 && columns[path][2] != 0 && columns[path][3] != 0;
     }
     uint32_t maximum_depth = 0;
-    valid = valid && tier1_burs_check_prepare(function, dominance, scratch, blocks, uses, users, barriers, canonical, known_bits, level_offsets, level_nodes, &maximum_depth);
+    valid = valid && tier1_burs_check_prepare(function, dominance, scratch, blocks, uses, users, barriers, canonical, known_bits, level_offsets, level_nodes, words, &maximum_depth);
     const Tier1SelectForest forest = {
         .function = function,
         .blocks = blocks,

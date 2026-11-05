@@ -4119,7 +4119,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         const uint32_t source_bits = ir_type_bits[function->type[a]];
         const uint32_t unsigned_bits = forest->known_bits != 0 ? forest->known_bits[a] & 255 : source_bits;
-        const bool nonnegative = op == IR_SEXT && unsigned_bits < source_bits;
+        const bool nonnegative = op == IR_SEXT && (unsigned_bits < source_bits ||
+                                                  (forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_RANGE_NONNEGATIVE_USE) != 0));
         const bool canonical = forest->canonical != 0 && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0;
         const bool sign_copy = op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && forest->canonical != 0 &&
                                (forest->canonical[a] & BUSTER_TIER1_STORAGE_SIGN) != 0;
@@ -5190,6 +5191,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     {
         tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
         tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
     }
     if (error == TIER1_SELECT_OK)
     {

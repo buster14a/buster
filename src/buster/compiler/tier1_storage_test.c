@@ -488,3 +488,98 @@ static void tier1_storage_narrow_arithmetic_tests(Tier1EmitTest* test)
         }
     }
 }
+
+static void tier1_storage_scoped_tests(Tier1EmitTest* test)
+{
+    const uint32_t samples[] = { 0, 1, 127, 128, 65535, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX };
+    uint64_t random = UINT64_C(0x76e31219cafe0921);
+    for (uint32_t shape = 0; shape < 14; shape += 1)
+    {
+        const uint64_t input_mark = test->input.length;
+        const IrSizes sizes = { .instruction_count = 12, .block_count = 3, .constant_count = 3, .parameter_count = 2 };
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create scoped nonnegative conversion regression");
+        if (created)
+        {
+            const uint32_t predicate = shape == 1 || shape == 9 ? IR_LT : shape == 2 || shape == 8 || shape == 12 ? IR_ULT :
+                                       shape == 3 || shape == 13 ? IR_ULE : shape == 4 ? IR_UGT : shape == 5 ? IR_GT : shape == 6 ? IR_EQ : shape == 7 ? IR_NE : IR_GE;
+            const bool bounded = (shape >= 2 && shape <= 4) || shape == 9;
+            const uint32_t limit = shape == 8 ? 1 : bounded || shape == 5 || shape >= 12 ? 4 : 2;
+            const bool proven = shape < 7 || shape == 12;
+            function.parameter_types[0] = IR_I32;
+            function.parameter_types[1] = IR_I32;
+            function.result_type = IR_I64;
+            function.block_offsets[1] = 8;
+            function.block_offsets[2] = 10;
+            function.block_offsets[3] = 12;
+            function.constants[1].low = 127;
+            function.constants[2].low = shape == 5 ? UINT32_MAX : UINT32_C(0x80000000);
+            tier1_select_test_node(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, IR_AND, IR_I32, 1, 3, BUSTER_IR_NONE);
+            if (shape == 5 || shape >= 12)
+            {
+                tier1_select_test_node(&function, 4, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            tier1_select_test_node(&function, 5, shape == 11 ? IR_COPY : IR_OR, IR_I32, 0, shape == 11 ? BUSTER_IR_NONE : 2, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_ICMP, IR_I1, shape == 4 ? limit : 5, shape == 4 ? 5 : limit, predicate);
+            tier1_select_test_node(&function, 7, IR_CBR, IR_VOID, 6, shape == 1 ? 2 : 1, shape == 1 ? 1 : 2);
+            tier1_select_test_node(&function, 8, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 10, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 11, shape == 10 ? IR_BR : IR_RET, IR_VOID, shape == 10 ? 1 : 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                {
+                    const uint64_t output_mark = test->output.length;
+                    IrDominance dominance;
+                    const bool dominated = tier1_terminal_dominance(test, &function, path != 0, &dominance);
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "scoped conversions select");
+                    if (selected == TIER1_SELECT_OK)
+                    {
+                        tier1_emit_test_expect(test, plan.patterns[8].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
+                                               "only a dominating nonnegative edge and real zero storage remove the signed conversion");
+                        const Tier1EmitOptions options = {
+                            .certify = true,
+                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                            .vector = path != 0,
+                            .rematerialize = pressure != 0,
+                        };
+                        Tier1EmitResult emitted;
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "scoped conversion allocation and code certify");
+                        if (error == TIER1_EMIT_OK)
+                        {
+                            void* executable = MAP_FAILED;
+                            uint64_t bytes = 0;
+                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            {
+                                for (uint32_t sample = 0; sample < 128; sample += 1)
+                                {
+                                    const uint32_t a = sample < 64 ? samples[sample / 8] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t b = sample < 64 ? samples[sample % 8] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0x7f80a55a00000000) | a, UINT64_C(0x9876f17e00000000) | b);
+                                    tier1_emit_test_expect(test, actual == (uint64_t)(int64_t)(int32_t)a,
+                                                           "guarded and bypass paths return exact signed bits with poisoned ABI halves");
+                                }
+                            }
+                            if (executable != MAP_FAILED)
+                            {
+                                munmap(executable, bytes);
+                            }
+                        }
+                    }
+                    arena_pop_to(&test->output, output_mark);
+                }
+            }
+        }
+        arena_pop_to(&test->input, input_mark);
+    }
+}

@@ -2628,6 +2628,37 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
         uint32_t counts[65];
         uint32_t extra[130];
         memset(word_types, IR_I32, sizeof(word_types));
+        for (uint32_t count = 2; count <= 65; count += 1)
+        {
+            const uint32_t offsets[] = { 0, count - 1, count };
+            const uint32_t entered[] = { 1, 2 };
+            const uint32_t left[] = { 4, 3 };
+            const IrDominance dominance = { .enter = (uint32_t*)entered, .leave = (uint32_t*)left };
+            uint8_t* guarded_column = memory + page - count;
+            uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
+            memset(operations, IR_PARAM, sizeof(operations));
+            operations[count - 2] = IR_BR;
+            operations[count - 1] = IR_RET;
+            memset(firsts, 0, sizeof(firsts));
+            firsts[count - 2] = 1;
+            memset(counts, 0, sizeof(counts));
+            for (uint32_t column = 0; column < 2; column += 1)
+            {
+                memcpy(guarded_column, column == 0 ? word_types : operations, count);
+                IrFunction function = { .instruction_count = count, .block_count = 2, .block_offsets = (uint32_t*)offsets,
+                                        .op = column == 0 ? operations : guarded_column, .type = column == 0 ? guarded_column : word_types, .a = firsts };
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    memset(storage, 0, sizeof(storage));
+                    tier1_select_scoped_ranges(&function, &dominance, counts, 0, storage, operands, parents, path != 0);
+                    for (uint32_t n = 0; n < count; n += 1)
+                    {
+                        tier1_select_test_expect(test, storage[n] == 0 && operands[n] == BUSTER_IR_NONE,
+                                                 "guarded scope scans read only logical opcode and type tails without inventing a guard");
+                    }
+                }
+            }
+        }
         for (uint32_t count = 0; count <= 65; count += 1)
         {
             uint8_t* op = memory + page - count;
