@@ -273,8 +273,9 @@ static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarn
 // position, "'x' is deprecated" (-Wdeprecated-declarations) with its message and the note at the attribute, or the error
 // "'x' is unavailable" with its note at the member's name, as a member access's (check_input_member_uses), where the
 // token's context doesn't drop it (CheckGraph.availability_contexts). The error is staged with the warnings, which the
-// driver gives it with (CHECK_WARNING_EVENT_UNAVAILABLE_USE); a walk whose warnings are quiet (`-w`) has no place for
-// it, and fails at it instead, as an invalid initializer.
+// driver gives it with (CHECK_WARNING_EVENT_UNAVAILABLE_USE), under `-w` too, which the driver's walk stages them for
+// all the same; a walk with a sink but no event buffer has no place for it, and fails at it instead, as an invalid
+// initializer.
 static void check_init_member_use(CheckInitWalker* walker, uint32_t member, uint32_t token)
 {
     const CheckGraph* graph = walker->graph;

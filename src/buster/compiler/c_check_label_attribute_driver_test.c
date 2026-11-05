@@ -288,6 +288,34 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
     unlink(header);
     unlink(source);
     rmdir(system_directory);
+    // An unavailable member's use in an initializer is clang's error under -w too (#147, check_init_member_use): each use,
+    // at its place, with its note, by both paths.
+    static const char unavailable_text[] = "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct S a = { .u = 1 };\n"
+                                           "struct S b = { 2, 3 };\nvoid f(void) { struct S c = { .w = 1, .u = 2 }; (void)c; }\n";
+    if (parse_test_write(source, unavailable_text, strlen(unavailable_text)))
+    {
+        char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-color-diagnostics", "-w", source, NULL };
+        char* reference = NULL;
+        const int oracle = check_test_driver_spawn(arguments, &reference);
+        char expected[8192];
+        const bool expected_valid = check_test_cleanup_errors(reference, 0, expected, sizeof(expected));
+        free(reference);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu23", "-fsyntax-only", "-w", source,
+                                scalar != 0 ? "--scalar" : NULL, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(checked, &text);
+            char actual[8192];
+            const bool actual_valid = check_test_cleanup_errors(text, 0, actual, sizeof(actual));
+            free(text);
+            char description[512];
+            snprintf(description, sizeof(description), "an unavailable member's initializer uses under -w, by the %s path: clang's (status %d)\n%sagainst (status %d)\n%s",
+                     scalar != 0 ? "scalar" : "vector", oracle, expected, status, actual);
+            check_test_expect(test, oracle == 1 && status == oracle && expected_valid && actual_valid && strcmp(expected, actual) == 0, description);
+        }
+    }
+    unlink(source);
     // A label's attributes are its own, a declaration's after it among them: aligned(64) doesn't align y, which the
     // program reads through its address's remainder, as clang's build does.
     static const char program[] =

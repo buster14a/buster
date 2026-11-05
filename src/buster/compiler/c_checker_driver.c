@@ -684,14 +684,17 @@ static bool tier1_select_initialize(void);
 
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
+// The initializers' walk's warnings, and its unavailable members' errors (CHECK_WARNING_EVENT_UNAVAILABLE_USE, #147), which
+// `quiet` (-w) keeps alone: the walk stages them all, whatever the warning options.
 static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
-                                                      const CheckWarningEvents* view, const CheckRepair* repair, Arena* scratch)
+                                                      const CheckWarningEvents* view, const CheckRepair* repair, bool quiet, Arena* scratch)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && !pp->fatal && i < view->count; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
+        const bool shown = !quiet || event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE;
+        if (shown && event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
         {
             valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count &&
                     (event->payload.data & 0xffff) == CHECK_WARNING_EXCESS_INITIALIZERS;
@@ -719,7 +722,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 }
             }
         }
-        else if (event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
+        else if (shown && event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
         {
             // An unavailable member's use (check_init_member_use, #147): clang's error, whatever the warning options.
             const CheckWarningNote* note = event->note_count == 1 && event->note_first < view->note_count ? view->notes + event->note_first : NULL;
@@ -741,7 +744,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 arena_pop_to(scratch, mark);
             }
         }
-        else
+        else if (shown)
         {
             const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
             valid = check_driver_warning_events(parser, pp, input, types, &one, repair, scratch);
@@ -4006,7 +4009,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 asms.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", asms.token };
                         }
                         if (check_initializers_run_events(&initializers, &input, &stream, checking, &types, output_arena, scratch,
-                                                          !quiet ? &initializer_warnings : NULL, !quiet ? &initializer_warning_keys : NULL))
+                                                          &initializer_warnings, &initializer_warning_keys))
                         {
                             excess_tokens = initializers.warning_tokens;
                             excess_count = initializers.warning_count;
@@ -4018,8 +4021,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
                         CheckInitWarningSink warnings = {
                             .capacity = !quiet ? tokens : 0,
-                            .events = !quiet ? &initializer_warnings : NULL,
-                            .event_keys = !quiet ? &initializer_warning_keys : NULL,
+                            .events = &initializer_warnings,
+                            .event_keys = &initializer_warning_keys,
                         };
                         warnings.tokens = warnings.capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, warnings.capacity) : NULL;
                         const bool storage = warnings.capacity == 0 || warnings.tokens != NULL;
@@ -4099,7 +4102,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
-                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, scratch) ||
+                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, scratch) ||

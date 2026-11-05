@@ -5679,9 +5679,9 @@ arguments against the function. The checker now gives these as clang does.
   level of elided braces, as SemaInit's `DiagnoseUseOfDecl` has them. An
   unavailable member's error there is staged with the walk's warnings
   (`CHECK_WARNING_EVENT_UNAVAILABLE_USE`), which the driver gives as the
-  error whatever the warning options, and the corpus comparison counts as
-  the initializer's failure; under `-w`, whose walk keeps no warnings, the
-  initializer fails at it instead, with the generic error.
+  error whatever the warning options (the walk stages its events under `-w`
+  too, of which the driver gives this one alone), and the corpus comparison
+  counts as the initializer's failure.
   An access only the reader's evaluator reads (`typeof`'s operand, a
   file-scope array bound, an enumerator's value, a static assertion's) is
   recorded where its member is marked (`CheckInputReader.evaluated_members`)
