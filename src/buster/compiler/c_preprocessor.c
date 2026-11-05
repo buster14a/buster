@@ -1533,10 +1533,13 @@ struct Preprocessor
     // The predefines' file data (clang's <built-in> buffer), whose __STDC macros clang reports as builtin when they are
     // redefined or undefined (pp_language_defined); BUSTER_PP_NONE before it is read.
     uint32_t predefines_data;
+    // __DATE__'s and __TIME__'s text, empty until the first expansion of either without SOURCE_DATE_EPOCH (pp_unit_time);
+    // and the unit's time they give, in seconds.
     char date[16];
     char time[16];
     char timestamp[32]; // __TIMESTAMP__'s with SOURCE_DATE_EPOCH (`has_epoch`); else each file's modification time.
     bool has_epoch;
+    int64_t unit_seconds;
     // The builtin __FLT_EVAL_METHOD__'s value (predefines_text).
     uint32_t flt_eval_method;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
@@ -11828,6 +11831,28 @@ static bool pp_calendar(Preprocessor* pp, int64_t seconds, bool utc, uint32_t lo
     return result;
 }
 
+// __DATE__'s and __TIME__'s text for a validated calendar: "Jan  1 2000" and "00:00:00".
+static void pp_format_date_time(Preprocessor* pp, const struct tm* calendar)
+{
+    static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar->tm_mon], calendar->tm_mday, calendar->tm_year + 1900);
+    snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar->tm_hour, calendar->tm_min, calendar->tm_sec);
+}
+
+// __DATE__'s and __TIME__'s text, made from the unit's time in local time at the first expansion of either that needs
+// it (pp_initialize_time). False, with a fatal diagnostic at `where`, if the time can't be converted.
+static bool pp_unit_time(Preprocessor* pp, uint32_t where)
+{
+    struct tm calendar;
+    const bool made = pp->date[0] != 0;
+    const bool result = made || pp_calendar(pp, pp->unit_seconds, false, where, "current time", &calendar);
+    if (result && !made)
+    {
+        pp_format_date_time(pp, &calendar);
+    }
+    return result;
+}
+
 // __TIMESTAMP__'s text for a validated calendar: "Sat Jan  1 00:00:00 2000" (C locale).
 static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* calendar)
 {
@@ -11952,10 +11977,16 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             pp_emit(pp, pp_number_token(pp, pp->flt_eval_method, flags));
             break;
         case PP_BUILTIN_DATE:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
+            if (pp_unit_time(pp, where))
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
+            }
             break;
         case PP_BUILTIN_TIME:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
+            if (pp_unit_time(pp, where))
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
+            }
             break;
         case PP_BUILTIN_TIMESTAMP:
         {
@@ -17954,15 +17985,17 @@ static bool pp_initialize_time(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the current time for predefined macros");
         }
     }
+    // SOURCE_DATE_EPOCH's calendar, in UTC, here, where its refusals are reported. The current time's, in local time,
+    // waits for the first __DATE__ or __TIME__ (pp_unit_time, #652): it reads the time zone's file, 7 system calls of
+    // every unit's start, which few units expand either of.
     struct tm calendar;
-    result = result && pp_calendar(pp, seconds, epoch != 0, 0, epoch != 0 ? "SOURCE_DATE_EPOCH" : "current time", &calendar);
-    if (result)
+    pp->unit_seconds = seconds;
+    result = result && (epoch == 0 || pp_calendar(pp, seconds, true, 0, "SOURCE_DATE_EPOCH", &calendar));
+    if (result && epoch != 0)
     {
-        static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-        snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar.tm_mon], calendar.tm_mday, calendar.tm_year + 1900);
-        snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
+        pp_format_date_time(pp, &calendar);
         pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
-        pp->has_epoch = epoch != 0;
+        pp->has_epoch = true;
     }
     return result;
 }
@@ -18517,6 +18550,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
         memcpy(replay->time, pp->time, sizeof(pp->time));
         memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
         replay->has_epoch = pp->has_epoch;
+        replay->unit_seconds = pp->unit_seconds;
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
