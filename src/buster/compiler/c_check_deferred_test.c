@@ -1249,7 +1249,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                                        outcome.deferred_active == (size_lanes < lane_counts[l] ? size_lanes : lane_counts[l]));
                 const bool postmerge = strncmp(name, "postmerge-", 10) == 0 && strcmp(name, "postmerge-ordered-expressions") != 0;
                 const bool expressions = !postmerge || outcome.deferred_active <= 1 ||
-                                         (outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
+                                         (BUSTER_SCALAR_PATH(false) ? outcome.deferred_expression_parts == 0 && !outcome.deferred_expression_retry :
+                                          outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
                                     !outcome.source_shared && expressions;
                 checks += 1;
@@ -1412,7 +1413,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
             check_corpus_deferred_fail_expressions = false;
-            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred_expression_retry;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred_expression_retry == !BUSTER_SCALAR_PATH(false);
             checks += 1;
             failures += !passed;
             if (!passed)
