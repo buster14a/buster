@@ -586,13 +586,18 @@ static void check_test_program_string_helpers(CheckTest* test)
             expected[count++] = 0xc3;
             for (uint32_t path = 0; path < 2; path += 1)
             {
-                uint8_t bytes[32];
+                // The longest leaf has six records. Both encoders require their full store capacity, even when
+                // the independently expected machine code is shorter than one vector store.
+                uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(6)];
+                char description[256];
                 const int64_t written = path == 0 ? x86_encode_scalar(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0) :
                                                    x86_encode(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0);
+                snprintf(description, sizeof(description), "%s imm8=%u %s encoder: fixed lengths, index/flag/mask result and ABI (%lld encoded bytes, %u expected)",
+                         cbuiltin_x86_helper_infos[cases[c].kind].name, immediate, path == 0 ? "scalar" : "vector", (long long)written, count);
                 check_test_expect(test, native.code.error == TIER0_OK && native.parameter_count == (cases[c].explicit_length ? 5 : 3) &&
                                        native.result_class == (cases[c].mask ? BUSTER_TYPED_CLASS_VECTOR : BUSTER_TYPED_CLASS_U64) &&
                                        written == count && memcmp(bytes, expected, count) == 0,
-                                  "string helper's encoded byte, fixed lengths, index/flag/mask result and ABI");
+                                  description);
             }
         }
         arena_pop_to(&output, 0);
