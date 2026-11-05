@@ -36,6 +36,14 @@ and published `clang/lib/Sema/SemaType.cpp`, `SemaExpr.cpp`, `SemaInit.cpp` and
 type-sugar, conversion and source-location contracts on November 5, 2026; no
 implementation or upstream test fixture is imported.
 
+The positional mixed-input driver, per-lane assembly adapter and original
+C/assembly/object/archive fixtures in `c_driver_inputs.c`, `c_driver_mixed.c`,
+`c_driver_mixed_test.c` and their driver integration (#1120) are original project
+material under the default terms. Existing project object, foreign-linker,
+runtime-discovery and lane interfaces are reused. Clang and the system archiver
+produce independent test inputs externally; no upstream implementation or
+fixture corpus is imported.
+
 The VECTOR/X86 typed adapter integration, sparse shared-interpreter SIMD storage,
 `ir_simd_lower_test.c`, `ir_interpreter_simd_test.c` and the real-C
 `tests/ir/vector-i32.c` fixture (#732) are original project material under the

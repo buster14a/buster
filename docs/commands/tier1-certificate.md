@@ -12,7 +12,10 @@ requirements. [Command index](README.md).
   `tier1_certificate_oracle.c`'s dense CFG fixpoint as the independent oracle
   and `tier1_certificate_interval.c` as the current interval allocator's
   fragment adapter. `test-tier1-allocation` runs the stream/mutation suites
-  and certificate-checks every successful allocation its fixtures make.
+  and certificate-checks every successful allocation its fixtures make. Its
+  multiple-home cases prove register and row facts independently, compare all
+  alias orders with the dense oracle, and reject stale rows on edges, joins and
+  loops (#1270).
 - `tier1_certificate_cfg.c` publishes the certificate of `tier1_cfg.c`'s CFG
   allocations: the source from the input, and the stream, entry facts and edges
   from the allocation, whose shape it bounds before reading through it.
@@ -43,6 +46,13 @@ requirements. [Command index](README.md).
   claimed placements of roles sharing a register while both hold values, of k0
   for a numbered opmask register or of a corrupted split (#1283's early
   register), and ymm or zmm moves narrowed to xmm; each must be refused.
+  The carried-call-row fixture proves a value in both its
+  register and row, then corrupts the owner, predecessor store and supplied
+  assertions, with and without a frame pointer and through both emitter paths;
+  it also combines a carried row with a by-value aggregate call. `test-tier1-emit`
+  also requires zero repeat stores for a single earlier
+  predecessor, while joins and backward-layout predecessors still store.
+
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and

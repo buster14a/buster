@@ -78,8 +78,8 @@ static void check_test_attribute_storage(CheckTest* test)
     arena_release(&storage);
 }
 
-// The diagnostic for object.member[0][0]... stays at member. A large tree exercises the location walk without
-// involving type construction or retaining parser-derived columns: the only available edges are parent links.
+// A large object.member[0][0]... tree exercises the location walk with no parser-derived columns: the only edges
+// are parent links. Its syntax names member, but a checked outer subscript converts its base and names object.
 static void check_test_attribute_expression_location(CheckTest* test)
 {
     enum { DEPTH = 32768, TOKENS = 3 + DEPTH * 3 };
@@ -110,7 +110,23 @@ static void check_test_attribute_expression_location(CheckTest* test)
             parser.tree.roles[close] = PARSE_ROLE_CLOSE_SUBSCRIPT;
         }
         check_test_expect(test, check_input_expression_location(&parser, 0, TOKENS) == 2,
-                          "deep subscripts retain the member base's expression location using parent links");
+                          "deep subscript syntax finds the member base's location using parent links");
+        CheckTestTypes types = { 0 };
+        const bool opened = check_test_types_open(&types);
+        check_test_expect(test, opened, "deep expression location fixture types");
+        if (opened)
+        {
+            const TypeId pointer = type_pointer(&types.table, BUSTER_TYPE_INT);
+            CheckOp ops[] = { CHECK_OP_VALUE, CHECK_OP_VALUE, CHECK_OP_SUBSCRIPT };
+            uint32_t operand0[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0 };
+            uint32_t operand1[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 1 };
+            CheckGraph graph = { .count = 3, .ops = ops, .operand0 = operand0, .operand1 = operand1 };
+            CheckValue values[] = { { .type = pointer, .category = CHECK_LVALUE }, { .type = BUSTER_TYPE_INT }, { .type = BUSTER_TYPE_INT } };
+            CheckStream stream = { .graph = &graph, .count = 3, .dense_values = values };
+            check_test_expect(test, pointer != 0 && check_warning_expression_location(&parser, &types.table, &stream, 2, 0, TOKENS) == 0,
+                              "deep checked subscripts report the converted base's beginning with one parent walk");
+        }
+        check_test_types_close(&types);
     }
     arena_release(&storage);
 }

@@ -3127,16 +3127,44 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             fact_capacity += 1;
         }
     }
+    // Carried call-save rows are untrusted additional homes. Validate node/class/mask/frame indices before using
+    // them, then let the checker prove their actual bytes along every incoming edge. Block zero has no saved rows.
+    const uint32_t* const entry_rows = emitted->entry_rows;
+    const uint32_t call_save_mask = prepared->call_save_mask;
+    uint64_t row_facts = 0;
+    for (uint32_t b = 0; valid && entry_rows != 0 && b < blocks; b += 1)
+    {
+        for (uint32_t reg = 0; valid && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            const uint32_t node = entry_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg];
+            if (node != BUSTER_IR_NONE)
+            {
+                const uint32_t v = node < count ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
+                const uint64_t row = (uint64_t)emitted->allocation.spill_count + (uint32_t)__builtin_popcount(call_save_mask & ((1u << reg) - 1));
+                valid = b != 0 && v < values && input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && (call_save_mask & (1u << reg)) != 0 && row < emitted->frame.count;
+                valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_ORIGIN, UINT32_MAX);
+                row_facts += 1;
+            }
+        }
+    }
+    fact_capacity += row_facts;
     // The arrays: the locations (the registers', then a frame range per record and per kernel's store at most), the
     // values, the facts, the source and code, the blocks, edges and renames; and the scratch maps.
-    // The aggregates' parts' steps take a few locations and sources each (#789, #1284): their copies' kills and definitions.
-    const uint64_t parts = (uint64_t)value_total - build.parameter_parts;
-    build.location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * records + 8 * blocks + 2 * function->parameter_count + 64 + 16 * parts;
-    build.source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * count + 16 + 24 * parts;
-    build.code_capacity = records + build.source_capacity;
+    // Aggregate parts need their own locations and sources (#789, #1284), in addition to carried-row facts.
+    valid = valid && (value_total >= build.parameter_parts || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    const uint64_t parts = valid ? (uint64_t)value_total - build.parameter_parts : 0;
+    const uint64_t location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * (uint64_t)records + 8 * (uint64_t)blocks + 2 * (uint64_t)function->parameter_count + 64 + row_facts + 16 * parts;
+    const uint64_t source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * (uint64_t)count + 16 + 24 * parts;
+    const uint64_t code_capacity = records + source_capacity;
+    const uint64_t facts_capacity = fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + build.entry_count + 1;
+    valid = valid && ((location_capacity <= UINT32_MAX && source_capacity <= UINT32_MAX && code_capacity <= UINT32_MAX && facts_capacity <= UINT32_MAX) ||
+                      tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    build.location_capacity = valid ? (uint32_t)location_capacity : 0;
+    build.source_capacity = valid ? (uint32_t)source_capacity : 0;
+    build.code_capacity = valid ? (uint32_t)code_capacity : 0;
     build.locations = valid ? arena_push_array(output, build.location_capacity, sizeof(Tier1CertLocation), _Alignof(Tier1CertLocation)) : 0;
     Tier1CertValue* cert_values = valid ? arena_push_array(output, (uint64_t)value_total + 1, sizeof(Tier1CertValue), _Alignof(Tier1CertValue)) : 0;
-    Tier1CertFact* facts = valid ? arena_push_array(output, fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + build.entry_count + 1, sizeof(Tier1CertFact), _Alignof(Tier1CertFact)) : 0;
+    Tier1CertFact* facts = valid ? arena_push_array(output, facts_capacity, sizeof(Tier1CertFact), _Alignof(Tier1CertFact)) : 0;
     build.source = valid ? arena_push_array(output, build.source_capacity, sizeof(Tier1CertSource), _Alignof(Tier1CertSource)) : 0;
     build.code = valid ? arena_push_array(output, build.code_capacity, sizeof(Tier1CertInstruction), _Alignof(Tier1CertInstruction)) : 0;
     Tier1CertBlock* cert_blocks = valid ? arena_push_array(output, (uint64_t)blocks + 1, sizeof(Tier1CertBlock), _Alignof(Tier1CertBlock)) : 0;
@@ -3458,6 +3486,31 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
                             .location = location,
                         };
                         valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
+                    }
+                }
+            }
+        }
+        for (uint32_t b = 1; valid && entry_rows != 0 && b < blocks; b += 1)
+        {
+            for (uint32_t reg = 0; valid && numbers[b] != BUSTER_CERT_NONE && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+            {
+                const uint32_t node = entry_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg];
+                if (node != BUSTER_IR_NONE)
+                {
+                    if (pass == 0)
+                    {
+                        fact_offsets[b + 1] += 1;
+                    }
+                    else
+                    {
+                        const uint32_t v = emitted->node_values[node];
+                        const X86Instruction save = tier1_emit_call_save(emitted, reg, false);
+                        const uint32_t location = tier1_cert_emitted_frame(&build, save.displacement, tier1_cert_emitted_width(emitted, v));
+                        facts[fill[b]++] = (Tier1CertFact){
+                            .value = v,
+                            .location = location,
+                        };
+                        valid = location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
                     }
                 }
             }

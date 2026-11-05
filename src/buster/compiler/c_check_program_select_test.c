@@ -270,6 +270,8 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
     check_test_program_selection_run(test, source, name, functions, objects, CHECK_PROGRAM_OK, execute ? clang : 0, clang, 0, false);
 }
 
+#include "c_check_program_switch_test.c"
+
 // #418's CI and #1108: a constant if's dead arm. -c's selection, and clang's model's, select what clang -O0 -c's object
 // defines, which the emitted object must define too (and run as clang's build runs): nothing that only a dead arm
 // reaches. An arm that a label or an outer case enters is kept, an arm whose cases are its own switch's is not, and
@@ -280,6 +282,7 @@ static void check_test_program_selection_case(CheckTest* test, const char* sourc
 // its statement expressions' locals and statics.
 static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
 {
+    check_test_program_folded_switches(test, clang);
     typedef struct CheckFoldedIf CheckFoldedIf;
     struct CheckFoldedIf
     {

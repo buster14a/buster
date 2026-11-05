@@ -3,6 +3,8 @@
 // Original issue #1135 fixtures. Exercise the retained policy, not just directive acceptance, through both
 // parser schedules and tree-only input. The unsupported surface must continue to fail closed.
 
+#include "c_check_symbol_pragma_test.c"
+
 static void check_test_pragma_extension_history(CheckTest* test)
 {
     static InternTable identifiers;
@@ -241,5 +243,6 @@ static void check_test_pragma_extension_sources(CheckTest* test)
 static void check_test_pragma_extensions(CheckTest* test)
 {
     check_test_pragma_extension_history(test);
+    check_test_symbol_pragmas(test);
     check_test_pragma_extension_sources(test);
 }

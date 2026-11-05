@@ -6243,6 +6243,10 @@ arguments against the function. The checker now gives these as clang does.
   attribute argument reader's expression spelling, including parentheses.
   This lookup follows the first token's parent chain once, retaining a
   subscript base's location without repeatedly scanning nested prefixes.
+  Checked subscripts also consult the existing operand type and value category:
+  an implicit lvalue or array conversion reports the base's beginning, while
+  a value such as `p++` keeps its own operator location. The pointer operand
+  supplies that location in reversed subscripts such as `0[p]` too.
   Initializer conversion diagnostics follow the actual selected member or
   array element, including nested designators, union alternatives, atomic
   pointer elements and GNU ranges. The graph pass retains one bit per value
@@ -6351,8 +6355,10 @@ Unknown `STDC` directives warn by default. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.
-GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
-`optimize` use the unknown-pragma policy, as in the Clang oracle.
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`,
+`reset_options`, `target`, and `optimize` use the unknown-pragma policy, as in
+the pinned Clang 23.1.4 oracle. In particular, accepting `GCC target("avx2")`
+does **not** enable AVX2; use the implemented per-function `target` attribute.
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
@@ -6363,10 +6369,29 @@ reading source (the instrumentation boundary in the introduction), while a
 non-emitting action refuses each `#pragma omp` directive through the checker. A
 subsequent `-fno-openmp` restores the ignore behavior for both.
 
-Known unsupported semantic effects remain hard, named errors, including
-`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
-`align=packed`. Warning suppression cannot approve these directives. Already
-supported directives keep their original handlers and syntax validation.
+Literal file-scope `#pragma weak name` and `#pragma redefine_extname old new`
+are implemented for externally linked functions and objects, before their first
+use or non-tentative definition. They attach the existing weak-binding and
+assembler-label metadata to the canonical declaration, preserving redeclaration
+identity, object emission and relocations. A prototype may precede the pragma;
+a weak directive may follow a tentative definition. Repeated renamings keep the
+first mapping. An unused external-name mapping has no effect.
+
+This is a bounded subset of #1135, not full pragma compatibility. Weak aliases
+(`weak a = b`), unmatched weak names, internal-linkage subjects, macro operands,
+nested/interrupted placement, trailing tokens, conflicting assembler labels,
+and changes after a use/definition still produce a named unsupported-semantic
+error. Clang expands both directives' operands; retained macro spellings must
+not accidentally alter a different symbol. Late changes also depend on Clang's
+code-emission timing, so they are refused rather than applied retroactively.
+With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
+deferred body is conservatively refused because its binding was not checked;
+unrelated deferred bodies do not suppress weak or renamed symbol metadata.
+These refusal boundaries remain errors under `-w` and diagnostic suppression.
+
+Other unsupported semantic effects, including `scalar_storage_order` and
+layout-changing `align=packed`, remain hard, named errors. Already supported
+directives keep their original handlers and syntax validation.
 
 Directive warnings are sparse lexical facts with independent preprocessing
 source coordinates. Command-line policy, source-ordered diagnostic push/pop,
