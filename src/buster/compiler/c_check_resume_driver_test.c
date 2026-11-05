@@ -27,6 +27,9 @@ static void check_test_driver_resumed_declarations(CheckTest* test, const char* 
         "void f(void) { int x const; int y = 1 << 40; }\n",
         "void f(void) { int x const; int y static; }\n",
         "void f(void) { int x const; }\nvoid g(void) { int y _Alignas(4); }\n",
+        // A body's twelve, one round each, and what follows them.
+        "void f(void) { int x0 const; int x1 const; int x2 const; int x3 const; int x4 const; int x5 const; int x6 const; int x7 const;\n"
+        "int x8 const; int x9 const; int x10 const; int x11 const; int final = 1 << 40; }\n",
         // The parser's errors in the declaration after the specifier, and in a later one.
         "int x const y z;\n",
         "int x _Alignas(3);\nvoid f(void) { int q = ; }\n",
@@ -88,4 +91,41 @@ static void check_test_driver_resumed_declarations(CheckTest* test, const char* 
     }
     free(expected_lines);
     free(actual_lines);
+    // Many bodies of two each, whose second errors come a round after their first (#1443's review): the whole output,
+    // without an error limit, by both paths, in about linear time (check_prefix_sort_diagnostics).
+    enum { BODIES = 50000 };
+    const size_t capacity = (size_t)BODIES * 64 + 1;
+    char* text = malloc(capacity);
+    size_t length = 0;
+    for (uint32_t b = 0; text != NULL && b < BODIES; b += 1)
+    {
+        length += (size_t)snprintf(text + length, capacity - length, "void f%u(void) { int x const; int y static; }\n", b);
+    }
+    snprintf(source, sizeof(source), "%s/resumed-declarations-many.c", directory);
+    const bool made = text != NULL && parse_test_write(source, text, length);
+    char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-ferror-limit=0", source, NULL, NULL };
+    char* expected = NULL;
+    const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+    char* expected_many = expected != NULL ? malloc(strlen(expected) + 1) : NULL;
+    const bool lines = expected_many != NULL && check_test_diagnostic_lines(expected, expected_many, strlen(expected) + 1);
+    for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+    {
+        arguments[0] = (char*)executable;
+        arguments[6] = scalar != 0 ? "--scalar" : NULL;
+        char* actual = NULL;
+        const int status = check_test_driver_spawn(arguments, &actual);
+        char* actual_many = actual != NULL ? malloc(strlen(actual) + 1) : NULL;
+        const bool same = actual_many != NULL && check_test_diagnostic_lines(actual, actual_many, strlen(actual) + 1) && strcmp(expected_many, actual_many) == 0;
+        char description[256];
+        snprintf(description, sizeof(description), "resumed declarations in %u bodies, %s: status %d (clang %d), the same lines", BODIES,
+                 scalar != 0 ? "scalar" : "vector", status, oracle);
+        check_test_expect(test, same && status != 0 && oracle != 0, description);
+        free(actual_many);
+        free(actual);
+    }
+    check_test_expect(test, made && lines, "resumed declarations in many bodies: fixture written and clang's lines read");
+    free(expected_many);
+    free(expected);
+    free(text);
+    unlink(source);
 }

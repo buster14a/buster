@@ -6089,7 +6089,13 @@ arguments against the function. The checker now gives these as clang does.
   failed parse's checking takes a view of the unit with a synthetic `;`
   before each such specifier, parsed again: in rounds, each for the missing
   `;`s before the parse's first other error, as a body's after its first
-  show up only once the body is parsed past it. A view without errors is
+  show up only once the body is parsed past it. The rounds go on until one
+  finds none (a body with k of them takes k), within a budget of 256 times
+  the unit's tokens parsed in all, past which the last view stands with its
+  errors; the two views' columns take turns, so the memory is the unit's
+  size whatever the rounds, and the errors of all rounds are merged in order
+  by a stable merge sort (50,000 bodies of two each: 0.66 s, clang's
+  output). A view without errors is
   checked whole, as a prefix is (no translation unit's end); one with errors
   takes the repair and prefix views of its own first error. The view's
   tokens are its own (the synthetic `;`s take the next token's place), and
