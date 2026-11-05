@@ -11,7 +11,9 @@
 // (x86_disassemble) from its first byte to its size. A function's frame is the most bytes it takes below its return
 // address on any path through its code (#1415's review). Each instruction's depth on entry is its predecessors' along
 // the control flow, from 0 at the first byte. The edges come from x86_effects' kinds: on to the next instruction, a
-// jump's or a branch's target within the function, none after a jump, a return or a trap. Each push and `sub rsp, imm`
+// jump's or a branch's target within the function, none after a jump, a return or a trap. In an object, a jump whose
+// displacement is a relocation's (a tail call's, which reads as a jump to the next instruction before it is linked)
+// leaves the function. Each push and `sub rsp, imm`
 // (or `lea rsp, [rsp - imm]`) adds, each pop and `add rsp, imm` takes back, and `mov rsp, rbp` (or `lea rsp, [rbp +
 // imm]`, or `leave`) goes back to the depth `mov rbp, rsp` set rbp at. The frame is the most a depth reaches, so a
 // prologue after an early return (as clang's shrink-wrapping places it) counts, and an early return's epilogue takes
@@ -149,9 +151,28 @@ static void frame_measure_reach(int64_t* depths, uint32_t* work, uint32_t* pendi
     }
 }
 
-// The frame of `size` bytes of code at `code` (the file's comment), its decoded instructions and their depths in
+// Whether `field`, a jump's displacement's place as a relocation key (its section's index in the high bits, its offset
+// in the section in the low), is a relocation's, among `count` keys in ascending order: in an object, a jump to another
+// function (a tail call) has its displacement there, and leaves the function wherever its unrelocated bytes point.
+static bool frame_measure_relocated(const uint64_t* relocations, uint32_t count, uint64_t field)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = relocations[middle] < field;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < count && relocations[low] == field;
+}
+
+// The frame of `size` bytes of code at `code` (the file's comment), whose first byte's relocation key is `start` (its
+// section's index in the high bits, its offset in the section in the low), among the `relocation_count` keys at
+// `relocations` (an object's, ascending; none in an executable). Its decoded instructions and their depths are in
 // `scratch`, given back after.
-static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t size, Arena* scratch)
+static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t size, uint64_t start, const uint64_t* relocations, uint32_t relocation_count, Arena* scratch)
 {
     FrameMeasureFunction result = { 0 };
     const uint64_t mark = scratch->length;
@@ -210,9 +231,11 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
         {
             indirect = after > indirect ? after : indirect;
         }
-        // A target outside the function (a tail call's) is no edge of it.
+        // A target outside the function (a tail call's) is no edge of it, nor a relocated displacement's.
         const int64_t goal = (int64_t)decoded[i].offset + decoded[i].length + instruction->displacement;
-        frame_measure_reach(depths, work, &pending, transfer && relative ? frame_measure_find(decoded, count, goal) : count, count, after, &unresolved);
+        const uint64_t field = start + decoded[i].offset + decoded[i].length - x86_form_descriptions[form].relative_bytes;
+        const bool external = relative && frame_measure_relocated(relocations, relocation_count, field);
+        frame_measure_reach(depths, work, &pending, transfer && relative && !external ? frame_measure_find(decoded, count, goal) : count, count, after, &unresolved);
         frame_measure_reach(depths, work, &pending, on ? i + 1 : count, count, after, &unresolved);
         // Once every path is done, code no edge reached takes an indirect jump's depth, a run at a time.
         while (pending == 0 && indirect != BUSTER_FRAME_MEASURE_UNSET && unreached < count)
@@ -231,6 +254,13 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
     result.state = unresolved ? FRAME_MEASURE_UNRESOLVED : assumed ? FRAME_MEASURE_ASSUMED : FRAME_MEASURE_RESOLVED;
     arena_pop_to(scratch, mark);
     return result;
+}
+
+static int frame_measure_keys(const void* left, const void* right)
+{
+    const uint64_t a = *(const uint64_t*)left;
+    const uint64_t b = *(const uint64_t*)right;
+    return (a > b) - (a < b);
 }
 
 // The section of index `index` of the ELF image `file` (whose header frame_measure_open checked), or null.
@@ -270,6 +300,33 @@ static bool frame_measure_open(FrameMeasureFile* file, Arena* arena)
     file->functions = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, FrameMeasureFunction, count + 1) : NULL;
     valid = valid && file->functions != NULL;
     file->count = 0;
+    // An object's relocations' places, as keys of their section's index in the high bits and the offset in the low, sorted
+    // (frame_measure_relocated takes a section's run of them).
+    uint64_t relocation_count = 0;
+    for (uint32_t s = 0; valid && header->e_type == ET_REL && s < header->e_shnum; s += 1)
+    {
+        const Elf64_Shdr* section = frame_measure_section(file, s);
+        const bool rela = section->sh_type == SHT_RELA && section->sh_entsize == sizeof(Elf64_Rela) && section->sh_offset + section->sh_size <= file->size;
+        relocation_count += rela ? section->sh_size / sizeof(Elf64_Rela) : 0;
+    }
+    uint64_t* relocations = relocation_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, relocation_count) : NULL;
+    valid = valid && (relocation_count == 0 || relocations != NULL);
+    uint64_t relocated = 0;
+    for (uint32_t s = 0; valid && relocation_count != 0 && s < header->e_shnum; s += 1)
+    {
+        const Elf64_Shdr* section = frame_measure_section(file, s);
+        const bool rela = section->sh_type == SHT_RELA && section->sh_entsize == sizeof(Elf64_Rela) && section->sh_offset + section->sh_size <= file->size;
+        for (uint64_t r = 0; rela && r < section->sh_size / sizeof(Elf64_Rela); r += 1)
+        {
+            const Elf64_Rela* relocation = (const Elf64_Rela*)(file->bytes + section->sh_offset) + r;
+            relocations[relocated] = (uint64_t)section->sh_info << 40 | (relocation->r_offset & ((UINT64_C(1) << 40) - 1));
+            relocated += 1;
+        }
+    }
+    if (relocated != 0)
+    {
+        qsort(relocations, relocated, sizeof(uint64_t), frame_measure_keys);
+    }
     for (uint64_t i = 0; valid && i < count; i += 1)
     {
         const Elf64_Sym* symbol = (const Elf64_Sym*)(file->bytes + symbols->sh_offset) + i;
@@ -280,8 +337,10 @@ static bool frame_measure_open(FrameMeasureFile* file, Arena* arena)
         const uint64_t start = code ? (header->e_type == ET_REL ? symbol->st_value : symbol->st_value - section->sh_addr) : 0;
         if (code && start + symbol->st_size <= section->sh_size && section->sh_offset + start + symbol->st_size <= file->size)
         {
+            // Its section's relocations are the sorted keys with its index in the high bits.
             FrameMeasureFunction* function = &file->functions[file->count];
-            *function = frame_measure_code(file->bytes + section->sh_offset + start, symbol->st_size, arena);
+            *function = frame_measure_code(file->bytes + section->sh_offset + start, symbol->st_size, (uint64_t)symbol->st_shndx << 40 | start, relocations,
+                                           (uint32_t)relocated, arena);
             function->name = (const char*)(file->bytes + strings->sh_offset + symbol->st_name);
             file->count += 1;
         }
