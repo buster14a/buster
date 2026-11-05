@@ -71,12 +71,15 @@ unset CPATH C_INCLUDE_PATH
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
 # and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
 # lanes that don't start.
+# #153: changed IDs in the poisoned/debug output comparisons, canonical fatal-prefix diagnostics at 1/2/3/8 lanes
+# through both paths, and the sequential multi-input -E command's text and diagnostics against standalone bytes.
 # Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
 "$BUSTER_COMPILER" test-check-units
 == Test mixed-tier single- and multi-file determinism [8 CPUs]
 # #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
 # Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
-# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# execution, with changed IDs for both single- and multi-file commands. Multi-file repeats also poison the arenas.
+# The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
 # eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore

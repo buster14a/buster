@@ -39,7 +39,7 @@ requirements. [Command index](README.md).
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
   optimization macros, not the tier; Tier 0 is the default), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
-  option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
+  option, `check_driver_id_order`, for each unit of a multi-file command too), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or

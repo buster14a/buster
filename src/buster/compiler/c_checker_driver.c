@@ -2601,7 +2601,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
-                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept)
+                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool* fatal)
 {
     (void)scalar;
 
@@ -2658,6 +2658,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         else if (!valid)
         {
             fprintf(errors, "fatal error: can't keep the unit's link: no memory\n");
+            *fatal = true;
         }
     }
     else if (valid)
@@ -3563,6 +3564,10 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
     return result;
 }
 
+// Fault injection for test-check-units' reusable-driver child, set before any workers start and immutable until its
+// command returns. Normal commands leave it null. Fail the named unit's type-table reservation, not its preprocessing.
+static const char* check_driver_test_failed_types;
+
 // What every translation unit of a command reads, and none writes: run_check_command_mode's options.
 typedef struct CheckDriverCommand CheckDriverCommand;
 struct CheckDriverCommand
@@ -3691,13 +3696,16 @@ static void check_driver_deferred_give_back(void* context)
 // (--time-stages), each stage's time. With `release`, it releases the parser's, the preprocessor's and the type table's
 // memory before it returns. With `deferred` (--deferred-bodies, one source file's), the unit's reading reads its bodies
 // apart on the command's lanes, with that state, which the caller keeps until the unit is done (check_deferred_release).
+// If `fatal` is nonnull, retain the publication's fatal state before releasing the preprocessor: a multi-unit caller
+// uses that state to publish the canonical prefix, independently of which lane finishes first.
 // Returns the command's exit status: 0 for a unit without errors whose outputs were written.
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
-                             CheckDeferred* deferred)
+                             CheckDeferred* deferred, bool* fatal)
 {
     int result = 1;
+    bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
     const bool scalar = command->scalar;
@@ -3725,6 +3733,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
         arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        driver_fatal = true;
     }
     else
     {
@@ -3793,6 +3802,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (!original_pragmas_ready)
             {
                 fprintf(errors, "fatal error: original pragma diagnostic capacity exhausted\n");
+                driver_fatal = true;
                 ready = false;
             }
         }
@@ -3814,12 +3824,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
             // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
             const uint64_t type_bytes = type_capacity_bytes(capacity);
-            type_arena = arena_reserve_small(type_bytes, type_bytes);
-            index_arena = arena_reserve(type_index_capacity_bytes(capacity));
-            ready = capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
+            const bool fail_types = check_driver_test_failed_types != NULL && strcmp(path, check_driver_test_failed_types) == 0;
+            type_arena = !fail_types ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
+            index_arena = !fail_types ? arena_reserve(type_index_capacity_bytes(capacity)) : (Arena){ 0 };
+            ready = !fail_types && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
             if (!ready)
             {
                 fprintf(errors, "fatal error: can't reserve type table\n");
+                driver_fatal = true;
             }
         }
         check_clock_mark(stage_clock, CHECK_STAGE_TYPE_TABLE);
@@ -3830,6 +3842,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (!ready)
             {
                 fprintf(errors, "fatal error: system-header checking selection failed\n");
+                driver_fatal = true;
             }
         }
         if (ready)
@@ -3871,6 +3884,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (grants.return_failed)
             {
                 fprintf(errors, "fatal error: could not return GNU make worker slots\n");
+                driver_fatal = true;
             }
             if (stage_clock != NULL)
             {
@@ -3887,6 +3901,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (input.resource)
             {
                 fprintf(errors, "fatal error: checker input capacity exhausted\n");
+                driver_fatal = true;
             }
             // A rejected reader may retain complete earlier expressions solely for diagnostics. Their typed
             // reports share source order with declaration reports, but this fragment can never be emitted.
@@ -4028,6 +4043,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     if (!initializer_context)
                     {
                         fprintf(errors, "fatal error: initializer diagnostic capacity exhausted\n");
+                        driver_fatal = true;
                         ready = false;
                     }
                     const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
@@ -4072,6 +4088,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                     {
                         fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
                         ready = false;
                     }
                     original_pragmas_printed = true;
@@ -4079,7 +4096,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
                     }
-                    result = ready && expression_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
+                    result = !driver_fatal && ready && expression_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
                              !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
                     CheckProgram program;
                     CheckDataPrepared data = { 0 };
@@ -4138,6 +4155,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
                         {
                             fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
+                            driver_fatal = true;
                             result = 1;
                         }
                         result = pp->errors != 0 ? 1 : result;
@@ -4172,7 +4190,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
                             result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
                                                                            object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
-                                                                           scratch, stage_clock, errors, kept) ? 0 : 1;
+                                                                           scratch, stage_clock, errors, kept, &driver_fatal) ? 0 : 1;
                         }
                         else if (!selection)
                         {
@@ -4210,6 +4228,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 else
                 {
                     fprintf(errors, "fatal error: %s\n", stream.status == CHECK_STATUS_RESOURCE ? "checker output capacity exhausted" : "invalid checker input graph");
+                    driver_fatal = true;
                 }
             }
             else
@@ -4219,6 +4238,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                    driver_fatal = true;
                 }
                 original_pragmas_printed = true;
             }
@@ -4233,6 +4253,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
+                    driver_fatal = true;
                 }
             }
             if (!pp->fatal)
@@ -4249,7 +4270,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
-    result = pp->errors != 0 ? 1 : result;
+    result = pp->errors != 0 || driver_fatal ? 1 : result;
+    if (fatal != NULL)
+    {
+        *fatal = pp->fatal || driver_fatal;
+    }
     if (result == 0 && options->dependencies.enabled)
     {
         result = pp_dependencies(pp, path, output, dependency_arena, dependency, errors) ? 0 : 1;
@@ -4301,7 +4326,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     DependencyOutput dependency = { 0 };
     int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
-                                  run->command->deferred_bodies ? &deferred : NULL);
+                                  run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
