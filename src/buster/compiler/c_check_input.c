@@ -4693,7 +4693,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
             const CheckInputAttribute* attribute = list->records + i;
             const bool placed = specifiers || (chunks ? attribute->first < split : attribute->first >= split);
             if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
-                !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE)
+                !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
             {
                 check_input_attribute_unsupported_at(reader, attribute, completion);
             }
