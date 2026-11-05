@@ -33,6 +33,9 @@ take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
 arena checks, the parser smoke test, the performance readers and the TSan/MSan
 `main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
 report when the shards' times drift apart ([the runner guide](parallel.md)).
+The repository syntax check retains each build's sanitizer feature flags and
+predefines, while excluding its exact host-only detector and frame controls
+(#1423). The compiler executing the check remains instrumented.
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
