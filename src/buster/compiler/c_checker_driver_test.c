@@ -1336,9 +1336,10 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
 }
 
 // __builtin_call_with_static_chain (#148): calls whose callees read the chain in r10 through naked functions (direct,
-// indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop; its callee, chain and
-// arguments evaluated in that order), built by both paths at Tier 0 and Tier 1 (--tier1 --verify, whose certificate
-// checks each call's sequence), each the output of clang -O0's build of the same program.
+// indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop, a musttail return's, which
+// clang's code makes an ordinary call; its callee, chain and arguments evaluated in that order), built by both paths at
+// Tier 0 and Tier 1 (--tier1 --verify, whose certificate checks each call's sequence), each the output of clang -O0's
+// build of the same program.
 static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char program[] = "#include <stdio.h>\n"
@@ -1364,6 +1365,7 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "__attribute__((noinline)) long t_variadic(char* p) { return __builtin_call_with_static_chain(chain_variadic(1, 30L), p); }\n"
                                   "__attribute__((noinline)) long t_variadic_indirect(long (*g)(int, ...), char* p) { return __builtin_call_with_static_chain(g(1, 5L), p); }\n"
                                   "__attribute__((noinline)) long t_loop(char* p, int n) { long s = 0; for (int i = 0; i < n; i++) s += __builtin_call_with_static_chain(chain_plus(i), p + i); return s; }\n"
+                                  "__attribute__((noinline)) long t_tail(long x, char* p) { __attribute__((musttail)) return __builtin_call_with_static_chain(chain_plus(x), p); }\n"
                                   "int main(int argc, char** argv)\n"
                                   "{\n"
                                   "    (void)argv;\n"
@@ -1378,7 +1380,7 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "    long q = __builtin_call_with_static_chain(pick(f)(arg(k)), chain_of((char*)40));\n"
                                   "    printf(\"%ld %d%d%d %ld\\n\", q, order[0], order[1], order[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
                                   "    printf(\"%ld %ld %ld %ld %ld\\n\", t_direct((char*)9), t_plus(5, (char*)100), t_swap((char*)100, 5), t_sum((char*)1000), t_indirect(chain_plus, (char*)40, k));\n"
-                                  "    printf(\"%ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4));\n"
+                                  "    printf(\"%ld %ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4), t_tail(5, (char*)300));\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];

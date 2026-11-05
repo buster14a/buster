@@ -1850,7 +1850,18 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
 - **Code.** As clang's code does, `-c` evaluates the callee, then the
   chain, then the arguments, and passes the chain in `r10`, SysV's static
   chain register (LLVM's `nest`). The call's own arguments and result stay
-  as they were. A musttail return of such a call is refused by name.
+  as they were.
+- **A musttail return of it.** Clang's Sema gives the builtin the type
+  `R(R, C)`, where R is the call's result and C the chain's type after the
+  usual unary conversions (`BuiltinCallWithStaticChain`), and checks the
+  return's musttail against that type.
+  - So the caller must be prototyped, not variadic and of the default
+    convention, return R and take exactly R and C, as similar types. The
+    messages name `__builtin_call_with_static_chain`
+    (`check_musttail_static_chain_rule`).
+  - Its code is the call, then the return. Clang's code generation emits no
+    musttail for a builtin's call, so the return is no tail call
+    (`check_control_static_chain`).
 - **The call's record.** The chain is the call's argument 0, of class `U64`.
   Its ABI type is `void`, which no other argument has and `abi_assign`
   ignores, so it takes no register of the convention's. After the batch,
@@ -1877,7 +1888,9 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
   - **SSA promotion** sees calls as opaque values and needs nothing.
 - **Tests.** `test-checker-driver`'s static chain program runs naked
   callees that read `r10`, direct and indirect, of aggregate, floating and
-  variadic calls, past six arguments and in a loop. It is built on both
+  variadic calls, past six arguments, in a loop and as a musttail return's
+  value. Its musttail error fixtures compare each rule's message with
+  clang's. It is built on both
   paths at Tier 0 and with `--tier1 --verify`, and each build prints what
   clang `-O0`'s does. `test-interpreter` and `test-ir-lowering` pass a chain
   to native and interpreted callees.
