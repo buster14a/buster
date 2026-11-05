@@ -282,7 +282,7 @@ endfunction()
 #   buster_debug            the Release configuration's debug information (-g, none, or -gline-tables-only)
 #   buster_optimization     the Release configuration's optimization (-O3, or the sanitizers' level)
 #   buster_sanitizer_flags  what a sanitizer build adds to every unit and to the link
-#   buster_link_mode        -no-pie, or -pie for the sanitizers
+#   buster_link_mode        -no-pie with -static, -no-pie (fuzzing, BUSTER_HOST_RUNTIME), or -pie for the sanitizers
 #   buster_fuzz_libraries   what a fuzzing build links after the objects
 #   buster_host_vector      1 when the host has the complete vector feature set, else 0
 # buster_settings_normalize must have run.
@@ -386,6 +386,16 @@ function(buster_settings_tools clang)
         endif()
         list(APPEND flags -fsanitize=fuzzer-no-link -DBUSTER_FUZZ_AVAILABLE=1 "-DBUSTER_FUZZ_ENTRY=\"${buster_fuzz_entry}\"")
         set(fuzz_libraries "${runtime}" -lstdc++ -pthread)
+    endif()
+
+    # A static link (#652) where nothing needs the loader: the sanitizers' runtimes need a PIE, libFuzzer's runtime
+    # C++'s shared libraries, and BUSTER_HOST_RUNTIME links an old runtime's shared libraries explicitly
+    # (CMakeLists.txt's buster_link). The dynamic loader took 8% to 12% of a small compile's task-clock on the 9700X
+    # (an empty file's -fsyntax-only, -E -P and a one-line -c, buster-performance's small-unit-start-652-2026-11-05).
+    # BUSTER_HOST_STATIC tells the code (test_libm.c): a static executable's dlsym(RTLD_DEFAULT, ...) finds nothing.
+    if(buster_sanitizer STREQUAL "none" AND NOT buster_fuzz AND "${BUSTER_HOST_RUNTIME}" STREQUAL "")
+        list(APPEND link_mode -static)
+        list(APPEND flags -DBUSTER_HOST_STATIC=1)
     endif()
 
     set(buster_flags ${flags} PARENT_SCOPE)

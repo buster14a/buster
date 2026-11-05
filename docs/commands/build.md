@@ -190,6 +190,16 @@ a PIE, its pointer tables' 366,684 relative relocations made every start take 8
 to 13 ms of page faults, which `link-foreign` and the tests pay per process
 (#86). The sanitizers' builds are PIEs.
 
+It is also linked statically (`-static`, #652): the dynamic loader took 8% to
+12% of a small compile's task-clock on the 9700X. The sanitizers' PIEs, a
+fuzzing build (libFuzzer's runtime needs C++'s shared libraries) and
+`BUSTER_HOST_RUNTIME`'s explicit runtime stay dynamic, and the units see which
+it is as `BUSTER_HOST_STATIC`. A static executable's `dlsym(RTLD_DEFAULT, ...)`
+finds nothing, so the host functions that the interpreter's programs and the
+tests' libm oracles name come from `test_libm.c`'s table there, and a `dlopen`ed
+library brings a C library of its own. The compiler needs no libm either way
+(`host_math.h`); a dynamic link takes it only as needed.
+
 The post-link step has each executable write itself with the backend's tables
 built (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
 `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
@@ -203,8 +213,9 @@ tracking arrays fill. PIEs (the sanitizers' builds) and `BUSTER_BAKE=0` build
 them when they run; `test-baked-tables` checks either kind and fails, rather
 than skips, when the section is missing (the compile-time guide's "Baked
 tables"). The stack-protector policy is pinned (#916): `-fno-stack-protector`,
-and the step fails an executable that references `__stack_chk_fail`, which the
-toolchain's configured default would have added back.
+and the step fails an executable whose objects reference `__stack_chk_fail`,
+which the toolchain's configured default would have added back (in the
+objects, since a static link's libc.a defines and calls it itself).
 
 `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
 time; CI builds so, since nothing there reads it (clang's code then differs in

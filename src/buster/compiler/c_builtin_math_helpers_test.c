@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #148's raw-bit scalar math helper consumers. The independent numeric oracle is the host libm loaded only by
-// this test, with no compiler link dependency on libm. Both encoders and real ordinary Tier 0 CALL references run
-// against float/double bit fixtures under every MXCSR rounding/DAZ/FTZ combination. Old exception flags and control
-// bits are checked separately from newly raised exceptions; ceil/floor/trunc may differ in optional new precision.
-// Sqrt receives a bounded errno cell with adjacent sentinels. Signal-bounded child processes inspect saved fault
-// MXCSR for unmasked precision/invalid, while nearbyint must return without newly raising precision. No source
-// dispatch or optimizer acceptance is implied by exercising these raw ABI helpers.
+// #148's raw-bit scalar math helper consumers. The independent numeric oracle is the host libm, reached through
+// test_libm (dlopen'd, or linked in by a static link), with no compiler dependency on libm. Both encoders and real
+// ordinary Tier 0 CALL references run against float/double bit fixtures under every MXCSR rounding/DAZ/FTZ combination.
+// Old exception flags and control bits are checked separately from newly raised exceptions; ceil/floor/trunc may differ
+// in optional new precision. Sqrt receives a bounded errno cell with adjacent sentinels. Signal-bounded child processes
+// inspect saved fault MXCSR for unmasked precision/invalid, while nearbyint must return without newly raising
+// precision. No source dispatch or optimizer acceptance is implied by exercising these raw ABI helpers.
 
 #include <dlfcn.h>
 #include <signal.h>
@@ -42,7 +42,6 @@ struct CBuiltinMathTestNative
 {
     CBuiltinMathTestProgram direct[2][BUSTER_CBUILTIN_MATH_TEST_HELPERS];
     CBuiltinMathTestProgram callers[2][BUSTER_CBUILTIN_MATH_TEST_HELPERS];
-    void* library;
     void* oracles[BUSTER_CBUILTIN_MATH_TEST_HELPERS];
 };
 
@@ -490,14 +489,14 @@ static uint64_t cbuiltin_math_test_random(uint64_t* state)
 // ldexpl and frexpl of special values and random ones, scaled by exponents across every range their results fall in,
 // the subnormals', the overflow's and their edges' among them. Results compare bit for bit (the 80-bit format's ten
 // bytes); the inputs are canonical encodings, as every value the compiler makes is.
-static void cbuiltin_math_test_host(CBuiltinMathTestTally* tally, void* library)
+static void cbuiltin_math_test_host(CBuiltinMathTestTally* tally)
 {
-    int (*const get_round)(void) = (int (*)(void))dlsym(library, "fegetround");
-    int (*const set_round)(int) = (int (*)(int))dlsym(library, "fesetround");
-    int (*const libm_ilogb)(double) = (int (*)(double))dlsym(library, "ilogb");
-    double (*const libm_ldexp)(double, int) = (double (*)(double, int))dlsym(library, "ldexp");
-    long double (*const libm_ldexpl)(long double, int) = (long double (*)(long double, int))dlsym(library, "ldexpl");
-    long double (*const libm_frexpl)(long double, int*) = (long double (*)(long double, int*))dlsym(library, "frexpl");
+    int (*const get_round)(void) = (int (*)(void))test_libm("fegetround");
+    int (*const set_round)(int) = (int (*)(int))test_libm("fesetround");
+    int (*const libm_ilogb)(double) = (int (*)(double))test_libm("ilogb");
+    double (*const libm_ldexp)(double, int) = (double (*)(double, int))test_libm("ldexp");
+    long double (*const libm_ldexpl)(long double, int) = (long double (*)(long double, int))test_libm("ldexpl");
+    long double (*const libm_frexpl)(long double, int*) = (long double (*)(long double, int*))test_libm("frexpl");
     bool valid = cbuiltin_math_test_expect(tally, get_round != NULL && set_round != NULL && libm_ilogb != NULL && libm_ldexp != NULL && libm_ldexpl != NULL &&
                                                       libm_frexpl != NULL, "host math's libm oracles", 0);
     const int modes[] = { FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO };
@@ -730,17 +729,18 @@ static int run_builtin_math_helper_tests(int argc, char** argv)
         {
             x86_target_forms(&target, allowed);
             cbuiltin_math_test_refusals(&tally);
-            native.library = dlopen("libm.so.6", RTLD_NOW | RTLD_LOCAL);
-            valid = cbuiltin_math_test_expect(&tally, native.library != NULL, "independent host libm oracle", 0);
+            // The host's libm (test_libm): loaded by this process alone where the link is dynamic, linked in where it
+            // is static, so that its functions set the errno this process reads.
+            valid = cbuiltin_math_test_expect(&tally, test_libm("sqrt") != NULL, "independent host libm oracle", 0);
             if (valid)
             {
-                cbuiltin_math_test_host(&tally, native.library);
+                cbuiltin_math_test_host(&tally);
             }
         }
     }
     for (uint32_t h = 0; valid && h < BUSTER_CBUILTIN_MATH_TEST_HELPERS; h += 1)
     {
-        native.oracles[h] = dlsym(native.library, cbuiltin_math_test_names[h]);
+        native.oracles[h] = test_libm(cbuiltin_math_test_names[h]);
         valid = cbuiltin_math_test_expect(&tally, native.oracles[h] != NULL, "typed libm symbol", h);
         const CBuiltinId id = (CBuiltinId)((uint32_t)CBUILTIN_SQRT + h);
         const CBuiltinMathHelper helper = cbuiltin_math_helper(id, &arena);
@@ -824,10 +824,6 @@ static int run_builtin_math_helper_tests(int argc, char** argv)
                 munmap(native.callers[path][h].mapping, native.callers[path][h].mapping_bytes);
             }
         }
-    }
-    if (native.library != NULL)
-    {
-        dlclose(native.library);
     }
     arena_release(&arena);
     printf("test-builtin-math-helpers: %" PRIu64 " checks, %" PRIu64 " failures\n", tally.checks, tally.failures);

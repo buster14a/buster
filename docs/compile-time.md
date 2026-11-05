@@ -1515,12 +1515,23 @@ buster-performance):
 | `tiny.c`'s `-c` | −7.12% | −11.19% | 462 → 427 |
 | `sqlite3.c`'s `-fsyntax-only` | −0.01% (floor +0.10%) | −0.00% | |
 
-What remains, measured there: the dynamic loader (the same objects linked
-`-static` take 8% to 12% less task-clock, but a static glibc executable's
-`dlsym(RTLD_DEFAULT, ...)` finds nothing, which the interpreter's `--bind`
-and the SSA tests' natives use), and each arena a small unit touches, about
-1.7 µs at its start for a separate reservation (its `mmap`, first commit
-and page tables) against 0.36 µs as one of an arena of tables.
+What remained, measured there: the dynamic loader, which the same objects
+linked `-static` don't pay (8% to 12% less task-clock), and each arena a small
+unit touches, about 1.7 µs at its start for a separate reservation (its
+`mmap`, first commit and page tables) against 0.36 µs as one of an arena of
+tables.
+
+### A static link
+
+The executable is now linked statically wherever nothing needs the loader
+(`docs/commands/build.md`: every build but the sanitizers' PIEs, fuzzing and
+`BUSTER_HOST_RUNTIME`'s). A static glibc executable's `dlsym(RTLD_DEFAULT,
+...)` finds nothing, and a `dlopen`ed library brings its own C library, whose
+`errno` its functions set: the natives the interpreter's programs call
+(`test-ssa-source`, `interpret-ir --bind`) and the libm oracles of the tests
+come from a table of the host functions they name (`test_libm.c`), which links
+them in. The stack canary's check reads the compiler's objects, since libc.a
+defines and calls `__stack_chk_fail` itself.
 
 ## How it is measured
 
