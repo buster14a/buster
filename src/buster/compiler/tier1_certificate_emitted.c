@@ -369,7 +369,7 @@ static uint32_t tier1_cert_emitted_low(Tier1CertEmittedBuild* build, uint32_t re
         build->locations[result] = (Tier1CertLocation){
             .unit = 8 * reg,
             .width = (uint16_t)width,
-            .extent = (uint16_t)width,
+            .extent = (uint16_t)(width == 4 ? 8 : width),
             .class = TIER1_CERT_GPR,
             .reg = (uint8_t)reg,
         };
