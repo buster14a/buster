@@ -50,6 +50,9 @@ static bool check_request_known_option(const char* spelling)
         "-fno-omit-frame-pointer",
         "-momit-leaf-frame-pointer",
         "-mno-omit-leaf-frame-pointer",
+        // Stack-clash protection on request (#177, predefines_stack_clash): both tiers' frames and allocations probe.
+        "-fstack-clash-protection",
+        "-fno-stack-clash-protection",
         "-fexceptions",
         "-fno-exceptions",
         "-fcommon",
@@ -101,7 +104,6 @@ static bool check_request_known_option(const char* spelling)
         "-mcmodel=small",
         "-fno-split-stack",
         "-fno-trapv",
-        "-fno-stack-clash-protection",
         "-fno-stack-check",
         "-fno-instrument-functions",
         "-fno-profile-arcs",

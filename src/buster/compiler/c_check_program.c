@@ -144,6 +144,9 @@ struct CheckProgramOptions
     // The frame pointer the code keeps (#177, predefines_frame_pointer's BUSTER_PREDEFINES_FRAME_POINTER_*, which
     // check_request_program_options takes from the predefines): every function's (Tier0Function.frame_pointer).
     uint8_t frame_pointer;
+    // Whether the code probes the stack as it grows it (#177, -fstack-clash-protection, predefines_stack_clash): every
+    // function's (Tier0Function.probe_stack).
+    bool probe_stack;
     // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
     // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
     // statement's row and calls its helper as any function's.
@@ -313,12 +316,13 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target and frame_pointer.
+    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target, frame_pointer and probe_stack.
     bool unselected_operands;
     bool asm_helpers;
     uint32_t helper_forms;
     X86Target target;
     uint8_t frame_pointer;
+    bool probe_stack;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
     // it runs, without the condition, when no label or case of an outer switch enters the other, as clang -O0's code
@@ -3485,7 +3489,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
-                               .token = BUSTER_CHECK_NONE,
+                               .probe_stack = options.probe_stack, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
     if (options.prepared_data != NULL)

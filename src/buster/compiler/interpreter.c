@@ -147,7 +147,28 @@ struct InterpreterProgram
     uint32_t binding_count;
     const InterpreterNativeBinding* natives;
     uint32_t native_count;
+    // Optional label symbols, in each function's label_entries order, and canonical function tokens for aliases.
+    const SymbolId* const* labels;
+    const uint64_t* function_addresses;
+    // Symbol ids in borrowed streams stay local to their source unit. This optional bias names their program map.
+    const uint32_t* symbol_offsets;
 };
+
+typedef struct InterpreterTypedIncoming InterpreterTypedIncoming;
+struct InterpreterTypedIncoming
+{
+    const Tier0Function* caller;
+    const InterpreterValue* values;
+    uint32_t call;
+    uint32_t first;
+    uint32_t count;
+    uint64_t destination;
+};
+
+static InterpreterStatus interpreter_typed_variadic(const Tier0Function* function, const InterpreterTypedIncoming* incoming, InterpreterValue* locals, uint32_t base, InterpreterRuntime* runtime, Arena* arena);
+static bool interpreter_typed_native(const InterpreterNativeRequest* request, const Tier0Function* function, uint32_t call, uint32_t first, uint64_t destination, uint32_t result_size, InterpreterValue* result);
+
+#include "interpreter_value.c"
 
 static __attribute__((unused)) bool interpreter_native_invoke(const InterpreterNativeRequest* request, InterpreterValue* result);
 static __attribute__((unused)) void interpreter_native_release(InterpreterRuntime* runtime);
@@ -417,10 +438,10 @@ static bool interpreter_typed_copy_range(InterpreterRuntime* runtime, uint64_t a
     return result;
 }
 
-static InterpreterStatus interpreter_typed_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes)
+static InterpreterStatus interpreter_representation_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes)
 {
     InterpreterStatus status = INTERPRETER_INVALID;
-    if (bytes != 0 && bytes <= BUSTER_TIER0_MAX_COPY_BYTES)
+    if (bytes != 0)
     {
         uint8_t* source_defined = 0;
         uint8_t* destination_defined = 0;
@@ -451,6 +472,12 @@ static InterpreterStatus interpreter_typed_copy(InterpreterRuntime* runtime, uin
             status = INTERPRETER_OK;
         }
     }
+    return status;
+}
+
+static InterpreterStatus interpreter_typed_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes)
+{
+    const InterpreterStatus status = bytes <= BUSTER_TIER0_MAX_COPY_BYTES ? interpreter_representation_copy(runtime, destination, source, bytes) : INTERPRETER_INVALID;
     return status;
 }
 
@@ -764,19 +791,21 @@ static uint16_t interpreter_typed_ir_type(uint32_t class)
         IR_I64,
         IR_F32,
         IR_F64,
-        // Typed long double, the 128-bit integers and vectors have no execution model here.
-        IR_VOID,
-        IR_VOID,
-        IR_VOID,
+        IR_F80,
+        IR_I128,
+        IR_I128,
         IR_VOID,
     };
     const uint16_t result = types[class];
     return result;
 }
 
+#include "interpreter_typed_value.c"
+
 // Dynamic storage is lazy and frame-owned. Only allocations and distinct live stack positions allocate metadata.
 // Saves at the same position share a handle. A restore searches issued handles without dereferencing input bits,
 // removes only later dynamic objects, and rewinds their arena bytes/definedness together. Static locals precede it.
+
 typedef struct InterpreterStackAllocation InterpreterStackAllocation;
 struct InterpreterStackAllocation
 {
@@ -918,6 +947,9 @@ struct InterpreterTypedFrame
     uint32_t stack_base;
     uint32_t local_base;
     uint8_t return_class;
+    uint8_t call_class;
+    uint64_t return_address;
+    uint32_t return_bytes;
     uint64_t arena_mark;
     InterpreterStack dynamic;
 };
@@ -950,6 +982,11 @@ static const InterpreterBinding* interpreter_typed_find_binding(const Interprete
     return result;
 }
 
+static uint64_t interpreter_typed_function_address(const InterpreterProgram* program, uint32_t function)
+{
+    return program->function_addresses != 0 ? program->function_addresses[function] : (uint64_t)(uintptr_t)&program->functions[function];
+}
+
 // Interpreted function addresses are opaque tokens naming stable caller-owned function rows. Native functions
 // retain their host address. Neither kind is registered as readable data, and GLOBAL/STORE still require data.
 static bool interpreter_typed_symbol_address(const InterpreterProgram* program, SymbolId symbol, uint64_t* address)
@@ -958,7 +995,7 @@ static bool interpreter_typed_symbol_address(const InterpreterProgram* program, 
     bool found = function != UINT32_MAX;
     if (found)
     {
-        *address = (uint64_t)(uintptr_t)&program->functions[function];
+        *address = interpreter_typed_function_address(program, function);
     }
     for (uint32_t n = 0; !found && n < program->native_count; n += 1)
     {
@@ -966,6 +1003,18 @@ static bool interpreter_typed_symbol_address(const InterpreterProgram* program, 
         {
             *address = (uint64_t)(uintptr_t)program->natives[n].address;
             found = program->natives[n].address != 0;
+        }
+    }
+    for (uint32_t f = 0; !found && program->labels != 0 && f < program->function_count; f += 1)
+    {
+        const Tier0Function* function = &program->functions[f];
+        for (uint32_t k = 0; !found && program->labels[f] != 0 && k < function->label_count; k += 1)
+        {
+            if (program->labels[f][k] == symbol)
+            {
+                *address = (uintptr_t)&function->label_entries[k];
+                found = true;
+            }
         }
     }
     if (!found)
@@ -987,41 +1036,173 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     result = result && (function->local_count == 0 || function->local_classes != 0);
     result = result && (function->call_count == 0 || (function->call_targets != 0 && function->call_first != 0 && function->call_argument_counts != 0 && function->call_variadic != 0));
     result = result && (function->argument_count == 0 || function->argument_classes != 0);
+    // A local's optional object columns describe storage, not a value. Keep scalar cells in the fixed local array
+    // and allocate object representations in their invocation's arena region. No object may silently become an
+    // eight-byte cell. Address-only locals hold pointers to separately registered frame storage.
+    uint64_t object_bytes = 0;
+    bool object_parameters = false;
     for (uint32_t l = 0; result && l < function->local_count; l += 1)
     {
-        result = function->local_classes[l] > BUSTER_TYPED_CLASS_VOID && function->local_classes[l] < BUSTER_TYPED_CLASS_F80;
+        const uint32_t class = function->local_classes[l];
+        const uint32_t flags = function->local_flags != 0 ? function->local_flags[l] : 0;
+        const uint32_t size = function->local_sizes != 0 ? function->local_sizes[l] : 0;
+        const uint32_t role = flags & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
+        result = (flags & ~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY)) == 0;
+        if (role != 0)
+        {
+            result = result && (role & (role - 1)) == 0 && l >= function->parameter_count && class == BUSTER_TYPED_CLASS_U64 && size == 0 &&
+                     (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 && (role == BUSTER_TYPED_LOCAL_VA_LIST || function->incoming_variadic != 0);
+        }
+        else if (size != 0)
+        {
+            object_parameters |= l < function->parameter_count;
+            result = result && class == BUSTER_TYPED_CLASS_VOID &&
+                     (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 && function->local_alignments != 0 &&
+                     function->local_alignments[l] <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+            if (result)
+            {
+                const uint64_t alignment = UINT64_C(1) << function->local_alignments[l];
+                object_bytes = ((object_bytes + alignment - 1) & ~(alignment - 1)) + size;
+                result = object_bytes <= BUSTER_TIER0_MAX_OBJECT_BYTES;
+            }
+        }
+        else
+        {
+            result = result && class > BUSTER_TYPED_CLASS_VOID && class <= BUSTER_TYPED_CLASS_U128;
+        }
+    }
+    result = result && (function->label_count == 0 || function->label_entries != 0);
+    for (uint32_t k = 0; result && k < function->label_count; k += 1)
+    {
+        result = function->label_entries[k] <= function->count;
+    }
+    result = result && tier0_jump_tables_valid(function);
+    if (result && function->incoming_variadic != 0)
+    {
+        const AbiCall incoming = *function->incoming_variadic;
+        result = incoming.integer_registers <= BUSTER_ABI_INTEGER_ARGUMENTS && incoming.vector_registers <= BUSTER_ABI_VECTOR_ARGUMENTS &&
+                 incoming.stack_alignment_log2 >= BUSTER_ABI_STACK_ALIGNMENT_LOG2 && incoming.stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 &&
+                 incoming.stack_bytes <= INT32_MAX && incoming.stack_bytes % 8 == 0;
+    }
+    if (result && (object_parameters || function->incoming_variadic != 0) && function->parameter_count != 0)
+    {
+        result = function->parameters != 0 && tier0_parameters_valid(function);
     }
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
         result = function->call_first[c] <= function->argument_count && function->call_argument_counts[c] <= function->argument_count - function->call_first[c] && function->call_argument_counts[c] <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     }
+    bool aggregate_arguments = false;
     for (uint32_t a = 0; result && a < function->argument_count; a += 1)
     {
-        result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] < BUSTER_TYPED_CLASS_F80;
-        // An aggregate's bytes pass by value through its address (#137), which this interpreter doesn't model.
-        result = result && (function->argument_sizes == 0 || function->argument_sizes[a] == 0);
+        result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] <= BUSTER_TYPED_CLASS_U128;
+        const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[a] : 0;
+        aggregate_arguments |= size != 0;
+        result = result && size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && (size == 0 || function->argument_classes[a] == BUSTER_TYPED_CLASS_U64);
     }
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
-        result = function->call_result_objects == 0 || function->call_result_objects[c] == 0;
+        const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
+        result = object == 0 || (object - 1 < function->local_count && tier0_is_object(function, object - 1));
+        if (result && (function->calls != 0 || aggregate_arguments || object != 0))
+        {
+            result = function->calls != 0 && (function->argument_count == 0 || function->argument_locations != 0) && tier0_call_valid(function, c);
+        }
     }
-    result = result && function->result_size == 0;
+    result = result && (function->result_size == 0 || tier0_aggregate_result_valid(function->result, function->result_size));
+    if (result && function->result.kind == BUSTER_ABI_RESULT_MEMORY)
+    {
+        result = function->parameter_count != 0 && function->local_classes[0] == BUSTER_TYPED_CLASS_U64 && !tier0_is_object(function, 0);
+    }
     return result;
 }
 
-static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, uint64_t* locals, uint8_t* defined, uint32_t local_base, const InterpreterValue* arguments, uint32_t count, InterpreterRuntime* runtime, uint32_t owner)
+// An object's local cell holds its storage address; a scalar's cell is the storage itself. The descriptor was
+// validated before execution, and this helper is called only after the local index has been checked.
+static uint64_t interpreter_typed_local_address(const Tier0Function* function, InterpreterValue* locals, uint32_t base, uint32_t local)
 {
-    InterpreterStatus result = count == function->parameter_count ? INTERPRETER_OK : INTERPRETER_INVALID;
-    for (uint32_t l = 0; result == INTERPRETER_OK && l < function->local_count; l += 1)
+    const bool indirect = tier0_is_object(function, local) || (function->local_flags != 0 && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0);
+    const uint64_t result = indirect ? locals[base + local].low : (uint64_t)(uintptr_t)&locals[base + local];
+    return result;
+}
+
+static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, InterpreterValue* locals, uint8_t* defined, uint32_t local_base, const InterpreterValue* arguments, uint32_t count, const InterpreterTypedIncoming* incoming, InterpreterRuntime* runtime, uint32_t owner, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    const uint32_t local_count = function->local_count;
+    InterpreterStatus result = count == function->parameter_count && (function->incoming_variadic == 0 || incoming != 0) ? INTERPRETER_OK : INTERPRETER_INVALID;
+    for (uint32_t l = 0; result == INTERPRETER_OK && l < local_count; l += 1)
     {
         const uint32_t index = local_base + l;
-        const uint32_t bytes = tier0_class_bytes(function->local_classes[l]);
-        locals[index] = l < count ? interpreter_typed_normalize(function->local_classes[l], arguments[l].low) : 0;
-        memset(defined + (uint64_t)index * 8, l < count ? 1 : 0, 8);
-        if (!interpreter_memory_add(runtime, (uint8_t*)&locals[index], bytes, defined + (uint64_t)index * 8, true, owner))
+        const bool object = tier0_is_object(function, l);
+        const uint32_t role = function->local_flags != 0 ? function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY : 0;
+        if (role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA || role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
+        {
+            uint32_t earlier = l;
+            for (uint32_t p = 0; earlier == l && p < l; p += 1)
+            {
+                earlier = (function->local_flags[p] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == role ? p : earlier;
+            }
+            if (earlier != l)
+            {
+                locals[index] = locals[local_base + earlier];
+                continue;
+            }
+        }
+        const bool overflow = role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA;
+        const uint64_t named = overflow ? function->incoming_variadic->stack_bytes : 0;
+        const uint64_t size = role == BUSTER_TYPED_LOCAL_VA_LIST ? sizeof(AbiVaList) : role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA ? BUSTER_ABI_SAVE_AREA_BYTES :
+                              overflow ? incoming->caller->calls[incoming->call].stack_bytes : object ? function->local_sizes[l] : tier0_class_bytes(function->local_classes[l]);
+        const uint32_t alignment = overflow ? incoming->caller->calls[incoming->call].stack_alignment_log2 : object ? function->local_alignments[l] : 4;
+        const bool storage = object || role != 0;
+        if (named > size || alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+        {
+            result = INTERPRETER_INVALID;
+            break;
+        }
+        uint8_t* bytes = storage ? arena_push(arena, size, UINT64_C(1) << alignment) : (uint8_t*)&locals[index];
+        uint8_t* initialized = storage ? arena_push(arena, size, 1) : defined + (uint64_t)index * sizeof(InterpreterValue);
+        if (bytes == 0 || initialized == 0)
         {
             result = INTERPRETER_RESOURCE;
         }
+        else
+        {
+            // Zero bytes retain the unchecked oracle's deterministic convention; they are still undefined until a
+            // producer writes them. An object's exact extent, not its alignment padding, is accessible.
+            if (storage)
+            {
+                memset(bytes, 0, size);
+                locals[index] = (InterpreterValue){ .low = (uintptr_t)bytes + named };
+                memset(initialized, 0, size);
+            }
+            else
+            {
+                locals[index] = l < count ? interpreter_typed_value(function->local_classes[l], arguments[l]) : (InterpreterValue){ 0 };
+                memset(initialized, 0, sizeof(InterpreterValue));
+                if (l < count)
+                {
+                    memset(initialized, 1, interpreter_typed_bytes(function->local_classes[l]));
+                }
+            }
+            if (!interpreter_memory_add(runtime, bytes + named, size - named, initialized + named, true, owner))
+            {
+                result = INTERPRETER_RESOURCE;
+            }
+            if (result == INTERPRETER_OK && object && l < count && function->parameters[l].kind != BUSTER_ABI_LOCATION_IGNORE)
+            {
+                result = interpreter_representation_copy(runtime, (uintptr_t)bytes, arguments[l].low, size);
+            }
+        }
+    }
+    if (result == INTERPRETER_OK && function->incoming_variadic != 0)
+    {
+        result = interpreter_typed_variadic(function, incoming, locals, local_base, runtime, arena);
+    }
+    if (result != INTERPRETER_OK)
+    {
+        interpreter_memory_remove_owner(runtime, owner);
+        arena_pop_to(arena, mark);
     }
     return result;
 }
@@ -1044,7 +1225,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
     InterpreterTypedFrame* frames = 0;
     InterpreterValue* stack = 0;
     uint8_t* classes = 0;
-    uint64_t* locals = 0;
+    InterpreterValue* locals = 0;
     uint8_t* defined = 0;
     InterpreterRuntime runtime = {
         .memory_capacity = limits.max_memories,
@@ -1059,8 +1240,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         frames = BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterTypedFrame, limits.max_frames);
         stack = BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterValue, limits.max_values);
         classes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, limits.max_values);
-        locals = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, limits.max_locals);
-        defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)limits.max_locals * 8);
+        locals = arena_push(scratch, (uint64_t)limits.max_locals * sizeof(InterpreterValue), sizeof(InterpreterValue));
+        defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)limits.max_locals * sizeof(InterpreterValue));
         runtime.memories = BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterMemory, limits.max_memories);
         if (frames == 0 || stack == 0 || classes == 0 || locals == 0 || defined == 0 || runtime.memories == 0)
         {
@@ -1078,10 +1259,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
     if (result->status == INTERPRETER_OK)
     {
         const Tier0Function* function = &program->functions[initial];
-        result->status = function->local_count <= limits.max_locals ? interpreter_typed_enter(function, locals, defined, 0, arguments, argument_count, &runtime, 1) : INTERPRETER_RESOURCE;
+        const uint64_t mark = scratch->length;
+        result->status = function->local_count <= limits.max_locals ? interpreter_typed_enter(function, locals, defined, 0, arguments, argument_count, 0, &runtime, 1, scratch) : INTERPRETER_RESOURCE;
         frames[0] = (InterpreterTypedFrame){
             .function = initial,
-            .arena_mark = scratch->length,
+            .arena_mark = mark,
         };
         depth = 1;
         local_top = function->local_count;
@@ -1109,12 +1291,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        // Validate the dispatch domain before classifying effects; long double, the 128-bit integers and vectors (the
-        // classes from F80 on) have no InterpreterValue, an indirect jump (#133) goes to a label's address, which an
-        // interpreted function has no code at, and a machine operation (#136), a frame's address (#148) and a tail call
-        // (#147), whose return address and caller's frame an interpreted function hasn't, have no model here.
-        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86 ||
-            kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class >= BUSTER_TYPED_CLASS_F80 && class != BUSTER_TYPED_CLASS_MASK))
+        // Validate the dispatch domain before classifying effects. Machine rows, frame addresses and tail-call
+        // intrinsics have no model here. Indirect jumps use this function's label tokens, without executing code bytes.
+        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_X86 ||
+            kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class > BUSTER_TYPED_CLASS_U128 && class != BUSTER_TYPED_CLASS_MASK))
         {
             result->status = INTERPRETER_INVALID;
             break;
@@ -1142,7 +1322,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 result->status = INTERPRETER_INVALID;
                 break;
             }
-            needed = function->call_argument_counts[value];
+            needed = function->call_argument_counts[value] + (function->call_targets[value] == 0);
             pushed = class != BUSTER_TYPED_CLASS_VOID && needed == 0;
         }
         else if (kind != BUSTER_TYPED_JUMP && kind != BUSTER_TYPED_FENCE && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID))
@@ -1215,11 +1395,15 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         }
         else if (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SHR)
         {
-            shape = classes[top - 2] == class && ((kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR) ? tier0_class_integer(classes[top - 1]) : classes[top - 1] == class);
+            shape = classes[top - 2] == class && ((kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR) ? (tier0_class_integer(classes[top - 1]) || tier0_class_int128(classes[top - 1])) : classes[top - 1] == class);
         }
         else if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
         {
-            shape = tier0_class_integer(class) && classes[top - 1] == class;
+            shape = (tier0_class_integer(class) || tier0_class_int128(class)) && classes[top - 1] == class;
+        }
+        else if (kind == BUSTER_TYPED_JUMP_INDIRECT)
+        {
+            shape = class == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class && top - frame->stack_base == 1;
         }
         if (kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_GLOBAL_ADDRESS)
         {
@@ -1233,7 +1417,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         {
             shape = shape && value <= function->count;
         }
-        if (!shape || (kind == BUSTER_TYPED_NOT && !tier0_class_integer(class)))
+        if (!shape || (kind == BUSTER_TYPED_NOT && !tier0_class_integer(class) && !tier0_class_int128(class)))
         {
             result->status = INTERPRETER_INVALID;
             break;
@@ -1243,18 +1427,19 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         bool write = false;
         if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
         {
-            if (value >= function->local_count || (kind != BUSTER_TYPED_LOCAL_ADDRESS && function->local_classes[value] != class))
+            if (value >= function->local_count || (kind != BUSTER_TYPED_LOCAL_ADDRESS && function->local_classes[value] != class && !tier0_value_object(function, value, class)))
             {
                 result->status = INTERPRETER_INVALID;
                 break;
             }
-            address = (uint64_t)(uintptr_t)&locals[frame->local_base + value];
+            address = interpreter_typed_local_address(function, locals, frame->local_base, (uint32_t)value);
             read = kind == BUSTER_TYPED_LOCAL;
             write = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
         }
         else if (kind == BUSTER_TYPED_GLOBAL_ADDRESS)
         {
-            if (value > UINT32_MAX || !interpreter_typed_symbol_address(program, (SymbolId)value, &address))
+            const uint64_t symbol = value + (program->symbol_offsets != 0 ? program->symbol_offsets[frame->function] : 0);
+            if (symbol < value || symbol >= UINT32_MAX || !interpreter_typed_symbol_address(program, (SymbolId)symbol, &address))
             {
                 result->status = INTERPRETER_SYMBOL;
                 break;
@@ -1262,7 +1447,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         }
         else if (kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL)
         {
-            const InterpreterBinding* binding = value <= UINT32_MAX ? interpreter_typed_find_binding(program, (SymbolId)value) : 0;
+            const uint64_t symbol = value + (program->symbol_offsets != 0 ? program->symbol_offsets[frame->function] : 0);
+            const InterpreterBinding* binding = symbol >= value && symbol < UINT32_MAX ? interpreter_typed_find_binding(program, (SymbolId)symbol) : 0;
             if (binding == 0)
             {
                 result->status = INTERPRETER_SYMBOL;
@@ -1298,7 +1484,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_ATOMIC_CAS)
         {
             // Its address read from its local as a LOCAL reads one, then its object checked as an ATOMIC_RMW's (#1059).
-            const uint64_t local = (uint64_t)(uintptr_t)&locals[frame->local_base + (value >> BUSTER_TYPED_CAS_LOCAL_SHIFT)];
+            const uint64_t local = interpreter_typed_local_address(function, locals, frame->local_base, (uint32_t)(value >> BUSTER_TYPED_CAS_LOCAL_SHIFT));
             const uint64_t bytes = tier0_class_bytes(class);
             result->status = interpreter_memory_access(&runtime, local, 8, false);
             if (result->status == INTERPRETER_OK)
@@ -1317,7 +1503,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         }
         if (read || write)
         {
-            result->status = interpreter_memory_access(&runtime, address, tier0_class_bytes(class), write);
+            result->status = interpreter_memory_access(&runtime, address, interpreter_typed_bytes(class), write);
             if (result->status != INTERPRETER_OK)
             {
                 break;
@@ -1332,15 +1518,27 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_LOCAL_ADDRESS:
         case BUSTER_TYPED_GLOBAL_ADDRESS:
         {
-            uint64_t loaded = kind == BUSTER_TYPED_CONST ? value : address;
+            InterpreterValue loaded = { .low = kind == BUSTER_TYPED_CONST ? value : address };
+            if (kind == BUSTER_TYPED_CONST && class == BUSTER_TYPED_CLASS_F80)
+            {
+                if (function->x87_constants == 0 || value >= function->x87_constant_count)
+                {
+                    result->status = INTERPRETER_INVALID;
+                    break;
+                }
+                loaded.low = function->x87_constants[value * 2];
+                loaded.high = function->x87_constants[value * 2 + 1];
+            }
+            else if (kind == BUSTER_TYPED_CONST && class == BUSTER_TYPED_CLASS_I128)
+            {
+                loaded.high = (int64_t)value < 0 ? UINT64_MAX : 0;
+            }
             if (read)
             {
-                loaded = 0;
-                memcpy(&loaded, (const void*)(uintptr_t)address, tier0_class_bytes(class));
+                loaded = (InterpreterValue){ 0 };
+                memcpy(&loaded, (const void*)(uintptr_t)address, interpreter_typed_bytes(class));
             }
-            stack[top] = (InterpreterValue){
-                .low = interpreter_typed_normalize(class, loaded),
-            };
+            stack[top] = interpreter_typed_value(class, loaded);
             classes[top++] = (uint8_t)class;
             break;
         }
@@ -1350,19 +1548,31 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             top += 1;
             break;
         case BUSTER_TYPED_NEG:
-            stack[top - 1].low = tier0_class_floating(class) ? stack[top - 1].low ^ (class == BUSTER_TYPED_CLASS_F32 ? 0x80000000ull : 0x8000000000000000ull) : interpreter_typed_normalize(class, 0 - stack[top - 1].low);
+            if (class == BUSTER_TYPED_CLASS_F80)
+            {
+                stack[top - 1].high ^= 0x8000;
+            }
+            else if (tier0_class_int128(class))
+            {
+                stack[top - 1] = interpreter_value_from_integer(0 - interpreter_value_integer(stack[top - 1]), IR_I128);
+            }
+            else
+            {
+                stack[top - 1].low = tier0_class_floating(class) ? stack[top - 1].low ^ (class == BUSTER_TYPED_CLASS_F32 ? 0x80000000ull : 0x8000000000000000ull) : interpreter_typed_normalize(class, 0 - stack[top - 1].low);
+            }
             break;
         case BUSTER_TYPED_NOT:
-            stack[top - 1].low = interpreter_typed_normalize(class, ~stack[top - 1].low);
+            stack[top - 1] = tier0_class_int128(class) ? interpreter_value_from_integer(~interpreter_value_integer(stack[top - 1]), IR_I128) :
+                            (InterpreterValue){ .low = interpreter_typed_normalize(class, ~stack[top - 1].low) };
             break;
         case BUSTER_TYPED_CONVERT:
-            stack[top - 1].low = interpreter_typed_convert(class, operand, stack[top - 1].low, &result->status);
+            stack[top - 1] = interpreter_typed_convert_value(class, operand, stack[top - 1], &result->status);
             classes[top - 1] = (uint8_t)class;
             break;
         case BUSTER_TYPED_LOAD:
-            stack[top - 1].low = 0;
-            memcpy(&stack[top - 1].low, (const void*)(uintptr_t)address, tier0_class_bytes(class));
-            stack[top - 1].low = interpreter_typed_normalize(class, stack[top - 1].low);
+            stack[top - 1] = (InterpreterValue){ 0 };
+            memcpy(&stack[top - 1], (const void*)(uintptr_t)address, interpreter_typed_bytes(class));
+            stack[top - 1] = interpreter_typed_value(class, stack[top - 1]);
             classes[top - 1] = (uint8_t)class;
             break;
         case BUSTER_TYPED_PTR_ADD:
@@ -1375,13 +1585,13 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_LE:
         case BUSTER_TYPED_GT:
         case BUSTER_TYPED_GE:
-            stack[top - 2].low = interpreter_typed_compare(kind, operand, stack[top - 2].low, stack[top - 1].low);
+            stack[top - 2] = (InterpreterValue){ .low = interpreter_typed_compare_value(kind, operand, stack[top - 2], stack[top - 1]) };
             classes[top - 2] = BUSTER_TYPED_CLASS_I32;
             top -= 1;
             break;
         case BUSTER_TYPED_STORE:
         case BUSTER_TYPED_SET:
-            memcpy((void*)(uintptr_t)address, &stack[top - 1].low, tier0_class_bytes(class));
+            memcpy((void*)(uintptr_t)address, &stack[top - 1], interpreter_typed_bytes(class));
             stack[top - 2] = stack[top - 1];
             classes[top - 2] = (uint8_t)class;
             top -= kind == BUSTER_TYPED_STORE ? 1 : 2;
@@ -1390,7 +1600,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_SET_LOCAL:
         case BUSTER_TYPED_STORE_GLOBAL:
         case BUSTER_TYPED_SET_GLOBAL:
-            memcpy((void*)(uintptr_t)address, &stack[top - 1].low, tier0_class_bytes(class));
+            memcpy((void*)(uintptr_t)address, &stack[top - 1], interpreter_typed_bytes(class));
             top -= kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL;
             break;
         case BUSTER_TYPED_CALL:
@@ -1410,8 +1620,37 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             }
             const uint32_t count = function->call_argument_counts[value] - chain;
             const uint32_t first = function->call_first[value] + chain;
-            const SymbolId symbol = function->call_targets[value];
-            const uint32_t callee = interpreter_typed_find_function(program, symbol);
+            const bool indirect = function->call_targets[value] == 0;
+            const uint64_t wide_symbol = (uint64_t)function->call_targets[value] + (!indirect && program->symbol_offsets != 0 ? program->symbol_offsets[frame->function] : 0);
+            const SymbolId symbol = wide_symbol < UINT32_MAX ? (SymbolId)wide_symbol : UINT32_MAX;
+            const uint32_t argument_base = top - count;
+            const uint32_t call_base = argument_base - indirect;
+            const uint64_t address = indirect ? stack[call_base].low : 0;
+            const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[value] : 0;
+            const uint64_t destination = object != 0 ? interpreter_typed_local_address(function, locals, frame->local_base, object - 1) : 0;
+            const uint32_t result_size = object != 0 ? function->local_sizes[object - 1] : 0;
+            if (object != 0 && class != BUSTER_TYPED_CLASS_VOID)
+            {
+                result->status = INTERPRETER_INVALID;
+            }
+            uint32_t callee = indirect ? UINT32_MAX : interpreter_typed_find_function(program, symbol);
+            if (indirect)
+            {
+                if (classes[call_base] != BUSTER_TYPED_CLASS_U64)
+                {
+                    result->status = INTERPRETER_INVALID;
+                }
+                // Only opaque tokens made by GLOBAL_ADDRESS or explicitly registered native addresses name code.
+                // The callee sits below the arguments and is consumed even by a void or zero-argument call.
+                for (uint32_t f = 0; f < program->function_count; f += 1)
+                {
+                    if (address == interpreter_typed_function_address(program, f))
+                    {
+                        callee = f;
+                        break;
+                    }
+                }
+            }
             for (uint32_t a = 0; a < count; a += 1)
             {
                 if (classes[top - count + a] != function->argument_classes[first + a])
@@ -1426,10 +1665,30 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             if (callee != UINT32_MAX)
             {
                 const Tier0Function* target = &program->functions[callee];
-                bool compatible = count == target->parameter_count;
-                for (uint32_t a = 0; compatible && a < count; a += 1)
+                const uint32_t hidden = target->result.kind == BUSTER_ABI_RESULT_MEMORY;
+                const uint32_t named = target->parameter_count >= hidden ? target->parameter_count - hidden : UINT32_MAX;
+                const bool variadic = function->call_variadic[value] != 0;
+                bool compatible = named <= count && (variadic || named == count) && (target->incoming_variadic == 0 || variadic) &&
+                                  (target->incoming_variadic == 0 || (function->calls != 0 && function->argument_locations != 0)) &&
+                                  (hidden == 0 || destination != 0) && (target->result_size == 0 || class == BUSTER_TYPED_CLASS_VOID);
+                compatible = compatible && (object == 0 || (hidden != 0 || target->result_size != 0));
+                if (compatible && (hidden != 0 || target->result_size != 0))
                 {
-                    compatible = function->argument_classes[first + a] == target->local_classes[a];
+                    compatible = function->calls != 0 && function->calls[value].result.kind == target->result.kind &&
+                                 (hidden == 0 || class == BUSTER_TYPED_CLASS_VOID);
+                }
+                for (uint32_t a = 0; compatible && a < named; a += 1)
+                {
+                    const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
+                    const uint32_t parameter = hidden + a;
+                    const bool aggregate = tier0_is_object(target, parameter);
+                    const bool ignored = aggregate && target->parameters[parameter].kind == BUSTER_ABI_LOCATION_IGNORE;
+                    compatible = aggregate ? ignored || size == target->local_sizes[parameter] : size == 0 && function->argument_classes[first + a] == target->local_classes[parameter];
+                }
+                for (uint32_t a = named; compatible && a < count; a += 1)
+                {
+                    const uint32_t argument_class = function->argument_classes[first + a];
+                    compatible = argument_class != BUSTER_TYPED_CLASS_F32 && !(argument_class >= BUSTER_TYPED_CLASS_I8 && argument_class <= BUSTER_TYPED_CLASS_U16);
                 }
                 if (!compatible)
                 {
@@ -1441,15 +1700,34 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 }
                 else
                 {
-                    result->status = interpreter_typed_enter(target, locals, defined, local_top, stack + top - count, count, &runtime, depth + 1);
+                    const uint64_t mark = scratch->length;
+                    InterpreterValue parameters[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
+                    parameters[0] = (InterpreterValue){ .low = destination };
+                    memcpy(parameters + hidden, stack + argument_base, (uint64_t)named * sizeof(InterpreterValue));
+                    const InterpreterTypedIncoming incoming = {
+                        .caller = function,
+                        .values = stack + argument_base,
+                        .call = (uint32_t)value,
+                        .first = first,
+                        .count = count,
+                        .destination = destination,
+                    };
+                    result->status = interpreter_typed_enter(target, locals, defined, local_top, parameters, named + hidden, &incoming, &runtime, depth + 1, scratch);
+                    if (result->status != INTERPRETER_OK)
+                    {
+                        break;
+                    }
                     frames[depth] = (InterpreterTypedFrame){
                         .function = callee,
-                        .stack_base = top - count,
+                        .stack_base = call_base,
                         .local_base = local_top,
-                        .return_class = (uint8_t)class,
-                        .arena_mark = scratch->length,
+                        .return_class = (uint8_t)(target->result_size != 0 || hidden != 0 ? BUSTER_TYPED_CLASS_U64 : class == BUSTER_TYPED_CLASS_VOID ? UINT8_MAX : class),
+                        .call_class = (uint8_t)class,
+                        .return_address = destination,
+                        .return_bytes = result_size,
+                        .arena_mark = mark,
                     };
-                    top -= count;
+                    top = call_base;
                     local_top += target->local_count;
                     depth += 1;
                 }
@@ -1459,7 +1737,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 const InterpreterNativeBinding* binding = 0;
                 for (uint32_t n = 0; n < program->native_count; n += 1)
                 {
-                    if (program->natives[n].symbol == symbol)
+                    if (indirect ? address == (uint64_t)(uintptr_t)program->natives[n].address : program->natives[n].symbol == symbol)
                     {
                         binding = &program->natives[n];
                         break;
@@ -1487,27 +1765,28 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                     .binding = binding,
                     .types = types,
                     .extensions = extensions,
-                    .arguments = stack + top - count,
+                    .arguments = stack + argument_base,
                     .argument_count = count,
                     // This stream has already promoted every variadic argument, so their fixed/unnamed split is
                     // immaterial for the scalar machine classes it can express.
                     .named_count = count,
-                    .result_type = pointer_result && class == BUSTER_TYPED_CLASS_U64 ? IR_PTR : interpreter_typed_ir_type(class),
+                    // An ignored pointer result still reaches the bookkeeping bridge, then is discarded by the stream.
+                    .result_type = pointer_result && (class == BUSTER_TYPED_CLASS_U64 || class == BUSTER_TYPED_CLASS_VOID) ? IR_PTR : interpreter_typed_ir_type(class),
                     .variadic = function->call_variadic[value] != 0,
                     .runtime = &runtime,
                     .chain = chain_value,
                 };
                 InterpreterValue returned = { 0 };
-                if (binding == 0 || !interpreter_native_invoke(&request, &returned))
+                if (binding == 0 || !interpreter_typed_native(&request, function, (uint32_t)value, first, destination, result_size, &returned))
                 {
                     result->status = binding == 0 ? INTERPRETER_SYMBOL : INTERPRETER_NATIVE;
                 }
                 else
                 {
-                    top -= count;
+                    top = call_base;
                     if (class != BUSTER_TYPED_CLASS_VOID)
                     {
-                        returned.low = interpreter_typed_normalize(class, returned.low);
+                        returned = interpreter_typed_value(class, returned);
                         stack[top] = returned;
                         classes[top++] = (uint8_t)class;
                     }
@@ -1574,7 +1853,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_BRANCH_FALSE:
         case BUSTER_TYPED_BRANCH_TRUE:
             top -= 1;
-            if ((stack[top].low != 0) == (kind == BUSTER_TYPED_BRANCH_TRUE))
+            if ((stack[top].low != 0 || stack[top].high != 0) == (kind == BUSTER_TYPED_BRANCH_TRUE))
             {
                 frame->entry = value <= function->count ? (uint32_t)value : UINT32_MAX;
             }
@@ -1583,20 +1862,50 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_JUMP_VALUE:
             frame->entry = value <= function->count ? (uint32_t)value : UINT32_MAX;
             break;
+        case BUSTER_TYPED_JUMP_INDIRECT:
+        {
+            const uint64_t target = stack[--top].low;
+            uint32_t table = 0;
+            for (uint32_t t = 0; t < function->table_count; t += 1)
+            {
+                table = function->table_jumps[t] == i ? t + 1 : table;
+            }
+            bool found = false;
+            for (uint32_t k = 0; !found && k < function->label_count; k += 1)
+            {
+                if (target == (uintptr_t)&function->label_entries[k] && (function->table_count == 0 || function->label_tables[k] == table))
+                {
+                    frame->entry = function->label_entries[k];
+                    found = true;
+                }
+            }
+            result->status = found ? INTERPRETER_OK : INTERPRETER_INVALID;
+            break;
+        }
         case BUSTER_TYPED_RETURN:
         {
             const InterpreterValue returned = class != BUSTER_TYPED_CLASS_VOID ? stack[top - 1] : (InterpreterValue){ 0 };
-            if (depth > 1 && class != frame->return_class)
+            if (depth > 1 && frame->return_class != UINT8_MAX && class != frame->return_class)
             {
                 result->status = INTERPRETER_INVALID;
                 break;
             }
+            if (depth > 1 && function->result_size != 0 && frame->return_bytes != 0)
+            {
+                const uint32_t bytes = frame->return_bytes < function->result_size ? frame->return_bytes : function->result_size;
+                result->status = interpreter_representation_copy(&runtime, frame->return_address, returned.low, bytes);
+                if (result->status != INTERPRETER_OK)
+                {
+                    break;
+                }
+            }
+            const uint32_t call_class = frame->call_class;
             interpreter_memory_remove_owner(&runtime, depth);
             arena_pop_to(scratch, frame->arena_mark);
             local_top = frame->local_base;
             top = frame->stack_base;
             depth -= 1;
-            if (depth != 0 && class != BUSTER_TYPED_CLASS_VOID)
+            if (depth != 0 && call_class != BUSTER_TYPED_CLASS_VOID)
             {
                 if (top == limits.max_values)
                 {
@@ -1605,7 +1914,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 else
                 {
                     stack[top] = returned;
-                    classes[top++] = (uint8_t)class;
+                    classes[top++] = (uint8_t)call_class;
                 }
             }
             result->value = returned;
@@ -1621,7 +1930,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_XOR:
         case BUSTER_TYPED_SHL:
         case BUSTER_TYPED_SHR:
-            stack[top - 2].low = interpreter_typed_binary(kind, class, stack[top - 2].low, stack[top - 1].low, &result->status);
+            stack[top - 2] = interpreter_typed_binary_value(kind, class, stack[top - 2], stack[top - 1], &result->status);
             classes[top - 2] = (uint8_t)class;
             top -= 1;
             break;

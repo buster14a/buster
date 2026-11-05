@@ -107,6 +107,8 @@ static void check_test_driver_option_admission(CheckTest* test, const char* exec
         "-fomit-frame-pointer",
         "-mno-omit-leaf-frame-pointer",
         "-momit-leaf-frame-pointer",
+        // Stack-clash protection's default (#177): no probes.
+        "-fno-stack-clash-protection",
     };
     for (uint32_t tier = 0; tier < 2; tier += 1)
     {

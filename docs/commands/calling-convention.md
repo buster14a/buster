@@ -120,7 +120,8 @@ makes atomic, but `_BitInt`s (themselves, records holding them and aligned
 typedefs of them, as in the record runs), the vectors of 4, 8, 16, 32 and 64
 bytes the producer lowers (with SSE's registers at 16 bytes, AVX-512's at 64),
 and those of 1 and 2 bytes and of `bool`, which it passes by their bytes (#137:
-`check_lower_transport_type`, nothing that computes with them), and the
+`check_lower_transport_type`; what computes with them is
+`c_check_program_transport.c`'s, outside these runs), and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
