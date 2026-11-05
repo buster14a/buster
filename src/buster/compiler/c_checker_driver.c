@@ -3918,6 +3918,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 stage_clock->deferred = true;
                 stage_clock->deferred_lanes = deferred_lanes > 1 && !deferred->unsupported ? deferred->active : 0;
                 stage_clock->deferred_reason = deferred_lanes <= 1 ? "one lane" : deferred->unsupported ? deferred->reason : NULL;
+                stage_clock->deferred_expression_parts = deferred->expression_parts;
+                stage_clock->deferred_expression_parallel_tokens = deferred->expression_parallel_tokens;
+                stage_clock->deferred_expression_serial_tokens = deferred->expression_serial_tokens;
+                stage_clock->deferred_expression_retry = deferred->expression_retry;
+                memcpy(stage_clock->deferred_expression_ticks, deferred->expression_ticks, sizeof(stage_clock->deferred_expression_ticks));
             }
             if (grants.return_failed)
             {

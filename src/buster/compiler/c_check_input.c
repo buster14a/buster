@@ -9658,6 +9658,8 @@ static void check_input_expression_visit(CheckInputReader* reader, uint32_t toke
 // (check_input_expressions_coded): it visits only the tokens it acts at, whose first values their classes wrote
 // (check_input_expression_classes), and acts at most of them by their classes, testing the sparse columns only of tokens
 // their classes say have an entry.
+static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader* reader);
+
 static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -9678,7 +9680,10 @@ static void check_input_expressions(CheckInputReader* reader)
     }
     else
     {
-        check_input_expressions_coded(reader);
+        if (reader->deferred == NULL || !check_deferred_expressions(reader->deferred, reader))
+        {
+            check_input_expressions_coded(reader);
+        }
     }
 }
 
@@ -9851,21 +9856,25 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
 // The constant contexts of every token, and the static-assert message spans that contribute no expression value.
 // Only static objects, static assertions and case labels open one, so the vector path visits those alone, the scalar
 // path every token. Neither the context writes nor the ignored message spans affect the selection scans.
-static void check_input_constant_contexts(CheckInputReader* reader)
+static void check_input_constant_contexts_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    const uint32_t count = parser->tokens.count;
-    for (uint32_t first = 0; first < count; first += 64)
+    for (uint32_t first = begin; first < end; first += 64)
     {
-        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) :
-                            check_input_scan_bit(reader->output->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC) |
-                            check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_STATIC_ASSERT) |
-                            check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_CASE);
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, end) :
+                            check_input_scan_bit(reader->output->declaration_bits, first, end, BUSTER_CHECK_BITS_STATIC) |
+                            check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_STATIC_ASSERT) |
+                            check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_CASE);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected));
         }
     }
+}
+
+static void check_input_constant_contexts(CheckInputReader* reader)
+{
+    check_input_constant_contexts_range(reader, 0, reader->parser->tokens.count);
     if (reader->warning_index_ready)
     {
         // Static contexts may replace the earlier independent-bound bit. Reopen the compact index before later
@@ -9873,6 +9882,8 @@ static void check_input_constant_contexts(CheckInputReader* reader)
         memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
     }
 }
+
+static bool check_deferred_constant_contexts(CheckDeferred* deferred, CheckInputReader* reader);
 
 // The groups of names check_input_count_tokens counts the tokens of.
 typedef enum CheckInputCountGroup
@@ -10886,7 +10897,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     input->graph.x86_calls = arena_push_array(arena, input->graph.x86_capacity, sizeof(CheckX86Call), _Alignof(CheckX86Call));
                     input->resource |= input->graph.x86_calls == 0;
                 }
-                check_input_constant_contexts(&reader);
+                if (deferred == NULL || !check_deferred_constant_contexts(deferred, &reader))
+                {
+                    check_input_constant_contexts(&reader);
+                }
                 if (check_input_region_initialize(&reader))
                 {
                     if (counts.size_queries != 0)

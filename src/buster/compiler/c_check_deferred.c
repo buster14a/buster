@@ -70,17 +70,21 @@
 // 2 lanes, 56.9 on 3 and 55.7 on 4, against source order's 56.7 (#151, docs/function-lanes.md's "The checker's bodies on
 // lanes").
 #define BUSTER_CHECK_DEFERRED_COMPILE_LANES 4
-// The reader's rounds of a command's flow (#151, CheckDeferredFlow): its bodies' walks and its merge's pass. The C
+// The reader's rounds of a command's flow (#151, CheckDeferredFlow): bodies, merge and post-merge work. The C
 // driver's flow also runs the emission's (BUSTER_CHECK_EMIT_ROUND_BODIES, 1), and its other lanes run each kind's lane
 // (check_deferred_follow).
 #define BUSTER_CHECK_DEFERRED_ROUND_BODIES 2u
 #define BUSTER_CHECK_DEFERRED_ROUND_PASS 3u
+#define BUSTER_CHECK_DEFERRED_ROUND_EXPRESSIONS 4u
+#define BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS 5u
+#define BUSTER_CHECK_DEFERRED_ROUND_BINDINGS 6u
+#define BUSTER_CHECK_DEFERRED_ROUND_CONTROLS 7u
 
 // A caller whose lanes are a command's flow (the C driver's, #151): the reader's lanes are rounds of `flow`
 // (lane_flow_round_begin) rather than lane_run's, whose other lanes run them from the flow's follow loop. `grant` gives the
 // lanes the bodies may take of the `wanted` the rule plans (the session's that started and the worker budget's), before
-// the top level's walk; `give_back` returns them after the merge's pass, the reader's last part on lanes, or as the unit
-// goes to source order. The driver's reading takes a grant of one lane for source order's.
+// the top level's walk; `give_back` returns them after the post-merge phases, or as the unit goes to source order.
+// The driver's reading takes a grant of one lane for source order's.
 typedef struct CheckDeferredFlow CheckDeferredFlow;
 struct CheckDeferredFlow
 {
@@ -144,6 +148,8 @@ struct CheckDeferredResult
     CheckInputIntrinsicCall* intrinsic_calls;
     uint32_t intrinsic_call_count;
     uint32_t event_count;
+    // The body's retained events' range after the source-order merge, for the binding-answer round.
+    uint32_t event_begin;
     uint32_t* key;
     uint32_t* declaration;
     uint32_t* point;
@@ -312,6 +318,12 @@ struct CheckDeferred
     uint64_t history_reads;
     uint64_t withdrawn;
     uint64_t copies;
+    uint64_t expression_parts;
+    uint64_t expression_parallel_tokens;
+    uint64_t expression_serial_tokens;
+    uint64_t expression_lanes;
+    uint64_t expression_ticks[4];
+    bool expression_retry;
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
     // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
@@ -334,6 +346,7 @@ struct CheckDeferred
     // `late_first` (not with hold_lanes), the first lane starts its part only once every other lane has taken from the
     // counter, as when the others arrive first, so that it must still read the costliest part.
     bool fail_after_replay;
+    bool fail_after_expressions;
     bool hold_lanes;
     bool late_first;
     // For the tests: the merge finds the token columns' entries by its scalar twin (check_deferred_entries).
@@ -1812,10 +1825,19 @@ static bool check_deferred_lanes_run(const CheckDeferred* deferred, uint32_t kin
 // A flow's other lane, for a round lane 0 announced (lane_flow_next): its part of the reader's round of kind `kind`, if it
 // is one and the lane is one of the round's (`argument` not null). Returns whether `kind` is one of the reader's; the
 // caller widens the lane after it, as after any round.
+static void check_deferred_expression_lane(void* argument);
+static void check_deferred_context_lane(void* argument);
+static void check_deferred_binding_lane(void* argument);
+static void check_deferred_control_lane(void* argument);
+
 static __attribute__((unused)) bool check_deferred_follow(uint32_t kind, void* argument)
 {
     const bool bodies = kind == BUSTER_CHECK_DEFERRED_ROUND_BODIES;
     const bool pass = kind == BUSTER_CHECK_DEFERRED_ROUND_PASS;
+    const bool expressions = kind == BUSTER_CHECK_DEFERRED_ROUND_EXPRESSIONS;
+    const bool contexts = kind == BUSTER_CHECK_DEFERRED_ROUND_CONTEXTS;
+    const bool bindings = kind == BUSTER_CHECK_DEFERRED_ROUND_BINDINGS;
+    const bool controls = kind == BUSTER_CHECK_DEFERRED_ROUND_CONTROLS;
     if (bodies && argument != 0)
     {
         check_deferred_lane(argument);
@@ -1824,7 +1846,23 @@ static __attribute__((unused)) bool check_deferred_follow(uint32_t kind, void* a
     {
         check_deferred_pass_lane(argument);
     }
-    return bodies || pass;
+    else if (expressions && argument != 0)
+    {
+        check_deferred_expression_lane(argument);
+    }
+    else if (contexts && argument != 0)
+    {
+        check_deferred_context_lane(argument);
+    }
+    else if (bindings && argument != 0)
+    {
+        check_deferred_binding_lane(argument);
+    }
+    else if (controls && argument != 0)
+    {
+        check_deferred_control_lane(argument);
+    }
+    return bodies || pass || expressions || contexts || bindings || controls;
 }
 
 // Maps a decoded intrinsic's types through a part of the replay.
@@ -1967,6 +2005,10 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             counts[b] = deferred->results[b].event_count;
         }
         event_total = check_deferred_layout(deferred, offsetof(CheckDeferredCut, events), counts, top_events, event_map, event_bases);
+        for (uint32_t b = 0; b < bodies; b += 1)
+        {
+            deferred->results[b].event_begin = event_bases[b];
+        }
         valid = string_total <= count + 1 && region_total <= count + 1 && vla_total <= input->vla_capacity && asm_total <= input->asm_capacity && vararg_total <= reader->vararg_capacity &&
                 event_total <= reader->bindings.capacity;
     }
@@ -2459,8 +2501,8 @@ static bool check_deferred_shared(const CheckDeferred* deferred)
     return deferred->planned > 1 && deferred->large;
 }
 
-// The lanes a caller's flow granted (CheckDeferredFlow), given back once: after the merge's pass, the reader's last part on
-// lanes, or as the unit goes to source order.
+// The lanes a caller's flow granted (CheckDeferredFlow), given back once: after the post-merge phases, or as the unit
+// goes to source order. The outer reading owns the successful path's cleanup.
 static void check_deferred_give_back(CheckDeferred* deferred)
 {
     if (deferred->leased)
@@ -2633,13 +2675,18 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint64_t merge_begin = deferred->timing ? check_deferred_now() : 0;
     const bool merged = valid && check_deferred_merge(deferred, reader);
     deferred->merge_ns = deferred->timing ? check_deferred_now() - merge_begin : 0;
-    check_deferred_give_back(deferred);
+    if (!merged)
+    {
+        check_deferred_give_back(deferred);
+    }
     deferred->reason = valid && !merged && deferred->reason == 0 ? "the merge ran out of room" : deferred->reason;
     valid = merged;
     // A unit that isn't merged is source order's: nothing more of this run counts.
     deferred->unsupported |= !valid;
     input->resource |= !valid;
 }
+
+#include "c_check_deferred_expressions.c"
 
 // The state's memory, its lanes' among it, which its readings' inputs point into: release it once the last input is no
 // longer used. The state then reserves memory again if it reads another unit.
@@ -2770,7 +2817,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     const uint32_t least = every_lane ? 2 : BUSTER_CHECK_DEFERRED_COMPILE_LANES;
     const bool sections = valid && compile && ruled >= least && check_deferred_sections(parser, pp);
     // In a caller's flow, as many of the planned lanes as it grants (CheckDeferredFlow), taken before the top level's walk,
-    // whose bodies' rule is this one; they are given back after the merge's pass, or as the unit goes to source order.
+    // whose bodies' rule is this one; they are given back after the post-merge phases, or on a source-order retry.
     const bool leased = valid && flow != 0 && ruled > 1 && (!compile || (ruled >= least && !sections));
     const uint32_t granted = leased ? flow->grant(flow->context, ruled) : lanes;
     const uint32_t reading = granted == 0 ? 1 : granted < lanes ? granted : lanes;
@@ -2800,6 +2847,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
         const bool scalar_merge = deferred->scalar_merge;
         const uint32_t base_page_tokens = deferred->base_page_tokens;
         const CheckDeferredMemory memory = deferred->memory;
+        const bool fail_after_expressions = deferred->fail_after_expressions;
         *deferred = (CheckDeferred){
             .memory = memory,
             .lanes = reading,
@@ -2812,6 +2860,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
             .scalar_merge = scalar_merge,
             .base_page_tokens = base_page_tokens,
             .fail_after_replay = fail_after_replay,
+            .fail_after_expressions = fail_after_expressions,
             .hold_lanes = hold_lanes,
             .late_first = late_first,
             .planned = planned,
@@ -2868,7 +2917,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     check_deferred_give_back(deferred);
     deferred->unsupported |= !valid;
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;
-    if (deferred->unsupported)
+    if (deferred->unsupported || deferred->expression_retry)
     {
         // Source order, from nothing: the caller's table back to how it came (a merge that failed after its replay
         // filled it), and the input's records gone.

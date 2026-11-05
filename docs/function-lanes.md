@@ -444,16 +444,16 @@ compile on 8 lanes, for 12.8% more user cycles, because 90% of the reading stays
 
 ### How it runs
 
-- **Rounds.** The reader's two parts on lanes, the bodies' walks and its merge's pass, run as
-  rounds of the command's flow (`CheckDeferredFlow`, kinds `BUSTER_CHECK_DEFERRED_ROUND_BODIES` and
-  `_PASS`), on the session's lanes. The other lanes run them from the emission's follow loop
+- **Rounds.** The bodies' walks, the merge's pass and the post-merge controls, binding answers,
+  constant contexts and independent expression parts run as rounds of the command's flow
+  (`CheckDeferredFlow`), on the session's lanes. The other lanes run them from the emission's follow loop
   (`check_program_emit_follow`, `check_deferred_follow`). A session refuses `lane_run`'s threads,
   which the reader started before.
 - **The grant.** Before the top level's walk, the reader counts the bodies' tokens and asks the
   driver for the lanes its rule plans (`check_driver_deferred_grant`). The driver gives no more than
   the session asks for and started, and no more than the jobserver's spare tokens. It takes those
-  without waiting, under a lease of their own, and the reader gives them back after the merge's
-  pass.
+  without waiting, under a lease of their own, and the reader gives them back after the last
+  post-merge round, or before a source-order retry.
 - **Source order.** These units read in source order, before the reader reserves or zeroes
   anything:
   - a unit whose bodies take fewer than `BUSTER_CHECK_DEFERRED_COMPILE_LANES` (4) lanes, or two

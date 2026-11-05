@@ -51,6 +51,23 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "postmerge-independent-expressions",
+      "int top=3;struct S{int n;};int sum(int a,int b){return a+b;}\n"
+      "int f(int n){int a=n+top;struct S s={n};while(a>0){a-=1;}return sum(a,s.n);}\n"
+      "int g(int n){int a=n*2;switch(n){case 1:a+=3;break;case 3 ... 5:a+=4;break;default:a-=2;}return a;}\n"
+      "int h(int n){return n?sum(n,2):sum(3,n);}\n", true },
+    { "postmerge-ordered-expressions",
+      "int f(int n){return ({int a=n+1;a*2;});}\n"
+      "int g(int n){int a[n+1];return sizeof(a)+__builtin_popcount((unsigned)n);}\n"
+      "int h(int n){int a=n+3;return a*2;}\nint k(int n){return h(n)+4;}\n", true },
+    { "postmerge-builtin-expressions",
+      "int f(int n){return __builtin_expect(n,1)+__builtin_bswap32((unsigned)n);}\n"
+      "int g(int n){int a;return __builtin_add_overflow(n,1,&a)?0:a;}\n"
+      "int h(int n){return __builtin_expect_with_probability(n,1,0.75)+__builtin_popcount((unsigned)n);}\n", true },
+    { "postmerge-leaf-boundaries",
+      "int use(const char*);int f(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};while(n>0){if(n==2)break;n--;continue;}return a[n&7]+use(__func__);}\n"
+      "int g(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};return a[n&15]+use(\"second\");}\n"
+      "int h(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17};if(n<0)goto out;n+=a[n&15];out:return n+use(__func__);}\n", true },
     // Declared x86 builtins called in bodies that lanes read (#148): each lane works out their verdicts itself, writing
     // nothing the top level's reader or another lane reads.
     { "declared-builtins-in-bodies", "void _mm_sfence(void);void _mm_pause(void);void _mm_lfence(void);unsigned _mm_getcsr(void);\n"
@@ -1225,21 +1242,25 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
                                                        outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size_lanes < lane_counts[l] ? size_lanes : lane_counts[l]));
+                const bool postmerge = strcmp(name, "postmerge-independent-expressions") == 0 || strcmp(name, "postmerge-builtin-expressions") == 0 || strcmp(name, "postmerge-leaf-boundaries") == 0;
+                const bool expressions = !postmerge || outcome.deferred_active <= 1 ||
+                                         (outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
-                                    !outcome.source_shared;
+                                    !outcome.source_shared && expressions;
                 checks += 1;
                 failures += !passed;
                 merged += outcome.deferred;
                 bodies += outcome.deferred_bodies;
                 if (!passed)
                 {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s%s\n", name, lane_counts[l], mode_names[m],
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
                             copied ? "" : " (not the rule's lanes, those it planned before the top level's walk, the rare columns' pages for "
                                           "them or their regions' claims, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)",
-                            outcome.source_shared ? " (source order's rare columns in base pages)" : "");
+                            outcome.source_shared ? " (source order's rare columns in base pages)" : "",
+                            expressions ? "" : " (expected parallel expressions without ordered work or retry)");
                 }
             }
         }
@@ -1377,6 +1398,21 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on %u lanes with its merge failing after the replay: %s\n", name, check_corpus_deferred_lanes,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the result differs from source order's" :
                         !outcome.equal ? "the scalar and vector paths differ" : "merged");
+            }
+        }
+        if (valid && strcmp(name, "postmerge-independent-expressions") == 0)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_fail_expressions = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_fail_expressions = false;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred_expression_retry;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: post-merge expression recovery differs from source order\n");
             }
         }
         // A unit that merges, read on 8 lanes by a state that read it before: on one lane and on eight with every byte
