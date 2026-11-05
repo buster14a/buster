@@ -20,14 +20,42 @@ static bool check_noderef_graph_marked(CheckInputReader* reader, TypeId type, co
 }
 
 static void check_noderef_graph_conversion(CheckInputReader* reader, const CheckStream* stream, const CheckNoderefType* const* shadows,
-                                         uint32_t source, TypeId destination, const CheckNoderefType* target, uint32_t completion)
+                                         uint32_t source, TypeId destination, const CheckNoderefType* target, uint32_t first, uint32_t completion)
 {
     const CheckGraph* graph = &reader->output->graph;
-    if (source < graph->count && check_noderef_graph_pointer(reader->types, destination) &&
+    // Clang checks the written pointer types before atomic lvalue conversion or array decay.
+    if (source < graph->count && type_kind(reader->types, type_strip_aligned(reader->types, destination)) == BUSTER_TYPE_KIND_POINTER &&
+        type_kind(reader->types, type_strip_aligned(reader->types, check_stream_type(stream, source))) == BUSTER_TYPE_KIND_POINTER &&
         check_noderef_graph_marked(reader, check_stream_type(stream, source), shadows[source]) &&
         !check_noderef_graph_marked(reader, destination, target))
     {
-        const uint32_t token = check_warning_graph_first(graph, reader->parser, source);
+        const Parser* parser = reader->parser;
+        // Parentheses do not create graph nodes. Recover the outermost enclosing group once, then find its opening
+        // token in a single backwards walk, so a parenthesized initializer and the graph use the same warning key.
+        uint32_t group = BUSTER_CHECK_NONE;
+        for (uint32_t root = graph->tokens[source], steps = 0; root < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        {
+            const uint32_t parent = parser->tree.parents[root];
+            if (parent >= parser->tokens.count || parent >= completion || parser->tree.roles[parent] != PARSE_ROLE_CLOSE_GROUP || parent == root)
+            {
+                break;
+            }
+            group = parent;
+            root = parent;
+        }
+        if (group != BUSTER_CHECK_NONE)
+        {
+            uint32_t open = first;
+            while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == group))
+            {
+                open -= 1;
+            }
+            if (parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == group)
+            {
+                first = open;
+            }
+        }
+        const uint32_t token = check_input_expression_location(parser, first, completion);
         const CheckWarningEvent event =
         {
             .id = CHECK_WARNING_ID_NODEREF,
@@ -182,7 +210,11 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         if (op == CHECK_OP_DEREFERENCE || op == CHECK_OP_ARROW || op == CHECK_OP_SUBSCRIPT)
         {
             const uint32_t operand = op == CHECK_OP_SUBSCRIPT && !check_noderef_graph_pointer(reader->types, types[0]) ? 1 : 0;
-            accesses[node] = check_noderef_graph_marked(reader, types[operand], values[operand]);
+            const uint8_t result = type_kind(reader->types, type_strip_aligned(reader->types, check_stream_type(stream, node)));
+            // Clang suppresses unary dereference of an array result; its subscript path still diagnoses an
+            // annotation on that array type (for example, int (__attribute__((noderef)) *p)[3]; p[0]).
+            accesses[node] = (op != CHECK_OP_DEREFERENCE || !type_kind_is_array(result)) &&
+                             check_noderef_graph_marked(reader, types[operand], values[operand]);
         }
         else if (op == CHECK_OP_ADDRESS && operands[0] < node)
         {
@@ -190,21 +222,33 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         }
         if (op == CHECK_OP_ASSIGN)
         {
-            check_noderef_graph_conversion(reader, stream, shadows, operands[1], types[0], values[0], graph->source_positions[node]);
+            check_noderef_graph_conversion(reader, stream, shadows, operands[1], types[0], values[0], token + 1, graph->source_positions[node]);
         }
         else if (op == CHECK_OP_INITIALIZE || (op == CHECK_OP_CONVERT && token < token_count && parser->tokens.kinds[token] == PARSE_KIND_RETURN))
         {
-            check_noderef_graph_conversion(reader, stream, shadows, operands[0], graph->types[node], destination, graph->source_positions[node]);
+            check_noderef_graph_conversion(reader, stream, shadows, operands[0], graph->types[node], destination, token + 1, graph->source_positions[node]);
         }
         else if (op == CHECK_OP_CALL)
         {
             const CheckNoderefType* function = check_input_noderef_function(reader, types[0], values[0]);
+            const CheckNoderefParameter* parameter = function != NULL ? function->parameters : NULL;
+            TypeId callee = type_strip_aligned(reader->types, type_conversion_operand(reader->types, types[0]));
+            if (type_kind(reader->types, callee) == BUSTER_TYPE_KIND_POINTER)
+            {
+                callee = type_strip_aligned(reader->types, type_element(reader->types, callee));
+            }
+            uint32_t parameter_count = 0;
+            const TypeId* parameter_types = type_kind(reader->types, callee) == BUSTER_TYPE_KIND_FUNCTION &&
+                                            (reader->types->types.flags[type_index(callee)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ?
+                                            type_parameters(reader->types, callee, &parameter_count) : NULL;
             const uint32_t begin = graph->argument_offsets[node];
             const uint32_t arguments = graph->argument_counts[node];
-            for (uint32_t i = 0; i < arguments; i += 1)
+            for (uint32_t i = 0; i < arguments && i < parameter_count; i += 1)
             {
-                check_noderef_graph_conversion(reader, stream, shadows, graph->argument_nodes[begin + i], stream->argument_conversions[begin + i].type,
-                                               check_input_noderef_parameter(function, i), token);
+                const bool annotated = parameter != NULL && parameter->index == i;
+                check_noderef_graph_conversion(reader, stream, shadows, graph->argument_nodes[begin + i], parameter_types[i],
+                                               annotated ? parameter->type : NULL, graph->argument_tokens[begin + i], token);
+                parameter = annotated ? parameter->next : parameter;
             }
         }
     }
@@ -217,7 +261,11 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         const CheckOp op = graph->ops[node];
         const uint32_t a = graph->operand0[node];
         const uint32_t operand = op == CHECK_OP_SUBSCRIPT && a < node && !check_noderef_graph_pointer(reader->types, check_stream_type(stream, a)) ? graph->operand1[node] : a;
-        const uint32_t use = operand < node && graph->ops[operand] == CHECK_OP_VALUE ? graph->tokens[operand] : BUSTER_CHECK_NONE;
+        // Clang names a declaration only when its written type is a pointer or array. An atomic operand's value
+        // carries the annotation after conversion, but its declaration still has an atomic type.
+        const uint8_t kind = operand < node ? type_kind(reader->types, type_strip_aligned(reader->types, check_stream_type(stream, operand))) : BUSTER_TYPE_KIND_NONE;
+        const uint32_t use = (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind)) && operand < node &&
+                             graph->ops[operand] == CHECK_OP_VALUE ? graph->tokens[operand] : BUSTER_CHECK_NONE;
         const uint32_t declaration = use < token_count && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER ? input->declarations[use] : BUSTER_CHECK_NONE;
         const uint32_t token = op == CHECK_OP_ARROW ? graph->tokens[node] + 1 : op == CHECK_OP_SUBSCRIPT ?
                                check_warning_graph_first(graph, parser, node) : graph->tokens[node];

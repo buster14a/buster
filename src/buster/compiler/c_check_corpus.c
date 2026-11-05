@@ -2060,6 +2060,14 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
                 left->reports[report].pragma == right->reports[report].pragma;
+        if (equal && left->reports[report].message == CHECK_INPUT_REDECLARATION)
+        {
+            const CheckInputReport* left_report = left->reports + report;
+            const CheckInputReport* right_report = right->reports + report;
+            equal = left_report->detail == right_report->detail && left_report->note_token == right_report->note_token &&
+                    left_report->note_kind == right_report->note_kind && left_report->type == right_report->type &&
+                    left_report->value == right_report->value && left_report->type_spelling == right_report->type_spelling;
+        }
     }
     for (uint32_t token = 0; equal && !a->resource && trees && left->declarations != 0 && right->declarations != 0 && token < left_parser->tokens.count; token += 1)
     {

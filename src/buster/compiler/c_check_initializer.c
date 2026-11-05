@@ -2252,13 +2252,15 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 }
                 const CheckNoderefInitializer* noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? &walker->warnings->sink->noderef : NULL;
                 const CheckNoderefType* pointed = selected->noderef != NULL ? selected->noderef->base : NULL;
-                if (kind == BUSTER_TYPE_KIND_POINTER && noderef != NULL && noderef->values != NULL &&
+                if (type_kind(walker->types, type_strip_aligned(walker->types, destination)) == BUSTER_TYPE_KIND_POINTER &&
+                    type_kind(walker->types, type_strip_aligned(walker->types, check_stream_type(walker->stream, node))) == BUSTER_TYPE_KIND_POINTER &&
+                    noderef != NULL && noderef->values != NULL &&
                     ((noderef->values[node / 64] >> (node % 64)) & 1u) != 0 && (pointed == NULL || !pointed->marked))
                 {
                     const CheckWarningEvent annotation = {
                         .id = CHECK_WARNING_ID_NODEREF,
                         .kind = CHECK_WARNING_EVENT_NODEREF_CONVERSION,
-                        .token = token,
+                        .token = check_input_expression_location(walker->parser, token, end),
                         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                         .completion = walker->warning_completion,

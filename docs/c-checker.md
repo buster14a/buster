@@ -3347,6 +3347,15 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+Ordinary declaration conflicts retain their reason and previous source location
+(`c_check_redefinition.c`). The driver names a redefined variable, function or
+parameter; prints both types for a variable whose type changes; and distinguishes
+conflicting function types from a static declaration after an external one.
+The accompanying note identifies the previous declaration or definition.
+The binding rules and rejection boundary are unchanged. Fourteen original
+sources compare complete Clang diagnostics in scalar/vector paths and with one
+or three body lanes (`c_check_redefinition_driver_test.c`).
+
 The source driver caps its published errors as Clang 23 does (#669): nineteen
 ordinary errors by default, followed, only if another error occurs, by the fatal
 `too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
@@ -6305,17 +6314,28 @@ arguments against the function. The checker now gives these as clang does.
   identity, layout or generated values. A sparse token column exists only in
   units spelling `noderef` or `__noderef__`; ordinary units take no expression
   pass or annotation allocation. Declarator and constant/type-name readers
-  compose the same shadow shape. An invalid placement retains its type sugar
-  and gives `-Wignored-attributes`, as Clang does; a trailing declaration
+  compose the same shadow shape. An attribute just inside declarator parentheses
+  marks that chunk's type without adding a canonical layer. An invalid
+  placement retains its type sugar and gives `-Wignored-attributes`, as Clang
+  does; a trailing declaration
   spelling has no dereference effect. C23 `clang::noderef` remains ignored.
   The checked graph transfers the annotations through calls, casts, pointer
   arithmetic, assignments, comma and conditional expressions, then gives
-  `-Wnoderef` for dereferences, subscripts and arrow accesses. An identifier's
-  warning names it and notes its declaration. `sizeof`, `alignof`, `typeof`
+  `-Wnoderef` for dereferences, subscripts and arrow accesses. A pointer or array
+  identifier's warning names it and notes its declaration; an atomic operand
+  uses the generic expression warning. Unary dereferences that select array
+  values compute addresses without a warning; subscripts retain their annotation
+  check. `sizeof`, `alignof`, `typeof`
   and generic controlling expressions suppress the warning. Taking an address
   cancels its lvalue's dereference, including array-member address computations,
   while loading an intermediate pointer member still warns. Implicit pointer
-  conversions that remove the annotation warn; explicit casts do not.
+  conversions that remove the annotation warn; explicit casts do not. The
+  check uses the original source and destination pointer types before array
+  decay or atomic value conversion, and only fixed prototype parameters
+  supply assignment conversions at calls. Conversion locations share the
+  attribute argument reader's expression spelling, including parentheses.
+  This lookup follows the first token's parent chain once, retaining a
+  subscript base's location without repeatedly scanning nested prefixes.
   Initializer conversion diagnostics follow the actual selected member or
   array element, including nested designators, union alternatives, atomic
   pointer elements and GNU ranges. The graph pass retains one bit per value
@@ -6328,9 +6348,10 @@ arguments against the function. The checker now gives these as clang does.
   sugar, while an object's most recent declaration and a definition's own
   parameters keep their own sugar. Parameter adjustment preserves atomic
   wrappers; K&R declarations retain the adjusted annotations and the typed
-  parameter's location for declaration notes. A body's annotated record members
-  request source-order replay before publishing member indexes; other body shadows
-  remain immutable in the deferred reader's retained arenas.
+  parameter's location for declaration notes. Call arguments and their sparse
+  parameter annotations advance in source order together. A body's annotated
+  record members request source-order replay before publishing member indexes;
+  other body shadows remain immutable in the deferred reader's retained arenas.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers
     (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies

@@ -1166,6 +1166,30 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
+// A pointer expression keeps the typedef spelling of the value it derives from. Address, indirection, subscript and
+// pointer arithmetic wrap that type without replacing its base specifier; a cast supplies a new spelling itself.
+static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, uint32_t node)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t spelling = 0;
+    for (uint32_t steps = 0; spelling == 0 && node < graph->count && steps < graph->count; steps += 1)
+    {
+        spelling = check_input_operand_type_spelling(input, parser, node);
+        const CheckOp op = graph->ops[node];
+        uint32_t next = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        if (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
+        {
+            const uint32_t first = graph->operand0[node];
+            const TypeId type = first < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, first))) : 0;
+            const uint8_t kind = type != 0 ? type_kind(types, type) : BUSTER_TYPE_KIND_NONE;
+            next = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? first : graph->operand1[node];
+        }
+        node = next;
+    }
+    return spelling;
+}
+
 static const char* check_driver_pointer_conversion_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                                            const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning,
                                                            uint32_t* located, Arena* scratch)
@@ -1177,10 +1201,37 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
     const bool returning = op == CHECK_OP_CONVERT && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     if (types != NULL && graph != NULL && (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || returning))
     {
+        if (op == CHECK_OP_INITIALIZE && check_sparse_present(input->initializer_begins))
+        {
+            // Initializers diagnose their declarator, whose sparse range starts just after this '='. Search
+            // only this declaration; parameter names in a pointer declarator cannot match that range.
+            bool found = false;
+            for (uint32_t at = token; !found && at != 0;)
+            {
+                at -= 1;
+                found = check_sparse_get(input->initializer_begins, at) == token + 1;
+                if (found)
+                {
+                    *located = at;
+                }
+                found = found || check_input_declaration_boundary(parser->tree.roles[at]);
+            }
+        }
+        else if (returning && token + 1 < parser->tokens.count)
+        {
+            *located = token + 1;
+        }
         const uint32_t right = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
-        const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, node), 0);
+        const uint32_t left = op == CHECK_OP_ASSIGN ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        const uint32_t left_token = left < stream->count ? graph->tokens[left] : *located;
+        const TypeId declared = op == CHECK_OP_INITIALIZE && graph->types != NULL ? graph->types[node] : 0;
+        uint32_t left_spelling = 0;
+        const TypeId left_type = returning ? check_stream_type(stream, node) :
+                                 check_input_object_spelling(types, input, parser, left_token, declared, check_stream_type(stream, node), &left_spelling);
+        const uint32_t right_spelling = right < stream->count ? check_driver_pointer_spelling(parser, input, stream, types, right) : 0;
+        const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, left_spelling);
         const String8 right_name = right < stream->count ?
-                                   check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), 0) : (String8){ 0 };
+                                   check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), right_spelling) : (String8){ 0 };
         if (left_name.length != 0 && right_name.length != 0)
         {
             const char* action = op == CHECK_OP_INITIALIZE ? "initializing %.*s with an expression of type %.*s %s" :
@@ -1198,27 +1249,6 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
                                      "converts between pointers to integer types where one is of the unique plain 'char' type and the other is not" :
                                      "converts between pointers to integer types with different sign";
             result = check_warning_text(scratch, action, (int)first.length, first.pointer, (int)second.length, second.pointer, conversion);
-            if (op == CHECK_OP_INITIALIZE && check_sparse_present(input->initializer_begins))
-            {
-                // Initializers diagnose their declarator, whose sparse range starts just after this '='. Search
-                // only this declaration; parameter names in a pointer declarator cannot match that range.
-                bool found = false;
-                for (uint32_t at = token; !found && at != 0;)
-                {
-                    at -= 1;
-                    found = check_sparse_get(input->initializer_begins, at) == token + 1;
-                    if (found)
-                    {
-                        *located = at;
-                    }
-                    found = found || check_input_declaration_boundary(parser->tree.roles[at]);
-                }
-            }
-            // Assignment's sign warning points at its operator; its qualifier warning points at the source expression.
-            else if ((returning || (op == CHECK_OP_ASSIGN && warning == CHECK_WARNING_DISCARDED_QUALIFIERS)) && token + 1 < parser->tokens.count)
-            {
-                *located = token + 1;
-            }
         }
     }
     return result;
@@ -1949,7 +1979,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                        (int)type.length, type.pointer);
                             arena_pop_to(scratch, type_mark);
                         }
-                        else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)
+                        else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && input->reports[index].detail == CHECK_REDECLARATION_GENERIC &&
+                                 input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)
                         {
                             const uint32_t previous = input->reports[index].note_token;
                             const PPOutputDiagnosticNote note = {
@@ -2083,6 +2114,40 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                         "attribute '%s' multiversioning cannot be combined with attribute '%.*s'", multiversion,
                                         (int)attribute.length, attribute.pointer);
                                 }
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && token < count &&
+                                 input->reports[index].detail > CHECK_REDECLARATION_GENERIC &&
+                                 input->reports[index].detail <= CHECK_REDECLARATION_STATIC)
+                        {
+                            const CheckInputReport* conflict = input->reports + index;
+                            const uint32_t name = parser->tokens.names[token];
+                            const uint32_t previous = conflict->note_token;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : source,
+                                .message = conflict->note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ?
+                                           "previous definition is here" : "previous declaration is here",
+                            };
+                            if (conflict->detail == CHECK_REDECLARATION_OBJECT_TYPE)
+                            {
+                                const String8 current = check_driver_warning_type(parser, pp, input, types, &spell, scratch,
+                                                                                  conflict->type, conflict->type_spelling);
+                                const uint32_t previous_spelling = previous < count ? check_input_typedef_spelling(input, parser, previous) : 0;
+                                const String8 earlier = check_driver_warning_type(parser, pp, input, types, &spell, scratch,
+                                                                                  (TypeId)conflict->value, previous_spelling);
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                    "redefinition of '%.*s' with a different type: %.*s vs %.*s",
+                                    (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
+                                    (int)current.length, current.pointer, (int)earlier.length, earlier.pointer);
+                            }
+                            else
+                            {
+                                const char* format = conflict->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
+                                                     conflict->detail == CHECK_REDECLARATION_PARAMETER ? "redefinition of parameter '%.*s'" :
+                                                     conflict->detail == CHECK_REDECLARATION_STATIC ? "static declaration of '%.*s' follows non-static declaration" :
+                                                     "redefinition of '%.*s'";
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                            format, (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                             }
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)

@@ -416,6 +416,7 @@ struct CheckConstantTypeFrame
     uint8_t state;
     uint8_t abi_origin;
     bool group;
+    bool group_noderef;
     bool parameter;
     bool noderef_pending;
 };
@@ -742,6 +743,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 CheckConstantAttributes* attribute = input->attribute_starts[i - input->first];
                 if (attribute != 0)
                 {
+                    frame->group_noderef |= frame->group && check_input_noderef_new_attributes(&attribute->parsed, 0);
                     valid = check_constant_type_attribute(frame, attributes, &attribute_count, capacity, attribute);
                     i = attribute->end;
                     continue;
@@ -938,6 +940,19 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             }
             if (valid && frame->group)
             {
+                if (frame->group_noderef)
+                {
+                    if (frame->last != BUSTER_CHECK_NONE)
+                    {
+                        parts[frame->last].next = part_count;
+                    }
+                    else
+                    {
+                        frame->first = part_count;
+                    }
+                    parts[part_count] = (CheckConstantPart){ .next = BUSTER_CHECK_NONE, .token = frame->end, .kind = BUSTER_TYPE_KIND_NONE, .noderef = true };
+                    frame->last = part_count++;
+                }
                 CheckConstantTypeFrame* parent = &frames[depth - 2];
                 parent->name = frame->name;
                 parent->first = frame->first;
@@ -976,7 +991,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     {
                         check_input_noderef_placement(reader, part->token, end);
                     }
-                    noderef_pending = part->noderef;
+                    noderef_pending = part->kind != BUSTER_TYPE_KIND_NONE ? part->noderef : noderef_pending;
                     if (part->kind == BUSTER_TYPE_KIND_POINTER)
                     {
                         const bool restricted_function = (part->qualifiers & BUSTER_TYPE_RESTRICT) != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
@@ -993,17 +1008,18 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                         TypeId* types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= types == 0;
                         uint32_t count = 0;
-                        const CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated_last = NULL;
                         for (uint32_t parameter = part->parameter_first; types != 0 && parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                         {
-                            annotated = check_input_noderef_parameter_add(reader, annotated, parameters[parameter].noderef, count);
+                            check_input_noderef_parameter_add(reader, &annotated, &annotated_last, parameters[parameter].noderef, count);
                             types[count++] = parameters[parameter].type;
                         }
                         type = types != 0 ? check_input_type_result(reader, type_function(reader->types, type, types, count, part->flags)) : 0;
                         noderef = check_input_noderef_make(reader, noderef, annotated, false);
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
-                    else
+                    else if (part->kind != BUSTER_TYPE_KIND_NONE)
                     {
                         type = check_input_type_result(reader, part->kind == BUSTER_TYPE_KIND_ARRAY ? type_array(reader->types, type, part->extent) :
                                part->kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, type, (uint32_t)part->extent) :

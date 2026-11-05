@@ -1114,8 +1114,8 @@ struct ParseDiagnostic
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
     uint32_t resume_end;
-    // A parameter's missing type after a syntactically complete declarator. Diagnostic-only views may retain the
-    // enclosing declaration and recover this parameter as int, while preserving the original error.
+    // A parameter's missing or unknown type. A diagnostic-only view may recover it as int after proving the whole
+    // enclosing declaration structurally complete, while preserving the original tokens and error.
     bool parameter_type;
 };
 
@@ -3553,7 +3553,12 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
         const bool parameter = frame->role == PARSE_ROLE_OPEN_FUNCTION;
         if ((parameter && parser->language.standard >= 2023) || !parse_scalar_valid_after_name(parser, i + 1))
         {
+            const uint32_t before = parser->diagnostic_count;
             parse_scalar_note(parser, i, PARSE_MESSAGE_UNKNOWN_TYPE_NAME, i, true);
+            if (parameter && parser->diagnostic_count > before)
+            {
+                parser->diagnostics[before].parameter_type = true;
+            }
             step->role = PARSE_ROLE_SPECIFIER;
             frame->flags |= BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_SPECIFIED;
         }
@@ -12769,7 +12774,7 @@ struct Parser
     uint8_t* meaning_column;
     uint32_t meaning_room;
     uint32_t errors;
-    // A checked diagnostic prefix may include one complete declaration with already diagnosed typeless parameters.
+    // A checked diagnostic prefix may include one complete declaration with already diagnosed parameter types.
     // Only its parameter specifiers may recover as int; ordinary parses and emission never enable this.
     bool recovered_parameter_types;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,

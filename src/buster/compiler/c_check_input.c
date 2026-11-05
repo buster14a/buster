@@ -1971,10 +1971,9 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
 // BUSTER_CHECK_NONE sentinel where its expression was a sizeof/alignof — clang's `__size_t` there — else the
 // typedef naming its operand declaration's specifier, else 0. `node` is the operand's own graph node, from the
 // graph walk directly or `token_nodes` at an action's token.
-static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
+static uint32_t check_input_operand_type_spelling(const CheckInput* input, const Parser* parser, uint32_t node)
 {
-    const CheckGraph* graph = &reader->output->graph;
-    const Parser* parser = reader->parser;
+    const CheckGraph* graph = &input->graph;
     uint32_t result = 0;
     if (node < graph->count)
     {
@@ -1997,10 +1996,10 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
                 }
                 for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
                 {
-                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && reader->output->declarations != 0 ?
-                                              reader->output->declarations[type_name] : 0;
-                    if (resolved != 0 && resolved < reader->output->token_count && reader->output->declaration_kinds != 0 &&
-                        reader->output->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != 0 ?
+                                              input->declarations[type_name] : 0;
+                    if (resolved != 0 && resolved < input->token_count && input->declaration_kinds != 0 &&
+                        input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
                     {
                         result = resolved;
                     }
@@ -2008,12 +2007,17 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
             }
             else
             {
-                result = token < reader->output->token_count && reader->output->declarations != 0 ?
-                         check_input_typedef_spelling(reader->output, reader->parser, reader->output->declarations[token]) : 0;
+                result = token < input->token_count && input->declarations != 0 ?
+                         check_input_typedef_spelling(input, parser, input->declarations[token]) : 0;
             }
         }
     }
     return result;
+}
+
+static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
+{
+    return check_input_operand_type_spelling(reader->output, reader->parser, node);
 }
 
 static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
@@ -2168,6 +2172,8 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
         input->resource = true;
     }
 }
+
+#include "c_check_redefinition.c"
 
 // check_input_report of a message that reads `detail` (CheckInputReport.detail), at an attribute's first token. It is
 // published after the token, past the warnings an attribute's handler gives before it there (#147).
@@ -3193,6 +3199,7 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
             if (attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION && !attribute->ignored && !attribute->subject_ignored)
             {
                 const TypeTransparentUnionResult marked = type_mark_transparent_union(reader->types, type);
+                check_input_transparent_union_warning(reader, type, attribute, marked, point);
                 check_input_transparent_union_warning(reader, type, attribute, marked, point);
                 attribute->ignored = true;
             }
@@ -4645,6 +4652,7 @@ struct CheckDeclaratorFrame
     uint8_t abi_origin;
     uint8_t state;
     bool group;
+    bool group_noderef;
     bool parameter;
     bool parameter_context;
     bool star_array;
@@ -4866,7 +4874,7 @@ static uint32_t check_input_attribute_group_close(const Parser* parser, uint32_t
 // `base`); then the specifiers' and the trailing ones, which clang diagnoses once the declarator's type is complete, with
 // that type. All complete with the declaration's first attribute (an unknown one's too), so they come before what its
 // attributes' own checks give there (check_input_attribute_subjects), in this order.
-static void check_input_attribute_type_warnings(CheckInputReader* reader, const CheckInputAttributes* common, const CheckInputAttributes* own, TypeId type, uint32_t name,
+static void check_input_attribute_type_warnings(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, TypeId type, uint32_t name,
                                                 uint32_t split, const CheckDeclaratorPart* parts, uint32_t order, TypeId base)
 {
     TypeId function = type;
@@ -4877,6 +4885,22 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         kind = type_kind(reader->types, function);
     }
     const bool applies = kind == BUSTER_TYPE_KIND_FUNCTION;
+    // Retain the two list facts that the final kernel checks need. Type attributes moved to a function chunk leave a
+    // nonempty list there even though ProcessDeclAttributes ignores their type effects on that later visit.
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        CheckInputAttributes* list = pass == 0 ? common : own;
+        if (list != NULL)
+        {
+            list->function_chunk = false;
+            for (uint32_t i = 0; i < list->count; i += 1)
+            {
+                CheckInputAttribute* attribute = list->records + i;
+                attribute->declaration_prefix = pass == 0;
+                list->function_chunk |= applies && !attribute->specifier_ignored && check_input_attribute_function_typed(reader, attribute);
+            }
+        }
+    }
     // The declaration's type and then its subject checks complete after every parameter's checks.
     const uint32_t completion = reader->attribute_completion;
     // Three passes over the lists: where it applies, the specifiers', the trailing ones and the chunks'; where it doesn't,
@@ -4910,6 +4934,10 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
                     bool before = true;
                     for (uint32_t p = order; before && p != BUSTER_CHECK_NONE; p = parts[p].next)
                     {
+                        if (parts[p].kind == BUSTER_TYPE_KIND_NONE)
+                        {
+                            continue;
+                        }
                         before = parts[p].kind == BUSTER_TYPE_KIND_POINTER ? parts[p].token < attribute->first : close != UINT32_MAX && parts[p].token > close;
                         here = before ? parts[p].type : here;
                     }
@@ -4945,6 +4973,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     break;
                 }
             }
+            frame->group_noderef = frame->group && check_input_noderef_new_attributes(frame->attributes, 0);
             while (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_STAR)
             {
                 const uint32_t token = i;
@@ -5065,7 +5094,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 const uint32_t identifier = parser->tokens.names[token];
                 if (reader->parameter_seen[identifier] == function->token + 1)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                    check_input_parameter_redefinition(reader, token, function->names);
                     valid = false;
                 }
                 function->identifier_list = true;
@@ -5253,6 +5282,21 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             }
             if (valid && frame->group)
             {
+                if (frame->group_noderef)
+                {
+                    // A parenthesized chunk marks the type composed outside it without adding a canonical layer.
+                    // Its opening parenthesis bounds this extra part within the token-sized parts allocation.
+                    if (frame->last != BUSTER_CHECK_NONE)
+                    {
+                        parts[frame->last].next = part_count;
+                    }
+                    else
+                    {
+                        frame->first = part_count;
+                    }
+                    parts[part_count] = (CheckDeclaratorPart){ .next = BUSTER_CHECK_NONE, .token = frame->end, .kind = BUSTER_TYPE_KIND_NONE, .noderef = true };
+                    frame->last = part_count++;
+                }
                 CheckDeclaratorFrame* parent = &frames[depth - 2];
                 parent->name = frame->name;
                 parent->missing_name = frame->missing_name;
@@ -5265,9 +5309,13 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             }
             else if (valid)
             {
-                const uint32_t first = frame->first;
+                uint32_t first = frame->first;
+                while (first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_NONE)
+                {
+                    first = parts[first].next;
+                }
                 uint32_t reverse = BUSTER_CHECK_NONE;
-                for (uint32_t part = first; part != BUSTER_CHECK_NONE;)
+                for (uint32_t part = frame->first; part != BUSTER_CHECK_NONE;)
                 {
                     const uint32_t next = parts[part].next;
                     parts[part].next = reverse;
@@ -5285,7 +5333,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     {
                         check_input_noderef_placement(reader, part->token, i);
                     }
-                    noderef_pending = part->noderef;
+                    noderef_pending = part->kind != BUSTER_TYPE_KIND_NONE ? part->noderef : noderef_pending;
                     if (part->kind == BUSTER_TYPE_KIND_POINTER)
                     {
                         const bool restrict_function = (part->qualifiers & BUSTER_TYPE_RESTRICT) != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
@@ -5317,17 +5365,18 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         TypeId* parameter_types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= parameter_types == 0;
                         uint32_t count = 0;
-                        const CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated_last = NULL;
                         for (uint32_t parameter = part->parameter_first; parameter_types != 0 && parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                         {
-                            annotated = check_input_noderef_parameter_add(reader, annotated, parameters[parameter].noderef, count);
+                            check_input_noderef_parameter_add(reader, &annotated, &annotated_last, parameters[parameter].noderef, count);
                             parameter_types[count++] = parameters[parameter].type;
                         }
                         type = valid && parameter_types != 0 ? check_input_type_result(reader, type_function(reader->types, type, parameter_types, count, part->flags)) : 0;
                         noderef = check_input_noderef_make(reader, noderef, annotated, false);
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
-                    else
+                    else if (part->kind != BUSTER_TYPE_KIND_NONE)
                     {
                         type = check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent);
                         noderef = check_input_noderef_wrap(reader, noderef);
@@ -5419,7 +5468,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 if (reader->parameter_seen[identifier] == function->token + 1 ||
                                     (visible != 0 && reader->bindings.depth[visible - 1] == check_input_declaration_depth(reader)))
                                 {
-                                    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                                    check_input_parameter_redefinition(reader, token, function->names);
                                     valid = false;
                                 }
                                 reader->parameter_previous[token] = reader->parameter_seen[identifier];
@@ -7684,7 +7733,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) ||
             check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
         {
-            check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict);
         }
         else
         {
@@ -7743,17 +7792,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 (reader->definition_origins[token] && definition && !repeated_loader) ||
                 check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
             {
-                const uint32_t before = reader->output->report_count;
-                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
-                const bool loader = has_attributes &&
-                    ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
-                     check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL);
-                if (reader->output->report_count > before && kind == C_BINDING_OBJECT && compatible == TYPE_ANSWER_YES && loader &&
-                    reader->definition_origins[token] != 0 && reader->definition_origins[previous] != 0)
-                {
-                    reader->output->reports[before].note_token = reader->definition_origins[previous] - 1;
-                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
-                }
+                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict);
             }
             else
             {

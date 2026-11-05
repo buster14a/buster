@@ -4,6 +4,39 @@
 // Source spelling for shared conversion facts. Context and publication belong to the caller; this constructor
 // allocates nothing and can be used while initializer parts must remain contiguous in their output arena.
 
+// clang's Expr::getExprLoc of the expression from `first` to `end` (#147), where some handlers report an argument: a
+// binary operator's (an assignment's and a comma's too) at its operator, a member access at the member's name, a postfix
+// increment or decrement at its operator, a subscript at its base's, and any other (a conditional, a call, a cast, a
+// prefix operator, a parenthesized expression, a primary one) at its first token. Every subtree is contiguous, so
+// the first token's parent chain reaches its root. A subscript keeps its base's location along that chain; following
+// each link once avoids rescanning the same prefix for every subscript in a deep a[0][0]... expression.
+static uint32_t check_input_expression_location(const Parser* parser, uint32_t first, uint32_t end)
+{
+    uint32_t result = first;
+    if (first < end && end <= parser->tokens.count)
+    {
+        uint32_t root = first;
+        for (uint32_t steps = 0; steps < end - first; steps += 1)
+        {
+            const uint8_t role = parser->tree.roles[root];
+            if (role != PARSE_ROLE_CLOSE_SUBSCRIPT)
+            {
+                const bool binary = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL ||
+                                    role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR ||
+                                    role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA;
+                result = binary || role == PARSE_ROLE_POSTFIX ? root : role == PARSE_ROLE_MEMBER_OPERATOR && root + 1 < end ? root + 1 : first;
+            }
+            const uint32_t parent = parser->tree.parents[root];
+            if (parent < first || parent >= end || parent == root)
+            {
+                break;
+            }
+            root = parent;
+        }
+    }
+    return result;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_init_value.
 static inline __attribute__((always_inline)) bool check_warning_null_event(const Parser* parser, const TypeTable* types, TypeId destination, const CheckValue* value,
                                       uint32_t first, uint32_t end, uint32_t completion, CheckWarningEvent* event)

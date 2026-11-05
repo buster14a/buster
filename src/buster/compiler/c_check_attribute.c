@@ -205,6 +205,8 @@ struct CheckInputAttribute
     // C23 attributes after declaration specifiers apply to that base type, before declarator chunks (#147).
     bool specifier_type;
     bool specifier_ignored;
+    // Read from the declaration's common specifiers, before the declarator's chunks (#147).
+    bool declaration_prefix;
     // Ignored by the subject check (check_input_attribute_subjects) of the declarator that read it last: a record that
     // declaration specifiers' attributes share among their declarators is checked again by each.
     bool subject_ignored;
@@ -282,6 +284,9 @@ struct CheckInputAttributes
     bool has_alignas;
     // A counted_by family attribute among the records (#148), which a member's declaration checks.
     bool counted;
+    // A nonempty function-type chunk remains after type attributes slide to it. clang rechecks the declaration's
+    // already-applied kernel attributes after that chunk's attribute list too (#147).
+    bool function_chunk;
     // Where the first warning of an attribute the list dropped completes, plus one, or 0 for none: one clang gives where it
     // processes the declaration's attributes, after its type's (#147, check_input_attribute_type_warnings): an unknown
     // one's (after its first token), another language's or a type name's declaration attribute's (at it, so one before).
@@ -712,40 +717,6 @@ static bool check_input_alignas_underaligned(CheckInputReader* reader, CheckInpu
     return !underaligned;
 }
 
-// clang's Expr::getExprLoc of the expression from `first` to `end` (#147), where some handlers report an argument: a
-// binary operator's (an assignment's and a comma's too) at its operator, a member access at the member's name, a postfix
-// increment or decrement at its operator, a subscript at its base's, and any other (a conditional, a call, a cast, a
-// prefix operator, a parenthesized expression, a primary one) at its first token. Its root is the token whose parent is
-// outside it.
-static uint32_t check_input_expression_location(const Parser* parser, uint32_t first, uint32_t end)
-{
-    uint32_t result = first;
-    uint32_t last = end;
-    bool searching = first < end && end <= parser->tokens.count;
-    while (searching)
-    {
-        uint32_t root = BUSTER_CHECK_NONE;
-        for (uint32_t token = first; root == BUSTER_CHECK_NONE && token < last; token += 1)
-        {
-            const uint32_t parent = parser->tree.parents[token];
-            root = parent < first || parent >= last ? token : BUSTER_CHECK_NONE;
-        }
-        const uint8_t role = root != BUSTER_CHECK_NONE ? parser->tree.roles[root] : PARSE_ROLE_NONE;
-        uint32_t opener = BUSTER_CHECK_NONE;
-        for (uint32_t token = first; role == PARSE_ROLE_CLOSE_SUBSCRIPT && opener == BUSTER_CHECK_NONE && token < root; token += 1)
-        {
-            opener = parser->tree.parents[token] == root && parser->tree.roles[token] == PARSE_ROLE_OPEN_SUBSCRIPT ? token : BUSTER_CHECK_NONE;
-        }
-        const bool binary = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL ||
-                            role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR ||
-                            role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA;
-        result = binary || role == PARSE_ROLE_POSTFIX ? root : role == PARSE_ROLE_MEMBER_OPERATOR && root + 1 < last ? root + 1 : first;
-        searching = opener != BUSTER_CHECK_NONE && opener > first;
-        last = opener;
-    }
-    return result;
-}
-
 // An argument of more than 32 bits (CheckInputAttribute.wide), clang's err_ice_too_large at its expression, from `first`
 // to `end`, printing `value`: the declaration's first attribute error.
 static void check_input_attribute_too_large(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t first, uint32_t end,
@@ -1130,6 +1101,7 @@ static bool check_input_attribute_merge(CheckInputReader* reader, const CheckInp
     {
         output->packed |= suffix->packed;
         output->has_alignas |= suffix->has_alignas;
+        output->function_chunk |= suffix->function_chunk;
         output->alignment_log2 = suffix->alignment_log2 > output->alignment_log2 ? suffix->alignment_log2 : output->alignment_log2;
         output->required_alignment_log2 = suffix->required_alignment_log2 > output->required_alignment_log2 ? suffix->required_alignment_log2 : output->required_alignment_log2;
         // The common one first, as their records are; a conflict is clang's error where they meet a function.
@@ -2533,7 +2505,7 @@ static void check_input_attribute_named_event(CheckInputReader* reader, const Ch
 
 // check_input_attribute_named_event once an attribute (CheckInputReader.attribute_warned): its declaration specifiers'
 // record meets each declarator, and a type name's attributes are read by the constant evaluator and the walk.
-static void check_input_attribute_named_once(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind)
+static void check_input_attribute_named_once(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind, uint32_t completion)
 {
     const uint32_t count = reader->parser->tokens.count;
     if (reader->attribute_warned == NULL)
@@ -2549,7 +2521,7 @@ static void check_input_attribute_named_once(CheckInputReader* reader, const Che
     if (!warned)
     {
         reader->attribute_warned[token >> 6] |= (uint64_t)1 << (token & 63);
-        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, kind);
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, kind, token, completion);
     }
 }
 
@@ -2790,16 +2762,17 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
     return fact != NULL && ((simple && !effect) || handled);
 }
 
-// Whether the attribute at `first` is in a type name (#147): the group around it, past its list's parentheses and a
-// declarator's grouping ones, is a cast's, a sizeof's or alignof's, a compound literal's, a specifier's (typeof, _Atomic, _Alignas)
+// The closer of the type name containing the attribute at `first`, or BUSTER_CHECK_NONE (#147): the group around it,
+// past its list's parentheses and a declarator's grouping ones, is a cast's, a sizeof's or alignof's, a compound literal's,
+// a specifier's (typeof, _Atomic, _Alignas)
 // or a keyword's type argument (va_arg, offsetof, _Generic's association). A parameter's list (a function
 // declarator's), a block, a statement, a declaration's end or a tag's own list is none. A scan back over at most 256
 // tokens.
-static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t first)
+static uint32_t check_input_attribute_type_name_end(const Parser* parser, uint32_t first)
 {
     uint32_t depth = 0;
     uint32_t i = first;
-    bool result = false;
+    uint32_t result = BUSTER_CHECK_NONE;
     bool scanning = true;
     for (uint32_t steps = 0; scanning && i > 0 && steps < 256; steps += 1)
     {
@@ -2815,12 +2788,19 @@ static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t fi
         // A tag's own list, between its keyword and its name or body, is the tag's.
         const bool tag = open && depth == 0 && role == PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT;
         const bool enclosing = (open && depth == 0 && !transparent) || tag;
-        result = enclosing && !tag && (role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND ||
-                               role == PARSE_ROLE_OPEN_SPECIFIER || role == PARSE_ROLE_OPEN_KEYWORD);
+        const bool type_name = enclosing && !tag && (role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND ||
+                                                    role == PARSE_ROLE_OPEN_SPECIFIER || role == PARSE_ROLE_OPEN_KEYWORD);
+        const uint32_t closer = type_name ? parser->tree.parents[i] : BUSTER_CHECK_NONE;
+        result = closer > first && closer < parser->tokens.count ? closer : result;
         depth = close ? depth + 1 : open && depth != 0 ? depth - 1 : depth;
         scanning = !stop && !enclosing;
     }
     return result;
+}
+
+static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t first)
+{
+    return check_input_attribute_type_name_end(parser, first) != BUSTER_CHECK_NONE;
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
@@ -3039,7 +3019,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const CheckInputFactRow* gnu_fact = known && !standard ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
         // The facts of one this checker has no rule for (#147), which decide how clang takes it.
         const CheckInputFactRow* generic_fact = known && rule == 0 ? (standard ? fact : gnu_fact) : NULL;
-        const bool type_name = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 && check_input_attribute_in_type_name(parser, attribute.first);
+        const uint32_t type_name_end = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 ?
+                                       check_input_attribute_type_name_end(parser, attribute.first) : BUSTER_CHECK_NONE;
+        const bool type_name = type_name_end != BUSTER_CHECK_NONE;
         if (valid && chunk_gnu && !typed)
         {
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_POSITION);
@@ -3047,7 +3029,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         else if (valid && type_name)
         {
-            check_input_attribute_named_once(reader, &attribute, CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE);
+            check_input_attribute_named_once(reader, &attribute, CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE, type_name_end);
             attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first;
             unknown = true;
         }
@@ -5128,7 +5110,8 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
 // clang's ProcessDeclAttributeList ends (#147): the first of reqd_work_group_size, work_group_size_hint, vec_type_hint and
 // intel_reqd_sub_group_size, "attribute 'X' can only be applied to an OpenCL kernel function"; then the first of AMDGPU's
 // flat_work_group_size, waves_per_eu, num_sgpr and num_vgpr, "'X' attribute only applies to kernel functions"; each at the
-// function's name (`name`), in that order of their names, not of the attributes.
+// function's name (`name`), in that order of their names, not of the attributes. A nonempty function-type chunk is
+// processed after the specifiers too: prefix attributes are checked before it, then checked again with the later list.
 static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name)
 {
     static const char* const groups[2][4] = {
@@ -5141,32 +5124,37 @@ static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAt
         kernel |= check_input_attribute_kernel(reader, attributes->records + i);
     }
     bool reported = false;
-    for (uint32_t group = 0; !kernel && attributes != NULL && group < 2; group += 1)
+    for (uint32_t pass = 0; !kernel && attributes != NULL && pass < (attributes->function_chunk ? 2u : 1u); pass += 1)
     {
-        const CheckInputAttribute* found = NULL;
-        for (uint32_t n = 0; found == NULL && n < 4; n += 1)
+        const bool prefix = attributes->function_chunk && pass == 0;
+        for (uint32_t group = 0; group < 2; group += 1)
         {
-            for (uint32_t i = 0; found == NULL && i < attributes->count; i += 1)
+            const CheckInputAttribute* found = NULL;
+            for (uint32_t n = 0; found == NULL && n < 4; n += 1)
             {
-                const CheckInputAttribute* attribute = attributes->records + i;
-                const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored;
-                found = generic && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), groups[group][n]) ? attribute : NULL;
+                for (uint32_t i = 0; found == NULL && i < attributes->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + i;
+                    const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored &&
+                                         (!prefix || attribute->declaration_prefix);
+                    found = generic && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), groups[group][n]) ? attribute : NULL;
+                }
             }
+            const uint32_t before = reader->output->report_count;
+            if (found != NULL)
+            {
+                check_input_report_argument(reader, name, CHECK_INPUT_ATTRIBUTE_ARGUMENT, group == 0 ? CHECK_ARGUMENT_OPENCL_KERNEL : CHECK_ARGUMENT_KERNEL_ONLY);
+                attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
+            }
+            // (Published after the attributes' own diagnostics, as clang gives it once they are applied.)
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].attribute = found->first;
+                reader->output->reports[before].repeated = reported;
+                reader->output->reports[before].sort = attributes->records[attributes->count - 1].end + 1;
+            }
+            reported |= found != NULL;
         }
-        const uint32_t before = reader->output->report_count;
-        if (found != NULL)
-        {
-            check_input_report_argument(reader, name, CHECK_INPUT_ATTRIBUTE_ARGUMENT, group == 0 ? CHECK_ARGUMENT_OPENCL_KERNEL : CHECK_ARGUMENT_KERNEL_ONLY);
-            attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
-        }
-        // (Published after the attributes' own diagnostics, as clang gives it once they are applied.)
-        if (reader->output->report_count > before)
-        {
-            reader->output->reports[before].attribute = found->first;
-            reader->output->reports[before].repeated = reported;
-            reader->output->reports[before].sort = attributes->records[attributes->count - 1].end + 1;
-        }
-        reported |= found != NULL;
     }
 }
 
@@ -6751,6 +6739,32 @@ static uint32_t* check_input_evaluated_members(CheckInputReader* reader)
     return result;
 }
 
+// The next declarator separator after `first`, with complete groups skipped. Delayed availability diagnostics for
+// file-scope type specifiers complete here, after type construction and declaration attributes. The caller keeps
+// this cursor across uses in the same declaration, so many marked parameter types do not rescan the declaration.
+static uint32_t check_input_availability_declarator_end(const Parser* parser, uint32_t first)
+{
+    uint32_t token = first;
+    while (token < parser->tokens.count)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint32_t close = parser->tree.parents[token];
+        if ((kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE) && close > token && close < parser->tokens.count)
+        {
+            token = close + 1;
+        }
+        else if (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE)
+        {
+            break;
+        }
+        else
+        {
+            token += 1;
+        }
+    }
+    return token;
+}
+
 // clang's diagnostics of a use of what a deprecated or unavailable attribute marks (#147, DiagnoseUseOfDecl's): at each
 // use of a function, a variable, a typedef, an enumerator or a tag after the declaration that marks it, "'X' is
 // deprecated" (-Wdeprecated-declarations), or the error "'X' is unavailable", with the attribute's message after a colon
@@ -6839,6 +6853,8 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
         const uint32_t* evaluated = check_input_evaluated_members(reader);
         // Where the function body a use is in ends.
         uint32_t body_end = 0;
+        uint32_t delayed_first = count;
+        uint32_t delayed_end = 0;
         // The brackets open before a use (`(`, `[` and `{` less their closers): a file-scope declaration's own level is 0.
         // And of them, the parameter lists (a function declarator's parentheses, a call's to the vector parser).
         int32_t level = 0;
@@ -7024,6 +7040,26 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                                                                                       &first_declarator, &no_declarator) :
                                     !check_input_availability_dropped(context, unavailable);
             const CheckInputAttribute* attribute = copies != 0 ? candidate : NULL;
+            uint32_t completion = t + 1;
+            // File-scope typedef uses in a declaration's specifiers or parameter types are delayed until that
+            // declarator is complete. Initializers and type names in expressions retain their own use boundaries;
+            // record members and block declarations have separate availability contexts above.
+            const bool delayed = attribute != NULL && !inside && scopes == 0 && !tag && !anonymous_use &&
+                                 role == PARSE_ROLE_SPECIFIER && check_input_typedef_declared(reader, declared) && reader->declaration_starts != NULL;
+            if (delayed)
+            {
+                const uint32_t first = reader->declaration_starts[t];
+                if (delayed_first != first)
+                {
+                    delayed_first = first;
+                    delayed_end = check_input_availability_declarator_end(parser, first);
+                }
+                while (delayed_end < t && parser->tokens.kinds[delayed_end] == PARSE_KIND_COMMA)
+                {
+                    delayed_end = check_input_availability_declarator_end(parser, delayed_end + 1);
+                }
+                completion = delayed_end > t ? delayed_end : completion;
+            }
             // The attribute's message, its first argument's string.
             const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
                                      parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
@@ -7041,6 +7077,7 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                     reader->output->reports[before].note_token = noted;
                     reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
                     reader->output->reports[before].detail = message != BUSTER_CHECK_WARNING_NO_SOURCE ? message + 1 : 0;
+                    reader->output->reports[before].completion = completion;
                     // A token's reports print its first alone: the copies after it ride on it.
                     reader->output->reports[before].value = copies - 1;
                 }
@@ -7054,7 +7091,7 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                     .token = t,
                     .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                     .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                    .completion = t + 1,
+                    .completion = completion,
                     .payload = { .name = parser->tokens.names[t], .token = message },
                 };
                 // An anonymous tag's names are its type's spelling (BUSTER_CHECK_DEPRECATED_TYPE_NAME): its use's at its

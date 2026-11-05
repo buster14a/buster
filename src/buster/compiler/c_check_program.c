@@ -471,6 +471,8 @@ struct CheckControlWriter
     uint8_t* dropped_regions;
     // check_control_foldable's stack, `fold_capacity` nodes: check_program's node stack, which no other pass uses while
     // the bodies are written.
+    // Temporary storage for a known constant switch's nonrecursive source collector.
+    Arena* switch_scratch;
     uint32_t* fold_stack;
     uint32_t fold_capacity;
     uint32_t count;
@@ -1592,6 +1594,8 @@ static void check_control_drop(CheckControlWriter* writer, uint32_t low, uint32_
     writer->dropped_ranges[writer->dropped_range_count++] = ((uint64_t)low << 32) | high;
 }
 
+#include "c_check_program_switch.c"
+
 // Appends a source label's number, a writer's label, to the writer's CheckProgram.label_positions, which the bodies'
 // loop turns into its place once the label's body is written: a label is a token, so the column has room.
 static void check_control_source_label(CheckControlWriter* writer, uint32_t label)
@@ -1724,41 +1728,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         }
         else if (parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH)
         {
-            writer->stops[token] = end;
-            uint32_t width = 0;
-            bool sign = false;
-            if (!check_action_integer_type(writer->program->types, check_stream_type(writer->program->stream, condition), &width, &sign))
-            {
-                check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
-            }
-            uint32_t fallback = end;
-            for (uint32_t c = writer->case_first[token]; c != BUSTER_CHECK_NONE; c = writer->case_next[c])
-            {
-                const CheckProgramCase* item = writer->program->cases + c;
-                if (item->fallback)
-                {
-                    fallback = writer->source_labels[item->token];
-                }
-            }
-            check_control_mark(writer, end);
-            check_control_statement(writer, body, end, task.repeat);
-            check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, fallback);
-            uint32_t cases = 0;
-            for (uint32_t c = writer->case_first[token]; c != BUSTER_CHECK_NONE; c = writer->case_next[c])
-            {
-                if (!writer->program->cases[c].fallback)
-                {
-                    check_control_entry(writer, CHECK_CONTROL_CASE, writer->program->cases[c].token, BUSTER_CHECK_NONE, c);
-                    cases += 1;
-                }
-            }
-            check_control_entry(writer, CHECK_CONTROL_SWITCH, token, condition, BUSTER_CHECK_NONE);
-            // A jump table takes four clusters of cases or more, so only a switch of four cases or more may have one: the
-            // program lists those. The drain writes this SWITCH entry next, the last task pushed, at writer->count.
-            if (cases >= 4 && writer->switch_count < writer->switch_capacity)
-            {
-                writer->switches[writer->switch_count++] = writer->count;
-            }
+            check_control_switch(writer, keyword, token, body, condition, end, task.repeat);
         }
         else
         {
@@ -3888,6 +3858,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .switch_capacity = switch_capacity,
         .dropped_ranges = dropped_ranges,
         .dropped_regions = dropped_regions,
+        .switch_scratch = scratch,
         .fold_stack = stack,
         .fold_capacity = node_count + 1,
         .capacity = capacity,

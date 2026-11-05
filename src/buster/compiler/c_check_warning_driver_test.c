@@ -44,9 +44,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 3,
     },
     {
-        .name = "floating literal range initializer warns once",
+        .name = "floating literal scalar and aggregate declaration order",
+        .source = "int f(void){int x=4.5;int a[2]={1.5,2.5};int y=3.5;return x+a[0]+y;}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "floating literal range initializer conversions",
         .source = "int values[4]={[0 ... 3]=1.5};\n",
-        .warnings = 1,
+        .warnings = 4,
     },
     {
         .name = "floating literal decimal and hexadecimal spelling",

@@ -631,10 +631,6 @@ typedef struct CheckCommonEmission
     uint32_t work_capacity;
     uint32_t work_count;
     Arena* scratch;
-    // Brace initializers retain their conversions in plans rather than graph operators. Only floating literal
-    // conversions need entries here, sorted by source node; repeated range writes share one entry.
-    const uint64_t* initializer_conversions;
-    uint32_t initializer_conversion_count;
 } CheckCommonEmission;
 
 // The worklist frame kinds.
@@ -870,29 +866,6 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
     const CheckGraph* graph = &input->graph;
     const CheckOp op = graph->ops[node];
     const uint32_t token = graph->tokens[node];
-    if (emission->initializer_conversion_count != 0 && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_FLOATING &&
-        check_common_floating_literal(parser, graph, node))
-    {
-        uint32_t first = 0;
-        uint32_t last = emission->initializer_conversion_count;
-        while (first < last)
-        {
-            const uint32_t middle = first + (last - first) / 2;
-            if ((emission->initializer_conversions[middle] >> 32) < node)
-            {
-                first = middle + 1;
-            }
-            else
-            {
-                last = middle;
-            }
-        }
-        for (uint32_t i = first; i < emission->initializer_conversion_count && (emission->initializer_conversions[i] >> 32) == node; i += 1)
-        {
-            const CheckValue value = check_stream_value(stream, node);
-            check_common_conversion_warning(parser, pp, input, stream, types, spell, node, &value, (TypeId)emission->initializer_conversions[i], scratch);
-        }
-    }
     if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
     {
         const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
@@ -1853,9 +1826,9 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
 
 // A value-changing implicit integer conversion of a constant: the warning clang spells at the constant's own
 // token, shared by initializers, assignments, return conversions and a call's per-argument assignment.
-static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+static void check_common_conversion_warning_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
-                                            TypeId target, Arena* scratch)
+                                            TypeId target, uint32_t completion, Arena* scratch)
 {
     __int128 converted = 0;
     if (value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_conversion_changes(types, value->type, target, value, &converted))
@@ -1877,8 +1850,8 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
             const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
                                                       (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
                                                       original, changed);
-            check_common_report_deferred(parser, pp, input, input->graph.tokens[source], CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message,
-                                         NULL, 0, scratch);
+            check_common_report_phase_at(parser, pp, input, input->graph.tokens[source], completion, PP_DIAGNOSTIC_DEFERRED,
+                                        CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
         }
     }
     else if (value->constant_kind == CHECK_CONSTANT_FLOATING)
@@ -1920,16 +1893,35 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
                     message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
                                                  (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer, original, converted_text);
                 }
-                check_common_report_deferred(parser, pp, input, graph->tokens[source], CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, NULL, 0, scratch);
+                check_common_report_phase_at(parser, pp, input, graph->tokens[source], completion, PP_DIAGNOSTIC_DEFERRED,
+                                            CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, NULL, 0, scratch);
             }
         }
     }
 }
 
-// The sparse conversions which brace initializers keep outside the graph. Scalar '=' initializers already have a
-// conversion operator, and are omitted. No token/node-sized column is added, and all repeated GNU range writes of
-// one literal and destination collapse before the expression walk looks them up.
-static const uint64_t* check_common_initializer_conversions(const Parser* parser, Preprocessor* pp, const CheckInput* input,
+static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                            TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
+                                            TypeId target, Arena* scratch)
+{
+    check_common_conversion_warning_at(parser, pp, input, stream, types, spell, source, value, target,
+                                       check_common_function_boundary(parser, input->graph.tokens[source]), scratch);
+}
+
+static bool check_common_initializer_literal(const Parser* parser, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, const CheckInitPart* part)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    return part->kind == CHECK_INIT_VALUE && part->node < stream->count && check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_FLOATING &&
+           check_common_floating_literal(parser, &input->graph, part->node) && check_common_integer(types, part->conversion.type, &width, &is_signed);
+}
+
+// Brace initializers keep their conversions in plans rather than graph operators. Retain one sparse key for each
+// plan that has a literal conversion, ordered by its first graph root. The walk visits that plan's elements in
+// reverse initializer order at that point, preserving the declaration's position among the surrounding roots.
+// Scalar '=' initializers already have a conversion operator and are omitted.
+static const uint64_t* check_common_initializer_roots(const Parser* parser, Preprocessor* pp, const CheckInput* input,
                                                            const CheckStream* stream, const TypeTable* types, const CheckProgram* program,
                                                            uint32_t* result_count, Arena* scratch)
 {
@@ -1945,22 +1937,23 @@ static const uint64_t* check_common_initializer_conversions(const Parser* parser
             const uint32_t declaration = initializers->declaration_tokens[i];
             const bool scalar = declaration < input->token_count && check_common_sparse_get(input->initializer_nodes, declaration) < input->graph.count;
             const CheckInitializer* plan = initializers->plans + i;
+            bool converted = false;
+            uint32_t first = BUSTER_CHECK_NONE;
             for (uint32_t p = 0; !scalar && p < plan->count; p += 1)
             {
                 const CheckInitPart* part = plan->parts + p;
-                uint32_t width = 0;
-                bool is_signed = false;
-                if (part->kind == CHECK_INIT_VALUE && part->node < stream->count && check_stream_constant_kind(stream, part->node) == CHECK_CONSTANT_FLOATING &&
-                    check_common_floating_literal(parser, &input->graph, part->node) && check_common_integer(types, part->conversion.type, &width, &is_signed))
+                converted |= check_common_initializer_literal(parser, input, stream, types, part);
+                first = part->kind == CHECK_INIT_VALUE && part->node < first ? part->node : first;
+            }
+            if (converted && first < input->graph.count)
+            {
+                if (pass == 0)
                 {
-                    if (pass == 0)
-                    {
-                        capacity += 1;
-                    }
-                    else
-                    {
-                        keys[count++] = (uint64_t)part->node << 32 | part->conversion.type;
-                    }
+                    capacity += 1;
+                }
+                else
+                {
+                    keys[count++] = (uint64_t)first << 32 | i;
                 }
             }
         }
@@ -1980,15 +1973,7 @@ static const uint64_t* check_common_initializer_conversions(const Parser* parser
     }
     const uint32_t varying = input->graph.count != 0 ? UINT32_MAX >> __builtin_clz(input->graph.count) : 0;
     uint64_t* ordered = count != 0 ? c_bindings_sort(keys, temporary, count, !parser->options.scalar, varying) : NULL;
-    uint32_t kept = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        if (kept == 0 || ordered[i] != ordered[kept - 1])
-        {
-            ordered[kept++] = ordered[i];
-        }
-    }
-    *result_count = kept;
+    *result_count = count;
     return ordered;
 }
 
@@ -2059,13 +2044,42 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     {
         memset(emitted, 0, graph->count);
         uint32_t initializer_count = 0;
-        const uint64_t* initializers = check_common_initializer_conversions(parser, pp, input, stream, types, program, &initializer_count, scratch);
+        const uint64_t* initializers = check_common_initializer_roots(parser, pp, input, stream, types, program, &initializer_count, scratch);
         CheckCommonEmission emission = { parser, pp, input, stream, types, spell, evaluated, parents, emitted,
-                                         arm_effects, work_nodes, work_kinds, work_capacity, 0, scratch, initializers, initializer_count };
+                                         arm_effects, work_nodes, work_kinds, work_capacity, 0, scratch };
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order.
+        uint32_t initializer = 0;
         for (uint32_t node = 0; node < graph->count && !pp->fatal; node += 1)
         {
+            while (initializer < initializer_count && (initializers[initializer] >> 32) == node && !pp->fatal)
+            {
+                const uint32_t index = (uint32_t)initializers[initializer++];
+                const CheckInitializer* plan = program->initializers->plans + index;
+                const uint32_t declaration = program->initializers->declaration_tokens[index];
+                const uint32_t end = check_common_sparse_get(input->initializer_ends, declaration);
+                const uint32_t completion = end < parser->tokens.count ? check_common_function_boundary(parser, end) : parser->tokens.count;
+                for (uint32_t p = plan->count; p != 0 && !pp->fatal; p -= 1)
+                {
+                    const CheckInitPart* part = plan->parts + p - 1;
+                    const uint32_t root = part->node;
+                    if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+                        (evaluated == NULL || evaluated[root] != 0))
+                    {
+                        if (parents[root] == BUSTER_CHECK_NONE && emitted[root] == 0)
+                        {
+                            check_common_emit_root(&emission, root);
+                        }
+                        // Range initializers have one conversion per selected element, even when every write uses
+                        // the same source node. The graph's expression is traversed once; its conversions remain distinct.
+                        if (check_common_initializer_literal(parser, input, stream, types, part))
+                        {
+                            const CheckValue value = check_stream_value(stream, root);
+                            check_common_conversion_warning_at(parser, pp, input, stream, types, spell, root, &value, part->conversion.type, completion, scratch);
+                        }
+                    }
+                }
+            }
             if (stream->diagnostics[node] == CHECK_DIAG_NONE && (evaluated == NULL || evaluated[node] != 0) &&
                 parents != NULL && parents[node] == BUSTER_CHECK_NONE && emitted[node] == 0)
             {
