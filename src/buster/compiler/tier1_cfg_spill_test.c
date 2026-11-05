@@ -7,12 +7,13 @@
 // must supply that slot. A new interval at the same position must not inherit the earlier interval's proof.
 static void tier1_cfg_test_spill_prefix(Tier1CfgTestTally* tally)
 {
-    uint32_t value_offsets[] = { 0, 3, 4, 4 };
-    uint32_t starts[] = { 1, 4, 10, 1 };
-    uint32_t ends[] = { 4, 10, 12, 12 };
-    uint32_t offsets[] = { 0, 2, 5, 6, 7 };
-    uint32_t fragment_starts[] = { 1, 2, 4, 6, 8, 10, 1 };
-    uint32_t fragment_ends[] = { 2, 4, 6, 8, 10, 12, 12 };
+    uint32_t value_offsets[] = { 0, 3, 4, 5 };
+    uint32_t starts[] = { 1, 4, 10, 1, 1 };
+    uint32_t ends[] = { 4, 10, 12, 12, 12 };
+    uint32_t offsets[] = { 0, 2, 5, 6, 8, 9 };
+    uint32_t fragment_starts[] = { 1, 2, 4, 6, 8, 10, 1, 6, 1 };
+    uint32_t fragment_ends[] = { 2, 4, 6, 8, 10, 12, 6, 12, 12 };
+    uint32_t spill_values[] = { 1, 0 };
     uint8_t kinds[] = {
         BUSTER_TIER1_ALLOCATE_REGISTER,
         BUSTER_TIER1_ALLOCATE_SPILL,
@@ -21,12 +22,14 @@ static void tier1_cfg_test_spill_prefix(Tier1CfgTestTally* tally)
         BUSTER_TIER1_ALLOCATE_REGISTER,
         BUSTER_TIER1_ALLOCATE_REGISTER,
         BUSTER_TIER1_ALLOCATE_REGISTER,
+        BUSTER_TIER1_ALLOCATE_SPILL,
+        BUSTER_TIER1_ALLOCATE_REGISTER,
     };
     const Tier1CfgAllocation result = {
         .intervals = {
             .starts = starts,
             .ends = ends,
-            .count = 4,
+            .count = 5,
             .value_count = 3,
         },
         .allocation = {
@@ -34,22 +37,23 @@ static void tier1_cfg_test_spill_prefix(Tier1CfgTestTally* tally)
             .starts = fragment_starts,
             .ends = fragment_ends,
             .kinds = kinds,
-            .fragment_count = 7,
+            .spill_values = spill_values,
+            .spill_count = 2,
+            .fragment_count = 9,
         },
         .value_interval_offsets = value_offsets,
     };
-    uint32_t prefix[7];
+    uint32_t prefix[] = { 0, 0, 0, 0, 0, 0, 0, 0, UINT32_MAX };
     tier1_cfg_spill_prefix(&result, prefix);
-    const uint32_t expected[] = { 0, 4, 4, 8, 8, 8, 0 };
-    tier1_cfg_test_expect(tally, memcmp(prefix, expected, sizeof(expected)) == 0, "spill history crosses pieces but resets for each value");
+    const uint32_t expected[] = { 0, 4, 4, 8, 8, 8, 0, 12, UINT32_MAX };
+    tier1_cfg_test_expect(tally, memcmp(prefix, expected, sizeof(expected)) == 0, "spill history crosses pieces without visiting register-only values");
     tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 0, 1, 0), "a value not yet spilled has no current slot");
     tier1_cfg_test_expect(tally, tier1_cfg_slot_current(&result, prefix, 0, 5, 0), "a reloaded piece retains its block's earlier spill");
     tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 0, 5, 4), "a new interval does not inherit a spill ending at its block's entry");
     tier1_cfg_test_expect(tally, tier1_cfg_slot_current(&result, prefix, 0, 9, 8), "a continuing interval's entry reload establishes the slot");
     tier1_cfg_test_expect(tally, tier1_cfg_slot_current(&result, prefix, 0, 11, 6), "a later piece retains a spill in the same block");
     tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 0, 11, 10), "a spill in an earlier layout block proves nothing");
-    tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 1, 11, 0), "another value's spill proves nothing");
-    tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 2, 5, 0), "a value without intervals has no current slot");
+    tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 1, 5, 0), "another value's spill proves nothing");
     tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 0, 0, 0) && !tier1_cfg_slot_current(&result, prefix, 0, 12, 0), "positions outside the value's intervals have no current slot");
 }
 

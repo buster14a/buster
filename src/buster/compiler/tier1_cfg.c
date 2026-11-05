@@ -366,17 +366,20 @@ static bool tier1_cfg_entry_location(const Tier1CfgAllocation* result, uint32_t 
 
 // Last spill end at each fragment, by value and layout position. The prefix includes earlier pieces of the
 // value's range, so a reload after a fixed-register split keeps the proof. Zero means no spill. This is a linear
-// pass over values and fragments, paid only when there are spilled values; edge queries must not rescan fragments
-// for each successor of a dispatch block. Column pointers stay local under -fno-strict-aliasing.
+// pass over spilled values and their fragments; edge queries must not rescan fragments for each successor of a
+// dispatch block. A queried unchanged value has a spill destination, so its value is in spill_values. Register-only
+// values need no prefix. Column pointers stay local under -fno-strict-aliasing.
 static void tier1_cfg_spill_prefix(const Tier1CfgAllocation* result, uint32_t* spill_ends)
 {
-    const uint32_t values = result->intervals.value_count;
+    const uint32_t spills = result->allocation.spill_count;
+    const uint32_t* spill_values = result->allocation.spill_values;
     const uint32_t* value_offsets = result->value_interval_offsets;
     const uint32_t* fragment_offsets = result->allocation.fragment_offsets;
     const uint32_t* ends = result->allocation.ends;
     const uint8_t* kinds = result->allocation.kinds;
-    for (uint32_t v = 0; v < values; v += 1)
+    for (uint32_t s = 0; s < spills; s += 1)
     {
+        const uint32_t v = spill_values[s];
         uint32_t end = 0;
         const uint32_t first = fragment_offsets[value_offsets[v]];
         const uint32_t last = fragment_offsets[value_offsets[v + 1]];
