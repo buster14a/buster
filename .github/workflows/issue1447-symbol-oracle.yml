@@ -17,7 +17,7 @@ jobs:
       - name: Inspect symbol pragma declarations and IR
         run: |
           clang --version
-          for case_id in $(seq 1 32); do
+          for case_id in $(seq 33 42); do
             echo "::group::Symbol pragma case $case_id"
             clang -std=gnu17 -O0 -fno-caret-diagnostics -DCASE="$case_id" -S -emit-llvm tools/issue1447-symbol-semantics.c -o /tmp/issue1447-symbol.ll > /tmp/issue1447-symbol.out 2>&1
             result=$?

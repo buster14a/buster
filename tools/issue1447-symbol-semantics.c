@@ -144,4 +144,61 @@ int target(void);
 int use(void){return target();}
 #pragma redefine_extname target renamed
 int target(void){return 7;}
+#elif CASE == 33
+extern int value;
+int use(void){int x=value;
+#pragma redefine_extname value renamed
+return x;}
+int value=7;
+#elif CASE == 34
+extern int value;
+static int *pointer=&value;
+#pragma redefine_extname value renamed
+int value=7;
+int use(void){return *pointer;}
+#elif CASE == 35
+extern int value;
+static int *pointer=&value;
+int use(void){return *pointer;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 36
+extern int value;
+static int *pointer __attribute__((used))=&value;
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 37
+extern int value;
+int use(void){static int *pointer=&value;return *pointer;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 38
+extern int value;
+static int use(void){static int *pointer=&value;return *pointer;}
+int caller(void){return use();}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 39
+extern int value;
+extern inline int use(void){return value;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 40
+extern int value;
+static int use(void) __attribute__((used));
+static int use(void){return value;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 41
+extern int value;
+int *pointer;
+int use(void){pointer=&value;return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 42
+extern int value;
+static int *pointer=&value;
+int **external=&pointer;
+#pragma redefine_extname value renamed
+int value=7;
 #endif
