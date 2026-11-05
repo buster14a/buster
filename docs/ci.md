@@ -397,6 +397,21 @@ duplicates. A step whose run listing fails, even partly, plans nothing until a
 full listing succeeds; otherwise a run in flight it hid would be dispatched
 again. An admitted run older than two hours is cancelled.
 
+**Refused branches.** GitHub refuses (HTTP 403, "Resource not accessible by
+integration") to let the workflow token create some states' `nightly/SHA`
+branches. In the 2026-11-05 cycle it refused all four merges it was asked for
+whose pull request's head lacked a workflow change main already had, and none
+of the three other states (two merges whose heads had main's workflow files, one
+commit with a single parent). By that pattern, 27 of the cycle's 49 states would
+be refused. The token can't take the `workflows` permission that GitHub asks
+for to create such refs. A refused branch warns, and the state is skipped for
+the rest of that coordinator job, so it neither keeps a preparation slot nor
+stays the oldest ready state while later states wait. Each job tries it once
+again. The report counts and names the skipped states, with an alert. A
+refused snapshot is replaced by the newest eligible earlier state, as an
+ineligible one is. Measuring the refused states needs another way to make their
+branches, which is the owner's decision.
+
 **Time.** The tz database's Europe/Madrid is checked at three points:
 
 - at dispatch, by the coordinator's planner;

@@ -470,9 +470,11 @@ coordinate()
     [[ "$phase" == prepare || "$phase" == window ]]
     [[ "$mode" == run || "$mode" == dry-run ]]
     local coordinator=${GITHUB_RUN_ID:?} states="$work/states.tsv" facts="$work/facts.tsv" ledger="$work/ledger.tsv"
-    local refs="$work/refs.tsv" pending="$work/pending.tsv" main sequence=1 times cycle start deadline started
+    local refs="$work/refs.tsv" pending="$work/pending.tsv" refused="$work/refused.tsv" main sequence=1 times cycle start deadline started
     started=$(now)
     : > "$pending"
+    # The states whose nightly/SHA branch this job couldn't create: the plan skips them for the rest of the job.
+    : > "$refused"
     if [ "$phase" = window ]; then
         sequence=10001
         # Without the prepare job's pending dispatches, a dispatch the runs don't show yet could be dispatched again:
@@ -528,7 +530,7 @@ coordinate()
             sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
         "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
             --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" \
-            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" \
+            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" --refused "$refused" \
             $( [ "$phase" = prepare ] && printf -- '--prepare-only' ) > "$work/plan.tsv"
         cat "$work/plan.tsv"
         verdict=''
@@ -551,6 +553,9 @@ coordinate()
                         "$gh" workflow run 9700x.yml --repo "$repository" --ref "nightly/$commit" -f "purpose=$purpose" \
                             -f "hardware=$hardware" -f "snapshot=$pinned" -f "request=$request" "${override_arguments[@]}"
                         printf 'pending\t%s\t%s\t%s\t%s\t%s\n' "$request" "$purpose" "$hardware" "$commit" "$(now)" >> "$pending"
+                    else
+                        printf '%s\n' "$commit" >> "$refused"
+                        printf '::warning title=Nightly branch::nightly/%s could not be created, so nothing is dispatched for it in this job; later states are planned instead (docs/ci.md)\n' "$commit"
                     fi
                     sequence=$((sequence + 1))
                     ;;

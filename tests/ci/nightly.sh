@@ -30,12 +30,12 @@ if [ "$1" = workflow ]; then
 fi
 [ "$1" = api ]
 shift
-method=GET jq_filter='' endpoint=''
+method=GET jq_filter='' endpoint='' fields=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --paginate) shift ;;
         -X) method=$2; shift 2 ;;
-        -f) shift 2 ;;
+        -f) fields="$fields $2"; shift 2 ;;
         --jq) jq_filter=$2; shift 2 ;;
         *) endpoint=$1; shift ;;
     esac
@@ -69,7 +69,17 @@ case "$method $endpoint" in
         fixture="$FIXTURES/refs.json"; empty='[]' ;;
     "GET repos/buster14a/buster/git/ref/heads/nightly/"*)
         fixture="$FIXTURES/ref-${endpoint##*/}.json" ;;
-    "POST repos/buster14a/buster/git/refs"|"POST repos/buster14a/buster/actions/runs/"*/cancel|"DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+    "POST repos/buster14a/buster/git/refs")
+        # $FIXTURES/refuse-SHA: the workflow token may not create that commit's branch, as GitHub refused some on
+        # 2026-11-05.
+        sha=${fields##* sha=}
+        if [ -f "$FIXTURES/refuse-${sha%% *}" ]; then
+            printf '{"message":"Resource not accessible by integration","status":"403"}\n'
+            printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
+            exit 1
+        fi
+        printf '{}\n'; exit 0 ;;
+    "POST repos/buster14a/buster/actions/runs/"*/cancel|"DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
         printf '{}\n'; exit 0 ;;
     *)
         printf 'fake gh: unexpected %s %s\n' "$method" "$endpoint" >&2; exit 1 ;;
@@ -608,6 +618,17 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epo
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9600\.3\.defer$" 'the next step refills the slot its completion freed'
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and the job still waits for the window'
 rm -f "$fixtures/runs-workflow_dispatch.json.2" "$fixtures"/count-*
+# A branch the workflow token may not create (GitHub refused those of merges whose pull request's head lacked main's
+# workflow changes): it warns, dispatches nothing for that state, and the next step gives its slot to the next state.
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9650 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/refused-branch" prepare run
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::nightly/$epoch could not be created" 'a refused branch warns'
+expect_no_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch " 'and nothing is dispatched for its state'
+test "$(grep -c "^api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 1 || fail 'its branch is tried once a job'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9650\.3\.defer$" 'the next step prepares the next state in its place'
+expect_match "$work/refused-branch/report.md" 'Branch refused' 'and the report names the skipped state'
+rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
 # The handoff from the prepare job to the window job: a prepare step inside the window admits no hardware, and the
 # window job, handed the prepare job's pending dispatches as its output, repeats none that aren't visible yet, whether
 # or not the ledger's artifact can be read.
@@ -672,4 +693,4 @@ git -C "$history" -c push.negotiate=false push -q "$remote" main
 GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/moved" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
 expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, the prepare-to-window handoff and a pin that main moved past checked\n'
+printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, a refused branch, the prepare-to-window handoff and a pin that main moved past checked\n'
