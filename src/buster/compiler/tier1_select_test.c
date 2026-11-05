@@ -881,6 +881,51 @@ static void tier1_select_test_plans(Tier1SelectTest* test)
 // values seldom are), into a register of their own or an operand's. Emitted for x86-64-v3 (BMI1 and BMI2), both paths'
 // code runs natively against the test's evaluator where this machine has both; x86-64's baseline, which has neither,
 // refuses each as the target's.
+// Every form a vector operation's lanes select (#141's element types: tier1_select_lane_forms, _compares and _blends)
+// is one x86 semantics covers, whose effects the code certificate decodes (#939): an uncovered form's conservative
+// effects would read and write every register and fail --verify.
+static void tier1_select_test_lane_forms(Tier1SelectTest* test)
+{
+    uint32_t forms = 0;
+    uint32_t uncovered = 0;
+    for (uint32_t encoding = 0; encoding < 2; encoding += 1)
+    {
+        for (uint32_t operation = 0; operation < BUSTER_TIER1_VECTOR_OPERATIONS; operation += 1)
+        {
+            for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
+            {
+                for (uint32_t width = 0; width < 3; width += 1)
+                {
+                    const uint16_t form = tier1_select_lane_forms[encoding][operation][lane][width];
+                    forms += form != X86_FORM_NONE;
+                    if (form != X86_FORM_NONE && x86_effects(form)->operation == X86_OPERATION_NONE)
+                    {
+                        fprintf(stderr, "uncovered lane form %s (%u)\n", x86_form_description(form)->mnemonic, form);
+                        uncovered += 1;
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const uint16_t candidates[3] = { tier1_select_lane_compares[lane][0][width], tier1_select_lane_compares[lane][1][width], tier1_select_lane_blends[lane][width] };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                forms += candidates[k] != X86_FORM_NONE;
+                if (candidates[k] != X86_FORM_NONE && x86_effects(candidates[k])->operation == X86_OPERATION_NONE)
+                {
+                    fprintf(stderr, "uncovered lane form %s (%u)\n", x86_form_description(candidates[k])->mnemonic, candidates[k]);
+                    uncovered += 1;
+                }
+            }
+        }
+    }
+    tier1_select_test_expect(test, forms != 0 && uncovered == 0, "every form a vector operation's lanes select is one x86 semantics covers");
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -4341,6 +4386,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_intrinsics(&test);
+            tier1_select_test_lane_forms(&test);
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);

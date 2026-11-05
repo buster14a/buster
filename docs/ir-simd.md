@@ -224,6 +224,59 @@ mask, index or control. Tier 1 selects each as its one VEX instruction
 (`TIER1_RULE_INTRINSIC`), whose three registers are its own; its emission's
 target allow-list refuses one for a target without the feature.
 
+## Lanes: the vectors' element types (#141)
+
+The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
+and `v16i32`, the names of their default lanes), whatever their elements: the
+typed stream's `VECTOR` class is bytes alone, so loads, stores, copies, phis,
+selects, calls and row calls carry a vector as its bytes. Each operation that
+reads its operands as elements names its lanes in its `flags` column, an
+`IrSimdLane`, as WebAssembly's `v128` operations do: 32-bit integers (`I32`, 0,
+the default, so that the operations before the lanes keep their meaning), 8-,
+16- and 64-bit integers, floats and doubles. The IR's own opcodes take them, no
+new opcode or type:
+
+| Operation | Lanes | Semantics |
+| --- | --- | --- |
+| `add`, `sub`, `mul` | integers | wrapping, each lane |
+| `shl`, `lshr`, `ashr` | integers | each lane by the other operand's same lane, unsigned: 0 past the lane's bits, an arithmetic shift every bit the sign (the `vpsllv` family's) |
+| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE at the default rounding, a NaN operand's quieted bits (the first's where both are NaNs, x86's rule), else the default NaN |
+| `vcmp` | any | a mask of a bit per lane (`m8` for 8 lanes or fewer, else `m16`, `m32`, `m64`); floating lanes' predicates are C's (`eq` to `ge`: ordered but `ne`, unordered or unequal) |
+| `vselect` | any | each lane by its own mask bit |
+
+`and`, `or`, `xor` and `not` read no lanes (their flags stay 0), nor do a
+scalar's operations. The text names the lanes in the type: `add.v16i8` is an add
+of a `v4i32`'s 16 bytes as 8-bit lanes, `fadd.v8f64` of a `v16i32`'s as doubles;
+a comparison, whose type is its mask's, after its predicate: `vcmp.m16 %1, %2 ult
+lanes=i8` (`ir_lane_type_names`, `ir_parse_lane_type`). The verifier checks each
+operation's lanes (`ir_lane_valid`, `ir_lane_mask`), the vector path deferring a
+lane's instruction to the scalar oracle; `tests/ir/vector-lanes.ir` round-trips
+every form, and `test-ir` refuses its neighbours (an `fadd` of integer lanes, an
+integer `add` of floats, a bitwise operation's lanes, a mask of the wrong width,
+an unsigned floating comparison, a vector shifted by a scalar, a scalar's lanes)
+by both verifiers.
+
+The decoder (`ir_simd_typed_operation`) takes the operators' rows of every
+element type, EVEX's of AVX-512 and VEX's of AVX and AVX2, into these
+operations: `vpadd`, `vpsub` of bytes to quadwords, `vpmullw`, `vpmulld` and
+`vpmullq`, the `vpsllv`, `vpsrlv` and `vpsrav` of words to quadwords, `vaddps` to
+`vdivpd`, and every comparison and its expansion (`vpcmp[u]b` to `vpcmp[u]q`,
+`vcmpps` and `vcmppd` with `vpmovm2b` to `vpmovm2q`), each at its form's own
+features. Splats of a scalar, a floating negation (a sign bit's broadcast and
+`vpxorq`), half-precision elements and every other builtin stay machine rows. The
+interpreter models each lane (`ir_simd_evaluate`): `test-ir`'s model check
+compares every lane kind and width with C's scalar operators lane by lane, and
+`test-tier1-masks` runs three fixtures of every lane kind natively by Tier 1
+against the interpreter, random NaNs, infinities and denormals among the floats.
+The passes see a pure operation where they saw a call: SSA promotion, SCCP, dead
+code and CFG cleanup take them (SCCP folds no vector); GVN and LICM still refuse
+SIMD functions. Dead code keeps the floating operations as the scalar ones'
+effects on the floating environment: the arithmetic, and a comparison of
+floating lanes (`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises
+MXCSR's invalid flag, or traps where it is unmasked), whose mask may go unused;
+an integer comparison goes with its mask. `test-ir-optimize` checks both paths,
+and `test-checker-driver` an unused comparison of a NaN natively, by both tiers.
+
 ## Machine rows (#141)
 
 Any other `X86` row, one the decoders above don't take, is the IR's machine row
@@ -241,8 +294,8 @@ take but the target refuses stays refused. So the decoders' refusals above are
 now each a machine row, or a refusal by class or target: `test-ir-simd`'s
 mutations of the `_k*` and BMI rows check that none decodes as the front end's
 operation, and that the decoder of its family refuses it. `test-ir-simd` also
-decodes a byte addition's, a masked store's of no result and a shift's of a count
-from a general register as machine rows, with their classes and exactly their
+decodes a saturating byte addition's, a masked store's of no result and a shift's
+of a count from a general register as machine rows, with their classes and exactly their
 features, each refused without each feature it needs.
 
 The consumers take a function without vectors (`ir_function_has_vectors`, 64

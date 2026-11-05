@@ -304,8 +304,10 @@ for one). The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and
-64-bit integers, which `__m512i`'s intrinsics are) and the x86 builtins' rows of
-vectors are the IR's machine rows (#141, [the IR guide](ir.md)'s "Machine rows"),
+64-bit integers, which `__m512i`'s intrinsics are) are the IR's operations of
+their lanes where C's operators make them (#141, [the SIMD IR guide](ir-simd.md)'s
+"Lanes"), and the x86 builtins' other rows of vectors are the IR's machine rows
+([the IR guide](ir.md)'s "Machine rows"),
 which Tier 1 places as Tier 0 does ([the selection guide](tier1-selection.md)'s
 "Machine rows"); a vector of 4 or 8 bytes (an SSE carrier, #1280: the operand of
 `_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. Functions with
