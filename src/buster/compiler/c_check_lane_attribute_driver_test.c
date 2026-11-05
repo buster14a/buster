@@ -37,6 +37,13 @@ static void check_test_driver_lane_attributes(CheckTest* test, const char* clang
         { "void h(void);\n" BUSTER_LANE_PADDING "void k(void) { void h(void) __attribute__((hot)); { void h(void) __attribute__((cold)); } }\n", true },
         { "void h(void) __attribute__((hot));\n" BUSTER_LANE_PADDING "void k(void) { void h(void); { void h(void) __attribute__((cold)); } }\n", true },
         { "void k(void) { extern void h(void) __attribute__((hot)); }\nvoid m(void) { void h(void) __attribute__((cold)); }\n" BUSTER_LANE_PADDING, false },
+        // A block's first declaration, which a later file-scope one links to: the definition inherits its attributes (#1446's
+        // review), and they exclude a later one's, in another body too.
+        { "void f(void) { extern void g(void) __attribute__((cold)); }\n" BUSTER_LANE_PADDING "void g(void) {}\nvoid g(void) __attribute__((cold));\n", false },
+        { "void f(void) { extern void g(void) __attribute__((cold)); }\n" BUSTER_LANE_PADDING "void g(void) {}\nvoid g(void) __attribute__((used));\n", false },
+        { "void k(void) { extern void h(void) __attribute__((hot)); }\nvoid h(void);\n" BUSTER_LANE_PADDING
+          "void m(void) { void h(void) __attribute__((cold)); }\n", false },
+        { "void k(void) { extern void h(void) __attribute__((hot)); }\n" BUSTER_LANE_PADDING "void h(void) __attribute__((cold));\n", false },
         // A redeclaration without such attributes stays on its lane.
         { "void h(void) __attribute__((hot));\n" BUSTER_LANE_PADDING "void k(void) { void h(void); h(); }\n" BUSTER_LANE_TAIL, false },
     };

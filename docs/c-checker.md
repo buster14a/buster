@@ -6098,11 +6098,14 @@ arguments against the function. The checker now gives these as clang does.
   against those clang's lookup finds: the file scope's and an enclosing
   block's, not another body's nor a closed block's (and every earlier one
   where none is visible, as clang's `findLocallyScopedExternCDecl` finds a
-  closed block's extern). A block's attributes never reach the definition's,
-  which the attributes after it are checked against: the late masks take file
-  scope's alone. Each attributed block-scope declaration with linkage records
-  its scope's end (`CheckInputReader.declaration_scope_ends`, allocated at the
-  first).
+  closed block's extern). A block's attributes reach the definition's, which
+  the attributes after it are checked against, only from a block's first
+  declaration of its entity, which a later file-scope declaration that sees
+  none links to and inherits from; the late masks take file scope's and
+  those. Each attributed block-scope declaration with linkage that has a
+  visible previous one records its scope's end
+  (`CheckInputReader.declaration_scope_ends`, allocated at the first); the
+  others count as file scope's.
 - **Bodies on lanes** (`check_input_attribute_late`). A body read on a lane
   can't read its entity's other declarations' attributes, which other lanes'
   columns hold, nor publish its own to later ones. A redeclaration there that
