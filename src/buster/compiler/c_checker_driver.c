@@ -3403,6 +3403,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
         if (valid)
         {
+            // One C unit has no competing groups; a multi-unit merge has already selected them. Group metadata is
+            // for relocatable objects and unit selection, and must not retain the atom count before runtime binding.
+            code.link.groups = (LinkGroups){ 0 };
             // Binding takes the libraries between bind_begin, which check_program_emit ran, and bind_end.
             bind.libraries = naming ? &named : 0;
             bind.libraries_needed |= naming ? named.required : 0;

@@ -61,6 +61,9 @@ struct CheckProgramCode
     // (check_program_sections); none in a unit without one.
     SymbolId* retained_symbols;
     uint32_t retained_count;
+    // selectany definitions are weak symbols whose atoms and relocations form COMDAT groups of their names.
+    SymbolId* selectany_symbols;
+    uint32_t selectany_count;
     // The atoms of templates that take directives (CheckProgramAsm.unit), which the body loop publishes: each one's
     // section, with the file-scope assembly's, for -c's object.
     AtomId* unit_atoms;
@@ -1057,6 +1060,8 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
 // A loader_uninitialized declaration (#147): a definition that clang's code gives common linkage where a tentative one
 // would have it, made weak for its initializer that isn't zero (EmitGlobalVarDefinition).
 #define BUSTER_CHECK_EMIT_COMMON_LOADER 0x20u
+// A selectany definition uses weak binding and a COMDAT section, never a common symbol.
+#define BUSTER_CHECK_EMIT_SELECTANY 0x40u
 
 // The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
 // tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
@@ -2687,6 +2692,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // others' bits (check_program_emit_commons).
     uint8_t* commons = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     bool common = false;
+    bool selecting = false;
     valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0 &&
             commons != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
@@ -2764,14 +2770,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
-                    if (symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SELECTANY)
+                    if (symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SELECTANY && defined[object])
                     {
-                        // Weak binding alone cannot give a selectany definition COMDAT's section and relocation
-                        // selection. Keep syntax checking independent of this object-writer boundary.
-                        result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "a 'selectany' definition requiring ELF COMDAT section groups";
-                        result->token = attribute->first;
-                        valid = false;
+                        // The weak definition's whole section, including its relocations, is selected by name.
+                        // A declaration without a definition remains an ordinary external reference.
+                        weak[symbol] = 1;
+                        commons[symbol] |= BUSTER_CHECK_EMIT_SELECTANY;
+                        selecting = true;
                     }
                     // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
                     // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
@@ -2891,20 +2896,27 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             valid = false;
         }
     }
-    // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
-    // retain attribute for the counting pass to look for.
+    // The retained and selectany symbols (#147), for check_program_sections, in symbol order; the usual unit pays
+    // for neither counting pass nor output column.
     uint32_t retained_count = 0;
-    for (uint32_t s = 1; valid && retaining && s <= program->symbol_count; s += 1)
+    uint32_t selectany_count = 0;
+    for (uint32_t s = 1; valid && (retaining || selecting) && s <= program->symbol_count; s += 1)
     {
         retained_count += retained[s];
+        selectany_count += (commons[s] & BUSTER_CHECK_EMIT_SELECTANY) != 0;
     }
     result->retained_symbols = valid && retained_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, retained_count) : 0;
-    valid = valid && (retained_count == 0 || result->retained_symbols != 0);
-    for (uint32_t s = 1; valid && retained_count != 0 && s <= program->symbol_count; s += 1)
+    result->selectany_symbols = valid && selectany_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, selectany_count) : 0;
+    valid = valid && (retained_count == 0 || result->retained_symbols != 0) && (selectany_count == 0 || result->selectany_symbols != 0);
+    for (uint32_t s = 1; valid && (retained_count != 0 || selectany_count != 0) && s <= program->symbol_count; s += 1)
     {
         if (retained[s])
         {
             result->retained_symbols[result->retained_count++] = s;
+        }
+        if ((commons[s] & BUSTER_CHECK_EMIT_SELECTANY) != 0)
+        {
+            result->selectany_symbols[result->selectany_count++] = s;
         }
     }
     // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
@@ -3997,7 +4009,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     *table = 0;
     bool valid = true;
     if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0 ||
-        program->cfstring_count != 0)
+        program->cfstring_count != 0 || code->selectany_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -4124,12 +4136,31 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 valid = link_set_atom_section(link, atom, descriptors[atom].name);
             }
         }
-        // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
+        // Retained and selectany definitions (#147) need their named section or one of their own, their
         // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
-        // getELFSectionNameForGlobal), of its class's type and flags.
-        for (uint32_t r = 0; valid && refused == BUSTER_CHECK_NONE && r < code->retained_count; r += 1)
+        // getELFSectionNameForGlobal), of its class's type and flags. Retain adds SHF_GNU_RETAIN; selectany supplies the
+        // group signature, which also makes otherwise equal explicit section names distinct between groups.
+        const uint32_t previous_groups = link->groups.count != 0 ? link->groups.count : 1;
+        const uint64_t group_count = (uint64_t)previous_groups + code->selectany_count;
+        LinkGroup* groups = valid && code->selectany_count != 0 && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
+        uint32_t* memberships = groups != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, link->atoms.count) : NULL;
+        valid = valid && (code->selectany_count == 0 || (groups != NULL && memberships != NULL));
+        code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+        if (valid && groups != NULL)
         {
-            const SymbolId symbol = code->retained_symbols[r];
+            memset(groups, 0, group_count * sizeof(LinkGroup));
+            memset(memberships, 0, (uint64_t)link->atoms.count * sizeof(uint32_t));
+            if (link->groups.count != 0)
+            {
+                memcpy(groups, link->groups.data, (uint64_t)link->groups.count * sizeof(LinkGroup));
+                memcpy(memberships, link->groups.atom_groups, (uint64_t)link->groups.atom_count * sizeof(uint32_t));
+            }
+        }
+        const uint64_t unique_count = (uint64_t)code->retained_count + code->selectany_count;
+        for (uint64_t r = 0; valid && refused == BUSTER_CHECK_NONE && r < unique_count; r += 1)
+        {
+            const bool selectany = r >= code->retained_count;
+            const SymbolId symbol = selectany ? code->selectany_symbols[r - code->retained_count] : code->retained_symbols[r];
             const AtomId atom = link->symbols.atom[symbol];
             const NameId name = link->symbols.name[symbol];
             const ObjectSectionFormat* format = atom != 0 ? &object_class_sections[link->atoms.class[atom]] : NULL;
@@ -4148,8 +4179,18 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             }
             if (valid && format != NULL)
             {
-                descriptors[atom].flags |= SHF_GNU_RETAIN;
+                descriptors[atom].flags |= selectany ? SHF_GROUP : SHF_GNU_RETAIN;
+                if (selectany)
+                {
+                    const uint32_t group = previous_groups + (uint32_t)(r - code->retained_count);
+                    groups[group] = (LinkGroup){ .name = name, .signature = symbol, .unit = link->atoms.unit[atom], .flags = BUSTER_LINK_GROUP_COMDAT };
+                    memberships[atom] = group;
+                }
             }
+        }
+        if (valid && refused == BUSTER_CHECK_NONE && groups != NULL)
+        {
+            link->groups = (LinkGroups){ .data = groups, .atom_groups = memberships, .count = (uint32_t)group_count, .atom_count = link->atoms.count };
         }
         if (valid && refused != BUSTER_CHECK_NONE)
         {

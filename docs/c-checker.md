@@ -5951,8 +5951,17 @@ arguments against the function. The checker now gives these as clang does.
   first token. The checker stops at a declaration's first attribute error,
   where clang goes on to the next declaration's.
 
-  The rest stay refused by name: `selectany` (a COMDAT),
-  `no_caller_saved_registers` (a calling convention), and the attributes
+  `selectany` is accepted on external data. Its definitions have weak binding
+  and publish the existing `LinkGroups` representation: one COMDAT group per
+  selected variable, including its relocation sections. Explicit section names
+  remain separate when their groups differ; zero-fill, const and thread-local
+  definitions retain their own section kinds. With several source units the
+  first group's atoms are kept in command-line order before symbol resolution,
+  so references belonging only to discarded groups disappear. Ordinary strong
+  definitions still take precedence over weak definitions. `-c` objects and
+  direct links share this producer; no additional object-writer format is used.
+
+  The rest stay refused by name: `no_caller_saved_registers` (a calling convention), and the attributes
   whose handlers clang has its own (`pass_object_size`, `ms_struct`,
   `interrupt` and others).
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names

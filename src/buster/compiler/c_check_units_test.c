@@ -2589,6 +2589,8 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
     }
 }
 
+#include "c_check_selectany_driver_test.c"
+
 static int run_check_units_tests(int argc, char** argv)
 {
     CheckUnitsTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -2696,6 +2698,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_preprocessed(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
+        check_units_test_selectany(&tally, executable, clang, directory);
         check_units_test_bounds(&tally, executable, directory);
         check_units_test_merge_lease(&tally);
         check_units_test_shared(&tally, executable, directory);
