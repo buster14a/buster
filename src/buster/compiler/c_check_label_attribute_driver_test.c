@@ -686,6 +686,10 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void f(int p [[__clang__::unused]]) __attribute__((stdcall));\n",
         "#undef __clang__\n#define __clang__ 7\n[[__clang__::unused]] int a;\n",
         "#define WRAP __clang__\n[[WRAP::unused]] int a;\n",
+        // A failed attribute-name parse consumes the first closing bracket and diagnoses the second at file scope.
+        "[[123]] int a;\n",
+        "[[, 123::unused]] int a;\n",
+        "#define WRAP __clang__\n[[WRAP(1, (2))::unused]] int a;\n",
         "[[gnu::annotate(\"tag\", __clang__)]] int a;\nint values[] = {1, __clang__};\n",
         "void f(int p [[gnu::cold]]) __attribute__((stdcall));\n",
         "__attribute__((stdcall)) void f(int a __attribute__((cold)));\n",
@@ -698,6 +702,20 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void [[gnu::stdcall]] f(void);\nvoid [[gnu::regparm(2)]] h(void);\n",
         "typedef void F(void);\nF [[gnu::stdcall]] k;\n",
         "void [[gnu::ms_abi]] f(void);\nvoid f(void);\n",
+        // The type at an attribute retains this declarator's groups, including redundant ones and partial chunk types.
+        // Typedefs keep the groups in the sugared spelling and discard them in the canonical aka spelling.
+        "int (*p1) __attribute__((stdcall));\nint (*(p2)) __attribute__((stdcall));\nint *(p3) __attribute__((stdcall));\n"
+        "int ((p4)) __attribute__((stdcall));\nint (**p5) __attribute__((stdcall));\nint *(*p6) __attribute__((stdcall));\n"
+        "int (*p7[3]) __attribute__((stdcall));\nint (*(p8[3])) __attribute__((stdcall));\nint (*p9)[3] __attribute__((stdcall));\n"
+        "typedef int I; I (*p10) __attribute__((stdcall));\ntypedef int *P; P (p11) __attribute__((stdcall));\n"
+        "int ((*p12)) __attribute__((stdcall));\nint (* const p13) __attribute__((stdcall));\n",
+        "int (* __attribute__((stdcall)) p14);\nint (__attribute__((stdcall)) *p15);\n"
+        "int __attribute__((stdcall)) (*p16);\nint (__attribute__((stdcall)) *p17) __attribute__((fastcall));\n",
+        "void f(int (*p) __attribute__((stdcall)), int *q __attribute__((fastcall)));\n"
+        "int (*a) __attribute__((stdcall)), *b __attribute__((fastcall));\n"
+        "int s=sizeof(int (* __attribute__((stdcall))));\n",
+        "void (__attribute__((stdcall)) *p)(int q __attribute__((cold))) [[gnu::fastcall]];\n",
+        "[[__clang__::x]] void (__attribute__((stdcall)) *p)(int q [[__clang__::y]]) [[gnu::fastcall]];\n",
         "int f(int x) {\n    [[gnu::aligned(4)]] x += 1;\n    return x;\n}\n",
         "int f(int x) {\n    [[__gnu__::__fallthrough__]] x += 1;\n    return x;\n}\n",
         "int f(int x) {\n    [[__deprecated__]] x += 1;\n    return x;\n}\n",
@@ -1282,6 +1300,11 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "static __attribute__((cold)) int (*e4);\nvoid f(void) { __attribute__((cold)) int (*e9); }\n",
         "void ([[gnu::stdcall]] *a7)(void);\n",
         "int ([[gnu::regparm(2)]] *r3);\n",
+        "__attribute__((noinline)) void ([[gnu::stdcall]] *p)(void);\n",
+        "void __attribute__((stdcall)) ([[gnu::noinline]] *p)(void);\n",
+        "void ([[gnu::x]] *p)(void) __attribute__((noinline));\n",
+        "void f(int ([[gnu::x]] *p) __attribute__((cold))) __attribute__((stdcall));\n",
+        "__attribute__((noinline)) void ([[gnu::x]] ([[gnu::y]] *p))(void);\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

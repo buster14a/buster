@@ -2478,7 +2478,8 @@ static bool check_input_attribute_function_typed(CheckInputReader* reader, const
 
 // The "only applies to function types" warning of `attribute` (check_input_attribute_type_warnings and
 // check_input_attribute_function_types), completing where its declarator's type is ready.
-static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, uint32_t name, uint32_t earliest)
+static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, TypeId declared,
+                                                        uint32_t name, uint32_t position, uint32_t earliest)
 {
     const CheckWarningEvent event =
     {
@@ -2488,7 +2489,7 @@ static void check_input_attribute_function_type_warning(CheckInputReader* reader
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = earliest != UINT32_MAX ? earliest : attribute->first + 1,
-        .payload = { .first_type = type, .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .payload = { .first_type = type, .second_type = declared, .name = attribute->name, .token = position,
                      .data = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0 },
     };
     check_input_warning_event(reader, &event, NULL, 0);
@@ -2522,7 +2523,7 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
             earliest = pass == 0 && !function_type && attribute->first < earliest ? attribute->first : earliest;
             if (pass == 1 && function_type)
             {
-                check_input_attribute_function_type_warning(reader, attribute, type, name, earliest);
+                check_input_attribute_function_type_warning(reader, attribute, type, type, name, name, earliest);
             }
         }
     }
@@ -4710,7 +4711,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
             const bool placed = specifiers || (chunks ? attribute->first < split : attribute->first >= split);
             if (placed && attribute->specifier_ignored && check_input_attribute_function_typed(reader, attribute))
             {
-                check_input_attribute_function_type_warning(reader, attribute, base, name, completion);
+                check_input_attribute_function_type_warning(reader, attribute, base, type, name, split, completion);
             }
             else if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
                 !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
@@ -4732,7 +4733,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
                         here = before ? parts[p].type : here;
                     }
                 }
-                check_input_attribute_function_type_warning(reader, attribute, here, name, completion);
+                check_input_attribute_function_type_warning(reader, attribute, here, type, name, split, completion);
             }
         }
     }

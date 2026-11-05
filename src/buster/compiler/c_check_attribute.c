@@ -2425,6 +2425,7 @@ static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t
 #define BUSTER_CHECK_PLACE_SPECIFIERS 2u
 #define BUSTER_CHECK_PLACE_QUALIFIERS 3u
 #define BUSTER_CHECK_PLACE_FUNCTION 4u
+#define BUSTER_CHECK_PLACE_GROUP 5u
 
 static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
 {
@@ -2464,7 +2465,7 @@ static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
     // (A list that begins a declarator's group, `void ([[gnu::stdcall]] *p)(void)`, clang's parser rejects as one after a
     // pointer's qualifiers: #147.)
     const bool group = kind == PARSE_KIND_L_PAREN && role == PARSE_ROLE_OPEN_GROUP;
-    return qualifiers || group ? BUSTER_CHECK_PLACE_QUALIFIERS : role == PARSE_ROLE_CLOSE_FUNCTION ? BUSTER_CHECK_PLACE_FUNCTION : chunk ? BUSTER_CHECK_PLACE_CHUNK :
+    return group ? BUSTER_CHECK_PLACE_GROUP : qualifiers ? BUSTER_CHECK_PLACE_QUALIFIERS : role == PARSE_ROLE_CLOSE_FUNCTION ? BUSTER_CHECK_PLACE_FUNCTION : chunk ? BUSTER_CHECK_PLACE_CHUNK :
            specifiers && open > 0 ? BUSTER_CHECK_PLACE_SPECIFIERS : BUSTER_CHECK_PLACE_DECLARATION;
 }
 
@@ -3257,15 +3258,23 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             const uint32_t list_end = valid ? parser->tree.parents[open + 1] : end;
             valid &= list_end + 1 == close;
             i = open + 2;
-            if (valid && place == BUSTER_CHECK_PLACE_QUALIFIERS)
+            if (valid && (place == BUSTER_CHECK_PLACE_QUALIFIERS || place == BUSTER_CHECK_PLACE_GROUP))
             {
                 // clang's declarator parser rejects a C23 list after a pointer's qualifiers, or at a group's start
-                // (err_attributes_not_allowed).
+                // (err_attributes_not_allowed). A group's bounded list is discarded, then the same declarator finishes
+                // its type and outer attributes. The retained report still stops the unit before another declaration.
                 check_input_report(reader, first, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
-                valid = false;
-                attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
-                attributes->error_first = first;
-                attributes->error_end = close + 1;
+                if (place == BUSTER_CHECK_PLACE_GROUP)
+                {
+                    i = list_end;
+                }
+                else
+                {
+                    valid = false;
+                    attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
+                    attributes->error_first = first;
+                    attributes->error_end = close + 1;
+                }
             }
             while (valid && i < list_end)
             {

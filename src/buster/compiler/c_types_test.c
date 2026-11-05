@@ -2296,6 +2296,38 @@ static bool type_test_printing(Arena* arena)
         const String8 named = type_print(table, arena, type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3)), BUSTER_S8("p"), 0, 0);
         type_test_expect(&tally, named.length == 11 && memcmp(named.pointer, "int (*p)[3]", 11) == 0, "printing", "a named pointer to an array");
         arena_pop_to(arena, length);
+        // Parentheses are one declarator occurrence's sugar. They do not change its type, expand into an aka spelling,
+        // double the precedence group of an array pointer, or leak into a function parameter of the same base type.
+        const TypeId pointer_pointer = type_pointer(table, int_pointer);
+        const TypeId array = type_array(table, BUSTER_TYPE_INT, 3);
+        const struct
+        {
+            TypeId type;
+            TypeId grouped;
+            uint32_t count;
+            const char* text;
+        } grouped[] = {
+            { int_pointer, BUSTER_TYPE_INT, 1, "int (*)" },
+            { int_pointer, int_pointer, 1, "int *" },
+            { pointer_pointer, BUSTER_TYPE_INT, 1, "int (**)" },
+            { pointer_pointer, int_pointer, 1, "int *(*)" },
+            { type_array(table, int_pointer, 3), BUSTER_TYPE_INT, 1, "int (*[3])" },
+            { type_pointer(table, array), array, 1, "int (*)[3]" },
+            { int_pointer, BUSTER_TYPE_INT, 2, "int ((*))" },
+            { int_pointer | BUSTER_TYPE_CONST, BUSTER_TYPE_INT, 1, "int (*const)" },
+            { type_pointer(table, of_int), of_int, 1, "int (*)(int)" },
+            { type_function(table, int_pointer, &int_pointer, 1, prototype), BUSTER_TYPE_INT, 1, "int (*(int *))" },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(grouped); i += 1)
+        {
+            const uint64_t mark = arena->length;
+            const TypePrintParen parentheses = { .type = grouped[i].grouped, .count = grouped[i].count };
+            const TypeNames spelling = { .parentheses = &parentheses, .parenthesis_count = 1 };
+            const String8 printed = type_print(table, arena, grouped[i].type, (String8){ 0 }, &spelling, 0);
+            type_test_expect(&tally, printed.length == strlen(grouped[i].text) && memcmp(printed.pointer, grouped[i].text, printed.length) == 0,
+                             "parenthesized printing", grouped[i].text);
+            arena_pop_to(arena, mark);
+        }
         type_test_table_close(&test);
     }
     type_test_report("printing", tally);

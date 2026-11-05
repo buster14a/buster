@@ -5398,6 +5398,48 @@ static uint32_t parse_scalar_skip(const ParseScalar* parser, uint32_t token, uin
     return result;
 }
 
+// When a file-scope C23 attribute name is missing, clang's failed first `]` expectation skips through one `]` and
+// leaves the second one for the declaration parser. Report that bracket too, without publishing any of the damaged
+// declaration's tree or bindings. Balanced argument tokens in the skipped list cannot supply its closing bracket.
+static void parse_scalar_attribute_tail(ParseScalar* parser, uint32_t token, uint32_t end)
+{
+    const bool prefix = parser->frame_count == 3 && parser->frames[1].role == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER &&
+                        (parser->frames[1].continuation == PARSE_MODE_SPECIFIERS || parser->frames[1].continuation == PARSE_MODE_DECLARATOR);
+    const bool missing = prefix && parser->frames[2].role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST &&
+                         parser->frames[2].mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME && parser->error_message == PARSE_MESSAGE_EXPECTED_R_SQUARE;
+    uint32_t depth = 0;
+    bool done = !missing;
+    for (uint32_t i = token; !done && i < end && i < parser->count; i += 1)
+    {
+        const uint8_t kind = parser->kinds[i];
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            parser->brackets[depth] = kind;
+            depth += 1;
+        }
+        else if (parse_kind_is_closer(kind))
+        {
+            const uint8_t opener = kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : kind == PARSE_KIND_R_SQUARE ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_BRACE;
+            if (depth != 0 && parser->brackets[depth - 1] == opener)
+            {
+                depth -= 1;
+            }
+            else
+            {
+                if (depth == 0 && kind == PARSE_KIND_R_SQUARE && parser->kinds[i + 1] == PARSE_KIND_R_SQUARE)
+                {
+                    parse_scalar_note(parser, i + 1, PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_NONE, true);
+                }
+                done = true;
+            }
+        }
+        else
+        {
+            done = depth == 0 && kind == PARSE_KIND_SEMI;
+        }
+    }
+}
+
 // Back to file scope, between top-level declarations.
 static void parse_scalar_reset(ParseScalar* parser)
 {
@@ -5463,6 +5505,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
     }
     parser->errors += 1;
     const uint32_t end = resumed ? stopped - 1 : parse_scalar_skip(parser, stopped, parser->brackets);
+    parse_scalar_attribute_tail(parser, stopped, end);
     for (uint32_t t = parser->item_begin; t <= end && t < parser->count; t += 1)
     {
         parser->roles[t] = PARSE_ROLE_ERROR;
@@ -5477,8 +5520,8 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 typedef struct ParseScalarResult ParseScalarResult;
 struct ParseScalarResult
 {
-    // The errors found: syntax errors (one per top-level declaration at most), and the errors clang reports without
-    // changing how it parses (a missing type specifier).
+    // The errors found: a top-level declaration's first syntax error and any malformed attribute tail it leaves,
+    // and the errors clang reports without changing how it parses (a missing type specifier).
     uint32_t errors;
     // The scratch arena couldn't hold the parser's stacks: nothing was parsed.
     bool out_of_memory;
