@@ -6,14 +6,14 @@
 // Kept outside c_check_attribute.c so the evaluator's own type-attribute reader remains acyclic.
 
 static bool check_input_attribute_expression(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute,
-                                              uint32_t first, uint32_t end, CheckValue* value, bool* call_failure)
+                                              uint32_t first, uint32_t end, bool scoped, CheckValue* value, bool* call_failure)
 {
     const Parser* parser = reader->parser;
     CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
     uint32_t failed = BUSTER_CHECK_NONE;
     TypeId unused = 0;
     const uint32_t before = reader->output->report_count;
-    const bool valid = check_input_constant_read(reader, first, end, false, false, value, &unused, &failed, &failure);
+    const bool valid = check_input_constant_read(reader, first, end, false, false, scoped, value, &unused, &failed, &failure);
     *call_failure = false;
     if (!valid && !reader->output->resource && reader->output->report_count == before)
     {
@@ -30,6 +30,7 @@ static bool check_input_attribute_expression(CheckInputReader* reader, CheckInpu
         }
         *call_failure |= failure.op == CHECK_OP_CALL && failure.diagnostic != CHECK_DIAG_NONE;
         const bool undeclared = failure.diagnostic == CHECK_DIAG_NONE && token < end && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                                (!scoped || reader->declared_types[token] == 0) &&
                                 c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) == 0;
         const bool type_tail = undeclared && open != BUSTER_CHECK_NONE && open + 1 < token && check_input_attribute_type_start(reader, open + 1);
         if (undeclared && !type_tail)
@@ -49,15 +50,19 @@ static bool check_input_attribute_expression(CheckInputReader* reader, CheckInpu
             const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
             const bool size = failure.diagnostic == CHECK_DIAG_INCOMPLETE && (failure.op == CHECK_OP_SIZEOF || failure.op == CHECK_OP_ALIGNOF);
             const bool call = failure.diagnostic == CHECK_DIAG_ARGUMENT_COUNT && failure.op == CHECK_OP_CALL;
+            const bool binary = failure.second_type != 0 && (failure.diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED ||
+                                failure.diagnostic == CHECK_DIAG_INTEGER_REQUIRED || failure.diagnostic == CHECK_DIAG_SCALAR_REQUIRED ||
+                                failure.diagnostic == CHECK_DIAG_INCOMPATIBLE);
             const CheckAttributeArgumentError error = type_tail ? CHECK_ARGUMENT_EXPECTED_PAREN :
                 member && failure.diagnostic == CHECK_DIAG_MEMBER ? (record ? CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME : CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE) :
-                size ? CHECK_ARGUMENT_EXPRESSION_SIZEOF : call ? CHECK_ARGUMENT_EXPRESSION_CALL_COUNT : CHECK_ARGUMENT_EXPECTED_EXPRESSION;
+                size ? CHECK_ARGUMENT_EXPRESSION_SIZEOF : call ? CHECK_ARGUMENT_EXPRESSION_CALL_COUNT :
+                binary ? CHECK_ARGUMENT_EXPRESSION_BINARY : CHECK_ARGUMENT_EXPECTED_EXPRESSION;
             check_input_attribute_argument_error(reader, attributes, attribute, token, error, call ? failure.expected : 0);
             if (reader->output->report_count > before)
             {
                 CheckInputReport* report = reader->output->reports + before;
                 report->type = type;
-                report->value = call ? failure.actual | ((uint64_t)failure.variadic << 32) : member ? failure.name : 0;
+                report->value = call ? failure.actual | ((uint64_t)failure.variadic << 32) : member ? failure.name : binary ? failure.second_type : 0;
                 report->type_spelling = check_input_typedef_spelling(reader->output, parser, first);
                 report->note_token = BUSTER_CHECK_NONE;
                 if (type_tail)
@@ -101,7 +106,7 @@ static bool check_input_attribute_expressions(CheckInputReader* reader, CheckInp
         if (!identifier && !string)
         {
             CheckValue value = { 0 };
-            valid = check_input_attribute_expression(reader, attributes, attribute, first, end, &value, &call_failure);
+            valid = check_input_attribute_expression(reader, attributes, attribute, first, end, false, &value, &call_failure);
         }
         first = end + 1;
         index += 1;
@@ -137,7 +142,7 @@ static bool check_input_attribute_annotate(CheckInputReader* reader, CheckInputA
         const uint32_t end = check_constant_punctuation(parser, first, attribute->argument_end, PARSE_KIND_COMMA);
         CheckValue value = { 0 };
         bool call_failure = false;
-        valid = check_input_attribute_expression(reader, attributes, attribute, first, end, &value, &call_failure);
+        valid = check_input_attribute_expression(reader, attributes, attribute, first, end, false, &value, &call_failure);
         const bool constant = valid && check_input_const_rvalue(reader, end, &value) && value.constant_kind != CHECK_CONSTANT_NONE &&
                               value.fault == CHECK_FAULT_NONE && (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_DIVISION)) == 0;
         if (valid && !constant)

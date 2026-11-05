@@ -117,6 +117,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
     { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
     { "-Wassume", NULL, "assumption is ignored because it contains (potential) side-effects" },
+    { "-Wthread-safety-attributes", "-Wthread-safety", "invalid thread-safety attribute" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

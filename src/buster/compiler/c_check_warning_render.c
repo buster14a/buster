@@ -619,6 +619,38 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         attribute.pointer, ending);
             break;
         }
+        case CHECK_WARNING_EVENT_THREAD_CAPABILITY:
+        case CHECK_WARNING_EVENT_THREAD_ARGUMENT:
+        case CHECK_WARNING_EVENT_THREAD_METHOD:
+        case CHECK_WARNING_EVENT_THREAD_POINTER:
+        case CHECK_WARNING_EVENT_THREAD_CONTEXT:
+        case CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER:
+        case CHECK_WARNING_EVENT_THREAD_PARAMETER:
+        {
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const bool typed = event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER;
+            const String8 type = typed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->token) : (String8){ "", 0 };
+            const char* suffix = event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY ?
+                                 "attribute requires arguments whose type is annotated with 'capability' attribute; type here is " :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ? "only applies to pointer types; type here is " :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_METHOD ?
+                                 "attribute without capability arguments can only be applied to non-static methods of a class" :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_PARAMETER ?
+                                 "attribute applies to function parameters only if their type is a reference to a 'scoped_lockable'-annotated type" :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER ?
+                                 (payload->token != 0 ? "attribute on a field requires the field to be of function pointer type" :
+                                                       "attribute on a variable requires the variable to be of function pointer type") :
+                                 "attribute can only be applied in a context annotated with 'capability' attribute";
+            result = event->kind == CHECK_WARNING_EVENT_THREAD_ARGUMENT ?
+                     check_warning_text(scratch, "ignoring '%.*s%s%.*s' attribute because its argument is invalid", (int)scope.length, scope.pointer,
+                                        scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                     check_warning_text(scratch, "'%.*s%s%.*s' %s%.*s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                        (int)attribute.length, attribute.pointer, suffix, (int)type.length, type.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
         {
             static const char* const keywords[] = { "struct", "union", "enum" };
@@ -972,6 +1004,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                    event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
                    event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
                    event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT ||
+                   event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ||
                    (event->kind == CHECK_WARNING_EVENT_DEPRECATED_USE && event->note_count != 0 && event->note_first < view->note_count &&
                     view->notes[event->note_first].payload.data == BUSTER_CHECK_DEPRECATED_TYPE_NAME));
     }

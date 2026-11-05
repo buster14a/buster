@@ -1435,6 +1435,14 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "static int x __attribute__((selectany));\n",
         "void f(void) __attribute__((selectany));\n",
         "void f(void) { int x __attribute__((selectany)); }\n",
+        // A wrong base does not suppress the target's separate unsupported-mode error.
+        "int x __attribute__((mode(IF)));\n",
+        "void *x __attribute__((mode(IF)));\n",
+        "struct S { int n; }; struct S x __attribute__((mode(IF)));\n",
+        "int x __attribute__((mode(V2IF)));\n",
+        // target diagnostics name the decoded unsupported fragment, including permitted escapes.
+        "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
+        "int f(void) __attribute__((target(\"bo\\tgus\")));\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

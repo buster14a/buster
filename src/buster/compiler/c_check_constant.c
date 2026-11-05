@@ -152,6 +152,7 @@ struct CheckConstantFailure
     CheckDiagnostic diagnostic;
     CheckOp op;
     TypeId type;
+    TypeId second_type;
     uint32_t token;
     uint32_t callee;
     uint32_t name;
@@ -202,6 +203,9 @@ struct CheckConstantInput
     CheckConstantFailure* diagnosed;
     bool raw;
     bool cached;
+    // Attribute expressions may refer to a completed declarator's parameters or a record's earlier members. Those
+    // references already have declaration/type columns, while new type syntax and builtins still need normal binding.
+    bool scoped_names;
     bool deferred_tags;
 };
 
@@ -1767,7 +1771,8 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         else if (valid && kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT &&
                  (!input->syntax[index] || role == PARSE_ROLE_SPECIFIER))
         {
-            const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
+            const bool scoped = input->scoped_names && reader->declared_types[token] != 0;
+            const uint32_t handle = input->cached || scoped ? 0 : check_input_library_binding(reader, name, token);
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
             const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
             const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE && !invoke ? check_constant_intrinsic_type(input, token, handle) : 0;
@@ -1775,7 +1780,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 check_constant_callee_syntax(input, token);
             }
-            else if (input->cached || intrinsic != 0)
+            else if (input->cached || scoped || intrinsic != 0)
             {
                 valid = intrinsic != 0 || reader->declared_types[token] != 0 || role == PARSE_ROLE_OPERAND;
             }
@@ -2463,6 +2468,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             .diagnostic = checked->diagnostic,
             .op = action->op,
             .type = type,
+            .second_type = action->operands[1].type,
             .token = action->node,
             .callee = callee,
             .name = action->member,
@@ -3758,9 +3764,10 @@ static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t to
                 kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC;
     if (kind == PARSE_KIND_IDENTIFIER)
     {
-        const uint32_t handle = input->cached ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]);
+        const bool scoped = input->scoped_names && reader->declared_types[token] != 0;
+        const uint32_t handle = input->cached || scoped ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]);
         const uint32_t declaration = reader->output->declarations[token];
-        type = input->cached ? declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_TYPEDEF :
+        type = input->cached || scoped ? declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_TYPEDEF :
                handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
     }
     return type;
@@ -3872,7 +3879,8 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                  (parser->tokens.kinds[token - 1] != PARSE_KIND_STRUCT && parser->tokens.kinds[token - 1] != PARSE_KIND_ENUM)))
         {
             const uint32_t name = parser->tokens.names[token];
-            const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
+            const bool scoped = input->scoped_names && reader->declared_types[token] != 0;
+            const uint32_t handle = input->cached || scoped ? 0 : check_input_library_binding(reader, name, token);
             const bool type = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
             const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
@@ -3883,7 +3891,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             }
             else
             {
-                valid = intrinsic != 0 || (input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
+                valid = intrinsic != 0 || (input->cached || scoped ? reader->declared_types[token] != 0 || !input->syntax[index] :
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
             valid = valid && !(!input->cached && builtin == CBUILTIN_NONE && check_input_use_shadowed(reader, token, handle));
@@ -4236,7 +4244,7 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
     return valid;
 }
 
-static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
+static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached, bool scoped_names,
                                       CheckValue* value, TypeId* type, uint32_t* failed_token, CheckConstantFailure* diagnosed)
 {
     const uint64_t mark = reader->scratch->length;
@@ -4244,6 +4252,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     reader->constant_abi_origin = 0;
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
     input.diagnosed = diagnosed;
+    input.scoped_names = scoped_names;
     if (valid)
     {
         if (input.raw)
@@ -4276,19 +4285,19 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
 static bool check_input_evaluate(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, false, value, &unused, 0, NULL);
+    return check_input_constant_read(reader, first, end, false, false, false, value, &unused, 0, NULL);
 }
 
 static __attribute__((unused)) bool check_input_evaluate_cached(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, true, value, &unused, 0, NULL);
+    return check_input_constant_read(reader, first, end, false, true, false, value, &unused, 0, NULL);
 }
 
 static __attribute__((unused)) bool check_input_evaluate_cached_at(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value, uint32_t* failed_token)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, true, value, &unused, failed_token, NULL);
+    return check_input_constant_read(reader, first, end, false, true, false, value, &unused, failed_token, NULL);
 }
 
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
@@ -4342,6 +4351,6 @@ static __attribute__((unused)) TypeId check_input_constant_type(CheckInputReader
 {
     CheckValue unused = { 0 };
     TypeId type = 0;
-    const bool valid = check_input_constant_read(reader, first, end, true, false, &unused, &type, 0, NULL);
+    const bool valid = check_input_constant_read(reader, first, end, true, false, false, &unused, &type, 0, NULL);
     return valid ? type : 0;
 }

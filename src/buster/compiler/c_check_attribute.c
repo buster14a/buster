@@ -239,6 +239,8 @@ struct CheckInputAttribute
     // A type argument's type (#147: vec_type_hint's and preferred_type's, check_input_type_argument), read where its
     // attributes are read (check_input_read_attributes), or 0.
     TypeId argument_type;
+    // Thread-safety arguments' checked expression types, retained once for the subject's handler.
+    TypeId* expression_types;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -617,6 +619,7 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME,
     CHECK_ARGUMENT_EXPRESSION_SIZEOF,
     CHECK_ARGUMENT_EXPRESSION_CALL_COUNT,
+    CHECK_ARGUMENT_EXPRESSION_BINARY,
     CHECK_ARGUMENT_ANNOTATE_CONSTANT,
     CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
     CHECK_ARGUMENT_SELECTANY_LINKAGE,
@@ -2602,8 +2605,8 @@ static uint8_t check_input_attribute_count_check(const CheckInputFactRow* fact, 
 // check, past their subjects and argument counts: at least one argument (LEAST_ONE); capability's name, a string literal
 // (STRING); a trylock's first argument, an int or a bool (TRYLOCK); and a lock function's integer literal argument, an index
 // of its parameters (INDEXED). Their arguments are expressions, which clang's parser reads where the attribute is: their names
-// are the scope's there (check_input_thread_names). Their other warnings (-Wthread-safety-attributes) are off by default
-// and aren't made here. Linear: an attribute is rare.
+// and types are the scope's there (check_input_thread_names). Their warnings (-Wthread-safety-attributes) are off by
+// default and retained as sparse events. Linear catalog lookup: an attribute is rare.
 #define BUSTER_CHECK_THREAD_LEAST_ONE 0x1u
 #define BUSTER_CHECK_THREAD_TRYLOCK 0x2u
 #define BUSTER_CHECK_THREAD_INDEXED 0x4u
@@ -3442,8 +3445,22 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
         {
             check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_VECTOR_MODE);
         }
+        const bool unsupported = result == 0 && width != 0 && (error == CHECK_ARGUMENT_MODE_PRIMITIVE || error == CHECK_ARGUMENT_MODE_TYPE);
         result = 0;
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, error, attribute->argument_first - attribute->first);
+        if (unsupported)
+        {
+            // AddModeAttr diagnoses the base, then still asks the target for the mode. An unavailable target type
+            // therefore produces a second error at the same attribute, in that order.
+            CheckInputAttributes following = { 0 };
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, &following, attribute, attribute->first, CHECK_ARGUMENT_UNSUPPORTED_MODE,
+                                                  attribute->argument_first - attribute->first);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].repeated = true;
+            }
+        }
     }
     return result;
 }

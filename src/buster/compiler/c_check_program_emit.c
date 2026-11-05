@@ -4057,7 +4057,11 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             const bool restricted = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
                                     check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
                                     check_program_section_prefix(name, ".llvm.");
-            const uint8_t placed = class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
+            const bool loader = check_input_attribute_of(check_input_attributes_at(program->input, placement->token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+            // LLVM's undefined initializer has read-only section kind when explicitly placed. Named BSS/TLS families
+            // still impose their own kind; ordinary loader definitions without a placement keep their default BSS.
+            const uint8_t placed = loader && !bss && !tdata && !tbss && class == BUSTER_LINK_CLASS_BSS ? BUSTER_LINK_CLASS_RODATA :
+                                   class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
             const bool fits = restricted ? false :
                               bss ? class == BUSTER_LINK_CLASS_BSS :
                               tdata ? class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS :

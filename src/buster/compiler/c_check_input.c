@@ -2440,8 +2440,29 @@ static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, 
 
 struct CheckTagFrame;
 struct CheckTagMember;
-static bool check_input_thread_names(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
+static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
                                      uint32_t depth, const struct CheckTagMember* members, uint32_t member_count);
+
+static void check_input_incomplete_variable(CheckInputReader* reader, uint32_t name, TypeId type)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
+    if (reader->output->report_count > before)
+    {
+        CheckInputReport* report = reader->output->reports + before;
+        report->type = type;
+        report->type_spelling = check_input_typedef_spelling(reader->output, reader->parser, name);
+        const TypeId plain = type_strip_aligned(reader->types, type);
+        const uint8_t kind = type_kind(reader->types, plain);
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
+        {
+            const uint32_t tag_name = reader->types->tags.name[reader->types->types.index[type_index(plain)]];
+            const uint32_t binding = c_bindings_lookup(&reader->bindings, C_BINDING_TAG, tag_name);
+            report->note_token = binding != 0 ? reader->bindings.declaration[binding - 1] : BUSTER_CHECK_NONE;
+            report->note_kind = CHECK_INPUT_NOTE_FORWARD_DECLARATION;
+        }
+    }
+}
 
 // The first attribute of `kind` among a declaration's that isn't ignored, or NULL (#147).
 static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttributes* attributes, CheckInputAttributeKind kind)
@@ -6984,7 +7005,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             if (valid && !complete_object)
             {
                 reader->declared_types[name] = type;
-                check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
+                if (check_input_attribute_of(attributes, CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL)
+                {
+                    check_input_incomplete_variable(reader, name, type);
+                }
+                else
+                {
+                    check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
+                }
             }
             valid &= complete_object;
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
@@ -7072,7 +7100,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             else if (loader != NULL && !type_is_complete(reader->types, type))
             {
                 reader->declared_types[name] = type;
-                check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
+                check_input_incomplete_variable(reader, name, type);
                 valid = false;
             }
             else if (loader_defined)
@@ -7498,7 +7526,16 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 (reader->definition_origins[token] && reader->definition_origins[previous]) ||
                 check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
             {
+                const uint32_t before = reader->output->report_count;
                 check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                const bool loader = check_input_attribute_of(check_input_attributes_at(reader->output, previous), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL ||
+                                    check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+                if (reader->output->report_count > before && kind == C_BINDING_OBJECT && compatible == TYPE_ANSWER_YES && loader &&
+                    reader->definition_origins[token] != 0 && reader->definition_origins[previous] != 0)
+                {
+                    reader->output->reports[before].note_token = reader->definition_origins[previous] - 1;
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+                }
             }
             else
             {

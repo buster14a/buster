@@ -17,6 +17,16 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The declaration-attribute completion work for #1447/#147 in
+`c_check_attribute_expression.c`, `c_check_thread_safety_input.c`, their checker
+and diagnostic integration, and the added attribute driver fixtures is original
+project material under the default terms. Clang 23.1.4 is an external behavioral
+oracle. The thread-safety handler rules and diagnostic wording were checked
+against LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`,
+`clang/lib/Sema/SemaDeclAttr.cpp`, `clang/lib/Sema/SemaDecl.cpp` and
+`clang/include/clang/Basic/DiagnosticSemaKinds.td`; no upstream implementation
+or test fixture is imported.
+
 The VECTOR/X86 typed adapter integration, sparse shared-interpreter SIMD storage,
 `ir_simd_lower_test.c`, `ir_interpreter_simd_test.c` and the real-C
 `tests/ir/vector-i32.c` fixture (#732) are original project material under the

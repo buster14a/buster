@@ -6163,18 +6163,22 @@ arguments against the function. The checker now gives these as clang does.
     recovery errors and their notes (a first error's "to match this '('" is
     the parser's: `docs/c-parser.md`).
   - GNU's `noderef` is refused by name.
-  - A thread-safety attribute's argument is checked for its names alone: an
-    expression of other errors (`g.x` of an `int`) is taken, where clang
-    gives its error; a trylock's first argument's type is worked out from a
-    literal or a name alone. Their `-Wthread-safety-attributes` warnings,
-    off by default, aren't made.
-  - A `loader_uninitialized` variable's incomplete type is the generic
-    "object has incomplete type", and a definition after one the generic
-    "conflicting declaration", as every incomplete object's and redefinition's
-    are here, where clang names the type and the variable (with notes). With a
-    `section` attribute too, clang's object marks its section read-only
-    (LLVM's kind of an undefined initializer), which a write faults in; its
-    section here is writable.
+  - Thread-safety attributes use the declaration evaluator for their whole
+    arguments, including members, calls, casts and binary expressions. The
+    completed declarator's parameters and earlier record members supply
+    expression bindings without reopening or changing the ordinary scope.
+    `-Wthread-safety-attributes` retains capability-type, pointer-subject,
+    non-static-method, invalid-string and acquire-order-context warnings as
+    sparse events, off by default. Capability checks preserve the typedef
+    declaration that carries an annotation; annotating one typedef of `int`
+    does not annotate every `int`. The driver fixtures compare complete
+    Clang diagnostic streams for both reader paths.
+  - `loader_uninitialized` names an incomplete variable's type and its tag's
+    forward declaration, and a repeated definition names the variable with
+    its earlier-definition note. An ordinary explicit `section` places its
+    undefined initializer in read-only storage, as LLVM does; named BSS and
+    TLS families retain their mandated section kind. This includes the
+    direct executable's atom class and the emitted object's section flags.
   - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
     "an attribute list cannot appear here".
   - An argument's undeclared name after a type's keyword or a `sizeof` stays

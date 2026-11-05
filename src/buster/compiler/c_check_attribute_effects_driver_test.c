@@ -10,8 +10,80 @@
 // symbol. A program of them must run as clang's build does. Include after c_check_common_driver_test.c, whose symbol
 // reader it takes.
 
+static void check_test_driver_thread_arguments(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const units[] = {
+        "int g; int x __attribute__((guarded_by(g.x)));\n",
+        "int g; int x __attribute__((guarded_by(g)));\n",
+        "int *g; int x __attribute__((guarded_by(g)));\n",
+        "int x __attribute__((guarded_by(1)));\n",
+        "int x __attribute__((guarded_by(\"lock\")));\n",
+        "int x __attribute__((guarded_by(\"\")));\n",
+        "int x __attribute__((guarded_by(\"*\")));\n",
+        "int g; int x __attribute__((pt_guarded_by(g)));\n",
+        "int x __attribute__((pt_guarded_var));\n",
+        "int *x __attribute__((pt_guarded_var));\n",
+        "int f(void) __attribute__((try_acquire_capability(1.0 + 2.0)));\n",
+        "int f(void) __attribute__((try_acquire_capability(1L)));\n",
+        "int f(void) __attribute__((try_acquire_capability('x')));\n",
+        "void f(void) __attribute__((acquire_capability()));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; struct M m; int x __attribute__((guarded_by(m)));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; struct M *m; int x __attribute__((guarded_by(m)));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; struct M m; int x __attribute__((guarded_by(m || m)));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; struct M *m; int x __attribute__((guarded_by(m || !m)));\n",
+        "struct M { int n; }; struct M m; int x __attribute__((guarded_by(m)));\n",
+        "struct M; struct M *m; int x __attribute__((guarded_by(m)));\n",
+        "struct S { int m; int x __attribute__((guarded_by(m))); };\n",
+        "struct S { struct { int n; } m; int x __attribute__((guarded_by(m.n))); };\n",
+        "void f(int p) __attribute__((requires_capability(p + 1)));\n",
+        "void f(float p) __attribute__((try_acquire_capability(p + 1)));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; void f(struct M *p) __attribute__((acquire_capability(p)));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; void f(struct M *p) __attribute__((acquire_capability(1)));\n",
+        "void f(int p) __attribute__((acquire_capability(1)));\n",
+        "int a; int b __attribute__((acquired_after(a)));\n",
+        "struct __attribute__((capability(\"mutex\"))) M { int n; }; struct M a, b __attribute__((acquired_after(a)));\n",
+        "int a; int b __attribute__((requires_capability(a)));\n",
+        "int a; void f(int p __attribute__((requires_capability(a))));\n",
+        "typedef int __attribute__((capability(\"mutex\"))) Lock; Lock a; int x __attribute__((guarded_by(a)));\n",
+        "int a; [[clang::guarded_by(a)]] int x;\n",
+    };
+    enum { LINES = 16384 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/thread-attribute-arguments.c", directory);
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    {
+        const bool made = parse_test_write(source, units[unit], strlen(units[unit]));
+        char* arguments[] = { (char*)clang, "-std=gnu23", "-Wthread-safety-attributes", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        char* expected = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "thread attribute %u: clang's lines read", unit);
+        check_test_expect(test, made && lines, description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[6] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "thread attribute %u (%s), %s: status %d (clang %d), lines\n%s(clang\n%s)", unit, units[unit],
+                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+    }
+    free(expected_lines);
+    free(actual_lines);
+    unlink(source);
+}
+
 static void check_test_driver_attribute_effects(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_thread_arguments(test, clang, executable, directory);
     static const struct
     {
         const char* standard;
@@ -39,6 +111,11 @@ static void check_test_driver_attribute_effects(CheckTest* test, const char* cla
         { "gnu17", "__attribute__((loader_uninitialized)) void lf(void);\n" },
         { "gnu17", "__attribute__((loader_uninitialized)) static int g9;\n" },
         { "gnu17", "__attribute__((loader_uninitialized(1))) int g10;\n" },
+        { "gnu17", "struct S; struct S x __attribute__((loader_uninitialized));\n" },
+        { "gnu17", "typedef struct S T; T x __attribute__((loader_uninitialized));\n" },
+        { "gnu17", "int x[] __attribute__((loader_uninitialized));\n" },
+        { "gnu17", "int x __attribute__((loader_uninitialized)); int x = 1;\n" },
+        { "gnu17", "int x __attribute__((loader_uninitialized)); int x __attribute__((loader_uninitialized));\n" },
         { "gnu17", "__attribute__((internal_linkage)) int il(void) { return 1; }\n" },
         { "gnu17", "int il2(void);\n__attribute__((internal_linkage)) int il2(void) { return 1; }\n" },
         { "gnu17", "__attribute__((internal_linkage)) int il3(void);\nint il3(void) { return 1; }\n" },
@@ -190,6 +267,7 @@ static void check_test_driver_attribute_effects(CheckTest* test, const char* cla
         "__attribute__((loader_uninitialized)) int loader;\n"
         "__attribute__((loader_uninitialized, nocommon)) int loader_kept;\n"
         "__attribute__((loader_uninitialized, common)) int loader_common;\n"
+        "__attribute__((loader_uninitialized, section(\".loader\"))) int loader_named;\n"
         "__attribute__((loader_uninitialized)) static int loader_internal;\n"
         "int *loader_address(void) { return &loader_internal; }\n"
         "extern int imported __attribute__((weak_import));\n"
@@ -202,7 +280,7 @@ static void check_test_driver_attribute_effects(CheckTest* test, const char* cla
         "__attribute__((internal_linkage)) int internal_later(void);\n"
         "int internal_later(void) { return 7; }\n"
         "int calls(void) { return internal_function() + internal_variable + internal_later(); }\n";
-    static const char* const names[] = { "loader", "loader_kept", "loader_common", "loader_internal", "imported", "imported_defined", "imported_function",
+    static const char* const names[] = { "loader", "loader_kept", "loader_common", "loader_internal", "loader_named", "imported", "imported_defined", "imported_function",
                                           "internal_function", "internal_variable", "internal_later" };
     char path[512];
     snprintf(path, sizeof(path), "%s/attribute-effects-symbols.c", directory);
@@ -219,6 +297,12 @@ static void check_test_driver_attribute_effects(CheckTest* test, const char* cla
             const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
             free(text);
             check_test_expect(test, compiled, "attribute effects: the unit compiles through clang and both checker paths");
+            if (compiled && p != 0)
+            {
+                char difference[768];
+                const bool same = check_test_driver_same_sections(objects[p], objects[0], ".loader", true, difference, sizeof(difference));
+                check_test_expect(test, same, same ? "loader_uninitialized's named section matches clang's type, flags and bytes" : difference);
+            }
             for (uint32_t n = 0; compiled && p != 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
             {
                 char expected[192] = { 0 };

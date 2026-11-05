@@ -367,6 +367,9 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             snprintf(text, capacity, "too %s arguments to function call, expected %s%u, have %u", (uint32_t)value < number ? "few" : "many",
                      value >> 32 ? "at least " : "", number, (uint32_t)value);
             break;
+        case CHECK_ARGUMENT_EXPRESSION_BINARY:
+            snprintf(text, capacity, "invalid operands to binary expression (%.*s)", (int)literal.length, literal.pointer);
+            break;
         case CHECK_ARGUMENT_ANNOTATE_CONSTANT:
             snprintf(text, capacity, "'%s' attribute requires parameter %u to be a constant expression", parsed, number);
             break;
@@ -1844,7 +1847,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                   (int)type.length, type.pointer);
                             arena_pop_to(scratch, type_mark);
                         }
-                        else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
+                        else if (phase == 0 && (kind == CHECK_INPUT_VECTOR_ELEMENT ||
+                                 (kind == CHECK_INPUT_INCOMPLETE_OBJECT && input->reports[index].type != 0)))
                         {
                             // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
@@ -1860,8 +1864,30 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                            (String8){ 0 };
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid vector element type %.*s", (int)type.length, type.pointer);
+                            const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && report->note_token < count && spelled;
+                            const String8 tag = forward ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, type_unqualified(report->type), 0) :
+                                                          (String8){ "", 0 };
+                            char note_text[192];
+                            snprintf(note_text, sizeof(note_text), "forward declaration of %.*s", (int)tag.length, tag.pointer);
+                            const PPOutputDiagnosticNote note = {
+                                .token = forward ? parser->tokens.sources[report->note_token] : 0,
+                                .message = note_text,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, forward ? 1u : 0u,
+                                                       kind == CHECK_INPUT_VECTOR_ELEMENT ? "invalid vector element type %.*s" : "variable has incomplete type %.*s",
+                                                       (int)type.length, type.pointer);
                             arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)
+                        {
+                            const uint32_t previous = input->reports[index].note_token;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = "previous definition is here",
+                            };
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                       "redefinition of '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
                         {
@@ -2029,7 +2055,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL || (report->detail & 0xffu) == CHECK_ARGUMENT_INCOMPLETE_TYPE ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF) &&
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY) &&
                                                report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
@@ -2049,10 +2076,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint8_t* spelling_bytes = NULL;
                             const uint32_t spelling_length = spelling_buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at],
                                                                                                    spelling_buffer, &spelling_bytes) : 0;
-                            const String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
+                            String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
                                                     spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                     captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
                                                     captured ? (String8){ (char*)spelling_bytes, spelling_length } : (String8){ "", 0 };
+                            if (spelled && (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY)
+                            {
+                                const String8 second = check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, 0);
+                                const char* both = check_warning_text(scratch, "%.*s and %.*s", (int)literal.length, literal.pointer, (int)second.length, second.pointer);
+                                literal = both != NULL ? (String8){ both, strlen(both) } : (String8){ "", 0 };
+                            }
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
                             // (An incomplete tag's declaration, named by its type alone: preferred_type's, #147.)
                             const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && spelled;
