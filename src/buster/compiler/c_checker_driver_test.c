@@ -1729,7 +1729,8 @@ static void check_test_driver_section_bounds(CheckTest* test, const char* clang,
 // link of both, each printing clang's: one object of each literal (a static initializer's, NSString's and another
 // function's), an address constant cast and offset, the records' fields (the class's address, the flags, ASCII and
 // UTF-16 characters, a surrogate pair, a NUL, a conversion cut short, parentheses and a cast, the empty string) and the
-// record's size, and a literal whose lowest call is in a function nothing calls (its record is the program's all the same).
+// record's size, and literals whose lowest calls are in a function nothing calls and in a static initializer nothing reads
+// (their records are the program's all the same).
 // The unit doesn't declare the class: its object's symbol is the program's own, an undefined global. A unit that declares
 // it takes the declaration's object. And a unit of a CFString in sizeof alone, whose record nothing references, has no
 // record, characters or class (#1363's review): its object, by -c and by -c --lower-all, names no class, and it links
@@ -1751,6 +1752,7 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
 {
     static const char unit[] =
         "static const void* never_called(void) { return __builtin___CFStringMakeConstantString(\"only\"); }\n"
+        "static const void* never_read = __builtin___CFStringMakeConstantString(\"initial\");\n"
         "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
         "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
         "static const void* s1 = __builtin___CFStringMakeConstantString(\"hello\");\n"
@@ -1780,6 +1782,7 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
         "    bytes((const CF*)__builtin___CFStringMakeConstantString((const char*)\"cast\"));\n"
         "    bytes((const CF*)__builtin___NSStringMakeConstantString(\"ns\"));\n"
         "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"only\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"initial\"));\n"
         "    mix(__builtin___NSStringMakeConstantString(\"ns\") == __builtin___CFStringMakeConstantString(\"ns\"));\n"
         "    mix(__builtin___CFStringMakeConstantString(\"a\\0b\") != __builtin___CFStringMakeConstantString(\"a\"));\n"
         "    mix(__builtin___CFStringMakeConstantString(\"abc\")->length * 10 + sizeof(*__builtin___CFStringMakeConstantString(\"q\")));\n"
