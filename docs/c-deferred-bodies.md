@@ -35,8 +35,9 @@ ordered execution directly at their final graph identities. Token roots,
 sparse receipts and warning events are published with each part. A failed
 round, allocation, type lookup or diagnostic discards the complete attempted
 reading and repeats source order, including its recovery limits. A successful
-driver reading keeps its worker-budget lease through the last round; both
-success and retry return it exactly once.
+driver reading keeps its worker-budget lease through the last round and
+returns it immediately after that round joins, before ordered publication and
+serial finishing. Success and retry return it exactly once.
 
 ## The reader
 
@@ -1269,14 +1270,21 @@ is retained.
 
 ## What is left
 
-The top level, the merge's replay and layouts, and the phases after it are
-sequential, so the lanes shorten only the bodies' walks and the merge's pass,
-which on `sqlite3.c` are about a quarter of one lane's reading. The C driver
-reads a unit this way with `--deferred-bodies` (#151), on rounds of its
-command's flow: on 8 lanes `-c sqlite3.c -w` takes 2.4% less wall time for
-12.8% more user cycles, so it isn't the default ([the lanes
-guide](function-lanes.md)'s "The checker's bodies on lanes"). #1404 runs the
-phases after the merge per body, the largest serial part left. On eight lanes
+The top level, the merge's replay and layouts, shared post-merge preparation
+and ordered publication remain sequential. #1404 adds lane rounds for the
+independent post-merge controls, binding answers, constant contexts and
+expression/graph construction described above. Runtime VLA/region work and
+other exceptional expression actions retain source-order execution.
+
+The C driver uses these rounds with `--deferred-bodies` (#151). The
+[post-merge measurements](function-lanes.md#the-post-merge-measurements-and-decision-1404)
+compare default and explicit 2–8 lanes and balanced concurrent builds on the
+locked 9700X. At the default eight lanes the isolated `-c sqlite3.c -w` compile
+saves 2.37% wall time for 30.27% more user cycles, with no concurrent throughput
+gain. The option stays off by default. These supersede the pre-#1404 default
+decision's 2.4% wall saving for 12.8% more cycles.
+
+On eight lanes
 the pass shares the memory's bandwidth: it reads each of its columns at every
 token, mostly zeros, and the lanes' scans of their shares run at about a third
 of one lane's speed per token (on `sqlite3.c`, 0.8 ms a lane for 88,000
