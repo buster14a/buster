@@ -5827,6 +5827,39 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
     return same;
 }
 
+// #1250: the admitted exact q/Q subset must survive source-to-object emission.
+// Compare a named data section with clang for both checker paths and both routes.
+static void check_test_driver_quad_literals(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char code[] =
+        "__float128 values[] __attribute__((section(\".quad_literals\"))) = {\n"
+        "  0.0q, -0.0Q, 1.5q, -0x1.8p0Q, 0x1.0000000000000002p0q,\n"
+        "  0x1p-16445Q, 0x1.fffffffffffffffep16383Q };\n";
+    const char* arguments[] = { "-std=gnu17" };
+    const CheckCorpusSymbols oracle = { .clang = clang, .arguments = arguments, .argument_count = BUSTER_ARRAY_LENGTH(arguments), .directory = directory };
+    char source[PATH_MAX], theirs[PATH_MAX], ours[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/quad-literals.c", directory);
+    snprintf(theirs, sizeof(theirs), "%s/quad-literals-clang.o", directory);
+    snprintf(ours, sizeof(ours), "%s/quad-literals.o", directory);
+    const bool reference = parse_test_write(source, code, sizeof(code) - 1) && check_corpus_clang_object(&oracle, source, theirs);
+    check_test_expect(test, reference, "quad literals: clang writes the reference object");
+    const uint32_t routes = executable != NULL ? 4u : 2u;
+    for (uint32_t route = 0; reference && route < routes; route += 1)
+    {
+        CheckCorpusOracle checked = { 0 };
+        uint32_t warnings = 0;
+        const bool built = check_test_driver_run(route >= 2 ? executable : NULL, source, ours, (route & 1) != 0, false, true, false, &checked, &warnings) &&
+                           !checked.rejected;
+        char difference[512] = { 0 }, description[1024];
+        const bool same = built && check_test_driver_same_sections(ours, theirs, ".quad_literals", true, difference, sizeof(difference));
+        snprintf(description, sizeof(description), "quad literals: route %u writes clang's exact data bytes (%s)", route, built ? difference : checked.message);
+        check_test_expect(test, same, description);
+        unlink(ours);
+    }
+    unlink(source);
+    unlink(theirs);
+}
+
 // #619's #pragma clang section against clang: each line's settings and errors, at clang's places with its messages, and
 // the section type conflicts between settings and section attributes in clang's order, by -fsyntax-only. What the checker
 // refuses by name instead: a name in a place clang reads expanded that was a macro's in the unit, and an error at the
@@ -7033,6 +7066,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (check_test_driver_takes())
         {
             check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_quad_literals(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
