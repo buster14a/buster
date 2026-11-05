@@ -2460,7 +2460,8 @@ static bool check_input_attribute_function_typed(CheckInputReader* reader, const
            (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && check_input_function_type_name(reader, attribute));
 }
 
-// check_input_attribute_function_types' warning of `attribute`, completing before `earliest` where that is before it.
+// The "only applies to function types" warning of `attribute` (check_input_attribute_type_warnings and
+// check_input_attribute_function_types), completing at `earliest` where that is no later than after its first token.
 static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, uint32_t name, uint32_t earliest)
 {
     const CheckWarningEvent event =
@@ -2470,7 +2471,7 @@ static void check_input_attribute_function_type_warning(CheckInputReader* reader
         .token = attribute->first,
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = earliest <= attribute->first ? earliest : attribute->first + 1,
+        .completion = earliest <= attribute->first + 1 ? earliest : attribute->first + 1,
         .payload = { .first_type = type, .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                      .data = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0 },
     };
@@ -4653,7 +4654,7 @@ static uint32_t check_input_attribute_group_close(const Parser* parser, uint32_t
 // function's chunk, then the chunks'. Where it isn't, each function type's attribute's "only applies to function types":
 // the chunks' first, as clang meets them, with the type built so far (`parts` from `order`, each part's type, from
 // `base`); then the specifiers' and the trailing ones, which clang diagnoses once the declarator's type is complete, with
-// that type. All complete at the declaration's first attribute (an unknown one's too), so they come before what its
+// that type. All complete with the declaration's first attribute (an unknown one's too), so they come before what its
 // attributes' own checks give there (check_input_attribute_subjects), in this order.
 static void check_input_attribute_type_warnings(CheckInputReader* reader, const CheckInputAttributes* common, const CheckInputAttributes* own, TypeId type, uint32_t name,
                                                 uint32_t split, const CheckDeclaratorPart* parts, uint32_t order, TypeId base)
@@ -4666,6 +4667,8 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         kind = type_kind(reader->types, function);
     }
     const bool applies = kind == BUSTER_TYPE_KIND_FUNCTION;
+    // Where its attributes' own checks complete, after the first's token (an unknown one's warning, which comes at its
+    // token's end, at that token): tied with them, these come first, and after an earlier declarator's.
     const CheckInputAttributes* lists[2] = { common, own };
     uint32_t completion = UINT32_MAX;
     for (uint32_t l = 0; l < 2; l += 1)
@@ -4675,7 +4678,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         completion = unknown < completion ? unknown : completion;
         for (uint32_t i = 0; list != NULL && i < list->count; i += 1)
         {
-            completion = list->records[i].first < completion ? list->records[i].first : completion;
+            completion = list->records[i].first + 1 < completion ? list->records[i].first + 1 : completion;
         }
     }
     // Three passes over the lists: where it applies, the specifiers', the trailing ones and the chunks'; where it doesn't,

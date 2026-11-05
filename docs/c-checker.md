@@ -6137,11 +6137,22 @@ arguments against the function. The checker now gives these as clang does.
     declaration that declares nothing (-Wmissing-declarations). That is the
     parser's recovery (`docs/c-parser.md`), which keeps no declaration after
     the error for the reader to warn of.
-  - A calling convention keyword in a nested declarator
-    (`__attribute__((noinline)) void (__stdcall *p)(void);`) warns after the
-    declaration's attributes, where clang warns of the type's first; one in
-    the specifiers warns before them, as clang's
-    (`check_input_attribute_function_types`).
+  - A function type's attribute's warnings come in clang's order
+    (`check_input_attribute_type_warnings`) but for three places. A parameter's
+    attributes' warnings, which clang gives as it reads the parameter list,
+    come after the declarator's convention's when the declaration has
+    attributes before it (`__attribute__((noinline)) void (__stdcall *p)(int x
+    __attribute__((noinline)));`). A C23 list on a function's chunk
+    (`void (__stdcall *p)(void) [[gnu::noinline]];`) warns after the group's
+    convention, where clang meets the function's chunk first. And a C23 list
+    at a group's start is clang's error, after which clang reads on and warns
+    of the declaration's attributes, where this stops at the error, as after a
+    pointer's qualifiers.
+  - "type here is 'T'" of the specifiers' or trailing attributes of a
+    declarator with a group spells its whole type without clang's parentheses
+    (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
+    clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
+    that print such a type differ the same way.
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations: both need the earlier
     declarations' attributes, which a lane doesn't publish

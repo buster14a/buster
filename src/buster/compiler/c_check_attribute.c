@@ -258,9 +258,9 @@ struct CheckInputAttributes
     bool has_alignas;
     // A counted_by family attribute among the records (#148), which a member's declaration checks.
     bool counted;
-    // One plus the first token of an attribute the list dropped with a warning clang gives where it processes the
-    // declaration's attributes (#147: an unknown one's, another language's), after its type's; 0 for none
-    // (check_input_attribute_type_warnings).
+    // Where the first warning of an attribute the list dropped completes, plus one, or 0 for none: one clang gives where it
+    // processes the declaration's attributes, after its type's (#147, check_input_attribute_type_warnings): an unknown
+    // one's (after its first token), another language's or a type name's declaration attribute's (at it, so one before).
     uint32_t unknown_first;
 };
 
@@ -2386,8 +2386,8 @@ static void check_input_attribute_named_once(CheckInputReader* reader, const Che
 
 // clang's warning for a calling convention x86-64 hasn't (stdcall, fastcall, thiscall and pascal, which
 // X86_64TargetInfo::checkCallingConvention warns of and ignores: CHECK_CALL_IGNORED_X86_32), once each attribute meets a
-// function type: at its first token, named as written (a C23 one's normalized), completing at `completion`, its
-// declarator's type's warnings' (check_input_attribute_type_warnings), or at that token.
+// function type: at its first token, named as written (a C23 one's normalized), completing at `completion`: its
+// declarator's type's warnings' (check_input_attribute_type_warnings), or that token.
 static void check_input_attribute_unsupported_at(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t completion)
 {
     const uint32_t count = reader->parser->tokens.count;
@@ -2413,7 +2413,7 @@ static void check_input_attribute_unsupported_at(CheckInputReader* reader, const
             .token = attribute->first,
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-            .completion = completion < attribute->first ? completion : attribute->first,
+            .completion = completion,
             .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                          .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
         };
@@ -2862,6 +2862,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         else if (valid && type_name)
         {
             check_input_attribute_named_once(reader, &attribute, CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE);
+            attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first;
             unknown = true;
         }
         else if (valid && ignored_type)
@@ -2947,7 +2948,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             // Another language's: clang's warning that it ignores it, before anything else (#147).
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
-            attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first + 1;
+            attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first;
             unknown = true;
         }
         else if (valid && known && rule == 0 && check_input_attribute_equal(name, "nocf_check"))
@@ -4875,7 +4876,7 @@ static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAt
 // another declaration "... functions and methods" (NS's) or "... functions, methods, and parameters"; the out
 // parameters' "... pointer/reference-to-OSObject-pointer parameters". ns_returns_retained is a type's too: a function
 // type's warning at the attribute, "'ns_returns_retained' attribute only applies to functions that return an
-// Objective-C object", and off one "only applies to function types" (check_input_attribute_function_types); a tag's
+// Objective-C object", and off one "only applies to function types" (check_input_attribute_type_warnings); a tag's
 // "functions and methods" at its first token.
 static void check_input_attribute_ownership(CheckInputReader* reader, CheckInputAttribute* attribute, uint32_t declaration, TypeId type, uint32_t begin)
 {
@@ -4955,7 +4956,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // (A GPU kernel's convention, which a type off a function ignored, is a declaration's attribute: its subject's error.)
         const bool kernel = check_input_attribute_kernel(reader, attribute);
         // matrix_type without -fenable-matrix (#147): clang's error, then a typedef's subject's off one; cfi_salt is a
-        // function type's, whose warning off one is check_input_attribute_function_types's, not a subject's.
+        // function type's, whose warning off one is check_input_attribute_type_warnings', not a subject's.
         const bool generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword;
         const String8 generic_spelled = generic_name ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
         const bool matrix = generic_name && check_input_attribute_equal(generic_spelled, "matrix_type") &&
