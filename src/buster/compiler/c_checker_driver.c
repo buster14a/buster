@@ -1548,14 +1548,15 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             publication = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
                         }
-                        // The input's reports whose messages name their token's identifier.
+                        // The report's identifier supplies its spelling. Its sorted publication key can be a later
+                        // expression's end, as for an attribute count diagnosed after an argument's call error.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
-                        const bool named = phase == 0 && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+                        const bool named = phase == 0 && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER;
                         if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
                         {
                             // clang's musttail attribute where it doesn't go (#147), spelled as clang spells it there.
                             char spelling[96];
-                            check_driver_musttail_spelling(parser, pp, token, kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS, spelling, sizeof(spelling));
+                            check_driver_musttail_spelling(parser, pp, located, kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS, spelling, sizeof(spelling));
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' attribute %s", spelling,
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
@@ -1571,12 +1572,12 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             // which its list's opener, the nearest shallower token before it, tells (`[` or `(`); a label's
                             // subjects by its name without a GNU keyword's underscores (check_input_label_refusal).
                             // `::` is one token in C23 and two colons before it.
-                            const bool scoped = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
-                            const uint32_t at = !scoped ? token : parser->tokens.kinds[token + 2] == PARSE_KIND_COLON && token + 3 < count ? token + 3 : token + 2;
-                            const uint32_t scope = scoped ? parser->tokens.names[token] : 0;
+                            const bool scoped = located + 2 < count && parser->tokens.kinds[located + 1] == PARSE_KIND_COLON;
+                            const uint32_t at = !scoped ? located : parser->tokens.kinds[located + 2] == PARSE_KIND_COLON && located + 3 < count ? located + 3 : located + 2;
+                            const uint32_t scope = scoped ? parser->tokens.names[located] : 0;
                             const uint32_t name = parser->tokens.names[at];
-                            uint32_t opener = token;
-                            while (opener > 0 && parser->tree.depths[opener - 1] >= parser->tree.depths[token])
+                            uint32_t opener = located;
+                            while (opener > 0 && parser->tree.depths[opener - 1] >= parser->tree.depths[located])
                             {
                                 opener -= 1;
                             }

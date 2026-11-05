@@ -180,8 +180,9 @@ static void check_input_noderef_member_add(CheckInputReader* reader, uint32_t me
         check_input_lane_refuse(reader, reader->lane, "a body declares a noderef-annotated member");
         if (!reader->lane && input->noderef_member_count == input->noderef_member_capacity)
         {
-            const uint32_t capacity = input->noderef_member_capacity == 0 ? 16 : input->noderef_member_capacity * 2;
-            CheckNoderefMember* members = arena_push_array(reader->arena, capacity, sizeof(CheckNoderefMember), _Alignof(CheckNoderefMember));
+            const uint32_t capacity = input->noderef_member_capacity == 0 ? 16 :
+                                      input->noderef_member_capacity <= UINT32_MAX / 2 ? input->noderef_member_capacity * 2 : 0;
+            CheckNoderefMember* members = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckNoderefMember, capacity) : NULL;
             input->resource |= members == NULL;
             if (members != NULL)
             {
