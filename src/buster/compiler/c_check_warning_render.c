@@ -604,6 +604,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_PRAGMA:
         {
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
+            const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
+            if (layout != NULL)
+            {
+                result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
+                                               "extra tokens at end of '#pragma ms_struct' - ignored";
+            }
             if (record != NULL)
             {
                 const char* handler = record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE ? "redefine_extname" : "weak";
@@ -1209,7 +1215,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
         {
             valid = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && event->note_first <= view->note_count &&
                     event->note_count <= view->note_count - event->note_first &&
-                    event->kind < CHECK_WARNING_EVENT_KIND_COUNT && (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 &&
+                    event->kind < CHECK_WARNING_EVENT_KIND_COUNT && check_warning_flags_valid(event->kind, event->flags) &&
                     (event->source == BUSTER_CHECK_WARNING_NO_SOURCE || event->source < pp->output.count) &&
                     (event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ||
                      (event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN ? event->completion <= parser->tokens.count :
@@ -1251,12 +1257,14 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     else if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
+                        const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
                         const bool semantic = record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED;
-                        if (record != NULL && record->diagnostic_location != 0)
+                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location : 0;
+                        if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
                             pp->diagnostic_position = event->payload.token;
-                            pp_diagnose(pp, disposition, record->diagnostic_location, "%s%s", message, suffix);
+                            pp_diagnose(pp, disposition, location, "%s%s", message, suffix);
                             pp->diagnostic_position = saved_position;
                         }
                         else

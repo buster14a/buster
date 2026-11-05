@@ -5817,7 +5817,7 @@ arguments against the function. The checker now gives these as clang does.
     Objective-C's) is kept with no effect, for its subject's check and its
     argument count's;
   - so are some whose own handlers check what is checked here: `minsize`,
-    `optnone`, `noescape`, `annotate`, `uninitialized`, `gcc_struct`,
+    `optnone`, `noescape`, `annotate`, `uninitialized`,
     `no_sanitize_memory`, `analyzer_noreturn` and `carries_dependency`. With
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
@@ -6058,7 +6058,7 @@ arguments against the function. The checker now gives these as clang does.
   its base belongs to a selectany group.
 
   The rest stay refused by name: `no_caller_saved_registers` (a calling convention), and the attributes
-  whose handlers clang has its own (`pass_object_size`, `ms_struct`,
+  whose handlers clang has its own (`pass_object_size`,
   `interrupt` and others).
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
@@ -6336,6 +6336,11 @@ arguments against the function. The checker now gives these as clang does.
   attribute argument reader's expression spelling, including parentheses.
   This lookup follows the first token's parent chain once, retaining a
   subscript base's location without repeatedly scanning nested prefixes.
+  Checked subscripts also consult the existing operand type and value category:
+  an implicit lvalue or array conversion reports the base's beginning, as does
+  the value conversion of a materialized record's member (`get().pointer`).
+  A value such as `p++` keeps its own operator location. The pointer operand
+  supplies that location in reversed subscripts such as `0[p]` too.
   Initializer conversion diagnostics follow the actual selected member or
   array element, including nested designators, union alternatives, atomic
   pointer elements and GNU ranges. The graph pass retains one bit per value
@@ -6438,9 +6443,11 @@ Unknown `STDC` directives warn by default. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.
-GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
-`optimize` use the unknown-pragma policy, as in the Clang oracle.
-The same policy covers plain and GCC `scalar_storage_order`, `GCC target`,
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`,
+`reset_options`, `target`, and `optimize` use the unknown-pragma policy, as in
+the pinned Clang 23.1.4 oracle. In particular, accepting `GCC target("avx2")`
+does not enable AVX2; use the implemented per-function `target` attribute.
+The same policy covers plain and GCC `scalar_storage_order`,
 unqualified `section`, `code_seg`, `data_seg`, `bss_seg`, `const_seg`, `init_seg`
 and `fenv_access` in the accepted Linux mode. Their arguments do not change
 layout, symbol placement or floating evaluation, even when malformed; enabling
@@ -6471,15 +6478,53 @@ already emitted name. Source-time macro expansion applies to both directives'
 operands. Malformed forms use `-Wignored-pragmas`, including missing names and
 trailing tokens. These lexical warnings survive parser recovery.
 
-Renaming after an earlier evaluated reference remains explicitly refused: Clang
-may already have cached a symbol name when it emitted that reference, and the
-reader does not yet have that emission/control-flow proof. `#pragma weak ALIAS =
-TARGET` also remains refused because it can create a typed alias declaration
-without a C declarator. These boundaries are separate from ordinary weak binding
-and renaming before use.
+For a rename after a parsed use, emission selection decides whether an earlier
+emitted reference has already fixed the original name. It reads the compact live
+references of eager function bodies and static initializers once, with each
+body's definition-completion point. Constant-dead statements, unselected operands,
+unevaluated expressions and deferred functions do not block a later rename. A
+directive inside an eager function still precedes that function's emission. This
+cost and its cold per-pragma decisions exist only in units with a late rename;
+the declaration's retained asm-label fact and source coordinates stay immutable.
+The object oracle covers 26 late-rename shapes, including eager/deferred static
+data, and compares scalar/vector objects and poisoned multi-lane objects.
+
+`#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
+declaration without a C declarator. This is separate from ordinary weak binding.
+
+With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
+deferred body is conservatively refused because its binding was not checked;
+unrelated deferred bodies do not suppress weak or renamed symbol metadata.
+The unified handler retains the literal handler's allocation rollback, native
+ELF, separately linked strong-override, and selected-header regressions.
+
+`#pragma ms_struct on`, `off` and `reset` select the layout sampled by subsequent
+record definitions. The state follows source order across function boundaries;
+forward declarations do not capture it. Macro operands expand when the semantic
+preprocessor retains the directive. Malformed state names, missing operands and
+extra tokens warn under `-Wignored-pragmas` and leave the previous state intact.
+A directive between struct members is a hard placement error.
+
+Explicit `ms_struct` and `gcc_struct` attributes attach to structs and unions,
+including attributes inherited from a forward declaration. `gcc_struct` selects
+ordinary layout even while the pragma is on. Both attributes on one declaration
+conflict, with a note at the earlier one; Clang permits them across separate
+declarations, where `gcc_struct` wins. The type table implements complete
+bit-field storage units, same-size sharing, zero-width and union rules, and
+packed/aligned interactions in both layout paths (see [types](c-types.md)).
+Units whose byte size is not a power of two, such as a `_BitInt(129)` bit-field,
+are explicitly refused because their Microsoft alignment cannot fit the current
+type representation. A raw preprocessor client without semantic pragma expansion
+also refuses a macro-dependent setting instead of guessing its expanded state.
+
+The reader fixtures check all four parser schedules and retained state across
+function boundaries; the driver compares warning controls and exact diagnostic
+locations with Clang. Separately compiled Clang and Buster callers/callees exchange
+ordinary, packed, zero-width and union records in both directions at `-O0` and
+`-O2`, with fixed layout assertions and scalar/vector object equality.
 
 Other unsupported semantic effects remain hard, named errors, including
-`ms_struct` and layout-changing `align=packed`.
+layout-changing `align=packed`.
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 

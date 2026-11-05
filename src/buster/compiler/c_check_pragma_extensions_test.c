@@ -3,6 +3,8 @@
 // Original issue #1135 fixtures. Exercise the retained policy, not just directive acceptance, through both
 // parser schedules and tree-only input. The unsupported surface must continue to fail closed.
 
+#include "c_check_symbol_pragma_test.c"
+
 static void check_test_pragma_extension_history(CheckTest* test)
 {
     static InternTable identifiers;
@@ -140,6 +142,101 @@ static void check_test_pragma_extension_history(CheckTest* test)
     arena_release(&arena);
 }
 
+static void check_test_ms_pragma_history(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    static const char source[] =
+        "int ordinary;\n#pragma ms_struct on\nint on_first;\n"
+        "void f(void){int before;\n#pragma ms_struct off\nint off_inside;\n#pragma ms_struct on\nint on_inside;}\nint leaked;\n"
+        "#pragma ms_struct on extra\nint unchanged;\n#pragma ms_struct nonsense\nint unchanged_bad;\n"
+        "#pragma ms_struct off\nint off_file;\n#pragma ms_struct on\n#pragma ms_struct reset\nint reset_file;\n"
+        "#define MODE on\n#pragma ms_struct MODE\nint macro_file;\n";
+    static const uint8_t states[] = { 1, 0, 1, 1, 1, 0, 1, 0, 1 };
+    static const uint8_t warnings[] = { 0, 0, 0, 2, 1, 0, 0, 0, 0 };
+    static const char* const names[] = { "ordinary", "on_first", "before", "off_inside", "on_inside", "leaked", "unchanged", "unchanged_bad",
+                                         "off_file", "reset_file", "macro_file" };
+    static const uint8_t expected[] = { 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1 };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .semantic_pragmas = true };
+    Arena arena = arena_reserve(UINT64_C(1) << 16);
+    Arena scratch = arena_reserve(UINT64_C(1) << 16);
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && arena.base != NULL && scratch.base != NULL && pp_run_source(&pp, "ms-pragma-history.c", (const uint8_t*)source, sizeof(source) - 1);
+    check_test_expect(test, ready, "Microsoft layout source-state fixture initializes");
+    for (uint32_t schedule = 0; ready && schedule < 4; schedule += 1)
+    {
+        const ParseOptions parse_options = { .scalar = (schedule & 1) != 0, .tree_only = (schedule & 2) != 0 };
+        const bool parsed = parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        const bool retained = parsed && parser.tokens.pragma_count == BUSTER_ARRAY_LENGTH(states);
+        check_test_expect(test, retained, "Microsoft layout directives survive every parser schedule");
+        const uint64_t arena_capacity = arena.capacity;
+        const uint64_t scratch_capacity = scratch.capacity;
+        for (uint32_t pass = 0; retained && pass < 3; pass += 1)
+        {
+            arena.length = 31;
+            scratch.length = 29;
+            arena.capacity = pass == 1 ? arena.length : arena_capacity;
+            scratch.capacity = pass == 2 ? scratch.length : scratch_capacity;
+            uint8_t handled[BUSTER_ARRAY_LENGTH(states)] = { 0 };
+            CheckInput input = { .token_count = parser.tokens.count };
+            CheckInputReader reader = { .output = &input, .parser = &parser, .pp = &pp, .arena = &arena, .scratch = &scratch };
+            const bool valid = check_input_ms_pragmas(&reader, handled, true);
+            if (pass == 0)
+            {
+                const bool published = valid && !input.resource && input.ms_pragmas != NULL && input.ms_struct != NULL &&
+                                       input.ms_pragmas->count == BUSTER_ARRAY_LENGTH(states);
+                check_test_expect(test, published && scratch.length == 29, "Microsoft layout history publishes with scratch restored");
+                for (uint32_t i = 0; published && i < BUSTER_ARRAY_LENGTH(states); i += 1)
+                {
+                    const CheckInputMsPragma* record = input.ms_pragmas->records + i;
+                    check_test_expect(test, handled[i] == 1 && record->supported && !record->error && record->pragma == i && record->after == states[i] &&
+                                           record->warning == warnings[i] && record->token == parser.tokens.pragma_positions[i] &&
+                                           record->source == parser.tokens.pragma_sources[i],
+                                      "Microsoft layout keeps exact source order and leaves state unchanged after malformed directives");
+                }
+                uint32_t found = 0;
+                for (uint32_t token = 0; published && token < parser.tokens.count; token += 1)
+                {
+                    const uint32_t name = parser.tokens.names[token];
+                    for (uint32_t i = 0; name != 0 && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+                    {
+                        if (intern_length(&identifiers, name) == strlen(names[i]) && memcmp(intern_bytes(&identifiers, name), names[i], strlen(names[i])) == 0)
+                        {
+                            found += 1;
+                            check_test_expect(test, input.ms_struct[token] == expected[i], "Microsoft layout state persists across function boundaries and expands pragma operands");
+                        }
+                    }
+                }
+                check_test_expect(test, published && found == BUSTER_ARRAY_LENGTH(names), "Microsoft layout source-state fixture visits every marker");
+                const bool warned = published && check_input_ms_warnings(&reader);
+                check_test_expect(test, warned && input.pragma_warnings.count == 2 &&
+                                       input.pragma_warnings.events[0].flags == BUSTER_CHECK_WARNING_MS_PRAGMA &&
+                                       input.pragma_warnings.events[1].flags == BUSTER_CHECK_WARNING_MS_PRAGMA,
+                                  "malformed Microsoft pragmas retain distinct lexical warnings");
+            }
+            else
+            {
+                bool untouched = true;
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(handled); i += 1)
+                {
+                    untouched &= handled[i] == 0;
+                }
+                check_test_expect(test, !valid && input.resource && input.ms_pragmas == NULL && input.ms_struct == NULL && untouched &&
+                                       arena.length == 31 && scratch.length == 29,
+                                  "Microsoft layout allocation failure publishes no partial state or handler marks");
+            }
+        }
+        arena.capacity = arena_capacity;
+        scratch.capacity = scratch_capacity;
+        parse_release(&parser);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+    arena_release(&scratch);
+    arena_release(&arena);
+}
+
 typedef struct CheckPragmaExtensionFixture CheckPragmaExtensionFixture;
 struct CheckPragmaExtensionFixture
 {
@@ -147,6 +244,7 @@ struct CheckPragmaExtensionFixture
     const char* loop_text;
     CheckInputMessage message;
     uint32_t records;
+    uint32_t ms_records;
     bool accepted;
 };
 
@@ -169,8 +267,26 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma redefine_extname value renamed\nstatic int value=7;\n", .accepted = true },
         { .source = "#pragma weak\n#pragma weak alias=\n#pragma redefine_extname value\nint value;\n", .accepted = true },
         { .source = "#pragma weak alias=value\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "extern int value; int f(void){return value;}\n#pragma redefine_extname value renamed\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "extern int value; int f(void){return value;}\n#pragma redefine_extname value renamed\nint value=7;\n", .accepted = true },
         { .source = "#define SOURCE value\n#pragma weak SOURCE\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma ms_struct on\nint value;\n", .ms_records = 1, .accepted = true },
+        { .source = "#pragma ms_struct on\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 1, .accepted = true },
+        { .source = "#pragma ms_struct on\nstruct S;\n#pragma ms_struct off\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 2, .accepted = true },
+        { .source = "struct S;\n#pragma ms_struct on\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 1, .accepted = true },
+        { .source = "struct __attribute__((ms_struct)) S;\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .accepted = true },
+        { .source = "struct __attribute__((ms_struct,ms_struct,ms_struct)) S{char head;unsigned a:3,b:5;char tail;};\n", .accepted = true },
+        { .source = "struct __attribute__((ms_struct)) S;\nstruct __attribute__((gcc_struct)) S{char head;unsigned a:3,b:5;char tail;};\n", .accepted = true },
+        { .source = "struct __attribute__((gcc_struct)) S;\nstruct __attribute__((ms_struct)) S{char head;unsigned a:3,b:5;char tail;};\n", .accepted = true },
+        { .source = "#pragma ms_struct on\nstruct __attribute__((gcc_struct)) S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 1, .accepted = true },
+        { .source = "void f(void){int value=0;\n#pragma ms_struct on\nvalue++;}\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 1, .accepted = true },
+        { .source = "#pragma ms_struct on\n#pragma ms_struct reset\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 2, .accepted = true },
+        { .source = "#pragma ms_struct\n#pragma ms_struct on extra\n#pragma ms_struct nonsense\nint value;\n", .ms_records = 3, .accepted = true },
+        { .source = "struct __attribute__((ms_struct,gcc_struct)) S{unsigned a:3;};\n", .message = CHECK_INPUT_ATTRIBUTE_EXCLUSION },
+        { .source = "struct __attribute__((gcc_struct,ms_struct)) S{unsigned a:3;};\n", .message = CHECK_INPUT_ATTRIBUTE_EXCLUSION },
+        { .source = "struct S{\n#pragma ms_struct on\nunsigned a:3;};\n", .message = CHECK_INPUT_DECLARATION },
+        { .source = "#pragma ms_struct on\nstruct S{\n#pragma ms_struct off\nunsigned a:3;};\n", .message = CHECK_INPUT_DECLARATION },
+        { .source = "#pragma ms_struct on\nstruct S{unsigned _BitInt(129) a:32;};\n", .message = CHECK_INPUT_MS_STRUCT_ALIGNMENT },
+        { .source = "#define STATE on\n#pragma ms_struct STATE\nstruct S{unsigned a:3;};\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma fenv_access(on)\ndouble f(double x){return x/3.0;}\n", .accepted = true },
         { .source = "#pragma fenv_access(off)\nint x;\n", .accepted = true },
         { .source = "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n#pragma clang fp contract(fast)\nint x;\n", .records = 3, .accepted = true },
@@ -261,7 +377,8 @@ static void check_test_pragma_extension_sources(CheckTest* test)
             const bool adapted = parsed && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
             const bool accepted = parsed && !input.resource && adapted && input.report_count == 0;
             const bool rejected = parsed && !input.resource && input.report_count != 0 && input.reports[0].message == expected->message;
-            check_test_expect(test, expected->accepted ? accepted && input.fp_pragma_count == expected->records : rejected, expected->source);
+            const uint32_t ms_records = input.ms_pragmas != NULL ? input.ms_pragmas->count : 0;
+            check_test_expect(test, expected->accepted ? accepted && input.fp_pragma_count == expected->records && ms_records == expected->ms_records : rejected, expected->source);
             if (expected->loop_text != NULL)
             {
                 check_test_expect(test, rejected && input.loop_diagnostic != NULL && input.loop_diagnostic->pragma == 1 &&
@@ -288,5 +405,7 @@ static void check_test_pragma_extension_sources(CheckTest* test)
 static void check_test_pragma_extensions(CheckTest* test)
 {
     check_test_pragma_extension_history(test);
+    check_test_ms_pragma_history(test);
+    check_test_symbol_pragmas(test);
     check_test_pragma_extension_sources(test);
 }

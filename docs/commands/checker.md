@@ -83,6 +83,10 @@ requirements. [Command index](README.md).
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
+  `--semantic-diagnostics` selects #1107's common semantic-error catalogue: exact Clang messages and columns,
+  valid twins and a later syntax error, through both corpus paths and both driver paths. The default constraint
+  suite includes it too. `c_check_semantic_diagnostic.c` spells the retained names, types, converted case values
+  and decoded static-assert messages only on failure; corrected carets leave publication order unchanged.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.

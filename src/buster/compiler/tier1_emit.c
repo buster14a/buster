@@ -307,6 +307,10 @@ struct Tier1EmitResult
     uint32_t* origin_values;
     uint32_t* block_records;
     uint32_t* stub_records;
+    // Under certify, block_count contiguous rows of 16 general-register call-save owners (node ids), BUSTER_IR_NONE
+    // for an unknown row. Null without call-save rows or certification. These are untrusted entry assertions, not
+    // proof: the code certificate checks each row's bytes on every incoming edge, alongside the allocated locations.
+    uint32_t* entry_rows;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
     uint8_t* dropped;
     // Each machine row's placement as the consumer claims it (#1284, tier1_emit_cfg_row), by node, in a function with rows;
@@ -825,8 +829,9 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
 // straight-line consumer's function, a CFG block), `owed` are the registers whose values are in their rows and not in
 // the registers, which the calls clobbered, and `rows` the value each row holds: its register's owner when a call stored
 // or kept it. A call doesn't store a register whose row holds its owner, unchanged since: within straight-line code an
-// SSA value's bits don't change, so the row still holds them. (Every CFG block starts with no rows, as the code's
-// certificate proves it, tier1_emit_cfg_records.) A register is owed while its owner is unchanged, so whatever would
+// SSA value's bits don't change, so the row still holds them. A CFG block may carry its sole earlier predecessor's
+// rows (tier1_emit_cfg_records); the code certificate proves the additional homes. A register is owed while its owner
+// is unchanged, so whatever would
 // change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
 // The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the vector
 // path compares and blends them whole; `vector` picks it or its scalar twin, which gives the same rows and masks.

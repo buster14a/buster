@@ -3,6 +3,8 @@
 //
 // Retained weak/redefine_extname directives. The cold history owns their source coordinates; the completed binding
 // stream supplies translation-unit declarations, independent of local shadows and of the bodies' reading schedule.
+// This extends #1135's literal handler with source-time expansion and warning policy. Completion belongs to the final
+// unit, including selected lazy-system-header units; deferred lanes borrow the history without mutating it.
 
 typedef enum CheckInputSymbolPragmaKind
 {
@@ -36,6 +38,7 @@ struct CheckInputSymbolPragma
     uint8_t kind;
     uint8_t warning;
     bool supported;
+    bool after_use;
 };
 
 struct CheckInputSymbolPragmas
@@ -286,7 +289,9 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
     CheckInputSymbolPragmas* history = input->symbol_pragmas;
     const CBindings* bindings = &reader->bindings;
     const uint64_t temporary = reader->scratch->length;
-    const bool present = history != NULL && history->count != 0 && input->deferred_tokens == NULL;
+    const bool present = history != NULL && history->count != 0;
+    const uint8_t* const deferred = input->deferred_tokens;
+    const uint32_t names = reader->pp->table->count;
     bool renames = false;
     for (uint32_t i = 0; present && !renames && i < history->count; i += 1)
     {
@@ -294,10 +299,29 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
     }
     uint64_t* keys = present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)bindings->count * (renames ? 3 : 2) + 1) : NULL;
     uint64_t* uses = keys != NULL && renames ? keys + (uint64_t)bindings->count * 2 : NULL;
-    bool valid = !present || keys != NULL;
+    uint32_t* hidden = present && deferred != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, names) : NULL;
+    bool valid = !present || (keys != NULL && (deferred == NULL || hidden != NULL));
     uint32_t count = 0;
     uint32_t use_count = 0;
     const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
+    if (valid && hidden != NULL)
+    {
+        memset(hidden, 0xff, (uint64_t)names * sizeof(uint32_t));
+        const uint32_t tokens = input->token_count;
+        for (uint32_t first = 0; first < tokens; first += 64)
+        {
+            const uint64_t lanes = scalar ? check_input_scan_all(first, tokens) : check_input_scan_nonzero(deferred, first, tokens);
+            for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+                const IdentId name = reader->parser->tokens.names[token];
+                if (deferred[token] != 0 && name != 0 && name < names && hidden[name] == BUSTER_CHECK_NONE)
+                {
+                    hidden[name] = token;
+                }
+            }
+        }
+    }
     for (uint32_t first = 0; valid && present && first < bindings->count; first += 64)
     {
         const uint64_t lanes = scalar ? check_input_scan_all(first, bindings->count) : check_input_scan_equal(bindings->operation, first, bindings->count, C_BINDING_DECLARE);
@@ -344,7 +368,20 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
     for (uint32_t i = 0; valid && present && i < history->count; i += 1)
     {
         CheckInputSymbolPragma* record = history->records + i;
-        if (record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->token <= reader->expression_limit)
+        const bool eligible = record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->token <= reader->expression_limit;
+        const bool hidden_before = hidden != NULL && record->name < names && hidden[record->name] < record->token;
+        if (eligible && hidden_before)
+        {
+            // A selected-out body has no binding proof. Retain the upstream refusal only for this name; an
+            // unrelated skipped body must not suppress every directive in an otherwise complete selected unit.
+            const uint32_t before = input->report_count;
+            check_input_report(reader, record->token, CHECK_INPUT_PRAGMA_SEMANTICS);
+            if (input->report_count != before)
+            {
+                input->reports[before].pragma = record->pragma + 1;
+            }
+        }
+        if (eligible && !hidden_before)
         {
             const uint32_t begin = check_input_symbol_lower(ordered, count, record->name);
             uint32_t end = begin;
@@ -406,24 +443,13 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
                 }
                 else if (label == BUSTER_CHECK_NONE && (definition == BUSTER_CHECK_NONE || definition > record->token))
                 {
-                    // Clang's code generation can have cached a name at an earlier reference. Deciding whether a
-                    // reference was emitted needs its control-flow/emission proof; keep that boundary explicit.
+                    // The declaration keeps its asm-label fact even when code generation already cached its old
+                    // spelling. The emission selection resolves that distinction from live references and the
+                    // source completion of eagerly emitted bodies, rather than treating every parsed use as emitted.
                     const uint32_t object = input->objects[selected];
                     const uint32_t first = check_input_symbol_lower(uses, unique, object);
-                    const bool referenced = first < unique && (uint32_t)(uses[first] >> 32) == object && (uint32_t)uses[first] < record->token;
-                    if (referenced)
-                    {
-                        const uint32_t before = input->report_count;
-                        check_input_report(reader, record->token, CHECK_INPUT_PRAGMA_SEMANTICS);
-                        if (input->report_count != before)
-                        {
-                            input->reports[before].pragma = record->pragma + 1;
-                        }
-                    }
-                    else
-                    {
-                        valid = check_input_symbol_attribute(reader, record, selected);
-                    }
+                    record->after_use = first < unique && (uint32_t)(uses[first] >> 32) == object && (uint32_t)uses[first] < record->token;
+                    valid = check_input_symbol_attribute(reader, record, selected);
                 }
             }
         }

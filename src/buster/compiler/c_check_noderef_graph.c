@@ -55,7 +55,7 @@ static void check_noderef_graph_conversion(CheckInputReader* reader, const Check
                 first = open;
             }
         }
-        const uint32_t token = check_input_expression_location(parser, first, completion);
+        const uint32_t token = check_warning_expression_location(parser, reader->types, stream, source, first, completion);
         const CheckWarningEvent event =
         {
             .id = CHECK_WARNING_ID_NODEREF,

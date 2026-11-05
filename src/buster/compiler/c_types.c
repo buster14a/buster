@@ -297,6 +297,8 @@ typedef enum TypeError
     TYPE_ERROR_MODE_BASE,
     // A recognized mode has no target type, or requires a type this table cannot represent.
     TYPE_ERROR_MODE_UNSUPPORTED,
+    // Microsoft bit-field storage whose byte size is not a power of two needs an unrepresentable alignment.
+    TYPE_ERROR_MS_STRUCT_ALIGNMENT,
 } TypeError;
 
 // Per type, by index. What base, index and extent hold depends on the kind:
@@ -342,7 +344,7 @@ struct TypeParameters
 
 // Per tag (struct, union or enum), by tag index. A tag is one per declaration: never hash-consed. completion is the
 // order in which tags were completed, from 1 (0 while incomplete), which #113's deferred bodies compare. packed,
-// pack_log2 and alignment_log2 are the layout's inputs (an enum's alignment too); the last two hold log2 + 1, 0 for
+// ms_struct, pack_log2 and alignment_log2 are layout inputs (an enum's alignment too); the last two hold log2 + 1, 0 for
 // none. lookup is how a struct's or union's members are found by name (TypeLookup): 0 for a scan of its members,
 // BUSTER_TYPE_LOOKUP_WALK for a walk, and otherwise its index's first bucket, of 2^lookup_log2. Record 0 is unused.
 typedef struct TypeTags TypeTags;
@@ -354,6 +356,7 @@ struct TypeTags
     uint32_t* member_count;
     uint32_t* completion;
     uint8_t* packed;
+    uint8_t* ms_struct;
     uint8_t* pack_log2;
     uint8_t* alignment_log2;
     uint32_t* lookup;
@@ -486,14 +489,15 @@ struct TypeMember
     uint32_t count_name;
 };
 
-// A struct's or union's layout attributes: GNU's packed, #pragma pack's value (#124 gives it) and the aligned
-// attribute, the last two as log2 + 1 or 0 for none.
+// A struct's or union's layout attributes: GNU's packed, #pragma pack's value (#124 gives it), the aligned attribute
+// (the last two as log2 + 1 or 0 for none), and Microsoft's bit-field storage-unit rules.
 typedef struct TypeRecordAttributes TypeRecordAttributes;
 struct TypeRecordAttributes
 {
     bool packed;
     uint8_t pack_log2;
     uint8_t alignment_log2;
+    bool ms_struct;
 };
 
 // #113's deferred bodies check each function body apart from the top level, and the top level without its bodies,
@@ -1030,8 +1034,8 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_COLUMN_ALIGNMENT 64
 #define BUSTER_TYPE_RECORD_BYTES (4 * sizeof(uint8_t) + sizeof(TypeId) + sizeof(uint32_t) + 3 * sizeof(uint64_t))
 #define BUSTER_TYPE_RECORD_COLUMNS 9
-#define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 5 * sizeof(uint32_t) + 4 * sizeof(uint8_t))
-#define BUSTER_TYPE_TAG_COLUMNS 10
+#define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 5 * sizeof(uint32_t) + 5 * sizeof(uint8_t))
+#define BUSTER_TYPE_TAG_COLUMNS 11
 #define BUSTER_TYPE_MEMBER_BYTES (sizeof(uint32_t) + sizeof(TypeId) + sizeof(uint32_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t) + sizeof(uint32_t))
 #define BUSTER_TYPE_MEMBER_COLUMNS 7
 // The index: four slots per 64-byte bucket, at most three quarters full, from 64 buckets (4 KB).
@@ -1153,6 +1157,7 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
         result.tags.member_count = type_push_column(arena, tags, sizeof(*result.tags.member_count), 1, &fits);
         result.tags.completion = type_push_column(arena, tags, sizeof(*result.tags.completion), 1, &fits);
         result.tags.packed = type_push_column(arena, tags, sizeof(*result.tags.packed), 1, &fits);
+        result.tags.ms_struct = type_push_column(arena, tags, sizeof(*result.tags.ms_struct), 1, &fits);
         result.tags.pack_log2 = type_push_column(arena, tags, sizeof(*result.tags.pack_log2), 1, &fits);
         result.tags.alignment_log2 = type_push_column(arena, tags, sizeof(*result.tags.alignment_log2), 1, &fits);
         result.tags.lookup = type_push_column(arena, tags, sizeof(*result.tags.lookup), 1, &fits);
@@ -2627,6 +2632,7 @@ static TypeId type_tag(TypeTable* table, uint8_t kind, uint32_t name)
         tags->member_count[tag] = 0;
         tags->completion[tag] = 0;
         tags->packed[tag] = 0;
+        tags->ms_struct[tag] = 0;
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
         tags->lookup[tag] = 0;
@@ -2959,6 +2965,11 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
     {
         bool flexible = false;
         error = type_check_member(table, &members[i], any_flexible || i + 1 == count, &flexible);
+        if (error == TYPE_ERROR_NONE && attributes.ms_struct && members[i].bit_width != BUSTER_TYPE_NOT_BIT_FIELD)
+        {
+            const uint64_t size = type_size(table, members[i].type);
+            error = size != 0 && (size & (size - 1)) == 0 ? TYPE_ERROR_NONE : TYPE_ERROR_MS_STRUCT_ALIGNMENT;
+        }
         flags |= flexible ? BUSTER_TYPE_FLAG_FLEXIBLE : 0;
     }
     if (error == TYPE_ERROR_NONE)
@@ -2983,6 +2994,7 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
         table->tags.member_begin[tag] = begin;
         table->tags.member_count[tag] = count;
         table->tags.packed[tag] = attributes.packed ? 1 : 0;
+        table->tags.ms_struct[tag] = attributes.ms_struct ? 1 : 0;
         table->tags.pack_log2[tag] = attributes.pack_log2;
         table->tags.alignment_log2[tag] = attributes.alignment_log2;
         type_lookup_build(table, tag);
@@ -3312,7 +3324,7 @@ static TypeId type_builtin_va_list(TypeTable* table, const uint32_t* names)
 // Layout
 
 // The record layout of C on x86-64 Linux, as clang's ItaniumRecordLayoutBuilder computes it (its LayoutField,
-// LayoutBitField and FinishLayout, without what only ms_struct, AIX and C++ records do). In bits, from a data size
+// LayoutBitField and FinishLayout, including ms_struct, without AIX and C++ records). In bits, from a data size
 // (where the next member may start; a multiple of 8), the bits of its last byte that bit-fields left unfilled, and a
 // size; the record's alignment starts at its aligned attribute's, or 1 byte. For each member:
 //   - Any member: packed if the record or the member is. #pragma pack's value P caps alignments (aligned's too),
@@ -3328,6 +3340,9 @@ static TypeId type_builtin_va_list(TypeTable* table, const uint32_t* names)
 //     byte (a union's: its width rounded up, if larger), and the unfilled bits the difference.
 //   - The record's alignment rises to each member's alignment in whole bytes (so a packed bit-field's 1 bit never
 //     raises it), and its size to the data size; at the end the size is rounded up to the alignment.
+//   - ms_struct instead allocates whole bit-field storage units, shared only by adjacent fields of the same size
+//     that fit. Zero-width fields after non-bit-fields are ignored; other zero-width fields align the next unit.
+//     Unnamed fields raise alignment too. A union reserves the entire unit but its bit-fields never raise alignment.
 
 // A member's layout inputs in bits, as the scalar and the vector layout both read them.
 typedef struct TypeLayoutInput TypeLayoutInput;
@@ -3379,8 +3394,26 @@ static TypeLayoutColumns type_layout_columns(const TypeTable* table)
 
 #define BUSTER_INLINE static inline __attribute__((always_inline))
 
+// Microsoft record layout raises a complete builtin field's alignment to its element's size, including through
+// aligned typedefs and fixed arrays. Other types keep their ABI alignment, and flexible arrays keep theirs too.
+static uint32_t type_layout_ms_alignment(const TypeLayoutColumns* columns, uint32_t index)
+{
+    const uint32_t alignment = columns->alignment_log2[index];
+    uint32_t element = index;
+    while (columns->kind[element] == BUSTER_TYPE_KIND_ALIGNED || columns->kind[element] == BUSTER_TYPE_KIND_ARRAY)
+    {
+        element = type_index(columns->base[element]);
+    }
+    const uint8_t kind = columns->kind[element];
+    const uint64_t size = columns->size[element];
+    const bool builtin = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_NULLPTR;
+    const uint32_t width = builtin && size != 0 && (size & (size - 1)) == 0 ? type_log2(size) : 0;
+    const uint32_t result = width > alignment ? width : alignment;
+    return result;
+}
+
 // A member's inputs: its type's size (an aligned typedef's base's) and alignment, in bits.
-BUSTER_INLINE TypeLayoutInput type_layout_input(const TypeLayoutColumns* columns, uint32_t member)
+BUSTER_INLINE TypeLayoutInput type_layout_input(const TypeLayoutColumns* columns, uint32_t member, bool ms_struct)
 {
     const uint32_t index = columns->member_type[member] >> BUSTER_TYPE_INDEX_SHIFT;
     const uint32_t resolved = columns->kind[index] == BUSTER_TYPE_KIND_ALIGNED ? columns->base[index] >> BUSTER_TYPE_INDEX_SHIFT : index;
@@ -3388,7 +3421,7 @@ BUSTER_INLINE TypeLayoutInput type_layout_input(const TypeLayoutColumns* columns
     const uint8_t flags = columns->member_flags[member];
     TypeLayoutInput result = {
         .size = columns->size[resolved] * 8,
-        .alignment = 8ull << columns->alignment_log2[index],
+        .alignment = 8ull << (ms_struct ? type_layout_ms_alignment(columns, index) : columns->alignment_log2[index]),
         .explicit_alignment = alignment_log2 != 0 ? 8ull << (alignment_log2 - 1) : 0,
         .width = columns->bit_width[member],
         .bit_field = (flags & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0,
@@ -3425,27 +3458,36 @@ static TypeError type_layout_scalar(TypeTable* table, uint32_t tag, uint64_t* si
     const TypeTags* tags = &table->tags;
     const bool is_union = type_kind(table, tags->type[tag]) == BUSTER_TYPE_KIND_UNION;
     const bool record_packed = tags->packed[tag] != 0;
+    const bool ms_struct = tags->ms_struct[tag] != 0;
     const uint64_t pack = tags->pack_log2[tag] != 0 ? 8ull << (tags->pack_log2[tag] - 1) : 0;
     const uint32_t begin = tags->member_begin[tag];
     const uint32_t count = tags->member_count[tag];
     uint64_t alignment = tags->alignment_log2[tag] != 0 ? 1ull << (tags->alignment_log2[tag] - 1) : 1;
     uint64_t data_size = 0;
     uint64_t unfilled = 0;
+    uint64_t previous_unit = 0;
     uint64_t size = 0;
     bool fits = true;
     for (uint32_t i = 0; fits && i < count; i += 1)
     {
         const uint32_t member = begin + i;
-        const TypeLayoutInput input = type_layout_input(&columns, member);
+        const TypeLayoutInput input = type_layout_input(&columns, member, ms_struct);
         const bool packed = record_packed || input.packed;
         uint64_t offset = 0;
         uint64_t raise = 0;
         if (input.bit_field)
         {
             const uint64_t width = input.width;
+            const bool ignored_zero = ms_struct && previous_unit == 0 && width == 0;
+            if (ms_struct && (previous_unit != input.size || unfilled < width))
+            {
+                unfilled = 0;
+                previous_unit = 0;
+            }
             offset = is_union ? 0 : data_size - unfilled;
-            uint64_t field_alignment = packed && width != 0 ? 1 : input.alignment;
-            uint64_t unpacked_alignment = input.alignment;
+            const uint64_t natural_alignment = ms_struct ? (ignored_zero ? 1 : input.size) : input.alignment;
+            uint64_t field_alignment = packed && width != 0 ? 1 : natural_alignment;
+            uint64_t unpacked_alignment = natural_alignment;
             if (input.explicit_alignment != 0)
             {
                 field_alignment = type_maximum(field_alignment, input.explicit_alignment);
@@ -3456,24 +3498,36 @@ static TypeError type_layout_scalar(TypeTable* table, uint32_t tag, uint64_t* si
                 unpacked_alignment = type_minimum(unpacked_alignment, pack);
                 field_alignment = packed ? unpacked_alignment : type_minimum(field_alignment, pack);
             }
-            if (width == 0 || (pack == 0 && (offset & (field_alignment - 1)) + width > input.size))
+            field_alignment = ms_struct && is_union ? 1 : field_alignment;
+            if (width == 0 || (ms_struct ? width > unfilled : (pack == 0 && (offset & (field_alignment - 1)) + width > input.size)))
             {
                 offset = type_align_up(offset, field_alignment);
             }
-            else if (input.explicit_alignment != 0 && (pack == 0 || input.explicit_alignment <= pack))
+            else if (!ms_struct && input.explicit_alignment != 0 && (pack == 0 || input.explicit_alignment <= pack))
             {
                 offset = type_align_up(offset, input.explicit_alignment);
             }
-            raise = input.named ? field_alignment : 1;
+            raise = ms_struct || input.named ? field_alignment : 1;
             if (is_union)
             {
-                data_size = type_maximum(data_size, type_align_up(width, 8));
+                data_size = type_maximum(data_size, ms_struct ? (width != 0 ? input.size : 8) : type_align_up(width, 8));
+            }
+            else if (ms_struct && width != 0)
+            {
+                if (unfilled == 0)
+                {
+                    data_size = offset + input.size;
+                    unfilled = input.size;
+                }
+                unfilled -= width;
+                previous_unit = input.size;
             }
             else
             {
                 const uint64_t end = offset + width;
                 data_size = type_align_up(end, 8);
                 unfilled = data_size - end;
+                previous_unit = 0;
             }
         }
         else
@@ -3488,6 +3542,7 @@ static TypeError type_layout_scalar(TypeTable* table, uint32_t tag, uint64_t* si
             raise = packed ? packed_alignment : unpacked_alignment;
             offset = type_align_up(is_union ? 0 : data_size, raise);
             unfilled = 0;
+            previous_unit = 0;
             uint64_t end = 0;
             fits = !__builtin_add_overflow(offset, input.size, &end) && end <= BUSTER_TYPE_MAX_RECORD_BITS;
             data_size = is_union ? type_maximum(data_size, input.size) : end;
@@ -3704,7 +3759,7 @@ static __attribute__((noinline)) void type_layout_read_types(const TypeTable* ta
             const uint32_t resolved = columns.kind[index] == BUSTER_TYPE_KIND_ALIGNED ? columns.base[index] >> BUSTER_TYPE_INDEX_SHIFT : index;
             const uint64_t size = columns.size[resolved];
             layout_sizes[first + m] = size < (BUSTER_TYPE_LAYOUT_HUGE >> 3) ? (uint32_t)size * 8 : BUSTER_TYPE_LAYOUT_HUGE;
-            layout_log2[first + m] = columns.alignment_log2[index];
+            layout_log2[first + m] = (uint8_t)(table->tags.ms_struct[tag] != 0 ? type_layout_ms_alignment(&columns, index) : columns.alignment_log2[index]);
         }
         first += member_count;
     }
@@ -3726,6 +3781,7 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
     uint32_t steps = 0;
     uint32_t unions = 0;
     uint32_t packed = 0;
+    uint32_t microsoft = 0;
     uint32_t too_aligned = 0;
     for (uint32_t lane = 0; lane < BUSTER_TYPE_LAYOUT_LANES; lane += 1)
     {
@@ -3741,6 +3797,7 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
             too_aligned |= (tags->alignment_log2[tag] > 28 || tags->pack_log2[tag] > 28 ? 1u : 0u) << lane;
             unions |= (type_kind(table, tags->type[tag]) == BUSTER_TYPE_KIND_UNION ? 1u : 0u) << lane;
             packed |= (tags->packed[tag] != 0 ? 1u : 0u) << lane;
+            microsoft |= (tags->ms_struct[tag] != 0 ? 1u : 0u) << lane;
             steps = counts[lane] > steps ? counts[lane] : steps;
         }
     }
@@ -3751,10 +3808,12 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
     const __m512i pack = _mm512_loadu_si512(packs);
     const __mmask16 union_lanes = (__mmask16)unions;
     const __mmask16 packed_lanes = (__mmask16)packed;
+    const __mmask16 ms_lanes = (__mmask16)microsoft;
     const __mmask16 pack_lanes = _mm512_test_epi32_mask(pack, pack);
     __mmask16 overflow = (__mmask16)too_aligned;
     __m512i data_size = zero;
     __m512i unfilled = zero;
+    __m512i previous_unit = zero;
     __m512i size = zero;
     __m512i alignment = _mm512_loadu_si512(record_alignments);
     for (uint32_t block = 0; block < steps; block += BUSTER_TYPE_LAYOUT_LANES)
@@ -3828,9 +3887,38 @@ static __attribute__((noinline)) void type_layout_group(const TypeTable* table, 
             bit_offset = _mm512_mask_mov_epi32(bit_offset, to_explicit, type_align_up_vector(bit_start, explicit_alignment));
             const __m512i bit_end = _mm512_add_epi32(bit_offset, width);
             const __m512i bit_end_bytes = type_align_up_vector(bit_end, byte);
-            const __m512i bit_data = _mm512_mask_max_epu32(bit_end_bytes, union_lanes, data_size, type_align_up_vector(width, byte));
-            const __m512i bit_unfilled = _mm512_mask_mov_epi32(_mm512_sub_epi32(bit_end_bytes, bit_end), union_lanes, unfilled);
-            const __m512i bit_raise = _mm512_mask_mov_epi32(one, named, field_alignment);
+            __m512i bit_data = _mm512_mask_max_epu32(bit_end_bytes, union_lanes, data_size, type_align_up_vector(width, byte));
+            __m512i bit_unfilled = _mm512_mask_mov_epi32(_mm512_sub_epi32(bit_end_bytes, bit_end), union_lanes, unfilled);
+            __m512i bit_raise = _mm512_mask_mov_epi32(one, named, field_alignment);
+            if (ms_lanes != 0)
+            {
+                // An active unit belongs only to adjacent bit-fields of the same size. Full-unit allocation means
+                // a following ordinary field starts after its unused bits, while a same-size field can share them.
+                const __mmask16 continuing = _mm512_cmpeq_epi32_mask(previous_unit, member_size) & _mm512_cmpge_epu32_mask(unfilled, width);
+                const __m512i remaining = _mm512_maskz_mov_epi32(continuing, unfilled);
+                const __mmask16 ignored_zero = zero_width & _mm512_cmpeq_epi32_mask(previous_unit, zero);
+                const __m512i natural = _mm512_mask_mov_epi32(member_size, ignored_zero, one);
+                const __m512i unpacked_ms = _mm512_max_epu32(natural, explicit_alignment);
+                __m512i aligned_ms = _mm512_max_epu32(_mm512_mask_mov_epi32(natural, member_packed & (__mmask16)~zero_width, one), explicit_alignment);
+                aligned_ms = _mm512_mask_min_epu32(aligned_ms, pack_applies, aligned_ms, pack);
+                aligned_ms = _mm512_mask_min_epu32(aligned_ms, pack_applies & member_packed, unpacked_ms, pack);
+                aligned_ms = _mm512_mask_mov_epi32(aligned_ms, union_lanes, one);
+                const __m512i start_ms = _mm512_maskz_sub_epi32((__mmask16)~union_lanes, data_size, remaining);
+                const __mmask16 fresh = _mm512_cmpeq_epi32_mask(remaining, zero);
+                const __mmask16 align_ms = zero_width | _mm512_cmpgt_epu32_mask(width, remaining);
+                const __m512i offset_ms = _mm512_mask_mov_epi32(start_ms, align_ms, type_align_up_vector(start_ms, aligned_ms));
+                const __m512i unit_end = _mm512_mask_add_epi32(data_size, fresh, offset_ms, member_size);
+                __m512i data_ms = _mm512_mask_mov_epi32(unit_end, zero_width, type_align_up_vector(offset_ms, byte));
+                data_ms = _mm512_mask_max_epu32(data_ms, union_lanes, data_size, _mm512_mask_mov_epi32(member_size, zero_width, byte));
+                __m512i left_ms = _mm512_sub_epi32(_mm512_mask_mov_epi32(remaining, fresh, member_size), width);
+                left_ms = _mm512_mask_sub_epi32(left_ms, zero_width, data_ms, offset_ms);
+                left_ms = _mm512_mask_mov_epi32(left_ms, union_lanes, unfilled);
+                bit_offset = _mm512_mask_mov_epi32(bit_offset, ms_lanes, offset_ms);
+                bit_data = _mm512_mask_mov_epi32(bit_data, ms_lanes, data_ms);
+                bit_unfilled = _mm512_mask_mov_epi32(bit_unfilled, ms_lanes, left_ms);
+                bit_raise = _mm512_mask_mov_epi32(bit_raise, ms_lanes, aligned_ms);
+                previous_unit = _mm512_mask_mov_epi32(previous_unit, active, _mm512_maskz_mov_epi32(bit_field & (__mmask16)~zero_width & (__mmask16)~union_lanes, member_size));
+            }
             const __m512i new_data = _mm512_mask_blend_epi32(bit_field, plain_data, bit_data);
             const __m512i raise = _mm512_mask_blend_epi32(bit_field, plain_alignment, bit_raise);
             offset_rows[j] = _mm512_mask_blend_epi32(bit_field, plain_offset, bit_offset);
@@ -6180,6 +6268,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->tags.member_count, source->tags.member_count, tag_count * sizeof(*table->tags.member_count));
         memcpy(table->tags.completion, source->tags.completion, tag_count * sizeof(*table->tags.completion));
         memcpy(table->tags.packed, source->tags.packed, tag_count * sizeof(*table->tags.packed));
+        memcpy(table->tags.ms_struct, source->tags.ms_struct, tag_count * sizeof(*table->tags.ms_struct));
         memcpy(table->tags.pack_log2, source->tags.pack_log2, tag_count * sizeof(*table->tags.pack_log2));
         memcpy(table->tags.alignment_log2, source->tags.alignment_log2, tag_count * sizeof(*table->tags.alignment_log2));
         memcpy(table->tags.lookup, source->tags.lookup, tag_count * sizeof(*table->tags.lookup));
@@ -6320,6 +6409,7 @@ static void type_tag_withdraw(TypeTable* table, uint32_t tag, bool transparency_
         tags->member_count[tag] = 0;
         tags->completion[tag] = 0;
         tags->packed[tag] = 0;
+        tags->ms_struct[tag] = 0;
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
         tags->lookup[tag] = 0;
@@ -6341,6 +6431,7 @@ static void type_tag_restore(TypeTable* table, const TypeTable* source, uint32_t
     tags->member_count[tag] = source->tags.member_count[tag];
     tags->completion[tag] = source->tags.completion[tag];
     tags->packed[tag] = source->tags.packed[tag];
+    tags->ms_struct[tag] = source->tags.ms_struct[tag];
     tags->pack_log2[tag] = source->tags.pack_log2[tag];
     tags->alignment_log2[tag] = source->tags.alignment_log2[tag];
     tags->lookup[tag] = source->tags.lookup[tag];

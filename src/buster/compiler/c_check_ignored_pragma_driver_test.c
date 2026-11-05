@@ -239,17 +239,184 @@ static void check_test_driver_symbol_pragma_objects(CheckTest* test, const char*
         "#pragma redefine_extname first_pending first_name\n#pragma redefine_extname first_pending second_name\nint first_pending=12;\n"
         "#pragma redefine_extname explicit_name not_chosen\nint explicit_name asm(\"chosen\")=13;\n"
         "extern int prior_asm asm(\"chosen_prior\");\n#pragma redefine_extname prior_asm not_prior\nint prior_asm=14;\n"
+        "extern int late_value_17;\n"
+        "int late_use_17(void){return late_value_17;}\n"
+        "#pragma redefine_extname late_value_17 late_renamed_17\n"
+        "int late_value_17=7;\n"
+        "extern int late_value_18;\n"
+        "int late_use_18(void){if(0)return late_value_18; return 1;}\n"
+        "#pragma redefine_extname late_value_18 late_renamed_18\n"
+        "int late_value_18=7;\n"
+        "extern int late_value_19;\n"
+        "int late_use_19(void){return 1; return late_value_19;}\n"
+        "#pragma redefine_extname late_value_19 late_renamed_19\n"
+        "int late_value_19=7;\n"
+        "extern int late_value_20;\n"
+        "int late_use_20(void){return sizeof(late_value_20);}\n"
+        "#pragma redefine_extname late_value_20 late_renamed_20\n"
+        "int late_value_20=7;\n"
+        "extern int late_value_21;\n"
+        "static int late_use_21(void){return late_value_21;}\n"
+        "#pragma redefine_extname late_value_21 late_renamed_21\n"
+        "int late_value_21=7;\n"
+        "extern int late_value_22;\n"
+        "inline int late_use_22(void){return late_value_22;}\n"
+        "#pragma redefine_extname late_value_22 late_renamed_22\n"
+        "int late_value_22=7;\n"
+        "extern int late_value_23;\n"
+        "static int late_use_23(void){return late_value_23;}\n"
+        "#pragma redefine_extname late_value_23 late_renamed_23\n"
+        "int late_value_23=7;\n"
+        "int late_caller_23(void){return late_use_23();}\n"
+        "extern int late_value_24;\n"
+        "static int late_use_24(void){return late_value_24;}\n"
+        "int late_caller_24(void){return late_use_24();}\n"
+        "#pragma redefine_extname late_value_24 late_renamed_24\n"
+        "int late_value_24=7;\n"
+        "extern int late_value_25;\n"
+        "int *late_pointer_25=&late_value_25;\n"
+        "#pragma redefine_extname late_value_25 late_renamed_25\n"
+        "int late_value_25=7;\n"
+        "extern int late_value_26;\n"
+        "int late_use_26(void){return _Generic(0,int:1,default:late_value_26);}\n"
+        "#pragma redefine_extname late_value_26 late_renamed_26\n"
+        "int late_value_26=7;\n"
+        "extern int late_value_27;\n"
+        "int late_use_27(void){return 0 ? late_value_27 : 1;}\n"
+        "#pragma redefine_extname late_value_27 late_renamed_27\n"
+        "int late_value_27=7;\n"
+        "extern int late_value_28;\n"
+        "int late_use_28(int c){if(c)return late_value_28; return 1;}\n"
+        "#pragma redefine_extname late_value_28 late_renamed_28\n"
+        "int late_value_28=7;\n"
+        "extern int late_value_29;\n"
+        "int late_use_29(void){return 0 && late_value_29;}\n"
+        "#pragma redefine_extname late_value_29 late_renamed_29\n"
+        "int late_value_29=7;\n"
+        "extern int late_value_30;\n"
+        "int late_use_30(void){return 1 || late_value_30;}\n"
+        "#pragma redefine_extname late_value_30 late_renamed_30\n"
+        "int late_value_30=7;\n"
+        "extern int late_value_31;\n"
+        "int late_use_31(int x){switch(1){case 2:return late_value_31;default:return x;}}\n"
+        "#pragma redefine_extname late_value_31 late_renamed_31\n"
+        "int late_value_31=7;\n"
+        "int late_target_32(void);\n"
+        "int late_use_32(void){return late_target_32();}\n"
+        "#pragma redefine_extname late_target_32 late_renamed_32\n"
+        "int late_target_32(void){return 7;}\n"
+        "extern int late_value_33;\n"
+        "int late_use_33(void){int x=late_value_33;\n"
+        "#pragma redefine_extname late_value_33 late_renamed_33\n"
+        "return x;}\n"
+        "int late_value_33=7;\n"
+        "extern int late_value_34;\n"
+        "static int *late_pointer_34=&late_value_34;\n"
+        "#pragma redefine_extname late_value_34 late_renamed_34\n"
+        "int late_value_34=7;\n"
+        "int late_use_34(void){return *late_pointer_34;}\n"
+        "extern int late_value_35;\n"
+        "static int *late_pointer_35=&late_value_35;\n"
+        "int late_use_35(void){return *late_pointer_35;}\n"
+        "#pragma redefine_extname late_value_35 late_renamed_35\n"
+        "int late_value_35=7;\n"
+        "extern int late_value_36;\n"
+        "static int *late_pointer_36 __attribute__((used))=&late_value_36;\n"
+        "#pragma redefine_extname late_value_36 late_renamed_36\n"
+        "int late_value_36=7;\n"
+        "extern int late_value_37;\n"
+        "int late_use_37(void){static int *late_pointer_37=&late_value_37;return *late_pointer_37;}\n"
+        "#pragma redefine_extname late_value_37 late_renamed_37\n"
+        "int late_value_37=7;\n"
+        "extern int late_value_38;\n"
+        "static int late_use_38(void){static int *late_pointer_38=&late_value_38;return *late_pointer_38;}\n"
+        "int late_caller_38(void){return late_use_38();}\n"
+        "#pragma redefine_extname late_value_38 late_renamed_38\n"
+        "int late_value_38=7;\n"
+        "extern int late_value_39;\n"
+        "extern inline int late_use_39(void){return late_value_39;}\n"
+        "#pragma redefine_extname late_value_39 late_renamed_39\n"
+        "int late_value_39=7;\n"
+        "extern int late_value_40;\n"
+        "static int late_use_40(void) __attribute__((used));\n"
+        "static int late_use_40(void){return late_value_40;}\n"
+        "#pragma redefine_extname late_value_40 late_renamed_40\n"
+        "int late_value_40=7;\n"
+        "extern int late_value_41;\n"
+        "int *late_pointer_41;\n"
+        "int late_use_41(void){late_pointer_41=&late_value_41;return 1;}\n"
+        "#pragma redefine_extname late_value_41 late_renamed_41\n"
+        "int late_value_41=7;\n"
+        "extern int late_value_42;\n"
+        "static int *late_pointer_42=&late_value_42;\n"
+        "int **late_external_42=&late_pointer_42;\n"
+        "#pragma redefine_extname late_value_42 late_renamed_42\n"
+        "int late_value_42=7;\n"
         "int main(void){return weak_data+weak_function()+original+weak_constant+weak_tls;}\n";
     static const char strong[] = "int weak_data=40; int weak_function(void){return 30;} const int weak_constant=20; _Thread_local int weak_tls=30;\n";
     static const char* const names[] = {
         "weak_data", "weak_function", "weak_tentative", "weak_constant", "weak_tls", "weak_after_reference", "weak_missing",
         "strong_after", "strong_function", "renamed", "renamed_function", "renamed_tentative", "defined_before", "first_name", "chosen", "chosen_prior",
+        "late_value_17",
+        "late_renamed_18",
+        "late_renamed_19",
+        "late_renamed_20",
+        "late_renamed_21",
+        "late_renamed_22",
+        "late_renamed_23",
+        "late_renamed_24",
+        "late_value_25",
+        "late_renamed_26",
+        "late_renamed_27",
+        "late_value_28",
+        "late_renamed_29",
+        "late_renamed_30",
+        "late_renamed_31",
+        "late_target_32",
+        "late_renamed_33",
+        "late_renamed_34",
+        "late_renamed_35",
+        "late_value_36",
+        "late_value_37",
+        "late_renamed_38",
+        "late_value_39",
+        "late_value_40",
+        "late_value_41",
+        "late_renamed_42",
     };
-    static const char* const absent[] = { "original", "original_function", "rename_tentative", "not_emitted", "second_name", "not_chosen", "not_prior" };
+    static const char* const absent[] = {
+        "original", "original_function", "rename_tentative", "not_emitted", "second_name", "not_chosen", "not_prior",
+        "late_renamed_17",
+        "late_value_18",
+        "late_value_19",
+        "late_value_20",
+        "late_value_21",
+        "late_value_22",
+        "late_value_23",
+        "late_value_24",
+        "late_renamed_25",
+        "late_value_26",
+        "late_value_27",
+        "late_renamed_28",
+        "late_value_29",
+        "late_value_30",
+        "late_value_31",
+        "late_renamed_32",
+        "late_value_33",
+        "late_value_34",
+        "late_value_35",
+        "late_renamed_36",
+        "late_renamed_37",
+        "late_value_38",
+        "late_renamed_39",
+        "late_renamed_40",
+        "late_renamed_41",
+        "late_value_42",
+    };
     char path[512];
     char strong_path[512];
     char strong_object[512];
-    char objects[3][512] = { { 0 } };
+    char objects[5][512] = { { 0 } };
     char binary[512];
     snprintf(path, sizeof(path), "%s/symbol-pragmas.c", directory);
     snprintf(strong_path, sizeof(strong_path), "%s/symbol-pragmas-strong.c", directory);
@@ -261,11 +428,25 @@ static void check_test_driver_symbol_pragma_objects(CheckTest* test, const char*
     const bool override = written && check_test_driver_spawn(strong_arguments, &text) == 0;
     check_test_expect(test, override, "symbol pragma strong override fixture compiles");
     free(text);
-    for (uint32_t producer = 0; written && producer < 3; producer += 1)
+    for (uint32_t producer = 0; written && producer < BUSTER_ARRAY_LENGTH(objects); producer += 1)
     {
         snprintf(objects[producer], sizeof(objects[producer]), "%s/symbol-pragmas-%u.o", directory, producer);
-        char* arguments[] = { (char*)(producer == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[producer],
-                              producer == 2 ? "--scalar" : NULL, NULL };
+        char* arguments[16] = { (char*)(producer == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[producer] };
+        uint32_t count = 7;
+        if (producer != 0)
+        {
+            arguments[count++] = "--lanes";
+            arguments[count++] = producer < 3 ? "1" : "3";
+        }
+        if (producer >= 3)
+        {
+            arguments[count++] = "--poison-arenas";
+        }
+        if (producer == 2 || producer == 4)
+        {
+            arguments[count++] = "--scalar";
+        }
+        arguments[count] = NULL;
         text = NULL;
         const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
         check_test_expect(test, compiled, "symbol pragmas compile through Clang and both checker paths");
@@ -300,8 +481,12 @@ static void check_test_driver_symbol_pragma_objects(CheckTest* test, const char*
             free(text);
         }
     }
-    check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "symbol pragma scalar and vector objects match byte for byte");
-    for (uint32_t i = 0; i < 3; i += 1)
+    for (uint32_t i = 2; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[i]),
+                          "symbol pragma scalar/vector and poisoned multi-lane objects match byte for byte");
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
     {
         unlink(objects[i]);
     }
@@ -330,6 +515,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         const char* third;
     } cases[] = {
         { "#pragma buster_unknown\nint main(void){return 0;}\n", NULL, NULL, NULL },
+        { "#pragma GCC target(\"avx2\")\n#pragma GCC push_options\n#pragma GCC pop_options\n#pragma GCC reset_options\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
+        { "#pragma GCC target(\"avx2\")\nint main(void){return 0;}\n", "-Werror=unknown-pragmas", NULL, NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wunknown-pragmas", "-Werror", NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Werror=unknown-pragmas", "-w", NULL },
@@ -437,11 +624,9 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        { "extern int old; int use(void){return old;}\n#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL, NULL },
         { "#pragma weak alias = target\nint target;\n", "weak", NULL, NULL, NULL },
         { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
-        { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
@@ -522,6 +707,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     check_test_driver_fp_pragma_errors(test, clang, executable, directory);
     check_test_driver_symbol_pragma_diagnostics(test, clang, executable, directory);
     check_test_driver_symbol_pragma_objects(test, clang, executable, directory);
+    check_test_driver_ms_diagnostics(test, clang, executable, directory);
+    check_test_driver_ms_abi(test, clang, executable, directory);
     unlink(source);
     unlink(object);
 }

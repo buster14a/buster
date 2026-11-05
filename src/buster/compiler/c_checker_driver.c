@@ -5,6 +5,7 @@
 // accepted. Diagnostics retain source/macro history and are ordered by the point their constraint is known.
 
 #include "linker_options.c"
+#include "c_driver_inputs.c"
 
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
@@ -58,6 +59,11 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
         case CHECK_INPUT_REDECLARATION: result = "conflicting declaration"; break;
+        case CHECK_INPUT_BREAK: result = "'break' statement not in loop or switch statement"; break;
+        case CHECK_INPUT_CONTINUE: result = "'continue' statement not in loop statement"; break;
+        case CHECK_INPUT_INCOMPLETE_TENTATIVE: result = "tentative definition has incomplete type"; break;
+        case CHECK_INPUT_ENUMERATOR_REDEFINITION: result = "redefinition of enumerator"; break;
+        case CHECK_INPUT_CONFLICTING_TYPES: result = "conflicting types"; break;
         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
@@ -188,6 +194,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_RESTRICT_NOT_POINTER: result = "restrict requires a pointer or reference"; break;
         case CHECK_INPUT_INLINE_NOT_FUNCTION: result = "'inline' can only appear on functions"; break;
         case CHECK_INPUT_NORETURN_NOT_FUNCTION: result = "'_Noreturn' can only appear on functions"; break;
+        case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
     }
     return result;
 }
@@ -446,8 +453,10 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
     const CheckInputSectionDiagnostic* section = check_input_section_report(input, report);
     const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
     const CheckInputFpPragma* fp = check_input_fp_report(input, report);
+    const CheckInputMsPragma* layout = check_input_ms_report(input, report);
     return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
            section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
+           layout != NULL ? "this pragma cannot appear in struct declaration" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
@@ -619,6 +628,7 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 }
 
 #include "c_check_warning_render.c"
+#include "c_check_semantic_diagnostic.c"
 #include "c_check_literal_diagnostic.c"
 #include "c_check_common_warnings.c"
 
@@ -1190,6 +1200,44 @@ static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckI
     return spelling;
 }
 
+// Revisit only an already diagnosed conversion. Array decay and atomic loads expose their pointees directly,
+// without allocating semantic types or a per-argument warning column.
+static CheckActionResult check_driver_pointer_warning(const TypeTable* types, const CheckGraph* graph, uint32_t node,
+                                                       TypeId destination, const CheckValue* value, bool* nested)
+{
+    CheckActionResult result = { 0 };
+    const CheckAction action = { .node = node, .context = check_graph_context(graph, node, false) };
+    const TypeId target = type_unqualified(type_strip_aligned(types, destination));
+    TypeId source = type_unqualified(type_strip_aligned(types, value->type));
+    if (type_kind(types, source) == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        source = type_unqualified(type_strip_aligned(types, type_element(types, source)));
+    }
+    const uint8_t kind = type_kind(types, source);
+    *nested = false;
+    if (type_kind(types, target) == BUSTER_TYPE_KIND_POINTER && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind)) &&
+        !check_action_null(types, value, action.context.extensions))
+    {
+        check_action_pointer_assignable(types, type_element(types, target), type_element(types, source), &action, &result, false, nested);
+    }
+    return result;
+}
+
+static const char* check_driver_pointer_wording(const TypeTable* types, uint32_t warning, bool nested, TypeId destination, TypeId source)
+{
+    destination = type_unqualified(type_strip_aligned(types, destination));
+    source = type_unqualified(type_strip_aligned(types, source));
+    const TypeId left = type_kind(types, destination) == BUSTER_TYPE_KIND_POINTER ?
+                        type_unqualified(type_strip_aligned(types, type_element(types, destination))) : 0;
+    const TypeId right = type_kind(types, source) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(type_kind(types, source)) ?
+                         type_unqualified(type_strip_aligned(types, type_element(types, source))) : 0;
+    const bool plain_char = left == BUSTER_TYPE_CHAR || right == BUSTER_TYPE_CHAR;
+    return warning == CHECK_WARNING_DISCARDED_QUALIFIERS ?
+           (nested ? "discards qualifiers in nested pointer types" : "discards qualifiers") : plain_char ?
+           "converts between pointers to integer types where one is of the unique plain 'char' type and the other is not" :
+           "converts between pointers to integer types with different sign";
+}
+
 static const char* check_driver_pointer_conversion_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                                            const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning,
                                                            uint32_t* located, Arena* scratch)
@@ -1238,16 +1286,10 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
                                  returning ? "returning %.*s from a function with result type %.*s %s" : "assigning to %.*s from %.*s %s";
             const String8 first = returning ? right_name : left_name;
             const String8 second = returning ? left_name : right_name;
-            const TypeId destination = type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)));
-            const TypeId source = type_unqualified(type_strip_aligned(types, check_stream_type(stream, right)));
-            const TypeId left_element = type_kind(types, destination) == BUSTER_TYPE_KIND_POINTER ?
-                                        type_unqualified(type_strip_aligned(types, type_element(types, destination))) : 0;
-            const TypeId right_element = type_kind(types, source) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(type_kind(types, source)) ?
-                                         type_unqualified(type_strip_aligned(types, type_element(types, source))) : 0;
-            const bool plain_char = left_element == BUSTER_TYPE_CHAR || right_element == BUSTER_TYPE_CHAR;
-            const char* conversion = warning == CHECK_WARNING_DISCARDED_QUALIFIERS ? "discards qualifiers" : plain_char ?
-                                     "converts between pointers to integer types where one is of the unique plain 'char' type and the other is not" :
-                                     "converts between pointers to integer types with different sign";
+            bool nested = false;
+            const CheckValue value = check_stream_value(stream, right);
+            check_driver_pointer_warning(types, graph, node, check_stream_type(stream, node), &value, &nested);
+            const char* conversion = check_driver_pointer_wording(types, warning, nested, check_stream_type(stream, node), value.type);
             result = check_warning_text(scratch, action, (int)first.length, first.pointer, (int)second.length, second.pointer, conversion);
         }
     }
@@ -1267,6 +1309,115 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
         severity = CHECK_WARNING_IGNORE;
     }
     return severity;
+}
+
+// Each parameter has its own specifiers. Unlike a declaration's comma-separated declarators, a parameter cannot
+// inherit a typedef spelling from the preceding parameter or the function's return type.
+static uint32_t check_driver_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t result = 0;
+    bool scanning = token < input->token_count;
+    while (scanning && result == 0 && token != 0)
+    {
+        token -= 1;
+        const uint8_t role = parser->tree.roles[token];
+        scanning = role != PARSE_ROLE_SEPARATOR && role != PARSE_ROLE_OPEN_FUNCTION && !check_input_declaration_boundary(role);
+        if (scanning && role == PARSE_ROLE_SPECIFIER && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declarations != NULL)
+        {
+            const uint32_t declaration = input->declarations[token];
+            result = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_TYPEDEF ? declaration : 0;
+        }
+    }
+    return result;
+}
+
+// A call's warning bits summarize its arguments. Expand those two pointer bits together, walking arguments and the
+// declared function's sparse source list once so mixed warning groups retain argument order. Function-pointer calls,
+// including an explicit (*f), have no named declaration for parameter notes. A direct use resolves to the visible
+// declaration, whose compatible empty-list redeclarations retain their inherited prototype's sources.
+static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                            const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t flags, uint32_t enabled,
+                                            uint32_t publication, PPDiagnosticPhase phase, Arena* scratch)
+{
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const bool call = types != NULL && graph != NULL && node < stream->count && graph->ops[node] == CHECK_OP_CALL &&
+                      graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL;
+    if (call)
+    {
+        const uint32_t callee = graph->operand0[node];
+        const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE &&
+                            check_action_kind(types, check_stream_type(stream, callee)) == BUSTER_TYPE_KIND_FUNCTION &&
+                            declaration < input->token_count && input->declaration_kinds != NULL &&
+                            input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        uint32_t parameter = direct && check_sparse_present(input->parameter_sources) ? check_sparse_get(input->parameter_sources, declaration) : BUSTER_CHECK_NONE;
+        const uint32_t offset = graph->argument_offsets[node];
+        for (uint32_t i = 0; !pp->fatal && i < graph->argument_counts[node]; i += 1)
+        {
+            while (parameter < input->token_count && check_sparse_get(input->parameters, parameter) < i)
+            {
+                parameter = check_sparse_get(input->parameter_sources, parameter);
+            }
+            const uint32_t note_token = parameter < input->token_count && check_sparse_get(input->parameters, parameter) == i ? parameter : BUSTER_CHECK_NONE;
+            const uint32_t argument = graph->argument_nodes[offset + i];
+            const CheckConversion conversion = stream->argument_conversions[offset + i];
+            if (argument < stream->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0)
+            {
+                const CheckValue value = check_stream_value(stream, argument);
+                bool nested = false;
+                const CheckActionResult checked = check_driver_pointer_warning(types, graph, node, conversion.type, &value, &nested);
+                const uint32_t warning = checked.warnings & flags & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
+                if (checked.diagnostic == CHECK_DIAG_RESOURCE)
+                {
+                    pp_diagnose_output(pp, PP_SEVERITY_FATAL, parser->tokens.sources[token], "%s", check_driver_action_message(checked.diagnostic));
+                }
+                if (warning != 0)
+                {
+                    const uint32_t located = check_warning_graph_first(graph, parser, argument);
+                    const CheckWarningSeverity severity = check_driver_legacy_severity(pp, input, located, warning, (enabled & warning) == 0);
+                    if (severity != CHECK_WARNING_IGNORE)
+                    {
+                        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                        const uint32_t spelling = check_driver_pointer_spelling(parser, input, stream, types, argument);
+                        const uint32_t target_spelling = note_token < input->token_count ? check_driver_parameter_spelling(parser, input, note_token) : 0;
+                        const String8 source = check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling);
+                        const String8 target = check_driver_warning_type(parser, pp, input, types, spell, scratch, conversion.type, target_spelling);
+                        const char* note = NULL;
+                        if (note_token < input->token_count)
+                        {
+                            const bool named = parser->tokens.kinds[note_token] == PARSE_KIND_IDENTIFIER && input->declarations[note_token] == note_token &&
+                                               input->declaration_kinds[note_token] == C_BINDING_OBJECT;
+                            const uint32_t identifier = named ? parser->tokens.names[note_token] : 0;
+                            const uint32_t length = named ? intern_length(pp->table, identifier) : 0;
+                            const uint8_t* text = named ? intern_bytes(pp->table, identifier) : NULL;
+                            note = named ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)length, text) :
+                                           "passing argument to parameter here";
+                        }
+                        const PPOutputDiagnosticNote notes[1] =
+                        {
+                            { .token = note_token < input->token_count ? parser->tokens.sources[note_token] : 0, .message = note },
+                        };
+                        const uint32_t index = check_diagnostic_warning_index(warning);
+                        if (source.length != 0 && target.length != 0 && (note_token == BUSTER_CHECK_NONE || note != NULL))
+                        {
+                            pp_diagnose_output_notes_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, notes, note != NULL,
+                                "passing %.*s to parameter of type %.*s %s [%s%s]", (int)source.length, source.pointer, (int)target.length, target.pointer,
+                                check_driver_pointer_wording(types, warning, nested, conversion.type, value.type),
+                                severity >= CHECK_WARNING_ERROR ? "-Werror," : "", check_warning_descriptions[index].option);
+                        }
+                        else
+                        {
+                            pp_diagnose_output(pp, PP_SEVERITY_FATAL, parser->tokens.sources[located], "%s", check_driver_action_message(CHECK_DIAG_RESOURCE));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return call;
 }
 
 static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
@@ -1522,6 +1673,17 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             uint32_t flags = warned && (repair == NULL || check_repair_warning_token(repair, token)) ? (uint32_t)(warnings[warning] >> 16) & 0xffff : 0;
             const uint32_t enabled = warned ? (uint32_t)warnings[warning] & 0xffff : 0;
             warning += warned;
+            const uint32_t pointer_flags = flags & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
+            if (pointer_flags != 0)
+            {
+                PPDiagnosticPhase phase = PP_DIAGNOSTIC_SEMANTIC;
+                const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token,
+                                                                          pointer_flags & (0u - pointer_flags), publication_end, original, &phase);
+                if (check_driver_pointer_arguments(parser, pp, input, stream, types, &spell, token, pointer_flags, enabled, publication, phase, scratch))
+                {
+                    flags &= ~pointer_flags;
+                }
+            }
             while (!pp->fatal && flags != 0)
             {
                 const uint32_t warning_flag = flags & (0u - flags);
@@ -1613,7 +1775,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const uint32_t phase = sequence < input->report_count ? 0 : sequence - input->report_count < stream_reports ? 1 : 2;
                     const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
                     const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                         check_driver_input_report_message(input, input->reports + index);
+                                                                                         check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                     const uint32_t located = phase == 2 ? extra[index].token : phase == 1 ? stream->reports[index].token : input->reports[index].token;
                     const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                     const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
@@ -1636,6 +1798,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, scratch);
                     }
                     if (source != BUSTER_CHECK_NONE)
                     {
@@ -2116,39 +2282,18 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 }
                             }
                         }
-                        else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && token < count &&
+                        else if (phase == 0 && (kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) && token < count &&
                                  input->reports[index].detail > CHECK_REDECLARATION_GENERIC &&
                                  input->reports[index].detail <= CHECK_REDECLARATION_STATIC)
                         {
                             const CheckInputReport* conflict = input->reports + index;
-                            const uint32_t name = parser->tokens.names[token];
                             const uint32_t previous = conflict->note_token;
                             const PPOutputDiagnosticNote note = {
                                 .token = previous < count ? parser->tokens.sources[previous] : source,
                                 .message = conflict->note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ?
                                            "previous definition is here" : "previous declaration is here",
                             };
-                            if (conflict->detail == CHECK_REDECLARATION_OBJECT_TYPE)
-                            {
-                                const String8 current = check_driver_warning_type(parser, pp, input, types, &spell, scratch,
-                                                                                  conflict->type, conflict->type_spelling);
-                                const uint32_t previous_spelling = previous < count ? check_input_typedef_spelling(input, parser, previous) : 0;
-                                const String8 earlier = check_driver_warning_type(parser, pp, input, types, &spell, scratch,
-                                                                                  (TypeId)conflict->value, previous_spelling);
-                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
-                                    "redefinition of '%.*s' with a different type: %.*s vs %.*s",
-                                    (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
-                                    (int)current.length, current.pointer, (int)earlier.length, earlier.pointer);
-                            }
-                            else
-                            {
-                                const char* format = conflict->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
-                                                     conflict->detail == CHECK_REDECLARATION_PARAMETER ? "redefinition of parameter '%.*s'" :
-                                                     conflict->detail == CHECK_REDECLARATION_STATIC ? "static declaration of '%.*s' follows non-static declaration" :
-                                                     "redefinition of '%.*s'";
-                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
-                                                            format, (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                            }
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u, "%s", message);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)
                         {
@@ -2796,6 +2941,7 @@ static void check_driver_lower_report(const CheckProgramCode* code, const CheckC
 
 // A unit's link kept for the link of several units (c_checker_units.c), which check_driver_object fills.
 typedef struct CheckUnitsKept CheckUnitsKept;
+static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
@@ -2850,7 +2996,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
-                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool* fatal)
+                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
 {
     (void)scalar;
 
@@ -2899,7 +3045,15 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     if (valid && kept != NULL)
     {
         const LinkError checked = link_check(&code.link);
-        valid = checked == LINK_ERROR_NONE && check_units_keep(kept, &code.link, program, parser, pp, debug ? &dwarf.object : NULL);
+        if (foreign)
+        {
+            const Object object = check_driver_object_build(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch);
+            valid = checked == LINK_ERROR_NONE && check_units_keep_object(kept, &object);
+        }
+        else
+        {
+            valid = checked == LINK_ERROR_NONE && check_units_keep(kept, &code.link, program, parser, pp, debug ? &dwarf.object : NULL);
+        }
         if (checked != LINK_ERROR_NONE)
         {
             fprintf(errors, "internal compiler error: the unit's link isn't valid (link error %u)\n", (uint32_t)checked);
@@ -2963,6 +3117,7 @@ typedef enum CheckUnitsRound
     CHECK_UNITS_ROUND_MERGE,
     CHECK_UNITS_ROUND_CHECK,
     CHECK_UNITS_ROUND_WRITE,
+    CHECK_UNITS_ROUND_FOREIGN,
 } CheckUnitsRound;
 struct CheckUnitsFlow
 {
@@ -3379,6 +3534,9 @@ struct CheckDriverLibraries
     uint32_t count;
     String8* directories;
     uint32_t directory_count;
+    // The positional files and -l requests in their original order, for mixed-input links (#1120).
+    ForeignArgument* arguments;
+    uint32_t argument_count;
 };
 
 // Says why the -l libraries didn't import (runtime_libraries_import's error).
@@ -3869,6 +4027,10 @@ struct CheckDriverCommand
     const char* output;
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
+    const CheckDriverInput* inputs;
+    uint32_t source_count;
+    bool mixed_inputs;
+    bool assembly_intel;
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
@@ -4351,7 +4513,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE)
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
-                                control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position,
+                                check_semantic_control(pp, &types, control.status, &control.failure, scratch), control.position,
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
@@ -4413,8 +4575,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
                     if (program_diagnostics && !program_checked)
                     {
-                        const char* message = program.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" :
-                                              program.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported C statement" : "invalid C statement or control flow";
+                        const char* message = check_semantic_control(pp, &types, program.status, &program.failure, scratch);
                         check_driver_diagnose(checking, pp, program.token, message);
                         result = 1;
                     }
@@ -4466,7 +4627,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
                             result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
                                                                            object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
-                                                                           scratch, stage_clock, errors, kept, &driver_fatal) ? 0 : 1;
+                                                                           scratch, stage_clock, errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
                         }
                         else if (!selection)
                         {
@@ -4633,7 +4794,7 @@ static void check_driver_flow(void* argument)
         check_clock_mark(run->stage_clock, CHECK_STAGE_LANES_START);
         run->lanes->lanes = run->lanes->lanes < lane_count() ? run->lanes->lanes : lane_count();
     }
-    if (run->input_count > 1)
+    if (run->input_count > 1 || run->command->mixed_inputs)
     {
         // Lane 0 runs the units' driver alone, its wide parts rounds of the flow (CheckUnitsFlow), the lanes' start having
         // gone on until the first.
@@ -4770,6 +4931,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The source files: every argument that is neither an option nor an option's value (#152). pp_parse_options reads the
     // first, as it reads -E's one file, and the others are each a unit too.
     char** inputs = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
+    CheckDriverInput* input_kinds = BUSTER_ARENA_PUSH_ARRAY(&arena, CheckDriverInput, (uint64_t)count + 1);
+    CheckDriverInputKind language = CHECK_DRIVER_INPUT_AUTO;
+    const char* invalid_language = NULL;
+    bool invalid_stdin = false;
+    bool mixed_inputs = false;
+    bool assembly_intel = false;
+    uint32_t source_count = 0;
     uint32_t input_count = 0;
     uint32_t stdin_count = 0;
     bool end_options = false;
@@ -4817,13 +4985,19 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     char** linker_arguments = linker_capacity <= INT_MAX ? arena_push_array(&arena, linker_capacity, sizeof(char*), _Alignof(char*)) : NULL;
+    uint32_t* linker_inputs = linker_capacity <= INT_MAX ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, linker_capacity) : NULL;
+    if (linker_inputs != NULL)
+    {
+        memset(linker_inputs, 0, linker_capacity * sizeof(*linker_inputs));
+    }
     int linker_count = 0;
     CheckDriverLibraries libraries = {
         .names = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
         .directories = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
         .required = arena_push_array(&arena, linker_capacity, sizeof(bool), _Alignof(bool)),
+        .arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, ForeignArgument, linker_capacity),
     };
-    const bool linker_ready = linker_arguments != NULL && libraries.required != NULL &&
+    const bool linker_ready = linker_arguments != NULL && linker_inputs != NULL && input_kinds != NULL && libraries.arguments != NULL && libraries.required != NULL &&
                               linker_options_initialize(&libraries.linker, (uint32_t)linker_capacity, &arena);
     bool missing_value = false;
     // The code generation and ABI layout options the driver refuses, read as every client of the request reads them
@@ -4879,8 +5053,27 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             {
                 filtered[filtered_count++] = arguments[i];
             }
-            stdin_count += strcmp(arguments[i], "-") == 0;
+            const bool standard_input = strcmp(arguments[i], "-") == 0;
+            stdin_count += standard_input;
+            invalid_stdin |= standard_input && language == CHECK_DRIVER_INPUT_AUTO;
+            input_kinds[input_count] = check_driver_classify(arguments[i], language);
+            mixed_inputs |= input_kinds[input_count].kind != CHECK_DRIVER_INPUT_C;
+            source_count += input_kinds[input_count].kind != CHECK_DRIVER_INPUT_LINK;
+            linker_inputs[linker_count] = input_count + 1;
+            linker_arguments[linker_count++] = arguments[i];
             inputs[input_count++] = arguments[i];
+            continue;
+        }
+        if (strncmp(arguments[i], "-x", 2) == 0)
+        {
+            const char* value = arguments[i][2] != 0 ? arguments[i] + 2 : i + 1 < count ? arguments[++i] : "";
+            language = check_driver_language(value);
+            invalid_language = language == CHECK_DRIVER_INPUT_INVALID && invalid_language == NULL ? value : invalid_language;
+            continue;
+        }
+        if (strcmp(arguments[i], "--intel") == 0)
+        {
+            assembly_intel = true;
             continue;
         }
         scalar |= strcmp(arguments[i], "--scalar") == 0;
@@ -5146,7 +5339,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
             if (source)
             {
-                stdin_count += strcmp(arguments[i], "-") == 0;
+                const bool standard_input = strcmp(arguments[i], "-") == 0;
+                stdin_count += standard_input;
+                invalid_stdin |= standard_input && language == CHECK_DRIVER_INPUT_AUTO;
+                input_kinds[input_count] = check_driver_classify(arguments[i], language);
+                mixed_inputs |= input_kinds[input_count].kind != CHECK_DRIVER_INPUT_C;
+                source_count += input_kinds[input_count].kind != CHECK_DRIVER_INPUT_LINK;
+                linker_inputs[linker_count] = input_count + 1;
+                linker_arguments[linker_count++] = arguments[i];
                 inputs[input_count++] = arguments[i];
             }
         }
@@ -5160,8 +5360,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool as_needed = true;
     for (int i = 0; link && linker_ready && libraries.linker.error == NULL && !libraries.linker.resource && i < linker_count; i += 1)
     {
+        const int option_index = i;
         const char* argument = linker_arguments[i];
-        if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i))
+        if (linker_inputs[i] != 0)
+        {
+            const uint32_t input = linker_inputs[i] - 1;
+            input_kinds[input].argument = libraries.argument_count;
+            libraries.arguments[libraries.argument_count++] = (ForeignArgument){
+                .name = foreign_string(argument),
+                .flags = as_needed ? BUSTER_FOREIGN_INPUT_AS_NEEDED : 0,
+            };
+        }
+        else if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i))
         {
             // Shared output options.
         }
@@ -5188,6 +5398,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 {
                     libraries.required[libraries.count] = !as_needed;
                     libraries.names[libraries.count++] = text;
+                    libraries.arguments[libraries.argument_count++] = (ForeignArgument){
+                        .name = text,
+                        .flags = BUSTER_FOREIGN_INPUT_LIBRARY | (as_needed ? BUSTER_FOREIGN_INPUT_AS_NEEDED : 0) |
+                                 (runtime_kind_is_static(runtime_kind) ? BUSTER_FOREIGN_INPUT_STATIC : 0),
+                    };
                 }
                 else
                 {
@@ -5198,6 +5413,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else
         {
             libraries.linker.error = argument;
+        }
+        if (i != option_index && linker_inputs[i] != 0)
+        {
+            libraries.linker.error = linker_arguments[option_index];
+            libraries.linker.missing = true;
         }
     }
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
@@ -5215,9 +5435,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
                   !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
-    if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
+    if (parsed && (stdin_count > 1 || invalid_stdin))
     {
-        fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
+        fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
+        parsed = false;
+    }
+    if (invalid_language != NULL)
+    {
+        fprintf(stderr, "error: unsupported or missing input language '%s'\n", invalid_language);
         parsed = false;
     }
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
@@ -5272,6 +5497,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .unwind_tables = unwind_tables,
         .output = output,
         .libraries = &libraries,
+        .inputs = input_kinds,
+        .source_count = source_count,
+        .mixed_inputs = mixed_inputs,
+        .assembly_intel = assembly_intel,
         .tier1 = lanes->tier1,
         .tier1_strict = lanes->tier1_strict,
         .tier1_no_rematerialize = lanes->tier1_no_rematerialize,
@@ -5334,6 +5563,17 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else
     {
+        for (uint32_t i = 0; i < input_count; i += 1)
+        {
+            if (input_kinds[i].kind == CHECK_DRIVER_INPUT_LINK && !link)
+            {
+                fprintf(stderr, "warning: %s: linker input unused because linking was not requested\n", inputs[i]);
+            }
+            else if (input_kinds[i].unknown)
+            {
+                fprintf(stderr, "warning: %s: unrecognized suffix; treating as linker input\n", inputs[i]);
+            }
+        }
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
         if (lanes->tier1 && !check_tier1_ready)
         {

@@ -19,6 +19,22 @@ typedef enum CheckProgramStatus
     CHECK_PROGRAM_BACKEND,
 } CheckProgramStatus;
 
+// Cold constraint facts survive a failed program's output rollback. No source or arena pointer is retained.
+typedef enum CheckProgramMessage
+{
+    CHECK_PROGRAM_MESSAGE_GENERIC,
+    CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE,
+    CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
+} CheckProgramMessage;
+
+typedef struct CheckProgramFailure CheckProgramFailure;
+struct CheckProgramFailure
+{
+    CheckProgramMessage message;
+    TypeId type;
+    unsigned __int128 value;
+};
+
 // A variable-length array's object (block scope, automatic, of a runtime size) is ALLOCATEd at its declaration (`token`;
 // `target` is its block's closing token), after its bounds' VLA entries; the first of its block is preceded by the
 // block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (after the
@@ -317,6 +333,7 @@ struct CheckProgram
     bool cfstring_class_own;
     uint32_t token;
     uint32_t diagnostic_position;
+    CheckProgramFailure failure;
     CheckProgramStatus status;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target, frame_pointer and probe_stack.
@@ -368,8 +385,12 @@ struct CheckProgram
     // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
     // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
     // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
-    // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
+    // target attribute, an x86 builtin's call (#148), such a query, or a symbol rename after an earlier use.
     uint8_t* body_eager;
+    // For a unit with a redefine_extname after an earlier use, one byte per retained symbol pragma: whether an
+    // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
+    // view; the input's asm-label facts remain unchanged for syntax and type checks.
+    uint8_t* symbol_pragma_originals;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
     // lifetime_first (by the block's closing brace, BUSTER_CHECK_NONE for a block without them) through lifetime_next (by
     // declaration), in token order; null otherwise.
@@ -4033,8 +4054,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const CheckProgramStatus status = program->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : program->status;
         const uint32_t token = status == CHECK_PROGRAM_INVALID ? check_program_diagnostic_location(parser, program->token) : program->token;
         const uint32_t position = program->diagnostic_position;
+        const CheckProgramFailure failure = program->failure;
         arena_pop_to(output, mark);
-        *program = (CheckProgram){ .status = status, .token = token, .diagnostic_position = position };
+        *program = (CheckProgram){ .status = status, .token = token, .diagnostic_position = position, .failure = failure };
         valid = false;
     }
     else

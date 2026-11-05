@@ -7,7 +7,7 @@
 // are decoded from the rewritten stream; opcode/immediate/effect identify ALL
 // non-location semantics. This module is not an x86 byte decoder.
 //
-// One location per value is certified at a block entry. An operand the source
+// Several locations per value may be certified at a block entry. An operand the source
 // marks BUSTER_CERT_RECIPE may instead be its value's integer recipe itself (an
 // immediate, or a definition no location keeps): location BUSTER_CERT_NONE. Equal-width aliases at
 // the same location are supported, as are arbitrary copies after entry. Each
@@ -714,43 +714,106 @@ static void tier1_cert_put(Tier1CertState* state, uint32_t location, uint32_t to
     }
 }
 
+// During seeding only, names form a disjoint-set forest of one-based value ids.
+// Equal-span assertions join their names, including names already asserted at
+// other homes. Union by rank and path compression make this independent of fact
+// order without scanning earlier homes whenever an alias joins them. The base
+// field is rank scratch here; frame-incarnation bindings are installed last.
+static uint32_t tier1_cert_seed_root(Tier1CertState* state, uint32_t token)
+{
+    Tier1CertName* const names = state->names;
+    uint32_t root = token;
+    while (names[root - 1].token != root)
+    {
+        root = names[root - 1].token;
+    }
+    while (token != root)
+    {
+        const uint32_t next = names[token - 1].token;
+        names[token - 1].token = root;
+        token = next;
+    }
+    return root;
+}
+
 static bool tier1_cert_seed(Tier1CertState* state, const Tier1CertFact* facts, uint32_t count)
 {
     state->epoch += 1;
     state->next_token = state->program->value_count + 1;
+    Tier1CertName* const names = state->names;
+    const uint32_t epoch = state->epoch;
     bool valid = true;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const Tier1CertFact fact = facts[i];
-        valid = state->names[fact.value].stamp != state->epoch;
-        uint32_t token = fact.value + 1;
-        if (valid && fact.location != BUSTER_CERT_NONE)
+        const uint32_t token = fact.value + 1;
+        if (names[fact.value].stamp != epoch)
+        {
+            names[fact.value] = (Tier1CertName){
+                .token = token,
+                .stamp = epoch,
+            };
+        }
+        if (fact.location != BUSTER_CERT_NONE)
         {
             const Tier1CertLocation l = state->program->locations[fact.location];
             const Tier1CertCell first = tier1_cert_read(state, l.unit);
-            if (first.token != 0)
-            {
-                token = first.token;
-            }
             for (uint32_t lane = 0; valid && lane < l.width; lane += 1)
             {
                 const Tier1CertCell cell = tier1_cert_read(state, l.unit + lane);
-                valid = first.token == 0 ? cell.token == 0 : cell.token == token && cell.lane == lane && cell.width == l.width;
+                valid = first.token == 0 ? cell.token == 0 : cell.token == first.token && cell.lane == lane && cell.width == l.width;
             }
-            for (uint32_t lane = 0; valid && lane < l.width; lane += 1)
+            if (valid && first.token != 0)
             {
-                const Tier1CertCell cell = {
-                    .token = token,
-                    .lane = (uint16_t)lane,
-                    .width = l.width,
-                };
-                tier1_cert_write(state, l.unit + lane, cell);
+                uint32_t left = tier1_cert_seed_root(state, token);
+                uint32_t right = tier1_cert_seed_root(state, first.token);
+                if (left != right)
+                {
+                    if (names[left - 1].base < names[right - 1].base)
+                    {
+                        const uint32_t swap = left;
+                        left = right;
+                        right = swap;
+                    }
+                    names[right - 1].token = left;
+                    names[left - 1].base += names[left - 1].base == names[right - 1].base;
+                }
+            }
+            else if (valid)
+            {
+                for (uint32_t lane = 0; lane < l.width; lane += 1)
+                {
+                    const Tier1CertCell cell = {
+                        .token = token,
+                        .lane = (uint16_t)lane,
+                        .width = l.width,
+                    };
+                    tier1_cert_write(state, l.unit + lane, cell);
+                }
             }
         }
-        state->names[fact.value] = (Tier1CertName){
-            .token = token,
-            .stamp = state->epoch,
-        };
+    }
+    // Flatten only the asserted names and homes, not the entire value/storage
+    // domains. A repeated fact is idempotent; partial overlaps still fail above.
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const Tier1CertFact fact = facts[i];
+        const uint32_t token = tier1_cert_seed_root(state, fact.value + 1);
+        names[fact.value].token = token;
+        names[fact.value].base = 0;
+        if (fact.location != BUSTER_CERT_NONE)
+        {
+            const Tier1CertLocation l = state->program->locations[fact.location];
+            for (uint32_t lane = 0; lane < l.width; lane += 1)
+            {
+                Tier1CertCell cell = tier1_cert_read(state, l.unit + lane);
+                if (cell.token != token)
+                {
+                    cell.token = token;
+                    tier1_cert_write(state, l.unit + lane, cell);
+                }
+            }
+        }
     }
     // A frame recipe binds the base incarnation current when the dependent
     // value's incarnation was established, not a later redefinition. Record
@@ -760,7 +823,7 @@ static bool tier1_cert_seed(Tier1CertState* state, const Tier1CertFact* facts, u
         const Tier1CertValue value = state->program->values[facts[i].value];
         if (value.recipe == TIER1_CERT_FRAME_RECIPE)
         {
-            state->names[facts[i].value].base = tier1_cert_token(state, value.dependency);
+            names[facts[i].value].base = tier1_cert_token(state, value.dependency);
         }
     }
     return valid;
@@ -785,18 +848,33 @@ static bool tier1_cert_prove(Tier1CertState* state, const Tier1CertFact* facts, 
         {
             valid = tier1_cert_match(state, value, fact.location);
         }
-        // Else an undefined phi operand (BUSTER_CERT_NONE, a rename's source): its location holds the fact whatever it
-        // holds.
+        else
+        {
+            // Undef permits any bits at one home; it does not prove that two homes hold equal bits. Otherwise an
+            // undef asserted beside a:R and b:S could join a and b through its two homes and forge a use of a:S.
+            // Keep one physical span for an undefined incoming phi. Exact duplicate views remain idempotent.
+            Tier1CertName* const phi = state->renames + fact.value;
+            if (phi->base == 0)
+            {
+                phi->base = fact.location + 1;
+            }
+            else
+            {
+                const Tier1CertLocation first = state->program->locations[phi->base - 1];
+                const Tier1CertLocation other = state->program->locations[fact.location];
+                valid = first.unit == other.unit && first.width == other.width;
+            }
+        }
         state->report->facts += 1;
     }
     return valid;
 }
 
-// Exit requirements are assertions like any other: at most one location per
-// value, equal-span aliases allowed, partial overlap refused. Entry and
+// Exit requirements are assertions like any other: multiple homes and
+// equal-span aliases allowed, partial overlap refused. Entry and
 // block-entry certificates get the same discipline from the seed writes; the
 // exit list only meets the prover, so its shape is checked explicitly. The
-// edge overlay and rename scratch are free outside edge processing.
+// edge overlay is free outside edge processing.
 static bool tier1_cert_exit_shape(Tier1CertState* state)
 {
     const Tier1CertProgram* program = state->program;
@@ -806,12 +884,7 @@ static bool tier1_cert_exit_shape(Tier1CertState* state)
     for (uint32_t i = 0; valid && i < program->exit_count; i += 1)
     {
         const Tier1CertFact fact = program->exit[i];
-        valid = state->renames[fact.value].stamp != mark;
-        state->renames[fact.value] = (Tier1CertName){
-            .token = i,
-            .stamp = mark,
-        };
-        if (valid && fact.location != BUSTER_CERT_NONE)
+        if (fact.location != BUSTER_CERT_NONE)
         {
             const Tier1CertLocation l = program->locations[fact.location];
             for (uint32_t lane = 0; valid && lane < l.width; lane += 1)

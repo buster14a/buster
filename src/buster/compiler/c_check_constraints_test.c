@@ -3005,8 +3005,294 @@ static void check_test_declaration_scales(CheckTest* test, const char* clang, co
     printf("test-checker: declaration-start scaling shapes: %u checks\n", checks);
 }
 
+// The exact-message part of the constraint catalogue (#1107). Clang must agree with the recorded column and
+// first diagnostic line before it serves as the oracle for either checker path. The driver is checked separately,
+// so changing only the corpus renderer cannot satisfy these tests. A later parse error exercises repaired input.
+static int check_test_driver_spawn(char* const* arguments, char** text);
+
+typedef struct CheckSemanticFixture CheckSemanticFixture;
+struct CheckSemanticFixture
+{
+    const char* violation;
+    const char* valid;
+    uint32_t column;
+    const char* message;
+    // Tentative definitions complete at translation-unit end, after a later parser error.
+    bool translation_unit_end;
+};
+
+static const CheckSemanticFixture check_semantic_fixtures[] =
+{
+    {
+        "int f(void) { return; }\n",
+        "int f(void) { return 0; }\n",
+        15,
+        "non-void function 'f' should return a value [-Wreturn-mismatch]",
+    },
+    {
+        "void g(void) { return 1; }\n",
+        "void g(void) { return; }\n",
+        16,
+        "void function 'g' should not return a value [-Wreturn-mismatch]",
+    },
+    {
+        "int main(void) { int x = \"s\"; }\n",
+        "int main(void) { int x = 0; return x; }\n",
+        22,
+        "incompatible pointer to integer conversion initializing 'int' with an expression of type 'char[2]' [-Wint-conversion]",
+    },
+    {
+        "struct s { int a; }; int f(struct s v) { return v.b; }\n",
+        "struct s { int a; }; int f(struct s v) { return v.a; }\n",
+        51,
+        "no member named 'b' in 'struct s'",
+    },
+    {
+        "void f(void) { const int c = 1; c = 2; }\n",
+        "void f(void) { int c = 1; c = 2; }\n",
+        35,
+        "cannot assign to variable 'c' with const-qualified type 'const int'",
+    },
+    {
+        "void f(void) { int a[2]; a = 0; }\n",
+        "void f(void) { int a[2]; a[0] = 0; }\n",
+        28,
+        "array type 'int[2]' is not assignable",
+    },
+    {
+        "int f(int); int f(long);\n",
+        "int f(int); int f(int);\n",
+        17,
+        "conflicting types for 'f'",
+    },
+    {
+        "int main(void) { break; }\n",
+        "int main(void) { while (1) { break; } }\n",
+        18,
+        "'break' statement not in loop or switch statement",
+    },
+    {
+        "int f(int x) { switch(x) { case 1: case 1: return 0; } return 1; }\n",
+        "int f(int x) { switch(x) { case 1: case 2: return 0; } return 1; }\n",
+        41,
+        "duplicate case value '1'",
+    },
+    {
+        "static int s; int s;\n",
+        "static int s; static int s;\n",
+        19,
+        "non-static declaration of 's' follows static declaration",
+    },
+    {
+        "int main(void); int (*fp)(int) = main;\n",
+        "int main(void); int (*fp)(void) = main;\n",
+        23,
+        "incompatible function pointer types initializing 'int (*)(int)' with an expression of type 'int (void)' [-Wincompatible-function-pointer-types]",
+    },
+    {
+        "void f(void) { _Static_assert(1 == 2, \"nope\"); }\n",
+        "void f(void) { _Static_assert(1 == 1, \"nope\"); }\n",
+        31,
+        "static assertion failed due to requirement '1 == 2': nope",
+    },
+    {
+        "enum e { A, B, A };\n",
+        "enum e { A, B, C };\n",
+        16,
+        "redefinition of enumerator 'A'",
+    },
+    {
+        "struct incomplete x;\n",
+        "struct incomplete { int n; }; struct incomplete x;\n",
+        19,
+        "tentative definition has type 'struct incomplete' that is never completed",
+        true,
+    },
+    {
+        "void f(void) { int x; x++++; }\n",
+        "void f(void) { int x = 0; x++; }\n",
+        26,
+        "expression is not assignable",
+    },
+    {
+        "void f(void) { continue; }\n",
+        "void f(void) { while (1) { continue; } }\n",
+        16,
+        "'continue' statement not in loop statement",
+    },
+    {
+        "void f(int x) { switch(x) { default: break; default: break; } }\n",
+        "void f(int x) { switch(x) { default: break; case 1: break; } }\n",
+        29,
+        "multiple default labels in one switch",
+    },
+    {
+        "void f(int x) { switch(x) { case -1: break; case -1: break; } }\n",
+        "void f(int x) { switch(x) { case -1: break; case -2: break; } }\n",
+        50,
+        "duplicate case value '-1'",
+    },
+    {
+        "void f(unsigned x) { switch(x) { case -1: break; case 4294967295u: break; } }\n",
+        "void f(unsigned x) { switch(x) { case -1: break; case 4294967294u: break; } }\n",
+        55,
+        "duplicate case value '4294967295'",
+    },
+    {
+        "_Static_assert(0, \"hello \" \"world\");\n",
+        "_Static_assert(1, \"hello \" \"world\");\n",
+        16,
+        "static assertion failed: hello world",
+    },
+    {
+        "_Static_assert(1 == 2, \"hello\\nworld\");\n",
+        "_Static_assert(1 == 1, \"hello\\nworld\");\n",
+        16,
+        "static assertion failed due to requirement '1 == 2': hello",
+    },
+    {
+        "_Static_assert(0, \"\");\n",
+        "_Static_assert(1, \"\");\n",
+        16,
+        "static assertion failed: ",
+    },
+    {
+        "_Static_assert(1 == 2);\n",
+        "_Static_assert(1 == 1);\n",
+        16,
+        "static assertion failed due to requirement '1 == 2'",
+    },
+    {
+        "void f(void) { int x; const int *p = &x; *p = 1; }\n",
+        "void f(void) { int x; int *p = &x; *p = 1; }\n",
+        45,
+        "read-only variable is not assignable",
+    },
+    {
+        "void f(void) { struct incomplete x; }\n",
+        "void f(void) { struct incomplete { int n; } x; }\n",
+        34,
+        "variable has incomplete type 'struct incomplete'",
+    },
+    {
+        "int s; static int s;\n",
+        "static int s; static int s;\n",
+        19,
+        "static declaration of 's' follows non-static declaration",
+    },
+    {
+        "struct s { int a; }; int f(struct s *v) { return v->b; }\n",
+        "struct s { int a; }; int f(struct s *v) { return v->a; }\n",
+        53,
+        "no member named 'b' in 'struct s'",
+    },
+    {
+        "_Static_assert(sizeof(int) == 0, \"size\");\n",
+        "_Static_assert(sizeof(int) == 4, \"size\");\n",
+        16,
+        "static assertion failed due to requirement 'sizeof(int) == 0': size",
+    },
+    {
+        "enum { VALUE = 1 }; _Static_assert(VALUE == 2, \"value\");\n",
+        "enum { VALUE = 1 }; _Static_assert(VALUE == 1, \"value\");\n",
+        36,
+        "static assertion failed due to requirement 'VALUE == 2': value",
+    },
+};
+
+static void check_test_semantic_diagnostics(CheckTest* test, const char* clang)
+{
+    char directory[4096];
+    snprintf(directory, sizeof(directory), "%s/buster-semantic-diagnostics-XXXXXX", oracle_temporary_directory());
+    const bool made = mkdtemp(directory) != NULL;
+    check_test_expect(test, made, "the exact semantic catalogue's directory");
+    const PPOptions options =
+    {
+        .language = { .standard = 2017, .gnu = true },
+        .no_standard_includes = true,
+        .quiet = true,
+        .clang_features = true,
+        .semantic_pragmas = true,
+    };
+    const char* arguments[] = { "--no-default-config", "--target=x86_64-linux-gnu", "-std=gnu17", "-nostdinc" };
+    CheckCorpusTally tally = { 0 };
+    char executable[64];
+    snprintf(executable, sizeof(executable), "/proc/%ld/exe", (long)getpid());
+    for (uint32_t i = 0; made && i < BUSTER_ARRAY_LENGTH(check_semantic_fixtures); i += 1)
+    {
+        const CheckSemanticFixture* fixture = check_semantic_fixtures + i;
+        for (uint32_t mode = 0; mode < 3; mode += 1)
+        {
+            const bool violation = mode != 1;
+            const bool late = mode == 2 && fixture->translation_unit_end;
+            const uint32_t expected_line = late ? 2 : 1;
+            const uint32_t expected_column = late ? 12 : fixture->column;
+            const char* expected_message = late ? "expected parameter declarator" : fixture->message;
+            const char* source = violation ? fixture->violation : fixture->valid;
+            char path[4300];
+            snprintf(path, sizeof(path), "%s/semantic-%u-%u.c", directory, i, mode);
+            char* written_source = NULL;
+            size_t length = 0;
+            FILE* buffer = open_memstream(&written_source, &length);
+            bool ready = buffer != NULL;
+            if (ready)
+            {
+                fprintf(buffer, "%s%s", source, mode == 2 ? "int broken(;\n" : "");
+                ready = fclose(buffer) == 0 && check_corpus_write(path, written_source, length);
+            }
+            free(written_source);
+            CheckCorpusOracle oracle = { 0 };
+            ready = ready && check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
+            char description[1024];
+            snprintf(description, sizeof(description), "semantic %u/%u: recorded clang message and column (%u: %s)", i, mode, oracle.column, oracle.message);
+            check_test_expect(test, ready && oracle.rejected == violation && (!violation ||
+                              (oracle.line == expected_line && oracle.column == expected_column && strcmp(oracle.message, expected_message) == 0)), description);
+            if (ready)
+            {
+                oracle.check_diagnostic = violation;
+                snprintf(description, sizeof(description), "semantic %u/%u: exact first error on both corpus paths", i, mode);
+                check_test_expect(test, !check_corpus_file(&tally, path, description, "semantic", &options, &oracle, NULL, 128), description);
+                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                {
+                    char* command[] = { executable, "-std=gnu17", "-nostdinc", "-fsyntax-only", "-fno-color-diagnostics", path,
+                                        scalar != 0 ? "--scalar" : NULL, NULL };
+                    char* text = NULL;
+                    const int status = check_test_driver_spawn(command, &text);
+                    const char* error = text != NULL ? strstr(text, ": error: ") : NULL;
+                    char expected[4800];
+                    snprintf(expected, sizeof(expected), "%s:%u:%u: error: %s", path, expected_line, expected_column, expected_message);
+                    const char* located = error;
+                    while (located != NULL && located > text && located[-1] != '\n')
+                    {
+                        located -= 1;
+                    }
+                    const size_t actual_length = located != NULL ? strcspn(located, "\n") : 0;
+                    const bool exact = located != NULL && actual_length == strlen(expected) && memcmp(located, expected, actual_length) == 0;
+                    snprintf(description, sizeof(description), "semantic %u/%u scalar=%u: driver first error and column", i, mode, scalar);
+                    const bool passed = status == (violation ? 1 : 0) && (violation ? exact : error == NULL);
+                    if (!passed)
+                    {
+                        fprintf(stderr, "%s\nexpected: %s\nactual: %s\n", description, expected, text != NULL ? text : "<no output>");
+                    }
+                    check_test_expect(test, passed, description);
+                    // Newlines in the assertion payload are real decoded bytes, not a lost or escaped message.
+                    if (violation && i == 20)
+                    {
+                        check_test_expect(test, text != NULL && strstr(text, "hello\nworld") != NULL, "static assertion preserves the decoded multiline payload");
+                    }
+                    free(text);
+                }
+            }
+            check_test_expect(test, unlink(path) == 0, "the exact semantic fixture is removed");
+        }
+    }
+    printf("test-checker: exact semantic diagnostics: %u fixtures, valid twins and repaired inputs\n", (uint32_t)BUSTER_ARRAY_LENGTH(check_semantic_fixtures));
+    check_test_expect(test, !made || rmdir(directory) == 0, "the exact semantic catalogue's directory is removed");
+}
+
 static void check_test_constraints(CheckTest* test, const char* clang)
 {
+    check_test_semantic_diagnostics(test, clang);
     char directory[4096];
     const char* temporary = oracle_temporary_directory();
     snprintf(directory, sizeof(directory), "%s/buster-check-constraints-XXXXXX", temporary);

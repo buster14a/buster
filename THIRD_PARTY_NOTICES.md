@@ -31,10 +31,19 @@ The GNU `noderef` source-type shadows, expression and initializer diagnostics an
 `c_check_noderef_driver_test.c` fixtures (#1447) are original project material
 under the default terms. Clang 23.1.4 is the behavioral oracle. Its
 [attribute reference](https://clang.llvm.org/docs/AttributeReference.html#noderef)
-and published `clang/lib/Sema/SemaType.cpp`, `SemaExpr.cpp`, `SemaInit.cpp` and
-`clang/include/clang/AST/Expr.h` documentation were consulted for the placement,
+and published `clang/lib/Sema/SemaType.cpp`, `SemaExpr.cpp`, `SemaExprMember.cpp`,
+`SemaInit.cpp` and `clang/include/clang/AST/Expr.h` at LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5` were consulted for the placement,
 type-sugar, conversion and source-location contracts on November 5, 2026; no
 implementation or upstream test fixture is imported.
+
+The positional mixed-input driver, per-lane assembly adapter and original
+C/assembly/object/archive fixtures in `c_driver_inputs.c`, `c_driver_mixed.c`,
+`c_driver_mixed_test.c` and their driver integration (#1120) are original project
+material under the default terms. Existing project object, foreign-linker,
+runtime-discovery and lane interfaces are reused. Clang and the system archiver
+produce independent test inputs externally; no upstream implementation or
+fixture corpus is imported.
 
 The VECTOR/X86 typed adapter integration, sparse shared-interpreter SIMD storage,
 `ir_simd_lower_test.c`, `ir_interpreter_simd_test.c` and the real-C

@@ -6,6 +6,23 @@
 // The table starts from the direct member count and grows only for introduced names. The token bound limits
 // anonymous expansion depth, not clearing: named lexical nesting must not pay for every descendant's tokens.
 
+// Explicit layout attributes take precedence over the pragma sampled at the definition. The existing tag-attribute
+// merge retains explicit attributes from forward declarations; the pragma itself never attaches to those declarations.
+static bool check_input_record_ms_struct(const CheckInputAttributes* attributes, bool enabled)
+{
+    bool microsoft = false;
+    bool ordinary = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool kept = !attribute->ignored && !attribute->subject_ignored;
+        microsoft |= kept && attribute->kind == CHECK_ATTRIBUTE_MS_STRUCT;
+        ordinary |= kept && attribute->kind == CHECK_ATTRIBUTE_GCC_STRUCT;
+    }
+    const bool result = !ordinary && (microsoft || enabled);
+    return result;
+}
+
 static bool check_input_record_names_grow(CheckInputReader* reader, uint32_t** identifiers, uint64_t* capacity)
 {
     // At most UINT32_MAX nonzero identifier IDs can be distinct. With growth at half occupancy, capacities and

@@ -79,6 +79,35 @@ struct CheckCorpusPath
     char spelling[96];
 };
 
+static void check_corpus_input_diagnostic(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp, const CheckInputReport* report)
+{
+    CheckWarningSpelling spell = { 0 };
+    const char* message = check_semantic_input(parser, pp, &path->input, &path->types, report, &spell, &path->scratch);
+    snprintf(path->message, sizeof(path->message), "%s", message);
+    path->resource |= pp->diagnostic_collection_failed;
+}
+
+static void check_corpus_expression_diagnostic(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp, const CheckReport* report)
+{
+    char text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
+    CheckWarningSpelling spell = { 0 };
+    const char* message = check_diagnostic_x86_hard(&path->input, &path->stream, report, text, sizeof(text), &path->token);
+    if (message == NULL)
+    {
+        message = check_diagnostic_varargs(&path->input, parser, &path->types, report, &path->token);
+    }
+    if (message == NULL)
+    {
+        message = check_diagnostic_counted_ref(&path->input, parser, report, &path->token);
+    }
+    if (message == NULL)
+    {
+        message = check_semantic_expression(parser, pp, &path->input, &path->stream, &path->types, report, &spell, &path->token, &path->scratch);
+    }
+    snprintf(path->message, sizeof(path->message), "%s", message);
+    path->resource |= pp->diagnostic_collection_failed;
+}
+
 #define BUSTER_CHECK_CORPUS_DEFERRED_REASONS 16
 
 // --deferred's reason for a unit that doesn't parse, which the reader never reads: tallied, not reported per file.
@@ -145,6 +174,8 @@ struct CheckCorpusOracle
     uint32_t column;
     // The first warning clang gave, by its presumed line, or 0: the constraint catalogue's expected warning.
     bool check_warning;
+    // Opt-in for the exact semantic catalogue; legacy corpus comparisons retain their acceptance/line contract.
+    bool check_diagnostic;
     uint32_t warning;
     uint32_t warning_column;
     char file[512];
@@ -519,7 +550,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
     }
 }
 
-static void check_corpus_late_diagnostics(CheckCorpusPath* path, const Parser* parser, uint32_t before_token)
+static void check_corpus_late_diagnostics(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp, uint32_t before_token)
 {
     const bool assemblies = check_asms_diagnose(&path->asm_diagnostic, &path->input, &path->stream, &path->types, before_token, &path->scratch);
     path->resource |= path->asm_diagnostic.status == CHECK_ASM_RESOURCE;
@@ -557,7 +588,7 @@ static void check_corpus_late_diagnostics(CheckCorpusPath* path, const Parser* p
         path->position = path->program_diagnostic.position;
         path->pragma = 0;
         path->phase = "control";
-        snprintf(path->message, sizeof(path->message), "%s", "invalid C statement or control flow");
+        snprintf(path->message, sizeof(path->message), "%s", check_semantic_control(pp, &path->types, path->program_diagnostic.status, &path->program_diagnostic.failure, &path->scratch));
     }
 }
 
@@ -622,7 +653,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     result->token = diagnostic->token;
                     result->position = result->token;
                     result->pragma = diagnostic->pragma;
-                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_report_message(&result->input, diagnostic));
+                    check_corpus_input_diagnostic(result, &repair->parser, repair->preprocessor, diagnostic);
                 }
             }
             if (result->adapted || result->input.diagnostic_graph)
@@ -641,17 +672,15 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     if (check_repair_graph_report(repair, &result->input.graph, diagnostic) && diagnostic->token < result->position)
                     {
                         // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
-                        char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
-                        const char* x86 = check_diagnostic_x86_hard(&result->input, &result->stream, diagnostic, x86_text, sizeof(x86_text), &result->token);
+                        check_corpus_expression_diagnostic(result, &repair->parser, repair->preprocessor, diagnostic);
                         result->position = diagnostic->token;
                         result->pragma = 0;
                         result->phase = "expression";
-                        snprintf(result->message, sizeof(result->message), "%s", x86 != NULL ? x86 : check_driver_report_message(diagnostic));
                     }
                 }
                 if (result->checked && !result->resource)
                 {
-                    check_corpus_late_diagnostics(result, &repair->parser, repair->record_begin);
+                    check_corpus_late_diagnostics(result, &repair->parser, repair->preprocessor, repair->record_begin);
                 }
             }
             check_corpus_warning_diagnostics(result, &repair->parser, repair->record_begin, repair);
@@ -906,7 +935,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->token = path->input.reports[report].token;
                     path->position = path->token;
                     path->pragma = path->input.reports[report].pragma;
-                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_report_message(&path->input, path->input.reports + report));
+                    check_corpus_input_diagnostic(path, view, pp, path->input.reports + report);
                 }
             }
         }
@@ -937,12 +966,10 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
-            char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
-            const char* x86 = check_diagnostic_x86_hard(&path->input, &path->stream, path->stream.reports, x86_text, sizeof(x86_text), &path->token);
+            check_corpus_expression_diagnostic(path, view, pp, path->stream.reports);
             path->phase = "expression";
             path->position = path->stream.reports[0].token;
             path->pragma = 0;
-            snprintf(path->message, sizeof(path->message), "%s", x86 != NULL ? x86 : check_driver_report_message(path->stream.reports));
         }
     }
     bool assemblies = false;
@@ -1001,8 +1028,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             path->token = path->program.token;
             path->position = path->program.diagnostic_position;
             path->pragma = 0;
-            snprintf(path->message, sizeof(path->message), "%s", path->program.status == CHECK_PROGRAM_RESOURCE ? "control checking capacity exhausted" :
-                     path->program.status == CHECK_PROGRAM_UNSUPPORTED ? "control construct is not supported" : "invalid function control flow");
+            snprintf(path->message, sizeof(path->message), "%s", check_semantic_control(pp, &path->types, path->program.status, &path->program.failure, &path->scratch));
         }
         else
         {
@@ -1012,7 +1038,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     path->resource |= !ready;
     if (path->checked && !path->resource && (!path->programmed || !path->parsed))
     {
-        check_corpus_late_diagnostics(path, view, path->position);
+        check_corpus_late_diagnostics(path, view, pp, path->position);
     }
     check_corpus_warning_diagnostics(path, view, BUSTER_CHECK_NONE, NULL);
     check_corpus_location(path, view, pp);
@@ -1679,7 +1705,8 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
     {
         equal = x->tags.type[i] == y->tags.type[i] && x->tags.name[i] == y->tags.name[i] && x->tags.member_begin[i] == y->tags.member_begin[i] &&
                 x->tags.member_count[i] == y->tags.member_count[i] && x->tags.completion[i] == y->tags.completion[i] &&
-                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
+                x->tags.packed[i] == y->tags.packed[i] && x->tags.ms_struct[i] == y->tags.ms_struct[i] &&
+                x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
                 x->tags.lookup[i] == y->tags.lookup[i] && x->tags.lookup_log2[i] == y->tags.lookup_log2[i];
     }
     for (uint32_t i = 1; equal && i < x->members.count; i += 1)
@@ -1828,12 +1855,15 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     const CheckInputPackPragmas* pack_b = b->pack_pragmas;
     const CheckInputSymbolPragmas* symbols_a = a->symbol_pragmas;
     const CheckInputSymbolPragmas* symbols_b = b->symbol_pragmas;
+    const CheckInputMsPragmas* ms_a = a->ms_pragmas;
+    const CheckInputMsPragmas* ms_b = b->ms_pragmas;
     const bool contents = !a->resource && !b->resource;
     bool equal = (x == NULL) == (y == NULL) && a->fp_pragma_count == b->fp_pragma_count &&
                  (a->fp_environments == NULL) == (b->fp_environments == NULL) &&
                  (a->cx_limited_ranges == NULL) == (b->cx_limited_ranges == NULL) && (nonnull_a == NULL) == (nonnull_b == NULL) &&
                  (a->pack_log2 == NULL) == (b->pack_log2 == NULL) && (pack_a == NULL) == (pack_b == NULL) &&
-                 (symbols_a == NULL) == (symbols_b == NULL);
+                 (symbols_a == NULL) == (symbols_b == NULL) && (ms_a == NULL) == (ms_b == NULL) &&
+                 (a->ms_struct == NULL) == (b->ms_struct == NULL);
     if (equal && contents && x != NULL)
     {
         equal = x->count == y->count && x->final_state == y->final_state && x->maximum_depth == y->maximum_depth &&
@@ -1886,7 +1916,19 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
             equal = p->pragma == q->pragma && p->source == q->source && p->end == q->end && p->token == q->token &&
                     p->name == q->name && p->target == q->target && p->diagnostic_source == q->diagnostic_source &&
                     p->diagnostic_location == q->diagnostic_location && p->declaration == q->declaration &&
-                    p->kind == q->kind && p->warning == q->warning && p->supported == q->supported;
+                    p->kind == q->kind && p->warning == q->warning && p->supported == q->supported && p->after_use == q->after_use;
+        }
+    }
+    if (equal && contents && ms_a != NULL)
+    {
+        equal = ms_a->count == ms_b->count;
+        for (uint32_t i = 0; equal && i < ms_a->count; i += 1)
+        {
+            const CheckInputMsPragma* p = ms_a->records + i;
+            const CheckInputMsPragma* q = ms_b->records + i;
+            equal = p->pragma == q->pragma && p->source == q->source && p->token == q->token &&
+                    p->diagnostic_source == q->diagnostic_source && p->diagnostic_location == q->diagnostic_location &&
+                    p->warning == q->warning && p->after == q->after && p->supported == q->supported && p->error == q->error;
         }
     }
     for (uint32_t i = 0; equal && contents && i < a->fp_pragma_count; i += 1)
@@ -1908,6 +1950,10 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     for (uint32_t token = 0; equal && contents && a->pack_log2 != NULL && token <= a->token_count; token += 1)
     {
         equal = a->pack_log2[token] == b->pack_log2[token];
+    }
+    for (uint32_t token = 0; equal && contents && a->ms_struct != NULL && token <= a->token_count; token += 1)
+    {
+        equal = a->ms_struct[token] == b->ms_struct[token];
     }
     return equal;
 }
@@ -1963,6 +2009,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                  a->line == b->line && a->column == b->column && a->token == b->token && a->position == b->position && a->pragma == b->pragma &&
                  x->tokens.count == y->tokens.count &&
                  x->errors == y->errors && x->fatal == y->fatal && x->diagnostic_count == y->diagnostic_count &&
+                 x->recovered_parameter_types == y->recovered_parameter_types &&
                  x->tokens.pragma_count == y->tokens.pragma_count && a->stream.status == b->stream.status &&
                  a->stream.failed_node == b->stream.failed_node && (a->prefix == 0) == (b->prefix == 0) &&
                  a->asm_diagnostic.status == b->asm_diagnostic.status && a->asm_diagnostic.token == b->asm_diagnostic.token &&
@@ -1999,7 +2046,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const ParseDiagnostic* left = x->diagnostics + report;
         const ParseDiagnostic* right = y->diagnostics + report;
         equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
-                left->place == right->place && left->error == right->error;
+                left->place == right->place && left->error == right->error && left->note == right->note &&
+                left->resumed == right->resumed && left->resume_delete == right->resume_delete && left->resume_end == right->resume_end &&
+                left->parameter_type == right->parameter_type;
     }
     if (equal && a->prefix != 0)
     {
@@ -2011,7 +2060,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     const bool trees = a->parsed || prefix || (resumed && a->resumed->parser.errors == 0);
     const Parser* left_parser = prefix ? &a->prefix->parser : resumed ? &a->resumed->parser : x;
     const Parser* right_parser = prefix && b->prefix != NULL ? &b->prefix->parser : other_resumed ? &b->resumed->parser : y;
-    equal = equal && left_parser->tokens.count == right_parser->tokens.count && left_parser->tokens.pragma_count == right_parser->tokens.pragma_count;
+    equal = equal && left_parser->tokens.count == right_parser->tokens.count && left_parser->tokens.pragma_count == right_parser->tokens.pragma_count &&
+            left_parser->recovered_parameter_types == right_parser->recovered_parameter_types;
     for (uint32_t token = 0; equal && trees && token < left_parser->tokens.count; token += 1)
     {
         equal = parse_test_canonical_role(left_parser->tree.roles[token]) == parse_test_canonical_role(right_parser->tree.roles[token]) &&
@@ -2059,8 +2109,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
-                left->reports[report].pragma == right->reports[report].pragma;
-        if (equal && left->reports[report].message == CHECK_INPUT_REDECLARATION)
+                left->reports[report].pragma == right->reports[report].pragma && left->reports[report].subject == right->reports[report].subject;
+        if (equal && (left->reports[report].message == CHECK_INPUT_REDECLARATION || left->reports[report].message == CHECK_INPUT_CONFLICTING_TYPES))
         {
             const CheckInputReport* left_report = left->reports + report;
             const CheckInputReport* right_report = right->reports + report;
@@ -2084,7 +2134,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 check_sparse_get(left->string_ids, token) == check_sparse_get(right->string_ids, token) &&
                 check_sparse_get(left->body_declarations, token) == check_sparse_get(right->body_declarations, token) &&
                 check_sparse_get(left->declaration_bodies, token) == check_sparse_get(right->declaration_bodies, token) && check_sparse_get(left->parameters, token) == check_sparse_get(right->parameters, token) &&
-                check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) && check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
+                check_sparse_get(left->parameter_next, token) == check_sparse_get(right->parameter_next, token) &&
+                check_sparse_get(left->parameter_sources, token) == check_sparse_get(right->parameter_sources, token) &&
+                check_sparse_get(left->control_owners, token) == check_sparse_get(right->control_owners, token) &&
                 check_sparse_get(left->label_targets, token) == check_sparse_get(right->label_targets, token) && check_sparse_get(left->case_ranges, token) == check_sparse_get(right->case_ranges, token) &&
                 left->expression_regions[token] == right->expression_regions[token] && check_input_asm_id(left, token) == check_input_asm_id(right, token) &&
                 left->constant_warnings[token] == right->constant_warnings[token] &&
@@ -2293,7 +2345,7 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
             const ParseDiagnostic* right = b->resumed->diagnostics + i;
             equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
                     left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed &&
-                    left->resume_delete == right->resume_delete && left->resume_end == right->resume_end;
+                    left->resume_delete == right->resume_delete && left->resume_end == right->resume_end && left->parameter_type == right->parameter_type;
         }
     }
     equal = equal && check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
@@ -2335,7 +2387,9 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  check_sparse_get(x->initializer_nodes, token) != check_sparse_get(y->initializer_nodes, token) ? "initializer_nodes" :
                  check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
                  check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :
-                 check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" : check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
+                 check_sparse_get(x->parameter_next, token) != check_sparse_get(y->parameter_next, token) ? "parameter_next" :
+                 check_sparse_get(x->parameter_sources, token) != check_sparse_get(y->parameter_sources, token) ? "parameter_sources" :
+                 check_sparse_get(x->control_owners, token) != check_sparse_get(y->control_owners, token) ? "control_owners" :
                  check_sparse_get(x->label_targets, token) != check_sparse_get(y->label_targets, token) ? "label_targets" : check_sparse_get(x->case_ranges, token) != check_sparse_get(y->case_ranges, token) ? "case_ranges" :
                  x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : check_input_asm_id(x, token) != check_input_asm_id(y, token) ? "asm_ids" :
                  x->constant_warnings[token] != y->constant_warnings[token] ? "constant_warnings" :
@@ -2745,13 +2799,17 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     const bool line = !oracle->rejected || outcome.accepted[0] || outcome.lines[0] == oracle->line;
     const bool diagnostic_path = !oracle->rejected || outcome.accepted[0] || strcmp(outcome.file, oracle->file) == 0;
     const bool warning = !oracle->check_warning || (!oracle->rejected && outcome.first_warning_line == oracle->warning);
+    const size_t message_length = strcspn(outcome.message, "\n");
+    const bool diagnostic = !oracle->check_diagnostic || !oracle->rejected || outcome.accepted[0] ||
+                            (outcome.column == oracle->column && strlen(oracle->message) == message_length &&
+                             memcmp(outcome.message, oracle->message, message_length) == 0);
     const bool resource = outcome.resource;
     tally->files += 1;
     tally->oracle_accepted += !oracle->rejected;
     tally->checker_accepted += outcome.accepted[0];
     tally->acceptance_differences += !acceptance;
     tally->line_differences += !line;
-    tally->diagnostic_path_differences += !diagnostic_path;
+    tally->diagnostic_path_differences += !diagnostic_path || !diagnostic;
     tally->line_differences += !warning;
     tally->path_differences += prepared && !equal;
     tally->resource_failures += resource;
@@ -2770,7 +2828,7 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
     {
         check_corpus_tally_reason(tally, outcome.deferred_reason, 1);
     }
-    const bool different = !acceptance || !line || !diagnostic_path || !warning || !equal || resource;
+    const bool different = !acceptance || !line || !diagnostic_path || !diagnostic || !warning || !equal || resource;
     if (report != 0)
     {
         fprintf(report, "%s\t", kind);
@@ -2800,6 +2858,10 @@ static bool check_corpus_file_outcome(CheckCorpusTally* tally, const char* file,
                 oracle->rejected ? "reject" : "accept", oracle->line, outcome.accepted[0] ? "accept" : "reject", outcome.lines[0],
                 equal ? "equal" : "DIFFERENT", outcome.deferred_equal ? "" : " (deferred)", outcome.phase, outcome.token, outcome.spelling,
                 outcome.file, outcome.lines[0], outcome.column, outcome.message);
+        if (!diagnostic)
+        {
+            fprintf(stderr, "  expected column %u: %s\n", oracle->column, oracle->message);
+        }
         tally->reports += 1;
     }
     *result = outcome;
