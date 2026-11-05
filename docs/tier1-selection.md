@@ -346,13 +346,17 @@ propagate them. They start unknown, including on loop backedges, and improve
 in at most eight sweeps per round. Unresolved cycles retain the full range.
 
 A checked induction certificate can then establish a nonnegative I32 loop
-index. Every initial edge must supply a nonnegative constant. Every other edge
+index. Every initial edge must supply a nonnegative constant or a run-time value
+already independently proved nonnegative, such as a mask or zero extension.
+These facts begin with unknown backedges. Every other edge
 must add a known nonnegative stride to that same phi. A strict upper-bound
 guard may check the sum on the backedge: a walk of at most eight blocks may
 follow unconditional bridges to that guard, each bridge with exactly one
 incoming predecessor. An alternate entrance refuses the proof. The predecessor
-map reuses selection's positions workspace before level ordering. Indirect
-control flow disables bridge walking. A header guard before the increment also
+map reuses selection's positions workspace before level ordering. With indirect
+control flow, every address-taken label is conservatively ambiguous; marking
+them once preserves unrelated unique edges without enumerating labels per jump.
+A header guard before the increment also
 works when the selected successor has only the header as its predecessor and
 the existing verified dominance intervals prove that successor dominates the
 increment. This bounds the increment by the admitted index plus its stride,
@@ -387,8 +391,22 @@ unsigned widening still clears the upper half. Copies, selects and phis
 propagate only proven representations, and a nonnegative value makes the two
 certificates equivalent. A sign-only value records eight-byte storage in its
 selected pattern: both native consumers preserve all eight bytes through
-spills, reloads and CFG edge moves. ABI inputs, calls and opaque rows receive
-no such certificate.
+spills, reloads and CFG edge moves. Edge moves use the source's width, so an
+I32 phi and every incoming value in its connected component share eight-byte
+spill storage if any member needs it. Union by rank and path halving closes
+arbitrarily long phi chains in the dead positions workspace. This width
+obligation grants no upper-bit fact to opaque inputs. ABI inputs, calls and
+opaque rows receive no sign certificate.
+
+A branch can prove a value nonnegative only at a guarded conversion. The
+selected successor must have the conditional block as its only predecessor
+and dominate the conversion, using the verified dominator intervals. Signed
+lower bounds, equality to a nonnegative value and unsigned upper bounds below
+the sign bit supply such facts. The source must independently have real
+zero-upper-bit storage. A separate use annotation removes that conversion;
+the source's unguarded uses retain their signed extensions. Alternate
+entrances and address-taken labels refuse the proof. The pass keeps one
+conservative guard per value and reuses positions and pending workspace.
 
 With both facts, a nonnegative signed extension becomes a zero extension,
 and a zero extension of already canonical storage becomes a coalescible copy.
@@ -413,9 +431,20 @@ canonical values. An unbounded
 For a single-use expression followed by signed widening, bitwise operations,
 NOT and constant arithmetic right shift commute with sign extension when the
 inputs already have that representation. Negation also does so when its input
-needs fewer than 32 signed bits. The native expression matrix checks negative
+needs fewer than 32 signed bits. A difference of two values each needing fewer
+than 32 signed bits, or a product whose signed widths sum to at most 32, also
+fits without I32 overflow and can operate directly on their signed 64-bit
+representations. The native expression matrix checks negative
 fields and constants, full-width signed loads, poisoned ABI bits, and wrapping
 addition/negation controls that must retain their extensions.
+
+A byte or word truncation of a single-use I32 add, subtract, negation or NOT can
+instead use a byte or word ALU operation when its inputs already fit that
+unsigned width and have physical zero storage. The initial 32-bit copy, when
+needed, preserves those zero upper bits; the narrow operation wraps only the
+low result and leaves the rest zero. Both binary inputs must satisfy the proof
+because commutative register selection can exchange them on an alias. This
+removes the separate truncation while preserving canonical narrow storage.
 
 The bounds occupy two scratch bytes per node and the storage certificate one.
 The independent range seeds are classified in 32-node SIMD batches with masked
@@ -431,6 +460,10 @@ Mixed signed/unsigned widening tests keep eight loaded values live before
 either use, require real three-register spills, check the stored results
 independently, and put exact-width input at a protected page boundary. A
 volatile `I32` load checks the conservative representation.
+Mixed signed, positive, volatile and opaque phi inputs check uniform spill
+widths without inventing sign facts. Byte/word wrapping and guarded conversion
+fixtures observe the complete 64-bit result, including poisoned ABI inputs,
+negative bypass paths and unsafe unsigned bounds.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
