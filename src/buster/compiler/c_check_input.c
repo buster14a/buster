@@ -6761,8 +6761,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         if (valid)
         {
             const bool tag = check_input_empty_declaration_tag(parser, first, i, false);
-            // (At the specifiers' first token, after C23 attribute lists that begin the declaration, as clang's DeclSpec starts.)
-            uint32_t specifiers = first;
+            // At the specifiers' first token, after transparent __extension__ markers and leading C23 attribute lists,
+            // as clang's DeclSpec starts. A GNU attribute is itself a declaration specifier.
+            uint32_t specifiers = check_input_declaration_start(parser, first, i);
             while (specifiers < i && parser->tokens.kinds[specifiers] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, specifiers, i))
             {
                 specifiers = check_input_skip_attributes(parser, specifiers, i);
