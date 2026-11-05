@@ -244,6 +244,31 @@ static uint32_t check_lower_transport_row(CheckLowerWriter* writer, uint32_t op,
     return index;
 }
 
+// A wide bf16 vector uses the ordinary bf16 rows on each piece. Under excess precision the pieces have at most 32
+// bytes, so their widened floats fit one register and the row never needs the ordinary 64-byte vector's join.
+static uint32_t check_lower_transport_brain_row(CheckLowerWriter* writer, uint32_t op, uint32_t width)
+{
+    Tier0Operation rows[3];
+    uint32_t count = 0;
+    const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) == 0;
+    const char* reason = check_vector_lower_brain_rows(&writer->target, excess, op, width, 0, rows, &count);
+    uint32_t index = BUSTER_CHECK_NONE;
+    if (reason != NULL)
+    {
+        check_lower_unsupported(writer, reason);
+    }
+    else if (count != 1)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else
+    {
+        index = check_lower_operation_index(writer, rows);
+        writer->vectors = true;
+    }
+    return index;
+}
+
 // A scalar's splat into a `width` bytes' vector of `element` (of type `element_type`), the scalar on the stack
 // converted to the element's type already, as check_lower_vector_splat makes it: an element of 1 or 2 bytes from an
 // int's of its signedness, a half-precision one from its bits zero-extended; then set into the splat's temporary
@@ -315,7 +340,8 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
     const uint32_t bytes = (uint32_t)type_size(types, type_conversion_operand(types, vector));
     const uint32_t piece = bytes < width ? bytes : width;
     const bool unary = op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT || op == CHECK_OP_NOT;
-    const bool negation = op == CHECK_OP_NEGATIVE && element.floating;
+    const bool brain = element_type == BUSTER_TYPE_BF16;
+    const bool negation = op == CHECK_OP_NEGATIVE && element.floating && !brain;
     const uint32_t operands = unary ? 1 : 2;
     Tier0Operation rows[2];
     uint32_t main_row = BUSTER_CHECK_NONE;
@@ -333,7 +359,7 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
     }
     else
     {
-        main_row = check_lower_transport_row(writer, op, element, piece, 0, rows);
+        main_row = brain ? check_lower_transport_brain_row(writer, op, piece) : check_lower_transport_row(writer, op, element, piece, 0, rows);
     }
     if (writer->output->status == CHECK_PROGRAM_OK)
     {
@@ -407,17 +433,14 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
 }
 
 // An operator on wide transport vectors, a piece at a time (check_lower_transport_rows): the ordinary vectors' rows at
-// the target's widest registers' width, whose refusals are theirs. bf16 elements' arithmetic, which clang computes in
-// float where the unit's target hasn't AVX10.2 (check_vector_lower_brain_rows), is refused by name.
+// the target's widest registers' width, whose refusals are theirs. bf16 elements' arithmetic computes in float where
+// the unit's target hasn't AVX10.2, with pieces of at most 32 bytes so their floats fit one register.
 static void check_lower_transport_pieces(CheckLowerWriter* writer, uint32_t node, CheckOp op, TypeId vector, uint32_t result, uint32_t left)
 {
     const TypeTable* types = writer->program->types;
-    const CheckVectorElement element = check_vector_lower_element(types, vector);
-    if (check_vector_lower_brain(types, vector))
-    {
-        check_lower_unsupported(writer, "arithmetic on vectors of bf16 elements of more than 64 bytes");
-    }
-    else if (element.bytes == 0)
+    const bool brain = check_vector_lower_brain(types, vector);
+    const CheckVectorElement element = brain ? (CheckVectorElement){ .bytes = 2, .floating = true, .is_signed = true } : check_vector_lower_element(types, vector);
+    if (element.bytes == 0)
     {
         check_lower_unsupported(writer, "vector operations on elements of this type");
     }
@@ -428,7 +451,9 @@ static void check_lower_transport_pieces(CheckLowerWriter* writer, uint32_t node
         check_lower_vector_half_chain(writer, vector, op, left != BUSTER_CHECK_NONE ? BUSTER_CHECK_NONE : graph->operand0[node],
                                       unary ? BUSTER_CHECK_NONE : graph->operand1[node]);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
-        check_lower_transport_rows(writer, node, op, vector, element, check_lower_transport_width(writer), NULL, result, left);
+        const uint32_t width = check_lower_transport_width(writer);
+        const bool excess = brain && (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) == 0;
+        check_lower_transport_rows(writer, node, op, vector, element, excess && width > 32 ? 32 : width, NULL, result, left);
     }
 }
 
@@ -625,10 +650,6 @@ static __attribute__((noinline)) void check_lower_transport_update(CheckLowerWri
     }
 }
 
-// The most elements a transport vector's element-wise conversion, shuffle or reduction takes, an entry run for each:
-// clang's code is a run of each element's instructions too.
-#define BUSTER_CHECK_LOWER_TRANSPORT_LANES 1024u
-
 // The value of element `i` of the vector of type `vector` whose address local `source` (U64) holds, converted to `to`:
 // a vector of bool's, its bit (as an unsigned int's 0 or 1, converted), any other's, its element loaded.
 static void check_lower_transport_read(CheckLowerWriter* writer, uint32_t source, TypeId vector, uint32_t i, TypeId to)
@@ -761,6 +782,367 @@ static uint32_t check_lower_transport_result(CheckLowerWriter* writer, TypeId ty
     return object;
 }
 
+// A builtin row's source: ordinary and wide vectors use their objects, but a 1- or 2-byte vector is zero-extended
+// into an addressed word before a minimum-width VECTOR load. Neither the load nor the result store touches bytes
+// outside the caller's vector. The padding belongs to this lowering alone.
+static void check_lower_transport_builtin_source(CheckLowerWriter* writer, TypeId type, uint32_t local)
+{
+    const uint32_t bytes = (uint32_t)type_size(writer->program->types, type_conversion_operand(writer->program->types, type));
+    if (bytes >= 4)
+    {
+        check_lower_transport_source(writer, type, local);
+    }
+    else
+    {
+        const uint32_t object = check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U32);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U32, object);
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, bytes == 1 ? BUSTER_TYPED_CLASS_U8 : BUSTER_TYPED_CLASS_U16, 0);
+    }
+}
+
+// A minimum-width builtin row's result written at its actual width. The destination address is already below the
+// row's operands on the stack, as for SET of an ordinary VECTOR; a small result first goes through a private word.
+static void check_lower_transport_builtin_store(CheckLowerWriter* writer, uint32_t bytes)
+{
+    if (bytes >= 4)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, bytes);
+    }
+    else
+    {
+        const uint8_t class = bytes == 1 ? BUSTER_TYPED_CLASS_U8 : BUSTER_TYPED_CLASS_U16;
+        const uint32_t object = check_lower_transport_splat_temporary(writer, 4);
+        check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, object);
+    }
+}
+
+// Keep a vector operand's value before evaluating the next operand. An ordinary value is already a register and a
+// tiny value is read into its padded word; a wider transport value needs its own object because its address alone
+// would observe a later operand's writes. This is also the sequence point between a vector condition and its arms.
+static void check_lower_vector_logical_source(CheckLowerWriter* writer, TypeId type, uint32_t local)
+{
+    const uint32_t bytes = (uint32_t)type_size(writer->program->types, type_conversion_operand(writer->program->types, type));
+    if (bytes <= 2 || check_lower_transport_register(writer, type))
+    {
+        check_lower_transport_builtin_source(writer, type, local);
+    }
+    else
+    {
+        const uint32_t object = check_lower_transport_object(writer, type);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = bytes });
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+    }
+}
+
+// One piece's mask. Logical truth is nonzero, including either NaN, with both signed zeros false. Floating compares
+// retain the ordinary rows' exception behavior, including FE_INVALID for a signaling NaN.
+// A vector conditional instead tests the sign bit, as clang's signed less-than-zero comparison does even for an
+// unsigned condition. All true lanes have every bit set, so the same integer rows blend every arm's representation.
+static void check_lower_vector_logical_mask(CheckLowerWriter* writer, uint32_t source, uint32_t offset, uint32_t bytes, uint32_t compare, uint32_t zero)
+{
+    check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, compare);
+    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, zero);
+    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+    check_lower_transport_at(writer, source, offset);
+}
+
+// Half-precision truth uses the scalar conversion and comparison rules where the ordinary packed comparison has
+// no matching target form (bf16, or binary16 without AVX512-FP16). Converting each loaded lane also preserves the
+// comparison's floating-point exceptions; inspecting its representation alone would miss signaling NaNs.
+static void check_lower_vector_half_logical(CheckLowerWriter* writer, CheckOp op, TypeId input, TypeId result, const uint32_t sources[3], uint32_t object)
+{
+    const TypeTable* types = writer->program->types;
+    const TypeId element = check_lower_transport_element(types, input);
+    const TypeId output = check_lower_transport_element(types, result);
+    const uint32_t lanes = check_builtin_vector_lanes(types, type_conversion_operand(types, result));
+    const uint32_t operands = op == CHECK_OP_NOT ? 1 : 2;
+    for (uint32_t lane = lanes; lane-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_SET, check_lower_class(writer, output), 0);
+        check_lower_convert(writer, BUSTER_TYPE_INT, output);
+        check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I32, 0);
+        if (operands == 2)
+        {
+            check_lower_instruction(writer, op == CHECK_OP_LOGICAL_AND ? BUSTER_TYPED_AND : BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        for (uint32_t a = operands; a-- > 0;)
+        {
+            check_lower_truth(writer, element, op == CHECK_OP_NOT);
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, element), 0);
+            check_lower_transport_at(writer, sources[a], lane * 2);
+        }
+        check_lower_element_address(writer, object, lane * 2);
+    }
+}
+
+// Read an arm's element as unsigned bits, promoted to at least a word. The conditional blends representations,
+// preserving signed zero and NaN payloads and avoiding a floating conversion of either selected or unselected arm.
+static void check_lower_vector_logical_bits(CheckLowerWriter* writer, uint32_t source, uint32_t offset, uint32_t size)
+{
+    const uint8_t class = size == 1 ? BUSTER_TYPED_CLASS_U8 : size == 2 ? BUSTER_TYPED_CLASS_U16 :
+                          size == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+    if (size < 4)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+    check_lower_transport_at(writer, source, offset);
+}
+
+// A packed boolean condition's bits select whole elements. Boolean arms stay packed and blend a byte at a time;
+// other arms expand only the condition bit, at the same bounded lane count as the existing bool conversions.
+static void check_lower_vector_bool_conditional(CheckLowerWriter* writer, TypeId condition, TypeId result, const uint32_t sources[3], uint32_t object)
+{
+    const TypeTable* types = writer->program->types;
+    const bool packed = check_lower_bool_vector(types, result);
+    const uint32_t size = packed ? 1 : (uint32_t)type_size(types, check_lower_transport_element(types, result));
+    const uint32_t lanes = check_builtin_vector_lanes(types, type_conversion_operand(types, result));
+    const uint32_t count = packed ? (lanes + 7) / 8 : lanes;
+    const uint8_t class = size <= 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+    const uint8_t stored = size == 1 ? BUSTER_TYPED_CLASS_U8 : size == 2 ? BUSTER_TYPED_CLASS_U16 : class;
+    if (packed)
+    {
+        check_lower_transport_clear(writer, result, object);
+    }
+    for (uint32_t i = count; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+    {
+        const uint32_t offset = i * size;
+        check_lower_instruction(writer, BUSTER_TYPED_SET, stored, 0);
+        if (size < 4)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_XOR, class, 0);
+        check_lower_vector_logical_bits(writer, sources[2], offset, size);
+        check_lower_instruction(writer, BUSTER_TYPED_AND, class, 0);
+        if (packed)
+        {
+            check_lower_vector_logical_bits(writer, sources[0], i, 1);
+        }
+        else
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_NEG, class, 0);
+            if (class != BUSTER_TYPED_CLASS_U32)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, class, 0);
+            }
+            check_lower_transport_read(writer, sources[0], condition, i, BUSTER_TYPE_UINT);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_XOR, class, 0);
+        check_lower_vector_logical_bits(writer, sources[2], offset, size);
+        check_lower_vector_logical_bits(writer, sources[1], offset, size);
+        check_lower_element_address(writer, object, offset);
+    }
+}
+
+// Extended vectors' !, &&, || and vector-condition ?: share register-width masks for ordinary and transport
+// values. The only per-element case is unpacking a boolean condition for non-boolean arms. Scalar-condition ?: is
+// still the ordinary short-circuit control-flow path. Boolean && and || are rejected by Sema, as clang rejects them.
+static __attribute__((noinline)) void check_lower_vector_logical(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const CheckOp op = graph->ops[node];
+    const TypeId result = check_stream_type(stream, node);
+    const CheckConversion* conversions = stream->conversions[node].operands;
+    const bool conditional = op == CHECK_OP_CONDITIONAL;
+    const uint32_t operands = conditional ? 3 : op == CHECK_OP_NOT ? 1 : 2;
+    TypeId inputs[3] = { conversions[0].type, conversions[1].type, conversions[2].type };
+    const bool packed = check_lower_bool_vector(types, inputs[0]);
+    const TypeId element_type = check_lower_transport_element(types, inputs[0]);
+    const uint32_t element_bytes = (uint32_t)type_size(types, element_type);
+    const uint32_t bytes = (uint32_t)type_size(types, type_conversion_operand(types, result));
+    const uint32_t lanes = check_builtin_vector_lanes(types, type_conversion_operand(types, result));
+    const bool half = !conditional && check_lower_half(types, element_type) != CHECK_HALF_NONE;
+    const bool half_scalar = half && (element_type == BUSTER_TYPE_BF16 || (writer->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0);
+    if (op == CHECK_OP_NOT && packed)
+    {
+        check_lower_transport_bools(writer, node, op, inputs[0], check_lower_transport_object(writer, result), BUSTER_CHECK_NONE);
+    }
+    else if (element_bytes == 0 || element_bytes > 8 || type_size(types, check_lower_transport_element(types, result)) > 8)
+    {
+        check_lower_unsupported(writer, "vector logical operators on elements of this size");
+    }
+    else if (lanes == 0 || lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "logical operations of vectors of more than 1024 elements");
+    }
+    else
+    {
+        const bool reuse = conditional && graph->operand0[node] == graph->operand1[node];
+        uint32_t sources[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t a = 0; a < operands; a += 1)
+        {
+            sources[a] = a == 1 && reuse ? sources[0] : check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        }
+        const uint32_t object = check_lower_transport_result(writer, result);
+        if (conditional && packed)
+        {
+            check_lower_vector_bool_conditional(writer, inputs[0], result, sources, object);
+        }
+        else if (half_scalar)
+        {
+            check_lower_vector_half_logical(writer, op, inputs[0], result, sources, object);
+        }
+        else
+        {
+            const uint32_t width = check_lower_transport_width(writer);
+            const uint32_t piece_bytes = bytes < 4 ? 4 : bytes < width ? bytes : width;
+            const CheckVectorElement element = { .bytes = (uint8_t)element_bytes, .is_signed = true };
+            CheckVectorElement compared = element;
+            compared.floating = !conditional && check_action_kind(types, element_type) == BUSTER_TYPE_KIND_FLOATING;
+            const uint32_t predicate = conditional ? CHECK_OP_LESS : op == CHECK_OP_NOT ? CHECK_OP_EQUAL : CHECK_OP_NOT_EQUAL;
+            Tier0Operation row;
+            const uint32_t compare = check_lower_transport_row(writer, predicate, compared, piece_bytes, 0, &row);
+            const uint32_t bit_and = check_lower_transport_row(writer, CHECK_OP_BIT_AND, element, piece_bytes, 0, &row);
+            const uint32_t combine = check_lower_transport_row(writer, conditional ? CHECK_OP_BIT_XOR :
+                                                                      op == CHECK_OP_LOGICAL_OR ? CHECK_OP_BIT_OR : CHECK_OP_BIT_AND,
+                                                               element, piece_bytes, 0, &row);
+            uint64_t words[8] = { 0 };
+            const uint32_t zero = check_lower_vector_constant(writer, words, piece_bytes);
+            for (uint32_t end = bytes; end != 0 && writer->output->status == CHECK_PROGRAM_OK;)
+            {
+                const uint32_t part = end < piece_bytes ? end : piece_bytes;
+                const uint32_t offset = end - part;
+                check_lower_transport_builtin_store(writer, part);
+                if (conditional)
+                {
+                    // false ^ ((true ^ false) & mask).
+                    check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, combine);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, piece_bytes);
+                    check_lower_transport_at(writer, sources[2], offset);
+                    check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, bit_and);
+                    check_lower_vector_logical_mask(writer, sources[0], offset, piece_bytes, compare, zero);
+                    check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, combine);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, piece_bytes);
+                    check_lower_transport_at(writer, sources[2], offset);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, piece_bytes);
+                    check_lower_transport_at(writer, sources[1], offset);
+                }
+                else
+                {
+                    if (operands == 2)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, combine);
+                        check_lower_vector_logical_mask(writer, sources[1], offset, piece_bytes, compare, zero);
+                    }
+                    check_lower_vector_logical_mask(writer, sources[0], offset, piece_bytes, compare, zero);
+                }
+                check_lower_element_address(writer, object, offset);
+                end = offset;
+            }
+        }
+        for (uint32_t a = operands; a-- > 0;)
+        {
+            if (a != 1 || !reuse)
+            {
+                check_lower_vector_logical_source(writer, inputs[a], sources[a]);
+                check_lower_operand(writer, node, a, false, inputs[a]);
+            }
+        }
+        writer->vectors = true;
+    }
+}
+
+// An elementwise builtin of transport vectors uses the ordinary row on disjoint register-width pieces. ldexp's
+// exponent can have another element width: the piece's lane count is bounded by the widest argument, and every
+// argument advances by its own element width. No type is interned while a checked body's immutable table is read.
+static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeId result = check_stream_type(stream, node);
+    const uint32_t first = graph->argument_offsets[node];
+    const CheckVectorShape shape = check_vector_builtin_shape(types, result);
+    const bool ldexp = builtin == CBUILTIN_ELEMENTWISE_LDEXP;
+    const bool floating = check_vector_floating_instructions(builtin);
+    CheckVectorShape inputs[3] = { 0 };
+    uint32_t widest = shape.element;
+    bool valid = arguments >= 1 && arguments <= 3 && arguments <= graph->argument_counts[node] && shape.element != 0 && shape.lanes != 0;
+    for (uint32_t a = 0; valid && a < arguments; a += 1)
+    {
+        inputs[a] = check_vector_builtin_shape(types, stream->argument_conversions[first + a].type);
+        valid = inputs[a].element != 0 && inputs[a].lanes == shape.lanes;
+        widest = inputs[a].element > widest ? inputs[a].element : widest;
+    }
+    if (!valid)
+    {
+        check_lower_unsupported(writer, "elementwise vector builtins of elements of this size");
+    }
+    else if (shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "elementwise vector builtins of more than 1024 elements");
+    }
+    else
+    {
+        const uint32_t width = check_lower_transport_width(writer);
+        const uint32_t capacity = shape.bytes / shape.element;
+        const uint32_t lanes = capacity < width / widest ? capacity : width / widest;
+        const uint32_t bytes = lanes * shape.element;
+        CheckVectorShape piece = shape;
+        piece.bytes = bytes < 4 ? 4 : bytes;
+        piece.lanes = piece.bytes / piece.element;
+        CheckVectorShape exponent = inputs[arguments > 1 ? 1 : 0];
+        exponent.bytes = lanes * exponent.element;
+        exponent.bytes = exponent.bytes < 4 ? 4 : exponent.bytes;
+        exponent.lanes = piece.lanes;
+        const uint32_t negated = builtin == CBUILTIN_ELEMENTWISE_FMA && shape.bfloat && arguments == 3 ? check_lower_brain_negations(program, first, result) : 0;
+        Tier0Operation row;
+        CheckVectorConstants constants = { 0 };
+        const char* reason = ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, &row) :
+                             floating ? check_vector_floating_shape_row(builtin, piece, &row, &constants) :
+                                        check_vector_elementwise_shape_row(&writer->target, builtin, piece, arguments, negated, &row, &constants);
+        if (reason != NULL)
+        {
+            check_lower_unsupported(writer, reason);
+        }
+        else
+        {
+            const uint32_t operation = check_lower_operation_index(writer, &row);
+            uint32_t sources[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+            for (uint32_t a = 0; a < arguments; a += 1)
+            {
+                sources[a] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            }
+            const uint32_t object = check_lower_transport_result(writer, result);
+            for (uint32_t p = capacity / lanes; p-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+            {
+                check_lower_transport_builtin_store(writer, bytes);
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, operation);
+                check_lower_row_constants(writer, &row, &constants, arguments);
+                for (uint32_t a = arguments; a-- > 0;)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, row.operand_bytes[a]);
+                    check_lower_transport_at(writer, sources[a], (uint64_t)p * lanes * inputs[a].element);
+                }
+                check_lower_element_address(writer, object, p * bytes);
+            }
+            for (uint32_t a = arguments; a-- > 0;)
+            {
+                const TypeId type = stream->argument_conversions[first + a].type;
+                const bool folded = (negated >> a & 1) != 0;
+                check_lower_transport_builtin_source(writer, type, sources[a]);
+                check_lower_operand(writer, folded ? graph->argument_nodes[first + a] : node, folded ? 0 : a + 3, false, type);
+            }
+            writer->vectors = true;
+        }
+    }
+}
+
 // An element-wise conversion of the vector on top of the stack, from `from` to `to`, of as many elements, at least one
 // of them a transport vector (#137): __builtin_convertvector's, and the implicit conversion of an extended vector to
 // one of bool, whose elements are its elements' truths, as clang's icmp ne 0. Each element converts as C converts a
@@ -845,7 +1227,8 @@ static void check_lower_transport_splat_value(CheckLowerWriter* writer, TypeId f
     }
     else
     {
-        const CheckVectorElement shape = check_vector_lower_element(types, to);
+        const CheckVectorElement shape = check_vector_lower_brain(types, to) ? (CheckVectorElement){ .bytes = 2, .floating = true, .is_signed = true } :
+                                                                             check_vector_lower_element(types, to);
         const uint32_t width = check_lower_transport_width(writer);
         const uint32_t piece = bytes < width ? bytes : width;
         const uint32_t local = check_lower_transport_splat_temporary(writer, piece);
@@ -855,7 +1238,7 @@ static void check_lower_transport_splat_value(CheckLowerWriter* writer, TypeId f
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
             check_lower_element_address(writer, result, p * piece);
         }
-        if (shape.bytes == 0 || check_vector_lower_brain(types, to))
+        if (shape.bytes == 0)
         {
             check_lower_unsupported(writer, "splats of this type into vectors");
         }
@@ -1024,6 +1407,166 @@ static __attribute__((noinline)) void check_lower_transport_convertvector(CheckL
     const TypeId source = program->stream->argument_conversions[program->input->graph.argument_offsets[node]].type;
     check_lower_transport_convert(writer, source, check_stream_type(program->stream, node));
     check_lower_operand(writer, node, 3, false, source);
+}
+
+// A floating reduction of a wide vector first pairs its low and high halves, repeatedly, in register-width pieces.
+// The last piece uses the ordinary reduction rows. This preserves the full vector's reduction tree rather than
+// reducing independent pieces and adding their scalar results, which changes roundings and NaN selection.
+static __attribute__((noinline)) void check_lower_transport_reduce_floating(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t first = graph->argument_offsets[node];
+    const TypeId source = stream->argument_conversions[first].type;
+    const CheckVectorShape shape = check_vector_builtin_shape(types, source);
+    const bool sum = builtin == CBUILTIN_REDUCE_ASSOC_FADD;
+    const bool number = builtin == CBUILTIN_REDUCE_MAX || builtin == CBUILTIN_REDUCE_MIN;
+    const bool maximum = builtin == CBUILTIN_REDUCE_MAXIMUM || builtin == CBUILTIN_REDUCE_MAX;
+    if (!shape.floating || shape.bfloat || shape.element == 2)
+    {
+        check_lower_unsupported(writer, "vector reductions of half-precision or bf16 elements");
+    }
+    else if (shape.lanes == 0 || shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "vector reductions of more than 1024 elements");
+    }
+    else if (!sum && shape.lanes * shape.element != shape.bytes)
+    {
+        check_lower_unsupported(writer, "floating maximum and minimum reductions of vectors their elements don't fill");
+    }
+    else
+    {
+        const uint32_t width = check_lower_transport_width(writer);
+        const uint32_t bytes = shape.bytes < width ? shape.bytes : width;
+        CheckVectorShape piece = shape;
+        piece.bytes = bytes;
+        piece.lanes = bytes / shape.element;
+        Tier0Operation tail[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS];
+        uint32_t count = 0;
+        const uint8_t class = shape.element == 8 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
+        Tier0Operation scalar;
+        CheckVectorConstants scalar_constants = { 0 };
+        const char* reason = number ? check_vector_floating_scalar_row(&writer->target, maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM,
+                                                                       class, &scalar, &scalar_constants) :
+                                     check_vector_reduce_floating_shape_rows(builtin, piece, tail, &count);
+        Tier0Operation combine;
+        CheckVectorConstants constants = { 0 };
+        if (reason == NULL && shape.bytes > bytes)
+        {
+            if (sum)
+            {
+                const CheckVectorElement element = { .bytes = shape.element, .floating = true, .is_signed = true };
+                reason = check_vector_lower_element_row(&writer->target, false, CHECK_OP_ADD, element, bytes, 0, &combine);
+            }
+            else
+            {
+                const CBuiltinId operation = number ? maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM :
+                                                     maximum ? CBUILTIN_ELEMENTWISE_MAXIMUM : CBUILTIN_ELEMENTWISE_MINIMUM;
+                reason = check_vector_floating_shape_row(operation, piece, &combine, &constants);
+            }
+        }
+        if (reason != NULL)
+        {
+            check_lower_unsupported(writer, reason);
+        }
+        else
+        {
+            const uint64_t sign = check_vector_floating_sign(shape.element == 8);
+            const uint32_t object = check_lower_transport_object(writer, source);
+            const uint32_t local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            const bool explicit_start = sum && graph->argument_counts[node] == 2;
+            const uint32_t start = explicit_start ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+            const uint32_t operation = shape.bytes > bytes ? check_lower_operation_index(writer, &combine) : BUSTER_CHECK_NONE;
+            if (number)
+            {
+                // LLVM's fmax/fmin reduction legalizes wide vectors by pairing their halves, then folds the legal
+                // vector's lanes in source order. In particular, equal signed zeros keep that fold's first number.
+                const uint32_t accumulator = check_lower_temporary(writer, class);
+                const uint32_t step = check_lower_operation_index(writer, &scalar);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, accumulator);
+                for (uint32_t lane = piece.lanes; lane-- > 1;)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, accumulator);
+                    check_lower_instruction(writer, BUSTER_TYPED_X86, class, step);
+                    check_lower_row_constants(writer, &scalar, &scalar_constants, 2);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                    check_lower_element_address(writer, object, lane * shape.element);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, accumulator);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, accumulator);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_element_address(writer, object, 0);
+            }
+            for (uint32_t r = count; r-- > 0;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, tail[r].result_class, check_lower_operation_index(writer, tail + r));
+                if (!sum && !number)
+                {
+                    uint64_t words[8] = { 0 };
+                    const uint64_t mask = maximum ? sign - 1 : sign;
+                    for (uint32_t w = 0; w < tail[r].operand_bytes[1] / 8; w += 1)
+                    {
+                        words[w] = shape.element == 8 ? mask : mask | mask << 32;
+                    }
+                    if (tail[r].operand_bytes[1] == 4)
+                    {
+                        words[0] = mask;
+                    }
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR,
+                                             check_lower_vector_constant(writer, words, tail[r].operand_bytes[1]));
+                }
+                else if (sum && r == count - 1 && explicit_start)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, start);
+                }
+                else if (sum && r == count - 1)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, class, sign);
+                }
+            }
+            if (!number)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                check_lower_element_address(writer, object, 0);
+            }
+            // Pushed from the last halving to the first, so the widest runs first and no unread half is overwritten.
+            for (uint32_t span = bytes * 2; span <= shape.bytes; span *= 2)
+            {
+                const uint32_t half = span / 2;
+                for (uint32_t p = half / bytes; p-- > 0;)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                    check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, operation);
+                    check_lower_row_constants(writer, &combine, &constants, 2);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                    check_lower_element_address(writer, object, half + p * bytes);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                    check_lower_element_address(writer, object, p * bytes);
+                    check_lower_element_address(writer, object, p * bytes);
+                }
+            }
+            // An associative sum's padding is its -0.0 identity. It never reads unspecified padding as data.
+            for (uint32_t lane = shape.bytes / shape.element; lane-- > shape.lanes;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, class, sign);
+                check_lower_element_address(writer, object, lane * shape.element);
+            }
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = shape.bytes, .address = false });
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            if (explicit_start)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, start);
+                check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
+            }
+            check_lower_transport_source(writer, source, local);
+            check_lower_operand(writer, node, 3, false, source);
+            writer->vectors = true;
+        }
+    }
 }
 
 // An integer reduction of a transport vector (#137, __builtin_reduce_add, _mul, _and, _or, _xor, _max and _min): its

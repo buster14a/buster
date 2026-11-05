@@ -3244,6 +3244,18 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 attributes->calling_convention = attributes->calling_convention == CHECK_CALL_DEFAULT && call != CHECK_CALL_IGNORED_X86_32 ? call :
                                                  attributes->calling_convention;
             }
+            else if (name == C_NAME_NORETURN)
+            {
+                bool duplicate = false;
+                for (uint32_t a = 0; !duplicate && a < attributes->count; a += 1)
+                {
+                    duplicate = attributes->records[a].kind == CHECK_ATTRIBUTE_NORETURN && attributes->records[a].keyword;
+                }
+                if (duplicate)
+                {
+                    check_input_duplicate_specifier(reader, first, C_NAME_NORETURN);
+                }
+            }
             valid = valid && check_input_attribute_append(reader, attributes, attribute);
         }
         if (valid)

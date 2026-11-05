@@ -70,6 +70,9 @@ enum
     CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 78,
     CHECK_WARNING_ID_INDEPENDENT_CLASS = 79,
     CHECK_WARNING_ID_ASSUME = 80,
+    CHECK_WARNING_ID_DUPLICATE_DECLSPEC = 81,
+    CHECK_WARNING_ID_INVALID_NORETURN = 82,
+    CHECK_WARNING_ID_PRIVATE_EXTERN = 83,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -234,6 +237,12 @@ typedef enum CheckWarningEventKind
     // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
     // CHECK_WARNING_NOTE_UNAVAILABLE_HERE, at the member's name.
     CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+    // Repeated declaration specifiers: payload.name is Clang's canonical keyword spelling.
+    CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC,
+    // A return written in a noreturn function, including unreachable returns; payload.name names the function.
+    CHECK_WARNING_EVENT_NORETURN_RETURN,
+    CHECK_WARNING_EVENT_NORETURN_FALLS,
+    CHECK_WARNING_EVENT_PRIVATE_EXTERN,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -257,6 +266,7 @@ typedef enum CheckWarningNoteKind
     // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
     CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+    CHECK_WARNING_NOTE_PRIVATE_EXTERN,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

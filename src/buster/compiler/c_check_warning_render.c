@@ -448,6 +448,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
+        case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
+            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NORETURN_RETURN:
+            result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NORETURN_FALLS:
+            result = "function declared 'noreturn' should not return";
+            break;
         case CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE:
             result = "'gnu_inline' attribute requires function to be marked 'inline', attribute ignored";
             break;
@@ -884,6 +893,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
     const char* result = NULL;
     switch (note->kind)
     {
+        case CHECK_WARNING_NOTE_PRIVATE_EXTERN:
+            result = "use __attribute__((visibility(\"hidden\"))) attribute instead";
+            break;
         case CHECK_WARNING_NOTE_PRIOR_INITIALIZATION:
             result = note->payload.data != 0 ? "previous initialization with side effects is here (side effects will not occur at run time)" :
                                               "previous initialization is here";

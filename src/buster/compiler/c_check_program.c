@@ -125,6 +125,9 @@ struct CheckProgramOptions
     // Give non-aggregate functions the return-flow walk that -Wreturn-type needs. A warning-suppressed command leaves
     // it out, so its checking cost stays where it was before the warning existed.
     bool return_warnings;
+    // A void function can also fall off despite its noreturn declaration. Its warning group is independent of
+    // -Wreturn-type, so turning the latter off must not remove this analysis.
+    bool noreturn_warnings;
     // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
     // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129). An if whose condition
     // is a constant leaves its dead arm out whatever this says (CheckProgram.dropped_ranges).
@@ -2330,20 +2333,59 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     }
 }
 
+// A direct function call's source contract: 1 may return, 2 never returns, 0 is not known here. Keep indirect
+// calls and plain library declarations whose builtin contract is not retained conservative. The ordinary direct
+// call no longer suppresses the whole body's warning merely because it has a call in it.
+static uint32_t check_program_return_call(const CheckProgram* program, uint32_t node)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    uint32_t result = 0;
+    if (node < graph->count && graph->ops[node] == CHECK_OP_CALL && graph->tokens != NULL && input->declarations != NULL)
+    {
+        uint32_t callee = graph->operand0[node];
+        for (uint32_t steps = 0; callee < graph->count && steps < graph->count &&
+             (graph->ops[callee] == CHECK_OP_CONVERT || graph->ops[callee] == CHECK_OP_POSITIVE ||
+              graph->ops[callee] == CHECK_OP_ADDRESS || graph->ops[callee] == CHECK_OP_DEREFERENCE); steps += 1)
+        {
+            callee = graph->operand0[callee];
+        }
+        const uint32_t token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+        if (declaration < input->token_count && type_kind(program->types, type_strip_aligned(program->types, input->declared_types[declaration])) == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            const bool noreturn = input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
+            result = noreturn ? 2 : 1;
+            if (!noreturn && program->identifiers != NULL && program->parser != NULL)
+            {
+                const uint32_t name = program->parser->tokens.names[declaration];
+                const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name), intern_length(program->identifiers, name));
+                if (info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL)
+                {
+                    result = 0;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Aggregate returns need an address even at a reachable implicit return. Reuse the completed writer's label and
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
 static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work,
-                                     bool return_warnings)
+                                     bool return_warnings, bool noreturn_warnings)
 {
     CheckProgram* program = writer->program;
     const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
+    const bool noreturn = program->input->function_flags != NULL &&
+                          (program->input->function_flags[body->declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
     // main returns 0 without a return statement, so it has no -Wreturn-type fall-off warning.
-    const bool scalar = return_warnings && result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main;
-    if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar) && body->count != 0 && body->count == body->entry_count)
+    const bool scalar = return_warnings && result != 0 && kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && !aggregate && !body->is_main && !noreturn;
+    if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar || (noreturn_warnings && noreturn)) && body->count != 0 && body->count == body->entry_count)
     {
         CheckControl* entries = writer->entries + body->first;
         uint8_t* seen = (uint8_t*)writer->tasks;
@@ -2444,8 +2486,15 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
                 }
-                // Calls may be declared noreturn. Query operands also affect Clang's source-flow warning even
-                // when unevaluated. Until these contracts reach controls, keep their warnings conservative.
+                // A noreturn call that is the control's whole expression ends this source path. Nested noreturn
+                // calls and query operands keep the conservative boundary until their conditional execution is
+                // represented here; ordinary direct calls and nonterminating miscellaneous builtins are safe.
+                const bool terminal_call = pass != 0 && check_program_return_call(program, entry->node) == 2;
+                if (terminal_call)
+                {
+                    next = false;
+                    targets[0] = BUSTER_CHECK_NONE;
+                }
                 if (pass != 0 && warning_safe && entry->node < graph->count && (node_marks[entry->node] & warning_mark) == 0)
                 {
                     uint32_t depth = 1;
@@ -2460,7 +2509,18 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                             *work += 1;
                         }
                         const CheckOp op = graph->ops[node];
-                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
+                        warning_safe = op != CHECK_OP_BUILTIN_QUERY &&
+                                       (op != CHECK_OP_CALL || check_program_return_call(program, node) == 1 || (terminal_call && node == entry->node));
+                        if (op == CHECK_OP_BUILTIN_MISC)
+                        {
+                            const uint32_t effect = check_program_builtin_index(program->stream->misc, program->stream->misc_count, sizeof(CheckBuiltinMiscEffect), node);
+                            warning_safe = effect != BUSTER_CHECK_NONE && (!program->stream->misc[effect].terminates || node == entry->node);
+                            if (warning_safe && program->stream->misc[effect].terminates)
+                            {
+                                next = false;
+                                targets[0] = BUSTER_CHECK_NONE;
+                            }
+                        }
                         if (warning_safe && op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
                         {
                             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
@@ -2503,7 +2563,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                                 for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
                                 {
                                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                                    const bool evaluated = op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
+                                    const bool evaluated = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
                                     if (evaluated && argument < graph->count && (node_marks[argument] & warning_mark) == 0)
                                     {
                                         node_marks[argument] |= warning_mark;
@@ -2545,7 +2605,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
             }
             else
             {
-                body->return_warning = falls && warning_safe ? returns ? 2 : 1 : 0;
+                body->return_warning = falls && warning_safe ? noreturn ? (noreturn_warnings ? 3 : 0) : returns ? 2 : 1 : 0;
             }
         }
     }
@@ -3854,7 +3914,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work, options.return_warnings);
+        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work, options.return_warnings, options.noreturn_warnings);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {

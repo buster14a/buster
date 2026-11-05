@@ -135,3 +135,62 @@ jobs:
         with:
           name: issue1447-oracle
           path: build/issue1447-oracle
+
+  diagnostics:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build declaration and flow warning changes
+        run: ./build.sh --config Release
+      - name: Record Buster diagnostic comparisons
+        run: |
+          mkdir -p build/issue1447-comparison
+          for mode in default scalar; do
+            mode_args=()
+            if [ "$mode" = scalar ]; then mode_args=(--scalar); fi
+            for suite in issue1447-attribute-probes issue1447-attribute-probes2; do
+              while IFS=$'\t' read -r source flags; do
+                args=()
+                read -r -a args <<< "$flags"
+                printf '\nBUSTER ATTRIBUTE %s %s %s\n' "$mode" "$suite" "$source"
+                set +e
+                build/compiler "${mode_args[@]}" -std=gnu23 -fsyntax-only -fno-caret-diagnostics "${args[@]}" "tools/$suite/$source" > "build/issue1447-comparison/$mode-$suite-$source.log" 2>&1
+                status=$?
+                set -e
+                cat "build/issue1447-comparison/$mode-$suite-$source.log"
+                printf 'STATUS %s\n' "$status"
+              done < "tools/$suite/cases.tsv"
+            done
+            for case in $(seq 1 40); do
+              printf '\nBUSTER DIAGNOSTIC %s %s\n' "$mode" "$case"
+              build/compiler "${mode_args[@]}" -std=gnu17 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-diagnostic-probes/cases.c || true
+            done
+          done
+      - name: Check source diagnostics and object output
+        run: |
+          for part in 1 2 3 4; do
+            build/compiler test-checker-driver --executable build/compiler --part "$part/4"
+          done
+      - name: Check semantic and return-flow invariants
+        if: success() || failure()
+        run: build/compiler test-checker --seed 133
+      - name: Check generated vector programs against Clang
+        if: success() || failure()
+        run: build/compiler test-checker --program-vectors --clang clang
+      - name: Keep diagnostic comparison outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1447-comparison
+          path: build/issue1447-comparison

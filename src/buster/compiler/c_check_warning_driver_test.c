@@ -19,6 +19,94 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "duplicate qualifiers and declaration specifiers",
+        .source = "const const int a;\nvolatile volatile int b;\n_Atomic _Atomic int c;\nextern extern int d;\n"
+                  "static static int e;\ntypedef typedef int T;\nunsigned unsigned int f;\n",
+        .warnings = 7,
+    },
+    {
+        .name = "duplicate function specifiers",
+        .source = "inline inline void f(void){}\n_Noreturn _Noreturn void g(void){for(;;){}}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate parameter and pointer qualifiers",
+        .source = "int f(const const int x,int *volatile volatile p){return x+*p;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate declaration specifier group disabled",
+        .source = "const const int value;\n",
+        .options = { "-Wno-duplicate-decl-specifier" },
+    },
+    {
+        .name = "duplicate declaration specifier source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wduplicate-decl-specifier\"\nconst const int value;\n",
+    },
+    {
+        .name = "noreturn fall off",
+        .source = "_Noreturn void f(void){}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn explicit return",
+        .source = "_Noreturn void f(void){return;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn valued return",
+        .source = "__attribute__((noreturn)) int f(void){return 1;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn dead explicit return",
+        .source = "_Noreturn void f(void){if(0)return;for(;;){}}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn ordinary call can return",
+        .source = "void g(void);_Noreturn void f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn call ends the path",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+    },
+    {
+        .name = "noreturn partial terminal path",
+        .source = "_Noreturn void g(void);_Noreturn void f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn trap ends the path",
+        .source = "_Noreturn void f(void){__builtin_trap();}\n",
+    },
+    {
+        .name = "noreturn independent of return type warning policy",
+        .source = "_Noreturn void f(void){}\n",
+        .options = { "-Wno-return-type" },
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn group disabled",
+        .source = "_Noreturn void f(void){return;}\n",
+        .options = { "-Wno-invalid-noreturn" },
+    },
+    {
+        .name = "noreturn source policy",
+        .source = "#pragma clang diagnostic ignored \"-Winvalid-noreturn\"\n_Noreturn void f(void){}\n",
+    },
+    {
+        .name = "scalar return fall off after ordinary call",
+        .source = "void g(void);int f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return partial terminal path",
+        .source = "_Noreturn void g(void);int f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
         .name = "nonliteral integer zero pointer conversion",
         .source = "int*p=1-1;\n",
         .warnings = 1,

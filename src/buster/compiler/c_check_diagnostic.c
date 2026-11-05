@@ -117,6 +117,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
     { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
     { "-Wassume", NULL, "assumption is ignored because it contains (potential) side-effects" },
+    { "-Wduplicate-decl-specifier", NULL, "duplicate declaration specifier" },
+    { "-Winvalid-noreturn", NULL, "function declared 'noreturn' should not return" },
+    { "-Wprivate-extern", NULL, "use of __private_extern__ on a declaration may not produce external symbol private to the linkage unit and is deprecated" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

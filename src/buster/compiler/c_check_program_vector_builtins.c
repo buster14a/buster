@@ -851,11 +851,15 @@ static const char* check_vector_masked_row(const TypeTable* types, const X86Targ
 // Whether __builtin_elementwise_clmul of `vector`, a vector of integers, is check_vector_elementwise_row's: its elements
 // zero-extended to 64 bits take 64 bytes at most, and the target has VPCLMULQDQ and AVX-512VL (EVEX's forms at every
 // width). Else the lowering takes its elements one by one (check_lower_vector_lanes).
-static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* target, TypeId vector)
+static bool check_vector_clmul_packed_shape(const X86Target* target, CheckVectorShape shape)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(VPCLMULQDQ);
     return shape.integer && shape.element != 0 && shape.bytes * (8 / shape.element) <= 64 && (target->features & needed) == needed;
+}
+
+static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* target, TypeId vector)
+{
+    return check_vector_clmul_packed_shape(target, check_vector_builtin_shape(types, vector));
 }
 
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
@@ -868,10 +872,9 @@ static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* t
 // takes their negations' operands: check_lower_brain_negations) negate the product (a's or b's alone) or the sum (c's) as
 // the form does, as clang's instruction selection folds the negations: VFMADD213BF16, VFMSUB213BF16, VFNMADD213BF16 or
 // VFNMSUB213BF16. `constants` gets any extra constant operands.
-static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, uint32_t negated,
-                                                Tier0Operation* row, CheckVectorConstants* constants)
+static const char* check_vector_elementwise_shape_row(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape, uint32_t arguments, uint32_t negated,
+                                                      Tier0Operation* row, CheckVectorConstants* constants)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
@@ -1003,7 +1006,7 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
             row->records[r++] = check_vector_lower_record(truncate[e].forms[wide], v0, 0, v0);
         }
         row->record_count = (uint8_t)r;
-        reason = check_vector_clmul_packed(types, target, vector) ? NULL : "vector carry-less multiplication without AVX-512VL and VPCLMULQDQ";
+        reason = check_vector_clmul_packed_shape(target, shape) ? NULL : "vector carry-less multiplication without AVX-512VL and VPCLMULQDQ";
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_CTZG)
     {
@@ -1177,6 +1180,12 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     return reason;
 }
 
+static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, uint32_t negated,
+                                                Tier0Operation* row, CheckVectorConstants* constants)
+{
+    return check_vector_elementwise_shape_row(target, builtin, check_vector_builtin_shape(types, vector), arguments, negated, row, constants);
+}
+
 // The row of __builtin_elementwise_sqrt or _fma of float or double scalars (`class`, F32 or F64), of `arguments`
 // operands of the class: VSQRTSS/SD of the operand, or VFMADD213SS/SD of a, b and c (a = b * a + c), into the first
 // operand's register at the current rounding, as llvm.sqrt and llvm.fma compute them. Their EVEX forms are AVX-512F's,
@@ -1282,9 +1291,8 @@ static uint64_t check_vector_floating_one(bool d)
 // where x's is clear (maximum's VPTERNLOGD 224 with the magnitude mask) or set where x's is (minimum's VPTERNLOGD 248
 // with the sign mask), and x where x is a NaN (the ordered compare's mask moving the rest); maximumnum and minimumnum,
 // the same, but y where x is a NaN and x where y is. The constants are operands past the arguments (`constants`).
-static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId builtin, TypeId vector, Tier0Operation* row, CheckVectorConstants* constants)
+static const char* check_vector_floating_shape_row(CBuiltinId builtin, CheckVectorShape shape, Tier0Operation* row, CheckVectorConstants* constants)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
@@ -1387,6 +1395,11 @@ static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId 
         row->record_count = (uint8_t)r;
     }
     return reason;
+}
+
+static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId builtin, TypeId vector, Tier0Operation* row, CheckVectorConstants* constants)
+{
+    return check_vector_floating_shape_row(builtin, check_vector_builtin_shape(types, vector), row, constants);
 }
 
 // The same builtins (and __builtin_elementwise_ldexp) of float or double scalars (`class`, F32 or F64), its scalar
@@ -1504,10 +1517,8 @@ static const char* check_vector_floating_scalar_row(const X86Target* target, CBu
 // values, as llvm.ldexp takes them (VPMOVSXBD or VPMOVSXWD first for 8- and 16-bit ones, then VCVTDQ2PS or VCVTDQ2PD,
 // or VCVTQQ2PS or VCVTQQ2PD with AVX-512DQ), then x times 2 to the floor of each (VSCALEFPS or VSCALEFPD), as clang -O0's
 // code computes it. Its operands are x and e, of `vector`'s and `exponent`'s types.
-static const char* check_vector_ldexp_row(const TypeTable* types, const X86Target* target, TypeId vector, TypeId exponent, Tier0Operation* row)
+static const char* check_vector_ldexp_shape_row(const X86Target* target, CheckVectorShape in, CheckVectorShape ex, Tier0Operation* row)
 {
-    const CheckVectorShape in = check_vector_builtin_shape(types, vector);
-    const CheckVectorShape ex = check_vector_builtin_shape(types, exponent);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
     const char* reason = NULL;
@@ -1559,6 +1570,11 @@ static const char* check_vector_ldexp_row(const TypeTable* types, const X86Targe
     return reason;
 }
 
+static const char* check_vector_ldexp_row(const TypeTable* types, const X86Target* target, TypeId vector, TypeId exponent, Tier0Operation* row)
+{
+    return check_vector_ldexp_shape_row(target, check_vector_builtin_shape(types, vector), check_vector_builtin_shape(types, exponent), row);
+}
+
 // The most rows a floating reduction takes: a maximum's or minimum's halvings of 16 floats, a row each.
 #define BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS 4u
 
@@ -1570,10 +1586,9 @@ static const char* check_vector_ldexp_row(const TypeTable* types, const X86Targe
 // many as its records hold. The last row's result is the element (FLOATING_RESULT); a sum's adds the tree's to the start
 // value (VADDSS or VADDSD, the start's first, as clang adds them), its last operand (FLOATING), which the lowering gives
 // -0.0 without one. `count` gets the rows' number.
-static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBuiltinId builtin, TypeId vector,
-                                                     Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
+static const char* check_vector_reduce_floating_shape_rows(CBuiltinId builtin, CheckVectorShape shape,
+                                                           Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
     const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
@@ -1698,6 +1713,12 @@ static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBu
         }
     }
     return reason;
+}
+
+static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBuiltinId builtin, TypeId vector,
+                                                    Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
+{
+    return check_vector_reduce_floating_shape_rows(builtin, check_vector_builtin_shape(types, vector), rows, count);
 }
 
 // The row of __builtin_nontemporal_store(value, p) or __builtin_nontemporal_load(p) of a vector of `vector`'s type at
