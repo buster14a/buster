@@ -1,7 +1,7 @@
 name: Issue 1447 symbol pragma oracle
 on:
   push:
-    branches: [codex/issue-1447-symbol-oracles-01a1ad8e]
+    branches: [codex/issue-1447-symbol-object-oracles-01a1ad8e]
 permissions:
   contents: read
 jobs:
