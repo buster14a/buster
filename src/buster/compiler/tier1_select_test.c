@@ -2595,6 +2595,7 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
         uint8_t void_types[65] = { 0 };
         uint8_t storage[65] = { 0 };
         uint32_t operands[65] = { 0 };
+        uint32_t parameter_requests[65] = { 0 };
         const uint8_t types[] = { IR_I1, IR_I8, IR_I16, IR_I32, IR_I64, IR_PTR, IR_F32 };
         const uint8_t widths[] = { 1, 8, 16, 32, 64, 64, 64 };
         memset(operations, IR_PARAM, sizeof(operations));
@@ -2610,14 +2611,14 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 tier1_select_known_bits(&function, 0, 0, 0, known, path != 0);
-                tier1_select_sign_requests(&function, known, storage, path != 0);
+                tier1_select_sign_requests(&function, known, storage, parameter_requests, path != 0);
                 IrFunction scan = function;
                 scan.block_count = 2;
                 tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded type tails admit no induction certificate without a phi");
                 scan.op = type;
                 scan.type = void_types;
-                tier1_select_sign_requests(&scan, known, storage, path != 0);
+                tier1_select_sign_requests(&scan, known, storage, parameter_requests, path != 0);
                 tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded opcode tails admit no induction certificate without an integer phi");
                 for (uint32_t n = 0; n < count; n += 1)
