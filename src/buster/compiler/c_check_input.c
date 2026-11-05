@@ -394,6 +394,8 @@ struct CheckInputReport
     uint32_t pragma;
     // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
     uint32_t completion;
+    // Optional order among a completed declaration's diagnostics, whose locations need not follow that order.
+    uint64_t suborder;
     // The declaration a message located elsewhere names (an attribute's, #147), plus one; 0 for none.
     uint32_t subject;
     // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.

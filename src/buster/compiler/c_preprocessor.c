@@ -1313,6 +1313,9 @@ struct PPDiagnosticRecord
     PPDiagnosticRecord* next;
     Preprocessor* owner;
     uint64_t position;
+    // Nonzero orders a completed construct's diagnostics before unsequenced ones at the same publication position.
+    // Zero retains ordinary discovery order. Notes belong to the same record and follow its primary.
+    uint64_t suborder;
     uint32_t location;
     uint32_t origin;
     uint32_t note_location;

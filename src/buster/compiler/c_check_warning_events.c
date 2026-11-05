@@ -310,6 +310,8 @@ struct CheckWarningEvent
     uint32_t completion_kind;
     // Parser token for AT_TOKEN/AFTER_DELIMITER; NO_SOURCE for TU_END. Attached notes inherit this completion.
     uint32_t completion;
+    // Optional order inside a completed construct, independent of its source location and publication boundary.
+    uint64_t suborder;
     CheckWarningPayload payload;
     uint32_t note_first;
     uint32_t note_count;

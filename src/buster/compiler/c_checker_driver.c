@@ -1514,12 +1514,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     }
                     if (source != BUSTER_CHECK_NONE)
                     {
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
                         // An alias or ifunc definition's error is clang's after the multiversioning error at the
                         // function's name, though its location is its earlier attribute (#839).
                         if (phase == 0 && input->reports[index].sort != 0)
                         {
-                            publication = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                            const uint32_t sorted = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                            publication = publication < sorted ? sorted : publication;
                         }
                         // The input's reports whose messages name their token's identifier.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
@@ -2161,6 +2163,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
                         }
+                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder : 0);
                     }
                     else
                     {
