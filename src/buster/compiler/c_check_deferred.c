@@ -2726,9 +2726,9 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     const uint64_t arena_mark = arena->length;
     const CheckDeferredFlow* flow = deferred->flow;
     const bool every_lane = deferred->every_lane;
-    // Plain char's signedness on the caller's table, which the merge fills and the phases after the reader read
-    // (check_input_run sets the top level's, and type_copy each lane's).
-    types->char_unsigned = pp->options.predefines.char_unsigned;
+    // The target's facts on the caller's table (plain char's signedness, cx16's 16-byte atomics), which the merge fills and
+    // the phases after the reader read: check_input_run sets the top level's, and type_copy each lane's.
+    check_input_target_table(types, pp);
     // The caller's table as it comes, which a fallback to source order takes it back to: the merge replays into it, and
     // may fail after that.
     const TypeViewMark empty = type_view_mark(types);

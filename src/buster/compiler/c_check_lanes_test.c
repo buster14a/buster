@@ -56,7 +56,10 @@
 //   executables exiting alike; the program of 600 functions by --lanes 8 with --time-stages, its bodies read on more
 //   than one lane (with more than one CPU) and merged, by --lanes 1 in source order, after a `#pragma clang section`
 //   line in source order before its top level's walk, and by --no-deferred-bodies after --deferred-bodies in source
-//   order; in a child limited as above, its object by --lanes 8 source order's; and each
+//   order; under a jobserver pipe of none, 1, 3 and 7 spare tokens, on a lane per token up to the CPUs (none: source
+//   order), every token back in the pipe once, and by --worker-budget 1 and 3 on no more lanes than the budget, each
+//   object source order's; a unit of 16-byte lock-free queries by -mcx16, source order's object, which -mno-cx16's isn't;
+//   in a child limited as above, its object by --lanes 8 source order's; and each
 //   failing program by --lanes 2, 3 and 8, and in such a child: the exit status and diagnostics of --lanes 1.
 // - The driver's session's threads (#905): a library preloaded into the driver counts its calls of pthread_create,
 //   which its session makes once, before any source is read: none for --lanes 1, --worker-budget=1 and a source's
@@ -1985,8 +1988,9 @@ static bool check_lanes_test_report_deferred(const char* path, uint32_t* lanes, 
 // order: their objects and executables source order's on one lane (check_lanes_test_driver's --lanes 1), byte for byte,
 // and the executables exit alike. With --time-stages, the program of 600 functions on 8 lanes reads its bodies on more than one
 // lane (with more than one CPU) and merges them, on 1 lane goes to source order, and after a `#pragma clang section` line
-// goes to source order before its top level's walk; in a child whose lanes don't start, by --lanes 8, its object is
-// source order's. Each failing program by --deferred-bodies with --lanes 2, 3 and 8,
+// goes to source order before its top level's walk; under a jobserver's spare tokens and a worker budget, its bodies
+// take the lanes they give, and every token goes back; a unit's 16-byte lock-free queries answer by -mcx16 as in source
+// order; in a child whose lanes don't start, by --lanes 8, its object is source order's. Each failing program by --deferred-bodies with --lanes 2, 3 and 8,
 // and in such a child: --lanes 1's exit status and diagnostics. And --no-deferred-bodies after it reads in source order.
 static void check_lanes_test_driver_deferred(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs, uint64_t id_order)
 {
@@ -2096,6 +2100,99 @@ static void check_lanes_test_driver_deferred(CheckLanesTestTally* tally, const c
                             section_reported && section_lanes == 0 && strcmp(section_merged, "#pragma clang section") == 0 &&
                                 check_test_driver_same_files(object, sectioned_object),
                             "the driver reads a unit with #pragma clang section in source order, before its top level's walk", detail);
+    // The target's 16-byte atomics (cx16), which the lock-free queries read from the caller's table after the merge
+    // (check_input_target_table, #1403's review): a unit whose eight bodies ask for 16 bytes' lock-freedom, by -mcx16 on
+    // 8 lanes, source order's object; and by -mno-cx16 another, so that the queries' answers reach the object.
+    char atomics[PATH_MAX];
+    char atomics_order[PATH_MAX];
+    char atomics_narrow[PATH_MAX];
+    snprintf(atomics, sizeof(atomics), "%s/deferred_cx16.c", directory);
+    snprintf(atomics_order, sizeof(atomics_order), "%s/deferred_cx16_source_order.o", directory);
+    snprintf(atomics_narrow, sizeof(atomics_narrow), "%s/deferred_cx16_narrow.o", directory);
+    FILE* atomics_file = fopen(atomics, "w");
+    bool atomics_written = atomics_file != NULL;
+    for (uint32_t f = 0; atomics_written && f < 8; f += 1)
+    {
+        atomics_written = fprintf(atomics_file,
+                                  "int q%u(int x) { int y = x * %u; for (int i = 0; i < x; i += 1) { y += i; } "
+                                  "return y + __atomic_always_lock_free(16, 0) * 2 + __atomic_is_lock_free(16, 0); }\n",
+                                  f, f) > 0;
+    }
+    if (atomics_file != NULL)
+    {
+        atomics_written = fclose(atomics_file) == 0 && atomics_written;
+    }
+    char* atomics_source_order[] = { (char*)executable, (char*)"--lanes=8", (char*)"-mcx16", (char*)"-c", (char*)"-o", atomics_order, atomics, NULL };
+    char* atomics_deferred[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-mcx16", (char*)"-c", (char*)"-o",
+                                 object, atomics, NULL };
+    char* atomics_without[] = { (char*)executable, (char*)"--lanes=8", (char*)"-mno-cx16", (char*)"-c", (char*)"-o", atomics_narrow, atomics, NULL };
+    uint32_t atomics_lanes = 0;
+    char atomics_merged[128] = { 0 };
+    const bool atomics_compiled = atomics_written && check_lanes_test_run(atomics_source_order, report) == 0 && check_lanes_test_run(atomics_without, report) == 0 &&
+                                  check_lanes_test_run(atomics_deferred, report) == 0;
+    const bool atomics_reported = atomics_compiled && check_lanes_test_report_deferred(report, &atomics_lanes, atomics_merged, sizeof(atomics_merged));
+    snprintf(detail, sizeof(detail), "%s by -mcx16: %u lanes, merged: %s", atomics, atomics_lanes, atomics_reported ? atomics_merged : "(no report)");
+    check_lanes_test_expect(tally,
+                            atomics_reported && (cpus < 2 || (atomics_lanes > 1 && strcmp(atomics_merged, "yes") == 0)) &&
+                                check_test_driver_same_files(object, atomics_order) && !check_test_driver_same_files(atomics_order, atomics_narrow),
+                            "the driver's deferred bodies answer 16-byte lock-free queries by the target's cx16, as source order does", detail);
+    // The worker budget (#673): under a jobserver pipe of none, 1, 3 and 7 spare tokens, by --lanes 8, the bodies' grant
+    // takes a lane for each token it finds, without waiting, up to the CPUs (none: source order); every token is back in the
+    // pipe once as the command returns; and by --worker-budget 1 and 3 alone, no more lanes than the budget.
+    static const uint32_t spare[] = { 0, 1, 3, 7 };
+    const uint32_t most = cpus < 8 ? cpus : 8;
+    for (uint32_t k = 0; cpus > 1 && k < BUSTER_ARRAY_LENGTH(spare); k += 1)
+    {
+        int fds[2] = { -1, -1 };
+        uint8_t tokens[8];
+        for (uint32_t i = 0; i < spare[k]; i += 1)
+        {
+            tokens[i] = (uint8_t)(0x30 + i);
+        }
+        const bool ready = pipe(fds) == 0 && (spare[k] == 0 || write(fds[1], tokens, spare[k]) == (ssize_t)spare[k]);
+        char makeflags[96];
+        snprintf(makeflags, sizeof(makeflags), "MAKEFLAGS=-j --jobserver-auth=%d,%d", fds[0], fds[1]);
+        char* arguments[] = { (char*)"env", makeflags, (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-c", (char*)"-o",
+                              object, source, NULL };
+        const int status = ready ? check_lanes_test_run(arguments, report) : -1;
+        uint32_t lanes = 0;
+        char merged[128] = { 0 };
+        const bool found = status == 0 && check_lanes_test_report_deferred(report, &lanes, merged, sizeof(merged));
+        const uint32_t expected = 1 + spare[k] < most ? 1 + spare[k] : most;
+        snprintf(detail, sizeof(detail), "%s, %u spare tokens on %u CPUs: status %d, %u lanes, merged: %s", source, spare[k], cpus, status, lanes,
+                 found ? merged : "(no report)");
+        check_lanes_test_expect(tally,
+                                found && check_test_driver_same_files(object, first_object) &&
+                                    (expected > 1 ? lanes == expected && strcmp(merged, "yes") == 0 : lanes == 0 && strcmp(merged, "too few lanes") == 0),
+                                "the deferred bodies take a lane for each spare token, source order's object", detail);
+        check_lanes_test_expect(tally, ready && worker_budget_test_tokens(fds[0], tokens, spare[k]), "the deferred bodies return every token they took once",
+                                detail);
+        if (fds[0] >= 0)
+        {
+            close(fds[0]);
+        }
+        if (fds[1] >= 0)
+        {
+            close(fds[1]);
+        }
+    }
+    static const char* const budgets[] = { "--worker-budget=1", "--worker-budget=3" };
+    static const uint32_t budget_lanes[] = { 1, 3 };
+    for (uint32_t b = 0; cpus > 1 && b < BUSTER_ARRAY_LENGTH(budgets); b += 1)
+    {
+        char* arguments[] = { (char*)"env", (char*)"MAKEFLAGS=", (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)budgets[b], (char*)"--time-stages",
+                              (char*)"-c", (char*)"-o", object, source, NULL };
+        const int status = check_lanes_test_run(arguments, report);
+        uint32_t lanes = 0;
+        char merged[128] = { 0 };
+        const bool found = status == 0 && check_lanes_test_report_deferred(report, &lanes, merged, sizeof(merged));
+        const uint32_t expected = budget_lanes[b] < most ? budget_lanes[b] : most;
+        snprintf(detail, sizeof(detail), "%s, %s on %u CPUs: status %d, %u lanes, merged: %s", source, budgets[b], cpus, status, lanes, found ? merged : "(no report)");
+        check_lanes_test_expect(tally,
+                                found && check_test_driver_same_files(object, first_object) &&
+                                    (expected > 1 ? lanes == expected && strcmp(merged, "yes") == 0 : lanes == 0 && strcmp(merged, "one lane") == 0),
+                                "the deferred bodies take no more lanes than the worker budget, source order's object", detail);
+    }
     // --no-deferred-bodies after --deferred-bodies: source order's reader, which reports nothing of the deferred one.
     char* undone[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--no-deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-c", (char*)"-o",
                        object, source, NULL };

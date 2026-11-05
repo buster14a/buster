@@ -87,9 +87,12 @@ command's flow, `CheckDeferredFlow`): the four programs by the vector path by
 and executable source order's; the program of 600 functions read on lanes and
 merged by `--lanes 8`, in source order by `--lanes 1`, after a `#pragma clang
 section` line (before its top level's walk) and by `--no-deferred-bodies`, by
-`--time-stages`' `deferred-lanes` and `deferred-merged`, and with lanes that
-don't start; and the failing programs by `--lanes 2`, 3 and 8, `--lanes 1`'s
-diagnostics. Then a growing team: the first program of 600 functions by
+`--time-stages`' `deferred-lanes` and `deferred-merged`, under a jobserver pipe
+of none, 1, 3 and 7 spare tokens (a lane per token, every token back once) and
+by `--worker-budget 1` and 3, and with lanes that don't start; a unit of
+16-byte lock-free queries by `-mcx16`, source order's object (the caller's
+table's cx16, `check_input_target_table`); and the failing programs by
+`--lanes 2`, 3 and 8, `--lanes 1`'s diagnostics. Then a growing team: the first program of 600 functions by
 `--lanes 4` under a jobserver pipe of no token or one, its lane 0 writing none,
 2, 3 or 5 more after its first item (`BUSTER_TEST_WORKER_SUPPLY`): its
 `--time-stages` grant, team and growth, no more lanes taking parts than it
