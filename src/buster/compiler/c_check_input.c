@@ -7090,8 +7090,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             // extern (ActOnUninitializedDecl's, at its name) and is of a complete type; a later declaration doesn't add it to
             // a variable already defined (checkNewAttributesAfterDef's, at the attribute, a note at the definition).
             const CheckInputAttribute* loader = valid && !function && !is_typedef ? check_input_attribute_of(attributes, CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) : NULL;
-            const bool loader_defined = loader != NULL && previous_declaration != BUSTER_CHECK_NONE && reader->definition_origins[previous_declaration] != 0 &&
-                                        check_input_attribute_of(previous_attributes, CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) == NULL;
+            // An intervening ordinary declaration keeps the definition's origin, but need not repeat its attributes.
+            // Check that definition, not the immediately visible declaration, before calling this a new attribute.
+            const uint32_t loader_origin = previous_declaration != BUSTER_CHECK_NONE ? reader->definition_origins[previous_declaration] : 0;
+            const bool loader_defined = loader != NULL && loader_origin != 0 &&
+                                        check_input_attribute_of(check_input_attributes_at(reader->output, loader_origin - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) == NULL;
             if (loader != NULL && (kind == PARSE_KIND_EQUAL || storage == C_NAME_EXTERN))
             {
                 check_input_report(reader, name, kind == PARSE_KIND_EQUAL ? CHECK_INPUT_LOADER_INITIALIZER : CHECK_INPUT_LOADER_EXTERN);
@@ -7534,7 +7537,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             {
                 const uint32_t before = reader->output->report_count;
                 check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
-                const bool loader = check_input_attribute_of(check_input_attributes_at(reader->output, previous), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL ||
+                const bool loader = (definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
                                     check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
                 if (reader->output->report_count > before && kind == C_BINDING_OBJECT && compatible == TYPE_ANSWER_YES && loader &&
                     reader->definition_origins[token] != 0 && reader->definition_origins[previous] != 0)
