@@ -208,7 +208,7 @@ static void emitted_test_large_driver(EmittedTest* test)
         const bool written = debug_test_write_file(source, (const uint8_t*)text, sizeof(text) - 1);
         emitted_test_expect(test, written, "write the compile-only near-limit frame", 0);
         String8 first = { 0 };
-        for (uint32_t mode = 0; written && mode < 4; mode += 1)
+        for (uint32_t mode = 0; written && mode < 8; mode += 1)
         {
             char* arguments[12] = { "/proc/self/exe", "--lanes", "1", "-c", "-o", object, source };
             uint32_t used = 7;
@@ -220,9 +220,13 @@ static void emitted_test_large_driver(EmittedTest* test)
             {
                 arguments[used++] = "--scalar";
             }
+            if ((mode & 4) != 0)
+            {
+                arguments[used++] = "-fstack-clash-protection";
+            }
             arguments[used] = 0;
             const bool compiled = object_test_run(arguments, "/dev/null", errors) == 0;
-            emitted_test_expect(test, compiled, "-c compiles the large frame with and without --verify on both paths", mode);
+            emitted_test_expect(test, compiled, "-c compiles the large frame with both paths, verification and optional probes", mode);
             const String8 bytes = compiled ? object_test_read_file(&test->arena, object) : (String8){ 0 };
             const Elf64_Shdr* header = 0;
             const uint8_t* cfi = bytes.pointer != 0 ? x86_elf_section((const uint8_t*)bytes.pointer, bytes.length, SHT_X86_64_UNWIND, ".eh_frame", &header) : 0;
@@ -235,7 +239,7 @@ static void emitted_test_large_driver(EmittedTest* test)
                 found |= memcmp(cfi + at, wide_cfa, sizeof(wide_cfa)) == 0;
             }
             emitted_test_expect(test, found, "the driver's object really describes a CFA of 2^31", mode);
-            if (mode == 0)
+            if ((mode & 3) == 0)
             {
                 first = bytes;
             }
