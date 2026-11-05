@@ -466,10 +466,19 @@ function(buster_settings_linker)
     endif()
     set(buster_linker_flags ${flags} PARENT_SCOPE)
     set(buster_linker "${path}" PARENT_SCOPE)
-    # The static link, with any linker but wild (above): an explicit wild links dynamically. BUSTER_HOST_STATIC tells
-    # the code (test_libm.c): a static executable's dlsym(RTLD_DEFAULT, ...) finds nothing.
-    get_filename_component(linker_name "${path}" NAME)
-    if(buster_static_candidate AND NOT linker_name STREQUAL "wild")
+    # The static link, with any linker but wild (above): an explicit wild links dynamically, whatever its file is
+    # called (ld.wild, a symlink, a path), as its --version names it ("Wild 0.10.0 ..."). BUSTER_HOST_STATIC tells the
+    # code (test_libm.c): a static executable's dlsym(RTLD_DEFAULT, ...) finds nothing.
+    set(wild FALSE)
+    if(NOT path STREQUAL "system default")
+        execute_process(COMMAND "${path}" --version OUTPUT_VARIABLE version ERROR_VARIABLE version_errors
+            RESULT_VARIABLE status TIMEOUT 30)
+        get_filename_component(linker_name "${path}" NAME)
+        if(linker_name STREQUAL "wild" OR "${version}\n${version_errors}" MATCHES "(^|\n)Wild ")
+            set(wild TRUE)
+        endif()
+    endif()
+    if(buster_static_candidate AND NOT wild)
         set(buster_link_mode ${buster_link_mode} -static PARENT_SCOPE)
         set(buster_flags ${buster_flags} -DBUSTER_HOST_STATIC=1 PARENT_SCOPE)
         set(buster_static TRUE PARENT_SCOPE)
