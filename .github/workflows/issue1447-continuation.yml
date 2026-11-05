@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  ms-struct-oracle:
+  ms-struct-boundaries:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -14,12 +14,12 @@ jobs:
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Probe Microsoft record layout
+      - name: Probe record layout boundary cases
         shell: bash
         run: |
           set +e
           ulimit -c 0
-          for case in {1..44}; do
+          for case in {45..56}; do
             echo "LAYOUT CASE=$case"
             clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" tools/issue1447-ms-struct.c -o "$RUNNER_TEMP/ms-probe" 2>&1
             status=$?

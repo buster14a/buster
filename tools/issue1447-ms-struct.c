@@ -177,6 +177,49 @@ typedef struct {unsigned a:3,b:5; char tail; _Complex int complex;} S;
 #pragma ms_struct on
 #pragma ms_struct
 typedef struct {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 45
+#pragma ms_struct on
+typedef struct {char head; unsigned _BitInt(129) a:32,b:32; char tail;} S;
+#elif CASE == 46
+typedef struct __attribute__((ms_struct,gcc_struct)) {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 47
+typedef struct __attribute__((gcc_struct,ms_struct)) {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 48
+typedef struct __attribute__((ms_struct,ms_struct)) {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 49
+typedef struct Named
+#pragma ms_struct on
+{char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 50
+typedef struct {char head; unsigned a:3,b:5; char tail;}
+#pragma ms_struct on
+S;
+#elif CASE == 51
+enum E {
+#pragma ms_struct on
+    ZERO, ONE, TWO
+};
+typedef struct {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 52
+void earlier(void) {int x=0;(void)x;
+#pragma ms_struct on
+}
+typedef struct {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 53
+struct __attribute__((gcc_struct)) Forward;
+#pragma ms_struct on
+struct Forward {char head; unsigned a:3,b:5; char tail;};
+typedef struct Forward S;
+#elif CASE == 54
+typedef struct [[gnu::ms_struct]] {char head; unsigned a:3,b:5; char tail;} S;
+#elif CASE == 55
+struct __attribute__((ms_struct)) Forward;
+struct __attribute__((gcc_struct)) Forward {char head; unsigned a:3,b:5; char tail;};
+typedef struct Forward S;
+#elif CASE == 56
+struct __attribute__((gcc_struct)) Forward;
+struct __attribute__((ms_struct)) Forward {char head; unsigned a:3,b:5; char tail;};
+typedef struct Forward S;
 #else
 #error unknown case
 #endif
