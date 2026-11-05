@@ -9,11 +9,11 @@ static void check_test_pragma_extension_history(CheckTest* test)
     static Preprocessor pp;
     static Parser parser;
     const char* source =
-        "#pragma fenv_access(on)\ndouble file_on;\n"
+        "#pragma STDC FENV_ACCESS ON\ndouble file_on;\n"
         "#pragma clang fp contract(fast)\n#pragma float_control(precise, on)\n"
-        "double f(void){\n#pragma fenv_access(off)\ndouble local_off=0;{\n"
+        "double f(void){\n#pragma STDC FENV_ACCESS OFF\ndouble local_off=0;{\n"
         "#pragma STDC FENV_ACCESS ON\ndouble inner_on=0;}double restored_off=0;return 0;}double restored_on;\n"
-        "#pragma fenv_access(off)\ndouble file_off;\n"
+        "#pragma STDC FENV_ACCESS OFF\ndouble file_off;\n"
         "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n";
     const uint8_t kinds[] = { CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_PRECISE,
                              CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FENV_ACCESS,
@@ -86,7 +86,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
                                 {
                                     found += 1;
                                     check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0,
-                                                      "fenv_access and STDC settings share scope restoration without changing complex-range policy");
+                                                      "STDC settings restore scope without changing complex-range policy");
                                 }
                             }
                         }
@@ -137,30 +137,30 @@ static void check_test_pragma_extension_sources(CheckTest* test)
 {
     static const CheckPragmaExtensionFixture fixtures[] =
     {
-        { .source = "#pragma fenv_access(on)\ndouble f(double x){return x/3.0;}\n", .records = 1, .accepted = true },
-        { .source = "#pragma fenv_access(off)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma fenv_access(on)\ndouble f(double x){return x/3.0;}\n", .accepted = true },
+        { .source = "#pragma fenv_access(off)\nint x;\n", .accepted = true },
         { .source = "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n#pragma clang fp contract(fast)\nint x;\n", .records = 3, .accepted = true },
         { .source = "#pragma float_control(precise, on)\nint x;\n", .records = 1, .accepted = true },
-        { .source = "int f(void){\n#pragma fenv_access(on)\n#pragma clang fp contract(off)\n#pragma float_control(precise, on)\nreturn 0;}\n", .records = 3, .accepted = true },
-        { .source = "#define ACCESS _Pragma(\"fenv_access(on)\")\nACCESS\ndouble f(double x){return x/3.0;}\n", .records = 1, .accepted = true },
+        { .source = "int f(void){\n#pragma fenv_access(on)\n#pragma clang fp contract(off)\n#pragma float_control(precise, on)\nreturn 0;}\n", .records = 2, .accepted = true },
+        { .source = "#define ACCESS _Pragma(\"fenv_access(on)\")\nACCESS\ndouble f(double x){return x/3.0;}\n", .accepted = true },
         { .source = "#define CONTRACT _Pragma(\"clang fp contract(fast)\")\nCONTRACT\nint x;\n", .records = 1, .accepted = true },
         { .source = "#define PRECISE _Pragma(\"float_control(precise, on)\")\nPRECISE\nint x;\n", .records = 1, .accepted = true },
-        { .source = "#pragma STDC FENV_ACCESS ON\n#pragma fenv_access(off)\nint x;\n", .records = 2, .accepted = true },
-        { .source = "#define fenv_access unused\n#pragma fenv_access(on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma STDC FENV_ACCESS ON\n#pragma fenv_access(off)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#define fenv_access unused\n#pragma fenv_access(on)\nint x;\n", .accepted = true },
         { .source = "#define fp unused\n#pragma clang fp contract(on)\nint x;\n", .records = 1, .accepted = true },
-        { .source = "#define STATE on\n#pragma fenv_access(STATE)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#define on off\n#pragma fenv_access(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#define off on\n#pragma fenv_access(off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define STATE on\n#pragma fenv_access(STATE)\nint x;\n", .accepted = true },
+        { .source = "#define on off\n#pragma fenv_access(on)\nint x;\n", .accepted = true },
+        { .source = "#define off on\n#pragma fenv_access(off)\nint x;\n", .accepted = true },
         { .source = "#define contract reassociate\n#pragma clang fp contract(off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#define fast off\n#pragma clang fp contract(fast)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#define precise except\n#pragma float_control(precise, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#define on off\n#pragma float_control(precise, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#define on off\n#undef on\n#pragma fenv_access(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma fenv_access(ON)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma fenv_access(default)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma fenv_access(on\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma fenv_access(on) trailing\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma fenv_access(\n#pragma fenv_access(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define on off\n#undef on\n#pragma fenv_access(on)\nint x;\n", .accepted = true },
+        { .source = "#pragma fenv_access(ON)\nint x;\n", .accepted = true },
+        { .source = "#pragma fenv_access(default)\nint x;\n", .accepted = true },
+        { .source = "#pragma fenv_access(on\nint x;\n", .accepted = true },
+        { .source = "#pragma fenv_access(on) trailing\nint x;\n", .accepted = true },
+        { .source = "#pragma fenv_access(\n#pragma fenv_access(on)\nint x;\n", .accepted = true },
         { .source = "#pragma clang fp contract(unknown)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma clang fp contract(off\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma clang fp contract(off) reassociate(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
@@ -172,11 +172,11 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma float_control(precise, on, push)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma float_control(precise on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma float_control(precise, on) trailing\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "int f(void){int x=0;\n#pragma fenv_access(on)\nreturn x;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int f(void){int x=0;\n#pragma fenv_access(on)\nreturn x;}\n", .accepted = true },
         { .source = "int f(void){int x=0;\n#pragma clang fp contract(off)\nreturn x;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "int f(void){int x=0;\n#pragma float_control(precise, on)\nreturn x;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "struct S{\n#pragma fenv_access(on)\nint x;};\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "int x=\n#pragma fenv_access(on)\n1;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "struct S{\n#pragma fenv_access(on)\nint x;};\n", .accepted = true },
+        { .source = "int x=\n#pragma fenv_access(on)\n1;\n", .accepted = true },
         { .source = "#pragma GCC unroll 4\nint x;\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
         { .source = "#pragma GCC unroll 4\nint f(void){return 0;}\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },
         { .source = "int x;\n#pragma GCC unroll 4\n", .message = CHECK_INPUT_LOOP_HINT, .loop_text = "invalid '#pragma GCC unroll' directive" },

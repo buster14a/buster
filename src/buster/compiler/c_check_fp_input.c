@@ -44,30 +44,21 @@ static bool check_input_fp_name(const CheckInputReader* reader, uint32_t source,
 // Only complete supported extension forms acquire a handled mark. In particular, a recognized prefix must not
 // swallow another clang fp clause, a float_control stack operation, a macro argument or malformed punctuation.
 // Unsupported forms remain with the semantic-pragma diagnostic, which retains their original spelling.
-// clang enables fenv_access only under -fms-extensions or a strict floating model, and silently ignores a mid-block
-// spelling. Buster refuses that mode, so #1135 recognizes these spellings unconditionally; a spelling at a placement
-// this reader cannot apply stays unhandled, and the semantic-pragma diagnostic refuses it.
+// The unqualified fenv_access handler is not registered in Clang's accepted Linux mode; it belongs to the unknown
+// pragma policy. The standard FENV_ACCESS form below supplies the runtime environment semantics.
 static bool check_input_fp_extension(CheckInputReader* reader, uint64_t** macros, uint32_t source, uint32_t* end, uint8_t* kind, uint8_t* state)
 {
     const PPTokens* output = &reader->pp->output;
     uint32_t last = source;
     const bool candidate = source < output->count && output->count - source >= 6 &&
-                           (check_input_fp_name(reader, source + 2, "fenv_access") || check_input_fp_name(reader, source + 2, "float_control") ||
+                           (check_input_fp_name(reader, source + 2, "float_control") ||
                             (check_input_fp_name(reader, source + 2, "clang") && check_input_fp_name(reader, source + 3, "fp")));
     const bool directive = candidate && parse_pragma_at(output, source, &last);
     const uint32_t length = directive ? last - source : 0;
     bool supported = false;
-    uint8_t selected = CHECK_FP_PRAGMA_FENV_ACCESS;
+    uint8_t selected = CHECK_FP_PRAGMA_PRECISE;
     uint8_t value = 0;
-    if (length == 6 && pp_token_is_name(reader->pp, output, source + 2, last, "fenv_access") &&
-        output->kinds[source + 3] == C_TOKEN_L_PAREN && output->kinds[source + 5] == C_TOKEN_R_PAREN)
-    {
-        const bool on = pp_token_is_name(reader->pp, output, source + 4, last, "on");
-        const bool off = pp_token_is_name(reader->pp, output, source + 4, last, "off");
-        supported = on || off;
-        value = on;
-    }
-    else if (length == 8 && pp_token_is_name(reader->pp, output, source + 2, last, "clang") &&
+    if (length == 8 && pp_token_is_name(reader->pp, output, source + 2, last, "clang") &&
              pp_token_is_name(reader->pp, output, source + 3, last, "fp") &&
              pp_token_is_name(reader->pp, output, source + 4, last, "contract") &&
              output->kinds[source + 5] == C_TOKEN_L_PAREN && output->kinds[source + 7] == C_TOKEN_R_PAREN)
@@ -198,10 +189,6 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     uint8_t state = 0;
                     if (placement && check_input_fp_extension(reader, &macros, source, &end, &kind, &state))
                     {
-                        if (kind == CHECK_FP_PRAGMA_FENV_ACCESS)
-                        {
-                            environment = state != 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
-                        }
                         input->fp_pragmas[input->fp_pragma_count++] = (CheckInputFpPragma)
                         {
                             .pragma = pragma,
@@ -211,7 +198,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                             .scope = depth != 0 ? scopes[depth - 1].opening : BUSTER_CHECK_NONE,
                             .scope_end = depth != 0 ? scopes[depth - 1].closing + 1 : parser->tokens.count,
                             .kind = kind,
-                            .environment = kind == CHECK_FP_PRAGMA_FENV_ACCESS ? environment : state,
+                            .environment = state,
                             .valid = true,
                         };
                         handled[pragma] = 2;

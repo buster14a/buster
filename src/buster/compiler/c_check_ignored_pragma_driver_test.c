@@ -76,6 +76,8 @@ static void check_test_driver_pragma_execution(CheckTest* test, const char* exec
 {
     static const char source_text[] =
         "#pragma ident \"tooling\"\n#pragma GCC push_options\n#pragma GCC optimize(\"O3\")\n"
+        "#pragma scalar_storage_order big-endian\n#pragma GCC target(\"avx2\")\n"
+        "#pragma data_seg(\"ignored_data\")\n#pragma code_seg(\"ignored_code\")\n#pragma fenv_access(on)\n"
         "#pragma comment(lib, \"m\")\nint main(void){int sum=0;\n#pragma omp parallel for\n"
         "for(int i=0;i<4;i++)sum+=i;return sum!=6;}\n#pragma GCC pop_options\n";
     char source[512];
@@ -120,6 +122,15 @@ static void check_test_driver_pragma_execution(CheckTest* test, const char* exec
 
 static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    static const char target_ignored[] =
+        "#pragma scalar_storage_order big-endian\n#pragma GCC scalar_storage_order little-endian\n"
+        "#pragma GCC target(\"avx2\")\n#pragma section(\"unused\", read, write)\n"
+        "#pragma code_seg(\"unused\")\n#pragma data_seg(\"unused\")\n#pragma bss_seg(\"unused\")\n"
+        "#pragma const_seg(\"unused\")\n#pragma init_seg(user)\n#pragma fenv_access(on)\n"
+        "int main(void){int result=0;\n#pragma fenv_access(off)\nreturn result;}\n";
+    static const char target_malformed[] =
+        "#pragma scalar_storage_order invalid\n#pragma GCC target(\n#pragma section(\n"
+        "#pragma data_seg(42)\n#pragma fenv_access(ON) trailing\nint main(void){return 0;}\n";
     static const struct
     {
         const char* source;
@@ -134,6 +145,12 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wall", "-Wno-pragmas", NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Werror=unknown-pragmas", "-Wno-error=unknown-pragmas", NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wno-unknown-pragmas", "-Wpragmas", NULL },
+        { target_ignored, NULL, NULL, NULL },
+        { target_ignored, "-Wall", NULL, NULL },
+        { target_ignored, "-Werror=unknown-pragmas", NULL, NULL },
+        { target_ignored, "-Werror=unknown-pragmas", "-w", NULL },
+        { target_malformed, "-Wunknown-pragmas", NULL, NULL },
+        { target_malformed, "-Werror=unknown-pragmas", NULL, NULL },
         { "#pragma ident \"tooling\"\n#pragma GCC push_options\n#pragma GCC optimize(\"O3\")\n#pragma GCC ivdep\n#pragma GCC pop_options\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
         { "#pragma clang buster_unknown\n#pragma GCC buster_unknown\n#pragma STDC buster_unknown\nint main(void){return 0;}\n", NULL, NULL, NULL },
         { "#pragma clang buster_unknown\n#pragma GCC buster_unknown\n#pragma STDC buster_unknown\nint main(void){return 0;}\n", "-Werror=pragmas", NULL, NULL },
@@ -223,8 +240,6 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         const char* barrier;
     } refused[] = {
         { "#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL, NULL },
-        { "#pragma scalar_storage_order big-endian\nint object;\n", "scalar_storage_order", NULL, NULL, NULL },
-        { "#pragma GCC target(\"avx2\")\nint object;\n", "GCC target", NULL, NULL, NULL },
         { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
         { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },

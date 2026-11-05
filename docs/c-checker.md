@@ -389,19 +389,17 @@ does, each rule checked against clang's answers on probes of it:
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
-  `#pragma fenv_access(on|off)` at file scope or a compound's start updates
-  the same runtime `FENV_ACCESS` column as the STDC form, with the same
-  nested-scope restoration; `#pragma clang fp contract(on|off|fast)` retains
+  `#pragma clang fp contract(on|off|fast)` retains
   its state (`fast` distinct) without contracting anything; and
   `#pragma float_control(precise, on)` records the precise policy already used.
   The handler names are not macro-expanded, but their argument words are, so a
   spelling that was a macro anywhere in the unit is refused conservatively
   rather than read unexpanded. Other arguments, stack operations, additional
   clauses, malformed forms and invalid placements are hard semantic-pragma
-  errors. Clang enables `fenv_access` only with `-fms-extensions` (or a strict
-  floating model) and silently ignores a mid-block spelling; buster refuses
-  that option, recognizes these spellings unconditionally as #1135 asks, and
-  refuses the placements it cannot apply.
+  errors. The unqualified `#pragma fenv_access` uses the unknown-pragma warning
+  policy in the accepted Linux mode, as Clang 23 does. Its handler requires
+  `-fms-extensions`, which the driver refuses. Use `#pragma STDC FENV_ACCESS`
+  for runtime floating-environment semantics.
 - **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
   `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
   number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
@@ -6281,6 +6279,11 @@ Unknown `STDC` directives warn by default. Malformed alignment hints such as
 is not an implementation of COFF linker directives or automatic library loading.
 GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
 `optimize` use the unknown-pragma policy, as in the Clang oracle.
+The same policy covers plain and GCC `scalar_storage_order`, `GCC target`,
+unqualified `section`, `code_seg`, `data_seg`, `bss_seg`, `const_seg`, `init_seg`
+and `fenv_access` in the accepted Linux mode. Their arguments do not change
+layout, symbol placement or floating evaluation, even when malformed; enabling
+`-Wunknown-pragmas` reports them and promoting that warning prevents emission.
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
@@ -6292,8 +6295,8 @@ non-emitting action refuses each `#pragma omp` directive through the checker. A
 subsequent `-fno-openmp` restores the ignore behavior for both.
 
 Known unsupported semantic effects remain hard, named errors, including
-`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
-`align=packed`. Warning suppression cannot approve these directives. Already
+`redefine_extname`, `weak`, `ms_struct` and layout-changing `align=packed`.
+Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 
 Directive warnings are sparse lexical facts with independent preprocessing
