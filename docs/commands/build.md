@@ -133,7 +133,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds |
 | `BUSTER_HOST_RUNTIME` | none | links CI's emulated old CPU's runtime from that root (`x86-64` alone) |
 | `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time |
-| `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path |
+| `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path |
 | `BUSTER_BUILD_DEFINES` | none | whitespace-separated arguments every unit's compile adds |
 | `BUSTER_SANITIZER` | `none` | `address` (with UBSan and bounds), `undefined`, `thread`, `memory`: a PIE |
 | `BUSTER_SANITIZER_OPTIMIZATION` | `3` | a sanitizer build's Release optimization, `1` to `3` |
@@ -193,8 +193,12 @@ to 13 ms of page faults, which `link-foreign` and the tests pay per process
 It is also linked statically (`-static`, #652): the dynamic loader took 8% to
 12% of a small compile's task-clock on the 9700X. The sanitizers' PIEs, a
 fuzzing build (libFuzzer's runtime needs C++'s shared libraries) and
-`BUSTER_HOST_RUNTIME`'s explicit runtime stay dynamic, and the units see which
-it is as `BUSTER_HOST_STATIC`. A static executable's `dlsym(RTLD_DEFAULT, ...)`
+`BUSTER_HOST_RUNTIME`'s explicit runtime stay dynamic, and so does a link by
+wild: wild 0.10.0's static executables fault in glibc's `__ctype_init`, at
+their first TLS access, against Ubuntu's glibc, so a static build's `auto`
+linker is mold (or clang's default without it), and an explicit
+`BUSTER_LINKER=wild` links dynamically. The configure step's status line
+says which (`static: TRUE`), and the units see it as `BUSTER_HOST_STATIC`. A static executable's `dlsym(RTLD_DEFAULT, ...)`
 finds nothing, so the host functions that the interpreter's programs and the
 tests' libm oracles name come from `test_libm.c`'s table there, and a `dlopen`ed
 library brings a C library of its own. The compiler needs no libm either way
