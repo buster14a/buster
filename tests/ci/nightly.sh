@@ -612,6 +612,30 @@ expect_match "$work/window/ledger.tsv" "^run	900	.*	ok	skip	full	blocked-hosted	
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'the comprehensive run is admitted first'
 test "$(grep -E -c '^workflow run .*hardware=admit' "$fixtures/calls.log")" -eq 1 || fail 'one hardware run at a time'
 expect_line "$work/window/ledger.tsv" "cycle	2026-11-04	$head	9200	$(madrid '2026-11-03 22:10')" 'the window keeps the prepare job'"'"'s pin'
+expect_line "$GITHUB_OUTPUT" 'continue=closed' 'a window job with time left hands over nothing'
+# The night the clocks go back, the window is 7 hours: longer than one job's 345 minutes, within two.
+autumn=$("$work/nightly" window-times --now 1792886400)
+autumn_length=$(( $(awk -F '\t' '$1 == "deadline" { print $2 }' <<< "$autumn") - $(awk -F '\t' '$1 == "start" { print $2 }' <<< "$autumn") ))
+test "$autumn_length" -eq 25200 || fail "the fall-back night's window is 7 hours ($autumn_length s)"
+test "$autumn_length" -gt 20700 && test "$autumn_length" -le $((2 * 20700)) || fail 'it needs one continuation job, and one is enough'
+# A window job out of time (345 minutes since its start) while it still waits inside the window hands over: the pin and
+# its pending dispatches, as the prepare job does, and the continuation job, with requests from 20001, repeats none.
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_STARTED=$(( $(madrid '2026-11-04 04:10') - 20700 )) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$prepared run_coordinator "$work/window-out" window run
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'a window job out of time hands over to its continuation'
+expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'with the pin'
+expect_match "$work/coordinate.log" 'the continuation job takes over' 'and says so'
+continued=$(handed)
+pending_count=$(awk '{ print $2 }' <<< "$continued")
+[[ "$continued" == "buster-nightly-pending-1 "* ]] && test "$pending_count" -ge 1 || fail "and its pending dispatches: $continued"
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*-f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'it admitted the comprehensive run before handing over'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:11') NIGHTLY_SEQUENCE=20001 NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$continued run_coordinator "$work/window-continued" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'the continuation repeats no dispatch the runs don'"'"'t show yet'
+expect_no_match "$fixtures/calls.log" 'request=20261104\.9200\.100' 'and makes none with the window job'"'"'s request numbers'
+# Out of time after the window closed: nothing to hand over.
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 08:10') NIGHTLY_STARTED=$(( $(madrid '2026-11-04 08:10') - 20700 )) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$none_pending run_coordinator "$work/window-late" window run
+expect_line "$GITHUB_OUTPUT" 'continue=closed' 'after 08:00 there is nothing to continue'
 # A manual run's override admits outside the window, through the coordinator and its dispatch, and says so.
 : > "$fixtures/calls.log"
 GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_OVERRIDE='validating the coordinator' run_coordinator "$work/override-prepare" prepare run

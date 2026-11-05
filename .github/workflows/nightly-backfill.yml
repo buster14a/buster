@@ -160,17 +160,24 @@ jobs:
     if: needs.prepare.outputs.window == 'reachable'
     runs-on: ubuntu-26.04
     # GitHub's six hours, nearly: the job starts when the window opens (02:00) and ends once no backlog run could still end
-    # by 08:00 (about 07:35, tools/ci/nightly.c, nightly_plan), whether or not a run is in flight, then publishes.
+    # by 08:00 (about 07:35, tools/ci/nightly.c, nightly_plan), whether or not a run is in flight, then publishes. The
+    # night the clocks go back, the window is 7 hours: after 345 minutes with the window still open, the job hands over
+    # to window-continued (tools/ci/nightly.sh, NIGHTLY_JOB_LIMIT), as the prepare job hands over to this one.
     timeout-minutes: 355
     environment: nightly-ledger
     permissions:
       contents: write
       actions: write
+    outputs:
+      continue: ${{ steps.coordinate.outputs.continue }}
+      snapshot: ${{ steps.coordinate.outputs.snapshot }}
+      pending: ${{ steps.coordinate.outputs.pending }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Admit one hardware run at a time until 08:00 Europe/Madrid
+        id: coordinate
         env:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_OVERRIDE: ${{ inputs.override }}
@@ -187,6 +194,44 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nightly-ledger-window-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly/ledger.tsv
+            ${{ runner.temp }}/nightly/report.md
+          if-no-files-found: warn
+          retention-days: 90
+
+  # The rest of a window longer than one job (the night the clocks go back): the window job's step again, from its
+  # ledger (the latest nightly-ledger-window-* artifact), its pending dispatches and the cycle's pin, with requests from
+  # 20001 so that none repeats the window job's. Two jobs hold any window: 7 hours at most against 345 minutes each.
+  window-continued:
+    name: Measure inside the window, continued
+    needs: [prepare, window]
+    if: needs.window.outputs.continue == 'reachable'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 355
+    environment: nightly-ledger
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Admit one hardware run at a time until 08:00 Europe/Madrid, continued
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_OVERRIDE: ${{ inputs.override }}
+          NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          NIGHTLY_BRANCH_TOKEN: ${{ secrets.BUSTER_NIGHTLY_BRANCH_TOKEN }}
+          NIGHTLY_SNAPSHOT: ${{ needs.window.outputs.snapshot || needs.prepare.outputs.snapshot }}
+          NIGHTLY_PENDING: ${{ needs.window.outputs.pending }}
+          NIGHTLY_SEQUENCE: '20001'
+        run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase window --mode run
+      - name: Keep the ledger and the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-ledger-window-continued-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/nightly/ledger.tsv
             ${{ runner.temp }}/nightly/report.md

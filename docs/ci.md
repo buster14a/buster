@@ -472,7 +472,13 @@ rather than given priority.
 The window job starts when the window opens and must end within GitHub's six
 hours. So it stops once no backlog run could still end by 08:00, about 07:35,
 even with a hardware run in flight. That run ends by 08:00 under its own bound,
-and the next coordinator run harvests its record.
+and the next coordinator run harvests its record. The night the clocks go back,
+the window is 7 hours, longer than one job. A window job that has run 345
+minutes while it still waits inside the window hands over to `window-continued`,
+the same way the prepare job hands over to it: the pin and its pending
+dispatches go as job outputs, and the ledger comes from its artifact. The
+continuation numbers its requests from 20001, so none repeats the window job's.
+Two jobs hold any window.
 
 **Late schedules.** GitHub starts this repository's scheduled runs hours late.
 In the week of 2026-10-28, the former daily run's `23 7 * * *` started 6h22m to
