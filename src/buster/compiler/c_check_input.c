@@ -7635,7 +7635,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_deferred_linked(reader, name, token);
         }
     }
-    if (reader->output->visibility_pragmas != NULL || reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN ||
+    if (reader->output->visibility_pragmas != NULL || (reader->declaration_storage != NULL && reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN) ||
         (check_sparse_wide_present(reader->output->attributes) && check_input_attributes_at(reader->output, token) != NULL))
     {
         check_input_visibility_declare(reader, token, point);
@@ -8340,7 +8340,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             if (kind == PARSE_KIND_RETURN)
             {
                 reader->return_types[i] = reader->function_result;
-                const uint32_t declaration = check_sparse_get(reader->output->body_declarations, reader->function_body);
+                const uint32_t declaration = reader->function_body < parser->tokens.count ?
+                    check_sparse_get(reader->output->body_declarations, reader->function_body) : BUSTER_CHECK_NONE;
                 if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
                     (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0)
                 {
