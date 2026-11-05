@@ -12,6 +12,27 @@
 #define BUSTER_TIER1_KNOWN_UNSIGNED_MASK 127u
 #define BUSTER_TIER1_KNOWN_BELOW_MAX 128u
 
+static bool tier1_select_signed_multiply(const IrFunction* function, const uint16_t* known, uint32_t node)
+{
+    const uint32_t a = function->a[node];
+    const uint32_t b = function->b[node];
+    bool fits = (known[a] >> 8) + (known[b] >> 8) <= 32;
+    const uint32_t constant = function->op[b] == IR_CONST ? b : function->op[a] == IR_CONST ? a : BUSTER_IR_NONE;
+    if (!fits && constant != BUSTER_IR_NONE)
+    {
+        const uint32_t other = constant == b ? a : b;
+        const int32_t factor = (int32_t)function->constants[function->a[constant]].low;
+        const uint32_t positive = (uint32_t)factor;
+        if (factor > 0 && (positive & (positive - 1)) == 0)
+        {
+            // Multiplication by 2^k adds exactly k signed bits, including the negative endpoint. Counting the
+            // constant's sign bit as another magnitude bit would miss (i32 >> 1) * 2 and similar bounded fields.
+            fits = (known[other] >> 8) + (uint32_t)__builtin_ctz(positive) <= 32;
+        }
+    }
+    return fits;
+}
+
 // This is the plan's dead positions workspace, before level ordering fills it, not another CFG allocation.
 // A scalar edge scatter records one predecessor or ambiguity per block. If there is indirect control flow, all
 // address-taken labels are ambiguous. Marking them once avoids enumerating their edges per indirect branch.

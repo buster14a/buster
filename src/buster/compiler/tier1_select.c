@@ -3684,7 +3684,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t width = tier1_select_width(type);
     const bool sign_storage = type == IR_I32 && forest->canonical != 0 &&
                               (forest->canonical[node] & (BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN)) == BUSTER_TIER1_STORAGE_SIGN;
-    const bool sign_result = sign_storage && tier1_select_sign_birth(op);
+    const bool sign_result = sign_storage && tier1_select_sign_birth(function, node);
     Tier1SelectCandidates candidates = {0};
     Tier1SelectPattern base =
     {
@@ -4305,9 +4305,28 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 constant = right;
                 supported = true;
             }
-            else if (sign_left && right < function->instruction_count && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0 &&
-                     ((operation == IR_SUB && (forest->known_bits[left] >> 8) < 32 && (forest->known_bits[right] >> 8) < 32) ||
-                      (operation == IR_MUL && (forest->known_bits[left] >> 8) + (forest->known_bits[right] >> 8) <= 32)))
+            else if (operation == IR_MUL && tier1_select_signed_multiply(function, forest->known_bits, a))
+            {
+                constant = function->op[right] == IR_CONST ? right : function->op[left] == IR_CONST ? left : BUSTER_IR_NONE;
+                const uint32_t other = constant == right ? left : right;
+                if (constant != BUSTER_IR_NONE && (forest->canonical[other] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_IMMEDIATE;
+                    folded.values[0] = other;
+                    folded.immediate = (uint64_t)(int64_t)(int32_t)function->constants[function->a[constant]].low;
+                    folded.intrinsic_cost = 1;
+                    supported = true;
+                }
+                else if (sign_left && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_REGISTER;
+                    folded.values[1] = right;
+                    folded.intrinsic_cost = 3;
+                    supported = true;
+                }
+            }
+            else if (sign_left && operation == IR_SUB && right < function->instruction_count && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0 &&
+                     (forest->known_bits[left] >> 8) < 32 && (forest->known_bits[right] >> 8) < 32)
             {
                 folded.rule = TIER1_RULE_REGISTER;
                 folded.values[1] = right;

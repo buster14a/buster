@@ -410,8 +410,9 @@ For a requested loop state with that strict endpoint, an ordinary I32 ALU
 definition can establish signed storage once: perform its wrapping 32-bit
 operation, then sign-extend its result. Later widening of the state is a copy,
 and its separately proved `+1` can use a 64-bit `lea`. The original loop update
-retains its I32 wrapping semantics. Multiplication, division, shifts and
-no-write copy identities do not use this definition form. The selected pattern
+retains its I32 wrapping semantics. A nonzero constant arithmetic right shift
+can establish storage the same way. Multiplication, division, dynamic or
+zero-count shifts and no-write copy identities do not use this definition form. The selected pattern
 records the extra operation, and both emitters preserve its eight-byte storage.
 
 A branch can prove a value nonnegative only at a guarded conversion. The
@@ -450,7 +451,9 @@ inputs already have that representation. Negation also does so when its input
 needs fewer than 32 signed bits. A difference of two values each needing fewer
 than 32 signed bits, or a product whose signed widths sum to at most 32, also
 fits without I32 overflow and can operate directly on their signed 64-bit
-representations. The native expression matrix checks negative
+representations. A positive power-of-two multiplier adds only its shift to
+the input's signed width; an immediate multiply keeps its constant folded.
+The native expression matrix checks negative
 fields and constants, full-width signed loads, poisoned ABI bits, and wrapping
 addition/negation controls that must retain their extensions.
 

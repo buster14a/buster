@@ -9,9 +9,13 @@
 #define BUSTER_TIER1_STORAGE_SIGN 2u
 #define BUSTER_TIER1_STORAGE_WIDE 4u
 
-static bool tier1_select_sign_birth(uint32_t op)
+static bool tier1_select_sign_birth(const IrFunction* function, uint32_t node)
 {
-    const bool writes = op == IR_ADD || op == IR_SUB || op == IR_NEG || op == IR_NOT || op == IR_AND || op == IR_OR || op == IR_XOR;
+    const uint32_t op = function->op[node];
+    const uint32_t b = function->b[node];
+    const bool shifted = op == IR_ASHR && b < function->instruction_count && function->op[b] == IR_CONST &&
+                         (function->constants[function->a[b]].low & 31) != 0;
+    const bool writes = op == IR_ADD || op == IR_SUB || op == IR_NEG || op == IR_NOT || op == IR_AND || op == IR_OR || op == IR_XOR || shifted;
     return writes;
 }
 
@@ -133,7 +137,7 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
             {
                 const uint32_t value = function->extra[function->a[source] + edge * 2 + 1];
                 const uint32_t birth = tier1_select_range_source(function, value);
-                if ((known[source] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0 && tier1_select_sign_birth(function->op[birth]))
+                if ((known[source] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0 && tier1_select_sign_birth(function, birth))
                 {
                     // Preserve I32 wrapping first, then establish its full signed representation once at this
                     // definition. Its loop phi can reuse it, including for a separately proven nonoverflowing +1.
@@ -148,7 +152,7 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
             const uint32_t sa = a < function->instruction_count ? known[a] >> 8 : 32;
             const uint32_t sb = b < function->instruction_count ? known[b] >> 8 : 32;
             const bool binary = (op == IR_ADD || op == IR_SUB) && sa < 32 && sb < 32;
-            const bool multiply = op == IR_MUL && sa + sb <= 32;
+            const bool multiply = op == IR_MUL && tier1_select_signed_multiply(function, known, source);
             const bool bitwise = op == IR_AND || op == IR_OR || op == IR_XOR;
             const bool constant = b < function->instruction_count && function->op[b] == IR_CONST;
             const bool subtract = op == IR_SUB && constant && sa < 32 && sb < 32;

@@ -295,18 +295,18 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
 {
     const uint32_t samples[] = { 0, 1, 127, 32767, 32768, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX };
     uint64_t random = UINT64_C(0x1219ab8071e5c034);
-    for (uint32_t shape = 0; shape < 22; shape += 1)
+    for (uint32_t shape = 0; shape < 26; shape += 1)
     {
         const bool full_load = shape >= 14 && shape <= 17;
-        const bool unbounded = shape == 1 || shape == 3 || shape == 13 || shape == 19 || shape == 21;
+        const bool unbounded = shape == 1 || shape == 3 || shape == 13 || shape == 19 || shape == 21 || shape == 23 || shape == 25;
         const bool negate = shape == 2 || shape == 3;
         const bool invert = shape == 4 || shape == 15;
         const bool shift = shape == 5 || shape == 14;
-        const bool immediate = shift || (shape >= 6 && shape <= 8) || shape == 12 || shape == 13 || shape == 16;
+        const bool immediate = shift || (shape >= 6 && shape <= 8) || shape == 12 || shape == 13 || shape == 16 || shape >= 22;
         const bool signed_right = (shape >= 9 && shape <= 11) || shape == 17 || shape == 18 || shape == 20;
         const uint32_t op = shape >= 20 ? IR_MUL : shape >= 18 ? IR_SUB : negate ? IR_NEG : invert ? IR_NOT : shift ? IR_ASHR : shape == 6 || shape == 10 ? IR_AND : shape == 7 || shape == 11 ? IR_OR :
                             shape == 8 || shape == 9 || shape == 16 || shape == 17 ? IR_XOR : IR_ADD;
-        const uint32_t constant = shift ? (full_load ? 31 : 3) : shape == 12 || shape == 13 ? UINT32_MAX - 2 : UINT32_C(0x8000ffff);
+        const uint32_t constant = shape >= 24 ? UINT32_MAX : shape >= 22 ? 2 : shift ? (full_load ? 31 : 3) : shape == 12 || shape == 13 ? UINT32_MAX - 2 : UINT32_C(0x8000ffff);
         const uint32_t expected_rule = unbounded ? TIER1_RULE_SIGN_EXTEND : negate || invert ? TIER1_RULE_UNARY : immediate ? (op == IR_ADD ? TIER1_RULE_LEA_ADD : TIER1_RULE_IMMEDIATE) :
                                        op == IR_ADD ? TIER1_RULE_LEA_ADD : TIER1_RULE_REGISTER;
         const uint64_t input_mark = test->input.length;
@@ -703,6 +703,117 @@ static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
                                         const uint64_t expected = (uint64_t)(int64_t)(int32_t)phi + (uint64_t)(int64_t)(int32_t)(phi + 1u);
                                         const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55a123400000000) | stride, 0);
                                         tier1_emit_test_expect(test, actual == expected, "loop arithmetic wraps at 32 bits while separate signed uses retain negative and INT_MAX boundaries");
+                                    }
+                                }
+                            }
+                            if (executable != MAP_FAILED)
+                            {
+                                munmap(executable, bytes);
+                            }
+                        }
+                    }
+                    arena_pop_to(&test->output, output_mark);
+                }
+            }
+        }
+        arena_pop_to(&test->input, input_mark);
+    }
+}
+
+static void tier1_storage_midpoint_tests(Tier1EmitTest* test)
+{
+    const uint32_t samples[] = { 0, 1, 2, 3, 127, 65535, INT32_MAX, UINT32_C(0x80000000), UINT32_C(0x80000001), UINT32_MAX };
+    uint64_t random = UINT64_C(0x5a3112190ee3ab19);
+    for (uint32_t shape = 0; shape < 2; shape += 1)
+    {
+        const bool bounded = shape == 0;
+        const uint64_t input_mark = test->input.length;
+        const IrSizes sizes = { .instruction_count = 16, .block_count = 3, .constant_count = 3, .extra_count = 4, .parameter_count = 1 };
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create signed midpoint storage regression");
+        if (created)
+        {
+            function.parameter_types[0] = IR_I32;
+            function.result_type = IR_I64;
+            function.constants[0].low = 1;
+            function.constants[2].low = 2;
+            function.block_offsets[1] = 5;
+            function.block_offsets[2] = 9;
+            function.block_offsets[3] = 16;
+            function.extra[0] = 0;
+            function.extra[1] = 3;
+            function.extra[2] = 1;
+            function.extra[3] = 6;
+            tier1_select_test_node(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 3, bounded ? IR_ASHR : IR_COPY, IR_I32, 0, bounded ? 1 : BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 5, IR_PHI, IR_I32, 0, 2, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_ASHR, IR_I32, 5, 1, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 7, IR_ICMP, IR_I1, 6, 2, IR_GT);
+            tier1_select_test_node(&function, 8, IR_CBR, IR_VOID, 7, 1, 2);
+            tier1_select_test_node(&function, 9, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 10, IR_MUL, IR_I32, 5, 9, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 11, IR_SEXT, IR_I64, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 12, IR_MUL, IR_I32, 5, 9, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 13, IR_SEXT, IR_I64, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 14, IR_ADD, IR_I64, 11, 13, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 15, IR_RET, IR_VOID, 14, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                {
+                    const uint64_t output_mark = test->output.length;
+                    IrDominance dominance;
+                    const bool dominated = tier1_terminal_dominance(test, &function, path != 0, &dominance);
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed midpoint selects");
+                    if (selected == TIER1_SELECT_OK)
+                    {
+                        tier1_emit_test_expect(test, plan.patterns[3].sign_result == bounded && plan.patterns[6].sign_result == bounded &&
+                                               plan.patterns[11].rule == (bounded ? TIER1_RULE_IMMEDIATE : TIER1_RULE_SIGN_EXTEND) &&
+                                               plan.patterns[13].rule == (bounded ? TIER1_RULE_IMMEDIATE : TIER1_RULE_SIGN_EXTEND),
+                                               "a bounded signed midpoint shares its definition's extension while unbounded multiplication retains wrapping");
+                        const Tier1EmitOptions options = {
+                            .certify = true,
+                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                            .vector = path != 0,
+                            .rematerialize = pressure != 0,
+                        };
+                        Tier1EmitResult emitted;
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "signed midpoint allocation and code certify");
+                        if (error == TIER1_EMIT_OK)
+                        {
+                            tier1_emit_test_expect(test, emitted.prepared.sizes[5] == (bounded ? 8 : 4), "only the proved signed midpoint widens its spill storage");
+                            void* executable = MAP_FAILED;
+                            uint64_t bytes = 0;
+                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            {
+                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
+                                {
+                                    const uint32_t input = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
+                                    uint32_t phi = bounded ? (input >> 1) | (input & UINT32_C(0x80000000)) : input;
+                                    bool again = true;
+                                    for (uint32_t iteration = 0; again && iteration < 32; iteration += 1)
+                                    {
+                                        const uint32_t next = (phi >> 1) | (phi & UINT32_C(0x80000000));
+                                        again = (int32_t)next > 0;
+                                        if (again)
+                                        {
+                                            phi = next;
+                                        }
+                                    }
+                                    tier1_emit_test_expect(test, !again, "midpoint oracle terminates within its independent bound");
+                                    if (!again)
+                                    {
+                                        const uint64_t product = (uint64_t)(int64_t)(int32_t)(phi * 2u);
+                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55ac0de00000000) | input, 0);
+                                        tier1_emit_test_expect(test, actual == product + product, "midpoint multiplication preserves negative endpoints, raw wrapping controls and poisoned upper halves");
                                     }
                                 }
                             }
