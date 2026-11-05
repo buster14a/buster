@@ -2021,11 +2021,12 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
     CheckBuiltinX86Result checked;
     check_x86_action(types, call, action, &checked);
     *result = checked.action;
-    // A failed hard immediate constraint makes the call an invalid expression, as clang's is: its value has no type, so an
+    // A failed hard immediate or target constraint makes the call an invalid expression, as clang's is: its value has no type, so an
     // enclosing call or operator inherits the error (check_graph_inherited_error) rather than reports another. Clang checks
     // no call whose arguments hold an error (#1066).
     const bool hard = checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_ICE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_RC ||
-                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SAE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE;
+                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SAE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE ||
+                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_TARGET32;
     if (checked.status == CHECK_BUILTIN_X86_ERROR && hard)
     {
         result->value = (CheckValue){ 0 };

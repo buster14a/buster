@@ -96,7 +96,8 @@ typedef enum CheckX86LowerFamily
     // (element* p, vector a, mask m): VPMOV's truncation of a's elements, each stored at its place at p where m's bit is
     // set (the form's memory destination); a's lanes are the mask's.
     CHECK_X86_LOWER_TRUNCATE_STORE,
-    // (vector a[, int immediate], vector w, mask m): the form's operation of a (rm) into w (reg) under m, of `other` bytes
+    // (vector a[, int immediate], vector w, mask m): the form's operation of a (rm) into w (reg) under m, or with `swap`
+    // of a (reg) into w (rm), of `other` bytes
     // where they aren't a's (a conversion's); `element` is a's bytes per lane of the mask, which are a's bytes over it
     // (VRCP14PS, VGETEXPPS, VCVTPD2DQ, VGETMANTPS).
     CHECK_X86_LOWER_MASK_UNARY,
@@ -260,6 +261,8 @@ typedef enum CheckX86LowerRounding
     CHECK_X86_ROUND_NONE,
     CHECK_X86_ROUND_SAE,
     CHECK_X86_ROUND_ER,
+    // VCVTPS2PH512's SAE is bit 3 of its existing immediate, not another argument.
+    CHECK_X86_ROUND_IMMEDIATE_SAE,
 } CheckX86LowerRounding;
 
 #define BUSTER_CHECK_X86_NO_IMMEDIATE 0xffu
@@ -294,6 +297,8 @@ struct CheckX86LowerRule
     uint8_t fixed;
     // Its extensions (X86Target.extensions' bits: AVX512-FP16's), which the target must have too.
     uint32_t extensions;
+    // A second imm8 argument's index plus one, or zero. SSE4a packs it into immediate bits 8..15.
+    uint8_t immediate_extra;
 };
 
 _Static_assert(X86_EXTENSION_COUNT <= 32, "a rule's extensions are a 32-bit word's bits");
@@ -950,7 +955,7 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         {
             // An insertion's lane index is its immediate's low bits (VINSERTI's), a packed float compare's predicate clang's
             // code's (`fixed` CHECK_X86_PREDICATE_FCMP, its operands swapped where that says), the others' the whole byte.
-            const uint64_t lanes_in = rule->other != 0 ? (uint64_t)rule->bytes / rule->other : 256;
+            const uint64_t lanes_in = rule->immediate_extra != 0 ? 65536 : rule->other != 0 ? (uint64_t)rule->bytes / rule->other : 256;
             const bool fcmp = rule->fixed == CHECK_X86_PREDICATE_FCMP;
             bool swap = false;
             const uint64_t value = fcmp ? check_x86_lower_float_predicate(immediate, strict, &swap) : immediate & (lanes_in - 1);
@@ -969,7 +974,11 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         {
             // The result is of `other` bytes where they aren't a's (a narrowing conversion's, VCVTPD2DQ's of a YMM).
             row->records[0] = rule->swap ? check_x86_lower_record(rule->form, 0, v0, v0) : check_x86_lower_record(rule->form, v0, 0, v0);
-            row->records[0].immediate = rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE ? (int32_t)(immediate & 0xff) : 0;
+            if (x86_form_description(rule->form)->reg == BUSTER_X86_OPERAND_NONE)
+            {
+                row->records[0].reg = 0;
+            }
+            row->records[0].immediate = rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE ? (int32_t)(immediate & (rule->immediate_extra != 0 ? 0xffff : 0xff)) : 0;
             check_x86_lower_round(rule, round, &row->records[0]);
             row->record_count = 1;
             row->operand_count = 1;
@@ -1009,10 +1018,11 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             {
                 row->records[r++] = check_x86_lower_record(check_x86_lower_move(8, width, false), v3, 0, w);
             }
-            row->records[r] = check_x86_lower_record(rule->form, into, merge ? v0 : 0, merge ? v1 : v0);
+            row->records[r] = !merge && rule->swap ? check_x86_lower_record(rule->form, v0, 0, into) :
+                                                    check_x86_lower_record(rule->form, into, merge ? v0 : 0, merge ? v1 : v0);
             row->records[r].decorations = unmasked ? 0 : (uint8_t)(1 | (merged == CHECK_X86_MERGE_W_ZEROED ? BUSTER_X86_DECORATION_ZEROING : 0));
             row->records[r].immediate = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE ? (int32_t)(immediate & 0xff) : 0;
-            check_x86_lower_round(rule, round, &row->records[r]);
+            check_x86_lower_round(rule, rule->rounding == CHECK_X86_ROUND_IMMEDIATE_SAE ? immediate : round, &row->records[r]);
             r += 1;
             if (merged == CHECK_X86_MERGE_A)
             {

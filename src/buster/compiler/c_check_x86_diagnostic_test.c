@@ -741,6 +741,31 @@ static void check_test_x86_hard_errors(CheckTest* test, const char* clang)
           "unsigned f(unsigned b,unsigned i){if(0)return __builtin_ia32_kshiftlisi(b,i);return sizeof(__builtin_ia32_kshiftrisi(b,i));}\n",
           "8:47: error: argument to '__builtin_ia32_kshiftlisi' must be a constant integer\n"
           "8:92: error: argument to '__builtin_ia32_kshiftrisi' must be a constant integer\n" },
+        { "32-bit-only flags on x86-64",
+          "unsigned a(void){return __builtin_ia32_readeflags_u32();}\n"
+          "void b(unsigned x){__builtin_ia32_writeeflags_u32(x);}\n"
+          "unsigned long c(void){return sizeof(__builtin_ia32_readeflags_u32());}\n"
+          "unsigned d(void){if(0)return __builtin_ia32_readeflags_u32();return 0;}\n"
+          "void e(unsigned x){if(0)__builtin_ia32_writeeflags_u32(x);}\n",
+          "8:25: error: this builtin is only available on 32-bit targets\n"
+          "9:20: error: this builtin is only available on 32-bit targets\n"
+          "10:37: error: this builtin is only available on 32-bit targets\n"
+          "11:30: error: this builtin is only available on 32-bit targets\n"
+          "12:25: error: this builtin is only available on 32-bit targets\n" },
+        { "string and paired immediates",
+          "typedef long long Q __attribute__((vector_size(16)));\n"
+          "V a(V x,V y,int i){return __builtin_ia32_pcmpestrm128(x,1,y,2,i);}\n"
+          "int b(V x,V y,int i){return __builtin_ia32_pcmpistri128(x,y,i);}\n"
+          "Q c(Q x,int i){return __builtin_ia32_extrqi(x,i,1);}\n"
+          "Q d(Q x,int i){return __builtin_ia32_extrqi(x,1,i);}\n"
+          "Q e(Q x,Q y,int i){return __builtin_ia32_insertqi(x,y,i,1);}\n"
+          "Q f(Q x,Q y,int i){return __builtin_ia32_insertqi(x,y,1,i);}\n",
+          "9:27: error: argument to '__builtin_ia32_pcmpestrm128' must be a constant integer\n"
+          "10:29: error: argument to '__builtin_ia32_pcmpistri128' must be a constant integer\n"
+          "11:23: error: argument to '__builtin_ia32_extrqi' must be a constant integer\n"
+          "12:23: error: argument to '__builtin_ia32_extrqi' must be a constant integer\n"
+          "13:27: error: argument to '__builtin_ia32_insertqi' must be a constant integer\n"
+          "14:27: error: argument to '__builtin_ia32_insertqi' must be a constant integer\n" },
         { "other immediates",
           "I4 a(I4 x,int n){return __builtin_ia32_pshufd(x,n);}\n"
           "F4 b(F4 x,F4 y,int n){return __builtin_ia32_shufps(x,y,n);}\n"

@@ -306,8 +306,8 @@ static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t nod
 // checks that every one's message fits (check_test_x86_hard_every).
 #define BUSTER_CHECK_DIAGNOSTIC_X86_TEXT 192u
 
-// An x86 builtin's call whose hard immediate constraint failed, as clang reports it (#1066): Sema's BuiltinConstantArg
-// and SemaX86's rounding and scale checks put the error at the call's begin, the builtin's name, and name the builtin
+// An x86 builtin's call whose hard immediate or target constraint failed, as clang reports it (#1066, #1029): Sema's
+// BuiltinConstantArg and SemaX86's rounding, scale and 32-bit-only checks put the error at the call's begin, the builtin's name, and name the builtin
 // for an immediate that isn't an integer constant expression. The report keeps its own token, the call's `)`, which
 // orders it among the other diagnostics, as clang reports the call once its arguments' own diagnostics are out.
 // Returns the message, written into `text` (`capacity` bytes), with the name's token in `location`; or NULL for any
@@ -346,6 +346,7 @@ static const char* check_diagnostic_x86_hard(const CheckInput* input, const Chec
             case CHECK_BUILTIN_X86_CONSTRAINT_RC:
             case CHECK_BUILTIN_X86_CONSTRAINT_SAE: result = "invalid rounding argument"; break;
             case CHECK_BUILTIN_X86_CONSTRAINT_SCALE: result = "scale argument must be 1, 2, 4, or 8"; break;
+            case CHECK_BUILTIN_X86_CONSTRAINT_TARGET32: result = "this builtin is only available on 32-bit targets"; break;
             case CHECK_BUILTIN_X86_CONSTRAINT_NONE:
             case CHECK_BUILTIN_X86_CONSTRAINT_RANGE: break;
         }
