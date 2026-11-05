@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  recovery-conversion-oracle:
+  linkage-oracle:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -14,17 +14,35 @@ jobs:
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Probe declaration recovery and conversion diagnostics
+      - name: Probe linkage pragma semantics
         shell: bash
         run: |
           set +e
           ulimit -c 0
-          for case in {1..20}; do
-            echo "DECLARATION CASE=$case"
-            clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-declaration-recovery.c 2>&1
-          done
-          for case in {1..24}; do
-            echo "CONVERSION CASE=$case"
-            clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-conversions.c 2>&1
+          for case in {1..38}; do
+            echo "LINKAGE CASE=$case"
+            clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" -S -emit-llvm tools/issue1447-linkage-pragmas.c -o "$RUNNER_TEMP/linkage.ll" 2>&1
+            status=$?
+            echo "STATUS=$status"
+            if [ "$status" = 0 ]; then rg '^@|^define|^declare' "$RUNNER_TEMP/linkage.ll"; fi
           done
           exit 0
+  selectany-checker-backtrace:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: x86-64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: bc64d7bb16944b7104a0c743041ce1f997766e48
+          persist-credentials: false
+      - name: Install pinned Clang
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build the failing revision with debug information
+        run: ./build.sh --config Release --jobs 4
+      - name: Capture checker backtrace
+        shell: bash
+        run: |
+          if ! command -v gdb; then sudo apt-get update && sudo apt-get install -y gdb; fi
+          gdb --batch -ex 'set pagination off' -ex run -ex 'thread apply all bt full' --args build/compiler test-checker --part 1/4
