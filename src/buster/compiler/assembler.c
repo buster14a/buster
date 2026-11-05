@@ -911,6 +911,29 @@ static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t loca
     return result;
 }
 
+// Bind earlier unresolved section-name expressions when the first section of that name is created.
+static void asm_bind_forward_section(AsmParser* parser, String8 name, uint32_t section)
+{
+    uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->symbol_mask;
+    uint32_t id = parser->symbol_slots[slot];
+    while (id != 0 && (parser->symbols[id].internal || parser->symbols[id].name.length != name.length ||
+                       memcmp(parser->symbols[id].name.pointer, name.pointer, name.length) != 0))
+    {
+        slot = (slot + 1) & parser->symbol_mask;
+        id = parser->symbol_slots[slot];
+    }
+    if (id != 0)
+    {
+        AsmSymbol* symbol = &parser->symbols[id];
+        if (symbol->referenced && !symbol->defined && !symbol->alias && !symbol->section_start && symbol->common == 0)
+        {
+            symbol->section_start = true;
+            symbol->section_index = section;
+            symbol->flags = BUSTER_LINK_SYMBOL_LOCAL;
+        }
+    }
+}
+
 static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
 {
     const uint32_t result = asm_symbol_scoped(parser, name, location, false);
@@ -1290,9 +1313,9 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                         {
                             asm_fail(parser, token.start, "expected address register");
                         }
-                        const uint32_t section = text.length > 1 && text.pointer[0] == '.' ? asm_find_latest_section(parser, text) : 0;
+                        const uint32_t section = asm_find_latest_section(parser, text);
                         uint32_t symbol = 0;
-                        if (section != 0 && parser->sections[section].group != 0)
+                        if (section != 0)
                         {
                             // A section name denotes the last-created namesake at this expression, even if another
                             // group is selected later. Use a separate symbol for each identity before that can change.

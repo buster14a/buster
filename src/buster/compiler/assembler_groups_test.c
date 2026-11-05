@@ -178,9 +178,13 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
 {
     // GNU as binds each section-name expression to the last-created namesake, not the current group.
     static const char section_names[] =
+        ".long .debug_macro\n.long plain\n"
         ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
         ".section .debug_macro,\"G\",@progbits,second,comdat\n.long .debug_macro\n"
-        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n";
+        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
+        ".section plain,\"G\",@progbits,first,comdat\n.long plain\n"
+        ".section plain,\"G\",@progbits,second,comdat\n.long plain\n"
+        ".section plain,\"G\",@progbits,first,comdat\n.long plain\n";
     asm_test_pair(test, (String8){.pointer = (char*)section_names, .length = sizeof(section_names) - 1}, 1, X86_ARCH_BASELINE);
     if (cross_check)
     {

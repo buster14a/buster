@@ -325,6 +325,10 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         section->declared = true;
         if (added)
         {
+            if (parser->group_count != 0)
+            {
+                asm_bind_forward_section(parser, name, id);
+            }
             asm_section_index(parser, id);
         }
         parser->previous_section = parser->section;
