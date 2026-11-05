@@ -9,23 +9,48 @@
 //
 // Each FILE's functions are its symbol table's STT_FUNC symbols of a size in an executable section, each one decoded
 // (x86_disassemble) from its first byte to its size. A function's frame is the most bytes it takes below its return
-// address on the way through its code in address order: each push and each `sub rsp, imm` (or `lea rsp, [rsp - imm]`)
-// adds, each pop and `add rsp, imm` takes back, and the frame is the most the sum reaches (so that a prologue after an
-// early return, as clang's shrink-wrapping places it, counts, and so do several epilogues). A realignment (`and rsp,
-// -imm`) is its alignment apart; whether the function sets a frame pointer (`mov rbp, rsp`) too. A function whose code
-// doesn't decode whole counts what decoded, and is reported as partial. With --functions, a line per function:
+// address on any path through its code (#1415's review). Each instruction's depth on entry is its predecessors' along
+// the control flow, from 0 at the first byte. The edges come from x86_effects' kinds: on to the next instruction, a
+// jump's or a branch's target within the function, none after a jump, a return or a trap. Each push and `sub rsp, imm`
+// (or `lea rsp, [rsp - imm]`) adds, each pop and `add rsp, imm` takes back, and `mov rsp, rbp` (or `lea rsp, [rbp +
+// imm]`, or `leave`) goes back to the depth `mov rbp, rsp` set rbp at. The frame is the most a depth reaches, so a
+// prologue after an early return (as clang's shrink-wrapping places it) counts, and an early return's epilogue takes
+// nothing from another path's frame. A dynamic allocation (`sub rsp, reg`) and the moves of rsp that restore one count
+// nothing; a realignment (`and rsp, -imm`) is its alignment apart; whether the function sets a frame pointer (`mov rbp,
+// rsp`) too.
 //
-//   frame LABEL NAME BYTES ALIGNMENT POINTER PARTIAL
+// A function's frame has a state:
+// - resolved: every reached instruction's depth is known and agrees;
+// - assumed: the function has an indirect jump, and code no edge reaches (a jump table's targets) took the deepest depth
+//   an indirect jump leaves; without an indirect jump, such code is unreachable (padding, or after a call that doesn't
+//   return) and counts nothing;
+// - unresolved: two predecessors leave different depths, a path pops past its return address, or it moves rsp back to an
+//   rbp it never set. Its frame is the most it found.
+// A function whose code doesn't decode whole is also partial, its frame what decoded. With --functions, a line per
+// function:
 //
-// Then a line per FILE against the first: `frames LABEL`, its functions and their frames' sum, and over the functions
-// whose names both have once each (a name twice in a file is left out, as two static functions of an executable), how
-// many, both sums and their ratio, the median of the functions' ratios ((bytes + 8) / (first's bytes + 8): the return
-// address counted, so that two empty frames are 1), and how many are larger, equal and smaller. Tab-separated.
+//   frame LABEL NAME BYTES ALIGNMENT POINTER PARTIAL STATE
+//
+// Then a line per FILE against the first: `frames LABEL`, its functions, their frames' sum and how many are assumed,
+// unresolved and partial; and over the functions whose names both have once each (a name twice in a file is left out, as
+// two static functions of an executable), but those unresolved or partial in either (`excluded`), how many, both sums and
+// their ratio, the median of the functions' ratios ((bytes + 8) / (first's bytes + 8): the return address counted, so
+// that two empty frames are 1), and how many are larger, equal and smaller. Tab-separated.
 
 #include <elf.h>
 
 #define BUSTER_FRAME_MEASURE_FILES 8
-#define BUSTER_FRAME_MEASURE_DECODED 1024
+// No depth yet: an instruction no path has reached.
+#define BUSTER_FRAME_MEASURE_UNSET INT64_MIN
+
+typedef enum FrameMeasureState
+{
+    FRAME_MEASURE_RESOLVED,
+    FRAME_MEASURE_ASSUMED,
+    FRAME_MEASURE_UNRESOLVED,
+} FrameMeasureState;
+
+static const char* const frame_measure_states[3] = { "resolved", "assumed", "unresolved" };
 
 typedef struct FrameMeasureFunction FrameMeasureFunction;
 struct FrameMeasureFunction
@@ -35,6 +60,7 @@ struct FrameMeasureFunction
     uint32_t alignment;
     bool pointer;
     bool partial;
+    FrameMeasureState state;
     // Whether the name is the file's once (frame_measure_unique).
     bool unique;
 };
@@ -50,43 +76,160 @@ struct FrameMeasureFile
     uint32_t count;
 };
 
-// The frame of `size` bytes of code at `code` (the file's comment).
-static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t size)
+// The depth after one instruction from `depth` before it (the file's comment). *rbp is the depth `mov rbp, rsp` set
+// rbp at (UNSET before), *unresolved set where rsp goes back to an unset rbp or rbp is set at two depths.
+static int64_t frame_measure_step(const X86Instruction* instruction, int64_t depth, int64_t* rbp, bool* unresolved, FrameMeasureFunction* function)
+{
+    const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+    const bool direct = instruction->mode == BUSTER_X86_REGISTER_DIRECT;
+    const bool rsp = direct && instruction->rm == X86_REGISTER_RSP;
+    const bool sub = rsp && (form == X86_FORM_SUB_RM64_IMM8 || form == X86_FORM_SUB_RM64_IMM32);
+    const bool add = rsp && (form == X86_FORM_ADD_RM64_IMM8 || form == X86_FORM_ADD_RM64_IMM32);
+    const bool align = rsp && (form == X86_FORM_AND_RM64_IMM8 || form == X86_FORM_AND_RM64_IMM32) && instruction->immediate < 0;
+    const bool lea = form == X86_FORM_LEA_R64_M && instruction->reg == X86_REGISTER_RSP && instruction->mode == BUSTER_X86_MEMORY_BASE;
+    const bool set_rbp = direct && ((form == X86_FORM_MOV_RM64_R64 && instruction->rm == X86_REGISTER_RBP && instruction->reg == X86_REGISTER_RSP) ||
+                                    (form == X86_FORM_MOV_R64_RM64 && instruction->reg == X86_REGISTER_RBP && instruction->rm == X86_REGISTER_RSP));
+    const bool mov_from_rbp = direct && ((form == X86_FORM_MOV_RM64_R64 && instruction->rm == X86_REGISTER_RSP && instruction->reg == X86_REGISTER_RBP) ||
+                                         (form == X86_FORM_MOV_R64_RM64 && instruction->reg == X86_REGISTER_RSP && instruction->rm == X86_REGISTER_RBP));
+    const bool from_rbp = mov_from_rbp || (lea && instruction->rm == X86_REGISTER_RBP) || form == X86_FORM_LEAVE;
+    int64_t result = depth;
+    result += form == X86_FORM_PUSH_R64 ? 8 : form == X86_FORM_POP_R64 ? -8 : 0;
+    result += sub ? instruction->immediate : add ? -(int64_t)instruction->immediate : lea && instruction->rm == X86_REGISTER_RSP ? -(int64_t)instruction->displacement : 0;
+    if (set_rbp)
+    {
+        *unresolved |= *rbp != BUSTER_FRAME_MEASURE_UNSET && *rbp != depth;
+        *rbp = depth;
+        function->pointer = true;
+    }
+    if (from_rbp)
+    {
+        // leave is `mov rsp, rbp` then `pop rbp`; `lea rsp, [rbp + imm]` is rbp's depth less imm.
+        *unresolved |= *rbp == BUSTER_FRAME_MEASURE_UNSET;
+        result = *rbp == BUSTER_FRAME_MEASURE_UNSET ? depth : form == X86_FORM_LEAVE ? *rbp - 8 : lea ? *rbp - instruction->displacement : *rbp;
+    }
+    const uint32_t realignment = align ? (uint32_t)-(int64_t)instruction->immediate : 0;
+    function->alignment = realignment > function->alignment ? realignment : function->alignment;
+    return result;
+}
+
+// The index of the instruction at `offset` among `count` decoded at ascending offsets, or `count` for none.
+static uint32_t frame_measure_find(const X86Decoded* decoded, uint32_t count, int64_t offset)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = (int64_t)decoded[middle].offset < offset;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < count && (int64_t)decoded[low].offset == offset ? low : count;
+}
+
+// The depth `depth` given to instruction `s` (below `count`), which work's `pending` entries list until they are
+// stepped: where it already has another, the function is unresolved and the deeper one goes on.
+static void frame_measure_reach(int64_t* depths, uint32_t* work, uint32_t* pending, uint32_t s, uint32_t count, int64_t depth, bool* unresolved)
+{
+    if (s < count && depths[s] == BUSTER_FRAME_MEASURE_UNSET)
+    {
+        depths[s] = depth;
+        work[*pending] = s;
+        *pending += 1;
+    }
+    else if (s < count && depths[s] != depth)
+    {
+        *unresolved = true;
+        if (depth > depths[s])
+        {
+            depths[s] = depth;
+            work[*pending] = s;
+            *pending += 1;
+        }
+    }
+}
+
+// The frame of `size` bytes of code at `code` (the file's comment), its decoded instructions and their depths in
+// `scratch`, given back after.
+static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t size, Arena* scratch)
 {
     FrameMeasureFunction result = { 0 };
-    static X86Decoded decoded[BUSTER_FRAME_MEASURE_DECODED];
-    int64_t depth = 0;
-    int64_t most = 0;
+    const uint64_t mark = scratch->length;
+    X86Decoded* decoded = BUSTER_ARENA_PUSH_ARRAY(scratch, X86Decoded, size + 1);
+    int64_t* depths = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, size + 1);
+    // The work list: each step takes one entry and gives at most two, and the steps stop past 2 * size + 2, so it never
+    // holds more than 2 * size + 4 (a seed's among them).
+    uint32_t* work = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 4 * size + 8);
+    const bool ready = decoded != NULL && depths != NULL && work != NULL;
+    uint32_t count = 0;
     uint64_t consumed = 0;
-    bool decoding = true;
+    bool decoding = ready;
     while (decoding && consumed < size)
     {
-        const X86DecodeResult step = x86_disassemble(code + consumed, size - consumed, decoded, BUSTER_FRAME_MEASURE_DECODED);
+        const X86DecodeResult step = x86_disassemble(code + consumed, size - consumed, decoded + count, size + 1 - count);
         for (uint64_t i = 0; i < step.count; i += 1)
         {
-            const X86Instruction* instruction = &decoded[i].instruction;
-            const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-            const bool direct = instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->rm == X86_REGISTER_RSP;
-            const bool sub = direct && (form == X86_FORM_SUB_RM64_IMM8 || form == X86_FORM_SUB_RM64_IMM32);
-            const bool add = direct && (form == X86_FORM_ADD_RM64_IMM8 || form == X86_FORM_ADD_RM64_IMM32);
-            const bool align = direct && (form == X86_FORM_AND_RM64_IMM8 || form == X86_FORM_AND_RM64_IMM32) && instruction->immediate < 0;
-            const bool lea = form == X86_FORM_LEA_R64_M && instruction->reg == X86_REGISTER_RSP && instruction->mode == BUSTER_X86_MEMORY_BASE &&
-                             instruction->rm == X86_REGISTER_RSP;
-            depth += form == X86_FORM_PUSH_R64 ? 8 : form == X86_FORM_POP_R64 ? -8 : 0;
-            depth += sub ? instruction->immediate : add ? -(int64_t)instruction->immediate : lea ? -(int64_t)instruction->displacement : 0;
-            most = depth > most ? depth : most;
-            const uint32_t alignment = align ? (uint32_t)-(int64_t)instruction->immediate : 0;
-            result.alignment = alignment > result.alignment ? alignment : result.alignment;
-            result.pointer |= form == X86_FORM_MOV_RM64_R64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->rm == X86_REGISTER_RBP &&
-                              instruction->reg == X86_REGISTER_RSP;
-            result.pointer |= form == X86_FORM_MOV_R64_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg == X86_REGISTER_RBP &&
-                              instruction->rm == X86_REGISTER_RSP;
+            decoded[count + i].offset += (uint32_t)consumed;
         }
+        count += (uint32_t)step.count;
         consumed += step.consumed;
         decoding = step.status == X86_DECODE_OK && step.consumed != 0;
     }
+    result.partial = !ready || consumed < size;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        depths[i] = BUSTER_FRAME_MEASURE_UNSET;
+    }
+    int64_t most = 0;
+    int64_t rbp = BUSTER_FRAME_MEASURE_UNSET;
+    // The deepest depth an indirect jump leaves, which code no edge reaches takes.
+    int64_t indirect = BUSTER_FRAME_MEASURE_UNSET;
+    bool unresolved = false;
+    bool assumed = false;
+    uint32_t pending = 0;
+    uint32_t steps = 0;
+    frame_measure_reach(depths, work, &pending, 0, count, 0, &unresolved);
+    uint32_t unreached = 0;
+    // A depth only rises, and a function is unresolved once one does, so the steps are bounded; past twice the edges, the
+    // work stops, unresolved.
+    while (pending != 0 && steps <= 2 * size + 2)
+    {
+        pending -= 1;
+        steps += 1;
+        const uint32_t i = work[pending];
+        const X86Instruction* instruction = &decoded[i].instruction;
+        const int64_t after = frame_measure_step(instruction, depths[i], &rbp, &unresolved, &result);
+        unresolved |= after < 0;
+        most = after > most ? after : most;
+        const uint32_t control = x86_effects(instruction->form)->kinds >> 4;
+        const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+        const bool relative = x86_form_descriptions[form].relative_bytes != 0;
+        const bool transfer = control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH;
+        const bool on = control != BUSTER_X86_CONTROL_JUMP && control != BUSTER_X86_CONTROL_RETURN && control != BUSTER_X86_CONTROL_TRAP;
+        if (control == BUSTER_X86_CONTROL_JUMP && !relative)
+        {
+            indirect = after > indirect ? after : indirect;
+        }
+        // A target outside the function (a tail call's) is no edge of it.
+        const int64_t goal = (int64_t)decoded[i].offset + decoded[i].length + instruction->displacement;
+        frame_measure_reach(depths, work, &pending, transfer && relative ? frame_measure_find(decoded, count, goal) : count, count, after, &unresolved);
+        frame_measure_reach(depths, work, &pending, on ? i + 1 : count, count, after, &unresolved);
+        // Once every path is done, code no edge reached takes an indirect jump's depth, a run at a time.
+        while (pending == 0 && indirect != BUSTER_FRAME_MEASURE_UNSET && unreached < count)
+        {
+            const bool trap = (x86_effects(decoded[unreached].instruction.form)->kinds >> 4) == BUSTER_X86_CONTROL_TRAP;
+            if (depths[unreached] == BUSTER_FRAME_MEASURE_UNSET && !trap)
+            {
+                frame_measure_reach(depths, work, &pending, unreached, count, indirect, &unresolved);
+                assumed = true;
+            }
+            unreached += 1;
+        }
+    }
+    unresolved |= pending != 0;
     result.bytes = (uint64_t)most;
-    result.partial = consumed < size;
+    result.state = unresolved ? FRAME_MEASURE_UNRESOLVED : assumed ? FRAME_MEASURE_ASSUMED : FRAME_MEASURE_RESOLVED;
+    arena_pop_to(scratch, mark);
     return result;
 }
 
@@ -138,7 +281,7 @@ static bool frame_measure_open(FrameMeasureFile* file, Arena* arena)
         if (code && start + symbol->st_size <= section->sh_size && section->sh_offset + start + symbol->st_size <= file->size)
         {
             FrameMeasureFunction* function = &file->functions[file->count];
-            *function = frame_measure_code(file->bytes + section->sh_offset + start, symbol->st_size);
+            *function = frame_measure_code(file->bytes + section->sh_offset + start, symbol->st_size, arena);
             function->name = (const char*)(file->bytes + strings->sh_offset + symbol->st_name);
             file->count += 1;
         }
@@ -174,15 +317,28 @@ static void frame_measure_unique(FrameMeasureFile* file)
     }
 }
 
+// Whether a function's frame is one to compare: resolved or assumed, and decoded whole.
+static bool frame_measure_comparable(const FrameMeasureFunction* function)
+{
+    return function->state != FRAME_MEASURE_UNRESOLVED && !function->partial;
+}
+
 // The line of `file` against `first` (the file's comment), its functions' ratios' room in `ratios`.
 static void frame_measure_compare(const FrameMeasureFile* first, const FrameMeasureFile* file, double* ratios)
 {
     uint64_t sum = 0;
+    uint32_t assumed = 0;
+    uint32_t unresolved = 0;
+    uint32_t partial = 0;
     for (uint32_t i = 0; i < file->count; i += 1)
     {
         sum += file->functions[i].bytes;
+        assumed += file->functions[i].state == FRAME_MEASURE_ASSUMED;
+        unresolved += file->functions[i].state == FRAME_MEASURE_UNRESOLVED;
+        partial += file->functions[i].partial;
     }
     uint32_t common = 0;
+    uint32_t excluded = 0;
     uint64_t first_sum = 0;
     uint64_t file_sum = 0;
     uint32_t larger = 0;
@@ -195,7 +351,10 @@ static void frame_measure_compare(const FrameMeasureFile* first, const FrameMeas
         const FrameMeasureFunction* left = &first->functions[a];
         const FrameMeasureFunction* right = &file->functions[b];
         const int order = strcmp(left->name, right->name);
-        if (order == 0 && left->unique && right->unique)
+        const bool both = order == 0 && left->unique && right->unique;
+        const bool compared = both && frame_measure_comparable(left) && frame_measure_comparable(right);
+        excluded += both && !compared;
+        if (compared)
         {
             ratios[common] = (double)(right->bytes + 8) / (double)(left->bytes + 8);
             common += 1;
@@ -210,9 +369,10 @@ static void frame_measure_compare(const FrameMeasureFile* first, const FrameMeas
     }
     qsort(ratios, common, sizeof(double), frame_measure_doubles);
     const double median = common == 0 ? 0.0 : (common % 2 != 0 ? ratios[common / 2] : (ratios[common / 2 - 1] + ratios[common / 2]) / 2.0);
-    printf("frames\t%s\tfunctions=%u\tbytes=%" PRIu64 "\tagainst=%s\tcommon=%u\tbytes_%s=%" PRIu64 "\tbytes_%s=%" PRIu64 "\tsum_ratio=%.4f\tmedian_ratio=%.4f\tlarger=%u\tequal=%u\tsmaller=%u\n",
-           file->label, file->count, sum, first->label, common, first->label, first_sum, file->label, file_sum, first_sum == 0 ? 0.0 : (double)file_sum / (double)first_sum,
-           median, larger, equal, smaller);
+    printf("frames\t%s\tfunctions=%u\tbytes=%" PRIu64 "\tassumed=%u\tunresolved=%u\tpartial=%u\tagainst=%s\tcommon=%u\texcluded=%u\tbytes_%s=%" PRIu64
+           "\tbytes_%s=%" PRIu64 "\tsum_ratio=%.4f\tmedian_ratio=%.4f\tlarger=%u\tequal=%u\tsmaller=%u\n",
+           file->label, file->count, sum, assumed, unresolved, partial, first->label, common, excluded, first->label, first_sum, file->label, file_sum,
+           first_sum == 0 ? 0.0 : (double)file_sum / (double)first_sum, median, larger, equal, smaller);
 }
 
 static int run_frame_measure(int argc, char** argv)
@@ -245,7 +405,7 @@ static int run_frame_measure(int argc, char** argv)
         fprintf(stderr, "usage: compiler measure-frames [--functions] LABEL=FILE... (at most %u files)\n", BUSTER_FRAME_MEASURE_FILES);
     }
     Arena arena = valid ? arena_reserve(UINT64_C(1) << 34) : (Arena){ 0 };
-    valid = valid && arena.base != NULL && x86_disassembler_initialize();
+    valid = valid && arena.base != NULL && x86_disassembler_initialize() && (x86_semantics_initialized || x86_semantics_initialize());
     uint64_t most = 0;
     for (uint32_t f = 0; valid && f < count; f += 1)
     {
@@ -258,7 +418,8 @@ static int run_frame_measure(int argc, char** argv)
         for (uint32_t i = 0; valid && listing && i < files[f].count; i += 1)
         {
             const FrameMeasureFunction* function = &files[f].functions[i];
-            printf("frame\t%s\t%s\t%" PRIu64 "\t%u\t%u\t%u\n", files[f].label, function->name, function->bytes, function->alignment, function->pointer, function->partial);
+            printf("frame\t%s\t%s\t%" PRIu64 "\t%u\t%u\t%u\t%s\n", files[f].label, function->name, function->bytes, function->alignment, function->pointer, function->partial,
+                   frame_measure_states[function->state]);
         }
     }
     double* ratios = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, double, most + 1) : NULL;
