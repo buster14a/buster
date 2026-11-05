@@ -1700,7 +1700,6 @@ compile them for x86-64 either: `__builtin_preserve_access_index` (BPF
 alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
 compile, and this compiler doesn't yet:
 
-- `__builtin_eh_return`, whose unwinding to a handler;
 - `__builtin___NSStringMakeConstantString` of no string literal, whose
   object clang's code makes from what isn't one;
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
@@ -1715,10 +1714,42 @@ that compiles one gets the refusal's message, at the call.
 
 `__builtin_eh_return(offset, handler)` (0x456, #148) is `void(size_t,
 void *)` and doesn't return, as clang's Sema takes it: each argument converts
-as a prototype's parameter. Clang's code generation unwinds the stack by the
-offset and jumps to the handler; this compiler's refuses it by name
-("unsupported: __builtin_eh_return, whose unwinding to a handler this
-compiler doesn't make").
+as a prototype's parameter. Its code unwinds to the handler as LLVM's
+`EH_RETURN` does, for libgcc's unwinder (`uw_install_context`):
+
+- **The frame.** A function that calls it (`Tier0Function.eh_return`) has a
+  frame pointer. It saves every callee-saved register, then rdx and rax,
+  LLVM's `CSR_64EHRet` set. Its CFI says where each is: rdx at the CFA less
+  64 and rax less 72 with five callee-saved pushes, as clang's frame has
+  them after `__builtin_unwind_init`. The fixed descriptor can't say it, so
+  the frame is a row program (`emitted_tier0_eh_rows`).
+- **The unwinding.** The call is a TAIL_CALL of a row of its own
+  (`BUSTER_TIER0_TAIL_EH`). The row is indirect, its callee the handler in
+  `r11`, and the offset is its one argument, in `rcx`. Its teardown:
+  - `lea rcx, [rbp + rcx + 16]`, the CFA plus the offset;
+  - the release, then pops of rax, rdx, the callee-saved registers and rbp;
+  - `mov rsp, rcx` and `jmp r11`.
+
+  The handler runs with the stack LLVM's `ret` from `rcx - 8` gives it. The
+  offset is evaluated first, then the handler, as clang's arguments are.
+- **Ordinary returns** step over rax's and rdx's slots and keep the result.
+  LLVM's pop the saved rax over it (`movl $42, %eax; popq %rax`), as GCC's
+  epilogue doesn't.
+- **Its consumers:**
+  - `unwind_tier0_frame_tails` reads the frame.
+  - `emitted_verify_frames` proves its rows up to the `mov rsp, rcx`. At the
+    jump, the handler's stack is one no rule describes, and LLVM's CFI
+    doesn't describe it either.
+  - Tier 1 falls back to Tier 0 for the function, as for
+    `__builtin_unwind_init`'s frame.
+- **Refused by name:** one that isn't an expression statement of its own (a
+  tail call leaves nothing under its operands), one in a variadic function,
+  and one beside a musttail call.
+- **Tests.** `test-checker-driver`'s eh_return program writes rax's and
+  rdx's slots, then unwinds at offsets 0, 16 and 32 into a handler that
+  records the registers and rsp. It is built on both paths at Tier 0 and
+  with `--tier1`, all with `--verify`, and prints what clang `-O0`'s build
+  prints.
 
 `__builtin___CFStringMakeConstantString(s)` and
 `__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are
@@ -1928,13 +1959,31 @@ record dump, as `BuiltinDumpStruct` checks it.
   in its record's body (`check_lower_dump_member`), from the token past the
   body's `}` (`CheckGraph.tag_completions`, which the deferred reader's merge
   maps for records its lanes complete), and its typedef specifier
-  (`check_input_typedef_spelling`) gives the alias `type_print` prints. An
+  (`check_input_typedef_spelling`) gives the alias `type_print` prints. A
+  typedef's name covers its own qualifiers but those its declaration writes
+  with it, which print before it as clang prints them (`CI`, `const CI`,
+  `volatile CI` of a `const int`'s `CI`: `TypeNames.alias_covered`,
+  `check_lower_dump_alias`). Each typedef names the place it is written
+  alone: the declaration's specifier sequences, its own then each nested
+  parameter's, are listed in source order with the typedef among each
+  (`check_lower_dump_places`), the order `type_print` prints its specifiers
+  in, which takes the k-th one's alias for the k-th it prints
+  (`TypeNames.alias_order`), so `int (*)(I)` keeps its `int`; a level an
+  alias names has no suffix of its own, which its AFTER and POINTER_END frames
+  ask of that level alone (`TypePrinter.aliased`, by each TYPE frame's id and
+  depth), so `int (*(*)(FP))(int)` keeps its return's `(int)`. Where the
+  counts differ (a declaration its walk doesn't model), the typedefs apply by
+  type, as before. An
   unnamed record's canonical name has its scope, as clang's
   `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
   it, whatever declarator it is part of (an array's, a pointer's, a
   function's: `check_lower_dump_parent`), up to a named one (C's named tags belong to no record), then the
   function whose body holds the outermost, with its parameters' types where
-  it has a written prototype (`struct main()::L::(unnamed)`,
+  it has a written prototype, each as its declaration spells it
+  (`check_lower_dump_parameter`: its declarator's declared type, qualifiers
+  kept, the first identifier outside a record body its specifiers define that
+  declares itself, with every typedef its tokens name; an array's or a
+  function's adjusted type, which keeps none) (`struct main()::L::(unnamed)`,
   `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
   function has none.
 - **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool

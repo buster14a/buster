@@ -495,8 +495,9 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return's
-// unwinding, which clang makes and this compiler doesn't, and an NSString of no literal, which clang's code reads as one
+// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return where its
+// unwinding isn't made (a variadic function's, one within an expression, one beside a musttail call), and an NSString of
+// no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
@@ -515,7 +516,11 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
         { "struct S { char c[5000]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores" },
-        { "void f(void* p) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return, whose unwinding to a handler this compiler doesn't make" },
+        { "void f(int n, void* p, ...) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return in a variadic function" },
+        { "int f(void* p, int c) { return c + (__builtin_eh_return(8, p), 1); }\n",
+          "unsupported: __builtin_eh_return within an expression, not a statement of its own" },
+        { "int g(void* p, int c);\nint f(void* p, int c) { if (c) __builtin_eh_return(8, p); __attribute__((musttail)) return g(p, c); }\n",
+          "unsupported: a musttail call in a function that calls __builtin_eh_return" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
@@ -1079,16 +1084,19 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
     unlink(outputs[2]);
 }
 
-// __builtin_dump_struct by the driver (#148): a program of clang's dumps of records (every kind of field: the integer types,
-// bool and the character types as numbers, size_t's, ptrdiff_t's and intmax_t's typedefs, enums, the floating types,
-// strings, pointers, arrays, bit-fields and unnamed ones, anonymous members, nested and unnamed records with their
-// scopes (a pointer member's record's too), those of records in functions, of parameters, of no written prototype,
-// unions, vectors, a packed record, _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its
-// typedefs), through printf, a variadic
-// printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer through a
-// pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls, the rest of the
-// arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and without it, each
-// printing what clang's build does.
+// __builtin_dump_struct by the driver (#148): a program of clang's dumps of records (every kind of field: the integer
+// types, bool and the character types as numbers, size_t's, ptrdiff_t's and intmax_t's typedefs, enums, the floating
+// types, strings, pointers, arrays, bit-fields and unnamed ones, anonymous members, nested and unnamed records with
+// their scopes (a pointer member's record's too), those of records in functions, of parameters as their declarations
+// spell them (a record's array member among a parameter's tokens), of no written prototype, typedefs of qualified types
+// with and without qualifiers written with them, a typedef named in one place of a function pointer's types and not in
+// another of the same type (its return or its parameter, fields and parameters alike), a typedef of a function pointer
+// or an array named where the same type is spelled out elsewhere in the declaration, unions, vectors, a packed record,
+// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs), through printf, a
+// variadic printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer
+// through a pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls,
+// the rest of the arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and
+// without it, each printing what clang's build does.
 static void check_test_driver_dump_struct(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char program[] =
@@ -1180,6 +1188,45 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __builtin_dump_struct(&r.in, printf);\n"
                                   "}\n"
                                   "static void old_style(a) int a; { struct Old { struct { int k; } in; } r = { { a } }; __builtin_dump_struct(&r.in, printf); }\n"
+                                  "typedef int Arr4[4];\n"
+                                  "static void spelled(size_t n, cstr text, uint8_t *bytes, const size_t c, Arr4 arr, int (*cb)(size_t), int plain, ...)\n"
+                                  "{\n"
+                                  "    (void)n; (void)text; (void)bytes; (void)c; (void)arr; (void)cb;\n"
+                                  "    struct Spelled { struct { int k; } in; } r = { { plain } };\n"
+                                  "    __builtin_dump_struct(&r.in, printf);\n"
+                                  "}\n"
+                                  "typedef const int CI;\n"
+                                  "typedef int *const PC;\n"
+                                  "struct Qualified { CI ci; PC pc; const CI cci; volatile CI vci; CI const cic; };\n"
+                                  "static void qualified(CI x, PC p, const struct { int values[4]; } *const arg)\n"
+                                  "{\n"
+                                  "    (void)x; (void)p; (void)arg;\n"
+                                  "    struct Inner { struct { int n; } inner; } r = { { x } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
+                                  "typedef int I;\n"
+                                  "struct Placed { int (*a)(I); I (*b)(int); I c, (*d)(long), e; I (*(*f)(int))(I); size_t (*h)(const char *, ...); int (*k)(void); };\n"
+                                  "static void placed_return(int (*cb)(I))\n"
+                                  "{\n"
+                                  "    (void)cb;\n"
+                                  "    struct Outer1 { struct { int value; } inner; } r = { { 1 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
+                                  "static void placed_parameter(I (*cb)(int), I (*(*nested)(int))(I), ...)\n"
+                                  "{\n"
+                                  "    (void)cb; (void)nested;\n"
+                                  "    struct Outer2 { struct { int value; } inner; } r = { { 2 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
+                                  "typedef int (*FP)(int);\n"
+                                  "typedef int A4[4];\n"
+                                  "struct Repeated { int (*(*a)(FP))(int); FP (*b)(int (*)(int)); A4 *p; int (*q)[4]; A4 *(*r)(int (*)[4]); };\n"
+                                  "static void repeated(int (*(*cb)(FP))(int), int (*(*rev)(int (*)(int)))(FP))\n"
+                                  "{\n"
+                                  "    (void)cb; (void)rev;\n"
+                                  "    struct Outer3 { struct { int x; } inner; } r = { { 3 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
                                   "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
                                   "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
                                   "static struct S s;\n"
@@ -1233,6 +1280,17 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __typeof__(*pointee.p) pointed = { 42 };\n"
                                   "    pointee.p = &pointed;\n"
                                   "    __builtin_dump_struct(pointee.p, printf);\n"
+                                  "    spelled(1, \"t\", 0, 2, 0, 0, n);\n"
+                                  "    struct Qualified q = { 1, 0, 2, 3, 4 };\n"
+                                  "    __builtin_dump_struct(&q, printf);\n"
+                                  "    qualified(n, 0, 0);\n"
+                                  "    struct Placed placed = { 0 };\n"
+                                  "    __builtin_dump_struct(&placed, printf);\n"
+                                  "    placed_return(0);\n"
+                                  "    placed_parameter(0, 0);\n"
+                                  "    struct Repeated repeated_fields = { 0 };\n"
+                                  "    __builtin_dump_struct(&repeated_fields, printf);\n"
+                                  "    repeated(0, 0);\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];
@@ -1376,6 +1434,126 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
         else if (ran && strcmp(captured, expected) != 0)
         {
             fprintf(stderr, "static chain (%s):\n%s\nclang's build:\n%s\n", names[mode], captured, expected);
+        }
+        free(text);
+        text = NULL;
+    }
+    unlink(source);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        unlink(outputs[k]);
+    }
+}
+
+// __builtin_eh_return (#148): a function that unwinds to a handler, as libgcc's _Unwind_RaiseException does through
+// uw_install_context: after __builtin_unwind_init, it writes rax's and rdx's save slots (at the CFA less 72 and 64, as its
+// CFI and clang's say) and eh_returns from one of its two sites (#1420's review: the second after a branch to the first,
+// rax's slot written again), at offsets 0, 16 and 32, into an assembly handler that records the registers it
+// finds (the callee-saved ones restored, rax and rdx from their slots) and rsp (the CFA plus the offset); and one that
+// returns normally. Built by both paths at Tier 0 (with --verify, whose verifier proves its frame events) and with
+// --tier1 --verify (Tier 0's frame, which Tier 1 falls back to), each the output of clang -O0's build.
+static void check_test_driver_eh_return(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "long seen[8];\n"
+                                  "long before;\n"
+                                  "void thrower(long offset, void* h);\n"
+                                  "__attribute__((naked, noinline)) long run(long offset)\n"
+                                  "{\n"
+                                  "    __asm__(\n"
+                                  "        \"pushq %rbx\\npushq %r12\\npushq %r13\\npushq %r14\\npushq %r15\\n\"\n"
+                                  "        \"movq $0x0b0b, %rbx\\nmovq $0x0c0c, %r12\\nmovq $0x0d0d, %r13\\nmovq $0x0e0e, %r14\\nmovq $0x0f0f, %r15\\n\"\n"
+                                  "        \"subq $40, %rsp\\n\"\n"
+                                  "        \"movq %rsp, before(%rip)\\n\"\n"
+                                  "        \"leaq handler(%rip), %rsi\\n\"\n"
+                                  "        \"call thrower\\n\"\n"
+                                  "        \"movq $-1, %rax\\njmp 1f\\n\"\n"
+                                  "        \"handler:\\n\"\n"
+                                  "        \"movq %rax, seen+0(%rip)\\nmovq %rdx, seen+8(%rip)\\nmovq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\n\"\n"
+                                  "        \"movq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\nmovq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
+                                  "        \"movq before(%rip), %rsp\\nxorl %eax, %eax\\n\"\n"
+                                  "        \"1:\\naddq $40, %rsp\\n\"\n"
+                                  "        \"popq %r15\\npopq %r14\\npopq %r13\\npopq %r12\\npopq %rbx\\nret\\n\");\n"
+                                  "}\n"
+                                  "static volatile long sink;\n"
+                                  "static volatile int pick;\n"
+                                  "__attribute__((noinline)) static long churn(long x) { sink = x; return x * 7; }\n"
+                                  "__attribute__((noinline)) void thrower(long offset, void* h)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    long a = churn(offset), b = churn(a + 1), c = churn(b + 2), d = churn(c + 3), e = churn(d + 4), f = churn(e + 5);\n"
+                                  "    sink = a + b + c + d + e + f;\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x7a7a + offset;\n"
+                                  "    frame[-6] = 0x6d6d + offset;\n"
+                                  "    if (pick) { frame[-7] = 0x5151 + offset; __builtin_eh_return(offset, h); }\n"
+                                  "    __builtin_eh_return(offset, h);\n"
+                                  "}\n"
+                                  "__attribute__((noinline)) void maybe(long offset, void* h, int go)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    if (go) __builtin_eh_return(offset, h);\n"
+                                  "    sink = 5;\n"
+                                  "}\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    for (long offset = 0; offset <= 32; offset += 8)\n"
+                                  "    {\n"
+                                  "        pick = (offset & 8) != 0;\n"
+                                  "        long r = run(offset & ~8);\n"
+                                  "        printf(\"%ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld\\n\", r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before);\n"
+                                  "    }\n"
+                                  "    maybe(0, 0, 0);\n"
+                                  "    printf(\"normal return %ld\\n\", sink);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[5][256];
+    snprintf(source, sizeof(source), "%s/eh_return.c", directory);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        snprintf(outputs[k], sizeof(outputs[k]), "%s/eh_return-%u", directory, k);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the eh_return program written");
+    char* text = NULL;
+    char* const reference[] = { (char*)clang, "-O0", "-o", outputs[4], source, NULL };
+    const int built = written ? check_test_driver_spawn(reference, &text) : 1;
+    free(text);
+    static char expected[4096];
+    const bool referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+    check_test_expect(test, referenced && strlen(expected) > 100, "clang's build of the eh_return program runs");
+    static const char* const names[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
+    for (uint32_t mode = 0; referenced && mode < 4; mode += 1)
+    {
+        char* arguments[16] = { (char*)executable };
+        uint32_t count = 1;
+        if ((mode & 1) != 0)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (mode >= 2)
+        {
+            arguments[count++] = "--tier1";
+        }
+        arguments[count++] = "--verify";
+        arguments[count++] = "-o";
+        arguments[count++] = outputs[mode];
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        static char captured[4096];
+        const bool ran = status == 0 && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
+        char description[256];
+        snprintf(description, sizeof(description), "__builtin_eh_return unwinds to its handler as clang's build does (%s)", names[mode]);
+        check_test_expect(test, ran && strcmp(captured, expected) == 0, description);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        else if (ran && strcmp(captured, expected) != 0)
+        {
+            fprintf(stderr, "eh_return (%s):\n%s\nclang's build:\n%s\n", names[mode], captured, expected);
         }
         free(text);
         text = NULL;
@@ -7660,6 +7838,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_static_chain(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_eh_return(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

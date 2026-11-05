@@ -181,32 +181,36 @@ static uint32_t tier1_emit_cfg_row_bytes(const Tier1EmitResult* emitted, uint32_
     const uint32_t count = prepared->function->instruction_count;
     const uint32_t spills = emitted->cfg.allocation.spill_count;
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
+    const uint32_t call_columns = (uint32_t)__builtin_popcount(prepared->call_save_columns);
     const uint32_t mask_slots = (uint32_t)__builtin_popcount(prepared->mask_save_mask);
     const uint32_t vector_slots = (uint32_t)__builtin_popcount(prepared->vector_save_mask);
     const uint32_t temporaries = emitted->cfg.temp_slots & ((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1);
-    const uint32_t temporary_columns = call_slots + prepared->mask_columns + prepared->vector_columns;
-    // The n-th set bit of a register mask.
+    const uint32_t temporary_columns = call_columns + prepared->mask_columns + prepared->vector_columns;
+    // The n-th set bit of a register mask, and its column: a general register's the n-th of the columns' mask (#177).
     uint32_t column = UINT32_MAX;
     uint32_t index = row;
     uint32_t mask = 0;
     uint32_t base = 0;
+    bool general = false;
     if (index < spills)
     {
         column = emitted->value_nodes[emitted->cfg.allocation.spill_values[index]];
     }
     else if ((index -= spills) < call_slots)
     {
-        column = count + index;
+        mask = prepared->call_save_mask;
+        base = count;
+        general = true;
     }
     else if ((index -= call_slots) < mask_slots)
     {
         mask = prepared->mask_save_mask;
-        base = count + call_slots;
+        base = count + call_columns;
     }
     else if ((index -= mask_slots) < vector_slots)
     {
         mask = prepared->vector_save_mask;
-        base = count + call_slots + prepared->mask_columns;
+        base = count + call_columns + prepared->mask_columns;
     }
     else if ((index -= vector_slots) < (uint32_t)__builtin_popcount(temporaries))
     {
@@ -216,7 +220,8 @@ static uint32_t tier1_emit_cfg_row_bytes(const Tier1EmitResult* emitted, uint32_
     for (uint32_t k = 0; column == UINT32_MAX && mask != 0; k += 1)
     {
         const uint32_t bit = (uint32_t)__builtin_ctz(mask);
-        column = k == index ? base + bit : UINT32_MAX;
+        const uint32_t offset = general ? (uint32_t)__builtin_popcount(prepared->call_save_columns & ((1u << bit) - 1)) : bit;
+        column = k == index ? base + offset : UINT32_MAX;
         mask &= mask - 1;
     }
     return column < prepared->slot_columns ? prepared->sizes[column] : 0;
@@ -535,10 +540,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     emitted->symbol_access_count = options->symbol_access != 0 ? options->symbol_count : 0;
     prepared->call_abi.stack_alignment_log2 = prepared->call_abi.stack_alignment_log2 > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? prepared->call_abi.stack_alignment_log2 : BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     prepared->call_abi.integer_registers = prepared->call_abi.integer_registers < BUSTER_ABI_INTEGER_ARGUMENTS ? prepared->call_abi.integer_registers : BUSTER_ABI_INTEGER_ARGUMENTS;
-    prepared->call_save_mask = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
-    const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
+    // The general registers' call-save columns: every caller-saved register where the function calls, and the fixed
+    // registers' sequences'. Their rows, after allocation, are those of them a call or a sequence saves (tier1_emit_cfg_saves;
+    // #177): until then, every column's.
+    prepared->call_save_columns = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
+    prepared->call_save_mask = prepared->call_save_columns;
+    const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_columns);
     // The slots' columns: a value's at its node, the general registers' caller-save rows', the opmask registers' (one
-    // per register, whichever the calls save: tier1_emit_cfg_mask_saves), the xmm registers' (#141), the three classes'
+    // per register, whichever the calls save: tier1_emit_cfg_saves), the xmm registers' (#141), the three classes'
     // temporary slots', then each frame object's, live throughout until its lifetime markers say otherwise
     // (tier1_emit_cfg_lifetimes): the IR's slots, and past them the records' objects (tier1_emit_cfg_object_count), which
     // no marker names.
@@ -929,64 +938,66 @@ static bool tier1_emit_cfg_row_masks(const Tier1SelectPlan* plan, uint32_t node)
     return masks.operands != 0 || masks.result || masks.scratch != 0 || masks.named != 0;
 }
 
-// The opmask registers whose masks some call saves (#179), and the xmm registers whose floating values some call saves
-// (#141): each register fragment of a mask or a floating value that covers a call's definition phase, where
-// tier1_emit_cfg_records saves the values that live past the call. The calls in position order, then each fragment's
-// first call at or past its start, by halving. And the opmask registers whose masks a machine row of opmask registers
-// (#141, tier1_emit_cfg_row) may borrow where too few are free: those whose fragments cover such a row's definition phase,
-// the masks' alone (a row borrows no other class's), in a list of their own.
-static Tier1EmitError tier1_emit_cfg_mask_saves(const Tier1SelectPlan* plan, Arena* scratch, Tier1EmitResult* emitted)
+// The registers some call saves, by the allocation, which the frame gives rows: each register fragment that covers a
+// call's definition phase, where tier1_emit_cfg_records saves the values that live past the call, but the call's own
+// result's. The general registers' (#177): a caller-saved one's, which tier1_emit_call stores and loads, and a fixed
+// register's whose fragment covers the definition phase of a sequence that takes it (tier1_emit_cfg_fixed), each of the
+// columns the frame's reservations counted; the rest of the columns take no row, where every caller-saved register's did,
+// in every function that calls. The opmask registers whose masks some call saves (#179), and the xmm registers whose
+// floating values some call saves (#141). The calls in position order, and each fixed register's sequences', then each
+// fragment's first at or past its start, by halving. And the opmask registers whose masks a machine row of opmask
+// registers (#141, tier1_emit_cfg_row) may borrow where too few are free: those whose fragments cover such a row's
+// definition phase, the masks' alone (a row borrows no other class's), in a list of their own.
+static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* scratch, Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
     const Tier1CfgAllocation* cfg = &emitted->cfg;
     const Tier1Allocation* allocation = &cfg->allocation;
     const uint32_t base = 2 * (emitted->cfg_input.block_count - function->block_count);
+    const uint32_t count = function->instruction_count;
+    const uint32_t columns = emitted->prepared.call_save_columns;
     const uint64_t mark = scratch->length;
-    bool ok = true;
-    const bool classes = emitted->prepared.mask_columns != 0 || emitted->prepared.vector_columns != 0;
-    uint32_t* calls = classes && emitted->prepared.call_count != 0 ? ir_allocate(scratch, (uint64_t)emitted->prepared.call_count + 1, 4, &ok) : 0;
-    uint32_t call_count = 0;
+    Tier1EmitSavePositions saves;
+    bool ok = tier1_emit_save_positions(plan, columns, base, emitted->prepared.call_count, emitted->fixed_count, scratch, &saves);
+    const uint32_t* calls = saves.positions;
+    const uint32_t call_count = saves.call_count;
     uint32_t row_count = 0;
-    for (uint32_t node = 0; ok && node < function->instruction_count; node += 1)
+    for (uint32_t node = 0; ok && emitted->prepared.mask_columns != 0 && node < count; node += 1)
     {
-        row_count += emitted->prepared.mask_columns != 0 && tier1_emit_cfg_row_masks(plan, node) ? 1 : 0;
-        if (calls != 0 && tier1_select_function_call(function, node))
-        {
-            calls[call_count++] = base + 2 * node + 1;
-        }
+        row_count += tier1_emit_cfg_row_masks(plan, node) ? 1 : 0;
     }
-    uint32_t* rows = row_count != 0 ? ir_allocate(scratch, (uint64_t)row_count + 1, 4, &ok) : 0;
+    uint32_t* rows = ok && row_count != 0 ? ir_allocate(scratch, (uint64_t)row_count + 1, 4, &ok) : 0;
     row_count = 0;
-    for (uint32_t node = 0; ok && rows != 0 && node < function->instruction_count; node += 1)
+    for (uint32_t node = 0; ok && rows != 0 && node < count; node += 1)
     {
         rows[row_count] = base + 2 * node + 1;
         row_count += tier1_emit_cfg_row_masks(plan, node) ? 1 : 0;
     }
+    uint32_t general_saved = 0;
     uint32_t saved = 0;
     uint32_t vectors_saved = 0;
-    for (uint32_t i = 0; ok && (call_count != 0 || row_count != 0) && i < cfg->intervals.count; i += 1)
+    for (uint32_t i = 0; ok && (saves.positions != 0 || row_count != 0) && i < cfg->intervals.count; i += 1)
     {
         const uint32_t class = cfg->intervals.classes[i];
-        for (uint32_t f = allocation->fragment_offsets[i]; class != BUSTER_TIER1_ALLOCATE_GPR && f < allocation->fragment_offsets[i + 1]; f += 1)
+        const uint32_t own = emitted->cfg_input.definitions[cfg->intervals.values[i]];
+        for (uint32_t f = allocation->fragment_offsets[i]; f < allocation->fragment_offsets[i + 1]; f += 1)
         {
-            for (uint32_t list = 0; list < 2; list += 1)
+            const uint32_t reg = allocation->registers[f];
+            const bool in_register = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
+            // A register found saved isn't searched again: its column is left out.
+            general_saved |= class == BUSTER_TIER1_ALLOCATE_GPR && tier1_emit_fragment_saved(allocation, f, own, columns & ~general_saved, emitted->callee_registers, &saves) ? 1u << reg : 0;
+            for (uint32_t list = 0; class != BUSTER_TIER1_ALLOCATE_GPR && list < 2; list += 1)
             {
                 const uint32_t* positions = list == 0 ? calls : rows;
                 const uint32_t position_count = list == 0 ? call_count : row_count;
-                uint32_t low = 0;
-                uint32_t high = position_count;
-                while (low < high)
-                {
-                    const uint32_t middle = low + (high - low) / 2;
-                    low = positions[middle] < allocation->starts[f] ? middle + 1 : low;
-                    high = positions[middle] < allocation->starts[f] ? high : middle;
-                }
-                const bool covers = low < position_count && positions[low] < allocation->ends[f] && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
-                saved |= class == BUSTER_TIER1_ALLOCATE_MASK && covers && allocation->registers[f] < 8 ? 1u << allocation->registers[f] : 0;
-                vectors_saved |= list == 0 && class == BUSTER_TIER1_ALLOCATE_VECTOR && covers && allocation->registers[f] < 16 ? 1u << allocation->registers[f] : 0;
+                const uint32_t low = tier1_emit_first_at(positions, position_count, allocation->starts[f]);
+                const bool covers = low < position_count && positions[low] < allocation->ends[f] && in_register;
+                saved |= class == BUSTER_TIER1_ALLOCATE_MASK && covers && reg < 8 ? 1u << reg : 0;
+                vectors_saved |= list == 0 && class == BUSTER_TIER1_ALLOCATE_VECTOR && covers && reg < 16 ? 1u << reg : 0;
             }
         }
     }
+    emitted->prepared.call_save_mask = general_saved & columns;
     emitted->prepared.mask_save_mask = saved & BUSTER_TIER1_EMIT_MASK_REGISTERS;
     emitted->prepared.vector_save_mask = vectors_saved & BUSTER_TIER1_EMIT_VECTOR_REGISTERS;
     arena_pop_to(scratch, mark);
@@ -1167,10 +1178,11 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     const uint32_t count = plan->function->instruction_count;
     const uint32_t spills = cfg->allocation.spill_count;
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
+    const uint32_t call_columns = (uint32_t)__builtin_popcount(prepared->call_save_columns);
     const uint32_t mask_slots = (uint32_t)__builtin_popcount(prepared->mask_save_mask);
     const uint32_t vector_slots = (uint32_t)__builtin_popcount(prepared->vector_save_mask);
     const uint32_t temporary = (uint32_t)__builtin_popcount(cfg->temp_slots & ((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1));
-    const uint32_t temporary_columns = call_slots + prepared->mask_columns + prepared->vector_columns;
+    const uint32_t temporary_columns = call_columns + prepared->mask_columns + prepared->vector_columns;
     const uint32_t fixed_columns = temporary_columns + BUSTER_TIER1_ALLOCATE_CLASSES;
     bool ok = true;
     const uint32_t objects = tier1_emit_cfg_object_count(plan->function, prepared);
@@ -1208,25 +1220,29 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
         prepared->ends[node] = end;
         indices[k] = node;
     }
-    // The rows past the spills, each its column: the general registers' call saves, the opmask registers' (one column
-    // per register), the temporary slots used, the frame objects.
+    // The rows past the spills, each its column: the general registers' call saves (those a call or a fixed register's
+    // sequence saves, each its register's column: #177), the opmask registers' (one column per register), the temporary
+    // slots used, the frame objects.
     uint32_t row = spills;
-    for (uint32_t slot = 0; error == TIER1_EMIT_OK && slot < call_slots; slot += 1)
+    for (uint32_t reg = 0; error == TIER1_EMIT_OK && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
-        indices[row++] = count + slot;
+        if (((prepared->call_save_mask >> reg) & 1) != 0)
+        {
+            indices[row++] = count + (uint32_t)__builtin_popcount(prepared->call_save_columns & ((1u << reg) - 1));
+        }
     }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < 8; k += 1)
     {
         if (((prepared->mask_save_mask >> k) & 1) != 0)
         {
-            indices[row++] = count + call_slots + k;
+            indices[row++] = count + call_columns + k;
         }
     }
     for (uint32_t x = 0; error == TIER1_EMIT_OK && x < 16; x += 1)
     {
         if (((prepared->vector_save_mask >> x) & 1) != 0)
         {
-            indices[row++] = count + call_slots + prepared->mask_columns + x;
+            indices[row++] = count + call_columns + prepared->mask_columns + x;
         }
     }
     for (uint32_t class = 0; error == TIER1_EMIT_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
@@ -2348,7 +2364,7 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     const bool paired = error == TIER1_EMIT_OK && tier1_select_row_pairs(row);
     // Where too few opmask registers are free for what the row takes of them (its renamed registers, its mask scratch, a
     // written mask operand's copy and a mask result away from its destination), it borrows registers of masks live past
-    // it, the lowest first, each saved in its row before the row (tier1_emit_cfg_mask_saves gave them rows) and reloaded
+    // it, the lowest first, each saved in its row before the row (tier1_emit_cfg_saves gave them rows) and reloaded
     // after it.
     uint32_t mask_need = paired ? 0 : (uint32_t)__builtin_popcount(masks.named);
     mask_need += masks.scratch;
@@ -3766,7 +3782,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     }
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_cfg_mask_saves(plan, scratch, emitted);
+        error = tier1_emit_cfg_saves(plan, scratch, emitted);
     }
     if (error == TIER1_EMIT_OK)
     {
