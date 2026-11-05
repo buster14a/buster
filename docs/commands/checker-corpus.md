@@ -17,7 +17,12 @@ presumed file and line, and the scalar and vector paths, column by column.
 After a missing declaration semicolon, it uses the driver's `check_prefix_resume`
 view before making a prefix or repair. Later declarations are checked in that
 view, while the original parse rejection remains final. Diagnostic ordering uses
-the shared preprocessor positions so inserted tokens cannot reorder errors.
+the shared preprocessor positions so inserted or discarded tokens cannot reorder
+errors. K&R parameter declarations also retain their declared parameter before
+skipping a malformed tail to its semicolon or the function body. Each such
+header is reparsed before later repairs are considered; the existing token-work
+budget bounds the rounds. The retained view records both inserted semicolons and
+discarded tokens. Recovery does not move semantic pragmas out of a discarded tail.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
 names the checked source makes; a difference must have one of three documented

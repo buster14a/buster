@@ -23,6 +23,10 @@ static void check_test_corpus_resumed_declarations(CheckTest* test, const char* 
         { "int a\n#pragma clang diagnostic ignored \"-Wunknown-attributes\"\nint b __attribute__((unknown));\n", 1, true, 0 },
         { "int a\n#pragma pack(1)\nconst;\n", 0, false, 0 },
         { "int a;\nint f(void){return 1 +;}\n", 0, false, 0 },
+        { "int h(a) int a const; {return a;}\n", 1, true, 0 },
+        { "int h(a) int a {return a;}\n", 1, true, 0 },
+        { "int h(a,b) int a const; int b volatile; {return a+b;}\n", 2, true, 0 },
+        { "int h(a) int a const; {return a;}\nint b __attribute__((unknown));\n", 1, true, 2 },
     };
     const PPOptions options =
     {
@@ -52,7 +56,7 @@ static void check_test_corpus_resumed_declarations(CheckTest* test, const char* 
             const bool resumed = path.resumed != NULL && path.resumed->status == CHECK_PREFIX_READY;
             const bool shape = fixtures[f].insertions != 0 ? resumed && path.resumed->inserted == fixtures[f].insertions &&
                                (path.resumed->parser.errors == 0) == fixtures[f].whole : !resumed;
-            const bool all_tokens = !fixtures[f].whole || (path.input.token_count == parser.tokens.count + fixtures[f].insertions);
+            const bool all_tokens = !fixtures[f].whole || (resumed && path.input.token_count == parser.tokens.count + fixtures[f].insertions - path.resumed->discarded);
             const bool warning = fixtures[f].warning_line == 0 || path.first_warning_line == fixtures[f].warning_line;
             char description[1024];
             snprintf(description, sizeof(description), "corpus recovery fixture %u path %u: Clang %u:%u %s, checker %u:%u %s, inserted %u",

@@ -1107,6 +1107,12 @@ struct ParseDiagnostic
     // A missing `;` after a declaration's declarator before what clang takes for a declaration specifier (#147): clang's
     // ParseDeclGroup goes on as if the `;` were there, and reads the specifier as the next declaration's first.
     bool resumed;
+    // A balanced malformed type-name tail is removed without inserting a declaration terminator.
+    bool resume_delete;
+    // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
+    // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
+    // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
+    uint32_t resume_end;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1500,6 +1506,8 @@ struct ParseScalar
     uint8_t error_place;
     // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).
     bool error_resumed;
+    bool error_resume_delete;
+    uint32_t error_resume_end;
     // The diagnostics, in order.
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
@@ -3923,7 +3931,30 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // A K&R definition's parameter declaration: its declarator is checked, then only `,` or `;` may come (no
         // initializer, asm label or body), as clang reads it.
         parse_scalar_complete_declarator(parser, declaration, false);
+        const bool first_error = parser->error_token == BUSTER_PARSE_NONE;
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AFTER_PREVIOUS);
+        // Clang's K&R recovery keeps this parameter, then skips to its semicolon or the function body. Record only
+        // a proven balanced tail; the diagnostic adapter reparses a separate view before any semantic walk uses it.
+        uint32_t tail = i;
+        bool balanced = true;
+        while (first_error && balanced && tail < parser->count && parser->kinds[tail] != PARSE_KIND_SEMI && parser->kinds[tail] != PARSE_KIND_L_BRACE)
+        {
+            const uint8_t next = parser->kinds[tail];
+            if (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE)
+            {
+                tail = parse_scalar_skip_group(parser, tail, &balanced);
+            }
+            else
+            {
+                balanced = !parse_kind_is_closer(next);
+                tail += 1;
+            }
+        }
+        if (first_error && balanced && tail < parser->count)
+        {
+            parser->error_resumed = true;
+            parser->error_resume_end = tail + (parser->kinds[tail] == PARSE_KIND_SEMI);
+        }
     }
     else if (kind == PARSE_KIND_EQUAL && group == PARSE_ROLE_OPEN_STRUCT)
     {
@@ -5438,6 +5469,8 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->kept_count = 0;
     parser->error_token = BUSTER_PARSE_NONE;
     parser->error_resumed = false;
+    parser->error_resume_delete = false;
+    parser->error_resume_end = 0;
 }
 
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
@@ -5447,7 +5480,8 @@ static void parse_scalar_reset(ParseScalar* parser)
 // declaration's (#147): the parse goes on there, so that the next declaration's errors are clang's too.
 static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 {
-    const bool resumed = parser->error_resumed && parser->frame_count == 1 && stopped == parser->error_token && stopped > parser->item_begin;
+    const bool resumed = parser->error_resumed && parser->error_resume_end == 0 && parser->frame_count == 1 &&
+                         stopped == parser->error_token && stopped > parser->item_begin;
     if (parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -5458,6 +5492,8 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .error = true,
             .note = parser->error_note,
             .resumed = parser->error_resumed,
+            .resume_delete = parser->error_resume_delete,
+            .resume_end = parser->error_resume_end,
         };
         parser->diagnostic_count += 1;
     }

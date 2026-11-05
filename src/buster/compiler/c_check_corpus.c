@@ -2263,14 +2263,15 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
     bool equal = (a->resumed == NULL) == (b->resumed == NULL);
     if (equal && a->resumed != NULL)
     {
-        equal = a->resumed->status == b->resumed->status && a->resumed->inserted == b->resumed->inserted &&
+        equal = a->resumed->status == b->resumed->status && a->resumed->inserted == b->resumed->inserted && a->resumed->discarded == b->resumed->discarded &&
                 a->resumed->diagnostic_count == b->resumed->diagnostic_count;
         for (uint32_t i = 0; equal && i < a->resumed->diagnostic_count; i += 1)
         {
             const ParseDiagnostic* left = a->resumed->diagnostics + i;
             const ParseDiagnostic* right = b->resumed->diagnostics + i;
             equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
-                    left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed;
+                    left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed &&
+                    left->resume_delete == right->resume_delete && left->resume_end == right->resume_end;
         }
     }
     equal = equal && check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&

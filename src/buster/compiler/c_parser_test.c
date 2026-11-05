@@ -2307,7 +2307,8 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
         {
             const ParseDiagnostic* a = &full->diagnostics[d];
             const ParseDiagnostic* b = &tree.diagnostics[d];
-            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error;
+            same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error &&
+                   a->note == b->note && a->resumed == b->resumed && a->resume_delete == b->resume_delete && a->resume_end == b->resume_end;
         }
         if (same && parsed)
         {
@@ -3353,7 +3354,8 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
     {
         const ParseDiagnostic* x = &a->diagnostics[d];
         const ParseDiagnostic* y = &b->diagnostics[d];
-        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ? "diagnostics" : 0;
+        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ||
+                 x->note != y->note || x->resumed != y->resumed || x->resume_delete != y->resume_delete || x->resume_end != y->resume_end ? "diagnostics" : 0;
     }
     return result;
 }
