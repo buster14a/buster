@@ -6093,6 +6093,29 @@ arguments against the function. The checker now gives these as clang does.
   declarations' (`check_input_attribute_merge_exclusions`) after the
   attributes it drops after the definition, as clang's `mergeDeclAttributes`
   does.
+- **Block-scope redeclarations** (`check_input_declaration_visible`). Of an
+  entity's earlier declarations, a redeclaration's attributes are checked
+  against those clang's lookup finds: the file scope's and an enclosing
+  block's, not another body's nor a closed block's (and every earlier one
+  where none is visible, as clang's `findLocallyScopedExternCDecl` finds a
+  closed block's extern). A block's attributes never reach the definition's,
+  which the attributes after it are checked against: the late masks take file
+  scope's alone. Each attributed block-scope declaration with linkage records
+  its scope's end (`CheckInputReader.declaration_scope_ends`, allocated at the
+  first).
+- **Bodies on lanes** (`check_input_attribute_late`). A body read on a lane
+  can't read its entity's other declarations' attributes, which other lanes'
+  columns hold, nor publish its own to later ones. A redeclaration there that
+  writes an attribute clang drops after a definition
+  (`check_input_attribute_after_kind`) or one of a mutual exclusion sends the
+  unit to source order ("a body's redeclaration has attributes its entity's
+  other declarations decide"), as the late kinds' did already; one it inherits
+  (naked) doesn't. Measured in a cloud container with `-c --deferred-bodies
+  --lanes 4 --time-stages`: none of the 220 c-testsuite units it reports on
+  (45 merged on lanes, 175 too small for them) gives this reason, nor does a
+  unit of 19 glibc headers with their extern inline functions (merged). So
+  source order costs nothing measured there, where publishing the attribute
+  state across lanes would take a merge of its own.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers
     (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
@@ -6153,10 +6176,8 @@ arguments against the function. The checker now gives these as clang does.
     (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
     clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
     that print such a type differ the same way.
-  - A body checked on a lane doesn't warn of attributes after a definition, nor
-    check mutual exclusions across redeclarations: both need the earlier
-    declarations' attributes, which a lane doesn't publish
-    (`check_input_lane_refuse`'s linked state).
+  - A block-scope declaration whose attributes are set after it binds (by a
+    constant's job) records no scope, and is taken as a file scope's.
   - A supported attribute's argument count is checked after its subject, as
     clang's (`int x __attribute__((format(printf)));` is the subject's
     warning alone), and after the errors clang's parser gives of its
@@ -6196,6 +6217,10 @@ arguments against the function. The checker now gives these as clang does.
   - an attribute's count after its subject and its arguments' parser
     errors, with or without arguments, and a declarator's type's convention
     warnings before the declaration's attributes'.
+  - bodies' redeclarations with attributes after a definition and of mutual
+    exclusions, against the declarations each sees, by both paths and with the
+    bodies on 1, 2 and 4 lanes (`check_test_driver_lane_attributes`,
+    `c_check_lane_attribute_driver_test.c`).
 
   `test-checker` checks the exclusions table's order and pairs, and that the
   facts tell C's attributes from another language's.
