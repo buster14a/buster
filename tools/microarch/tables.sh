@@ -153,13 +153,27 @@ for h in "${hosts[@]}"; do
     echo
     echo "| independent compiles | batch wall ms (median of 4) | MB/s | user ms per compile | system ms per compile | package J per compile |"
     echo "| ---: | ---: | ---: | ---: | ---: | ---: |"
-    for k in $(awk -F'\t' 'NR > 1 { print $3 }' "$s/fanout.tsv" | sort -n | uniq); do
+    # A fanout record may survive a failed outer perf measurement. It is a
+    # sample only when that measurement also committed its CSV.
+    fanout_rows=""
+    while IFS=$'\t' read -r label round workers failures wall user system rest; do
+        [[ $label == fanout"$workers"-r* && $failures == 0 ]] || continue
+        r=${label##*-r}
+        [[ $r =~ ^[0-9]+$ && -f $s/fanout-energy-$workers.r$r.csv.done ]] || continue
+        fanout_rows+="$label"$'\t'"$round"$'\t'"$workers"$'\t'"$failures"$'\t'"$wall"$'\t'"$user"$'\t'"$system"$'\t'"$rest"$'\n'
+    done < "$s/fanout.tsv"
+    for k in $(awk -F'\t' 'NF > 1 { print $3 }' <<< "$fanout_rows" | sort -n | uniq); do
         energy_files=()
-        for f in "$s"/fanout-energy-"$k".r*.csv; do [[ -f $f.done ]] && energy_files+=("$f"); done
+        while IFS=$'\t' read -r label round workers failures rest; do
+            [[ $workers == "$k" ]] || continue
+            r=${label##*-r}
+            f=$s/fanout-energy-$k.r$r.csv
+            [[ -f $f ]] && energy_files+=("$f")
+        done <<< "$fanout_rows"
         energy=$(awk -F, '$3 ~ /energy-pkg/ { print $1 }' /dev/null "${energy_files[@]}" | median)
-        wall=$(awk -F'\t' -v k="$k" 'NR > 1 && $3 == k { print $5 }' "$s/fanout.tsv" | median)
-        awk -F'\t' -v k="$k" -v bytes=$SQLITE_BYTES -v energy="$energy" -v m="$wall" 'NR > 1 && $3 == k { n += 1; u += $6; s += $7 }
-            END { if (n > 0 && m > 0) printf "| %d | %.1f | %.1f | %.1f | %.1f | %s |\n", k, m, k * bytes / m / 1000, u / n / k, s / n / k, (energy == "" ? "" : sprintf("%.2f", energy / k)) }' "$s/fanout.tsv"
+        wall=$(awk -F'\t' -v k="$k" '$3 == k { print $5 }' <<< "$fanout_rows" | median)
+        awk -F'\t' -v k="$k" -v bytes=$SQLITE_BYTES -v energy="$energy" -v m="$wall" '$3 == k { n += 1; u += $6; s += $7 }
+            END { if (n > 0 && m > 0) printf "| %d | %.1f | %.1f | %.1f | %.1f | %s |\n", k, m, k * bytes / m / 1000, u / n / k, s / n / k, (energy == "" ? "" : sprintf("%.2f", energy / k)) }' <<< "$fanout_rows"
     done
     echo
 done

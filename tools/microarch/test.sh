@@ -374,11 +374,15 @@ expect '[[ $status -eq 0 ]] && ! grep -q "^| a |" "$work/tables.md" && ! grep -q
 UARCH=$ROOT/uarch tables
 expect '[[ $status -eq 0 ]] && grep -q "^| a |" "$work/tables.md" && grep -q "^| single |" "$work/tables.md"' "tables: committed energy and uncore included"
 printf '999,,energy-pkg,1000000000\n' > "$results/scaling/fanout-energy-1.r99.csv"
+printf 'fanout1-r99\t0\t1\t0\t99999\t99999\t99999\t1\t0\n' >> "$results/scaling/fanout.tsv"
+printf 'fanout1-r98\t0\t1\t1\t99999\t99999\t99999\t1\t0\n' >> "$results/scaling/fanout.tsv"
+printf '999,,energy-pkg,1000000000\n' > "$results/scaling/fanout-energy-1.r98.csv"
+: > "$results/scaling/fanout-energy-1.r98.csv.done"
 UARCH=$ROOT/uarch tables
-expect '! grep -q "999.00" "$work/tables.md"' "tables: unfinished fanout energy excluded"
+expect '! grep -q "999" "$work/tables.md"' "tables: failed and uncommitted fanout batches excluded"
 rm -f -- "$results/scaling"/fanout-energy-1.r*.csv.done
 UARCH=$ROOT/uarch tables
-expect 'grep -q "^| 1 |.* |  |$" "$work/tables.md"' "tables: missing fanout energy is blank rather than zero"
+expect '! grep -q "^| 1 |" "$work/tables.md"' "tables: fanout records with no committed energy are excluded"
 
 # pack.sh: every raw file in the archive; a failing or lossy tar fails the pack.
 if command -v zstd > /dev/null; then
