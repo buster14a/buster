@@ -7210,8 +7210,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     const uint32_t previous = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
                     if (previous != 0)
                     {
-                        const uint32_t declaration = reader->bindings.declaration[previous - 1];
-                        check_input_set_linkage(reader->declaration_bits, name, check_input_linkage(reader->declaration_bits, declaration) != 0 ? check_input_linkage(reader->declaration_bits, declaration) : check_input_linkage(reader->declaration_bits, name));
+                        uint32_t declaration = reader->bindings.declaration[previous - 1];
+                        if (function && check_input_overload_active(reader, name))
+                        {
+                            const uint32_t head = reader->bindings.kind[previous - 1] == C_BINDING_FUNCTION ? reader->output->overload_heads[declaration] : 0;
+                            const CheckOverloadCandidate* visible = head != 0 ? reader->overload_candidates + head - 1 : NULL;
+                            const CheckOverloadCandidate* prior = visible != NULL ? check_input_overload_prior(reader, name, type, visible->scope) : NULL;
+                            declaration = prior != NULL ? prior->declaration : BUSTER_CHECK_NONE;
+                        }
+                        if (declaration != BUSTER_CHECK_NONE && check_input_linkage(reader->declaration_bits, declaration) != 0)
+                        {
+                            check_input_set_linkage(reader->declaration_bits, name, check_input_linkage(reader->declaration_bits, declaration));
+                        }
                     }
                 }
                 // GNU's weak attribute needs external linkage (#147). A redeclaration of an already defined linked
@@ -7367,21 +7377,8 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         TypeId previous = 0;
         if (overload)
         {
-            uint64_t signature_hash = 0;
-            const bool hashed = check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
-            const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
-            signature_hash = attributes != NULL && attributes->object_sizes != NULL ? type_hash_mix(signature_hash, 1) : signature_hash;
-            reader->output->resource |= !hashed;
-            const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-            const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
-            for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); previous == 0 && linked != UINT32_MAX; linked = reader->overload_index.linked_next[linked])
-            {
-                const CheckOverloadCandidate* candidate = reader->overload_candidates + linked;
-                const bool same_sizes = (candidate->object_sizes != NULL) == (attributes != NULL && attributes->object_sizes != NULL);
-                const TypeAnswer signature = same_sizes ? check_overload_signature(reader->types, candidate->type, type) : TYPE_ANSWER_NO;
-                reader->output->resource |= signature == TYPE_ANSWER_FULL;
-                previous = signature == TYPE_ANSWER_YES ? candidate->type : 0;
-            }
+            const CheckOverloadCandidate* prior = check_input_overload_prior(reader, token, type, UINT32_MAX);
+            previous = prior != NULL ? prior->type : 0;
         }
         else if (old != 0 && reader->bindings.kind[old - 1] == C_BINDING_FUNCTION)
         {

@@ -93,7 +93,10 @@ on scalar/vector and eager/lazy header paths. It exercises copying, formatted
 output, an ordinary function address, file reads, wide conversion, polling and
 socket I/O. Direct builtin, ABI, symbol and overflow tests remain independent.
 The suite also links two translation units containing the same wrappers and
-checks writable-format `%n` rejection through the real stdio headers.
+checks writable-format `%n` rejection through the real stdio headers. The
+`mbstowcs` case validates object emission and execution through Clang's linker:
+the direct executable binder separately rejects two external asm-label
+declarations naming the same libc symbol, including without fortification.
 
 ## Validation
 

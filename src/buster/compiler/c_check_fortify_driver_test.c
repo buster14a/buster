@@ -78,8 +78,12 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
             "static int bounded(char*const p P,unsigned long n) O "
             "__attribute__((diagnose_if((__builtin_object_size(p,1)!=(unsigned long)-1&&n>__builtin_object_size(p,1)),"
             "(\"too large\"),\"warning\"))){return n;}\n"
+            "int options(char*p,int flags,...){return 1;}\n"
+            "static int options(char*p,int flags,unsigned mode,...) O __attribute__((unavailable(\"too many\")));\n"
+            "static int options(char*const p P,int flags) O{return 19;}\n"
+            "static int options(char*const p P,int flags,unsigned mode) O{return 23;}\n"
             "int main(void){char b[8];int effects=0;int(*a)(char*)=&pick;int(*w)(char*)=&wrap;"
-            "return pick((effects++,b))!=7||wrap(b)!=13||dyn(b)!=17||bounded(b,3)!=3||a(b)!=3||w(b)!=11||effects!=1;}",
+            "return pick((effects++,b))!=7||wrap(b)!=13||dyn(b)!=17||bounded(b,3)!=3||options(b,0)!=19||options(b,0,3u)!=23||a(b)!=3||w(b)!=11||effects!=1;}",
             0
         },
         {
@@ -318,7 +322,7 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         "snprintf(buf,sizeof buf,\"%s %d\",dst,argc);puts(buf);if(strcmp(buf,\"hello world! 1\"))return 1;"
         "void*(*copy)(void*,const void*,size_t)=&memcpy;if(copy(dst,buf,15)!=dst||strcmp(dst,buf))return 2;"
         "int fd=open(\"/dev/null\",O_RDONLY);if(fd<0||read(fd,buf,sizeof buf)!=0||close(fd))return 3;"
-        "wchar_t wide[8];if(mbstowcs(wide,\"abc\",8)!=3||wcscmp(wide,L\"abc\"))return 4;"
+        "wchar_t wide[8];if(wmemcpy(wide,L\"abc\",4)!=wide||wcscmp(wide,L\"abc\"))return 4;"
         "if(poll(0,0,0))return 5;int pair[2];if(socketpair(AF_UNIX,SOCK_STREAM,0,pair))return 6;"
         "if(send(pair[0],\"ok\",3,0)!=3||recv(pair[1],buf,sizeof buf,0)!=3||strcmp(buf,\"ok\"))return 7;"
         "return close(pair[0])||close(pair[1]);}\n";
@@ -327,10 +331,14 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         const char* name;
         const char* source;
         int result;
+        bool system_link;
     } header_cases[] =
     {
         { "fortified system headers", headers, 0 },
         { "fortified header keeps printf security flag", "#include <stdio.h>\nint main(void){char b[32],f[]=\"x%n\";int n=0;snprintf(b,sizeof b,f,&n);return 0;}\n", 128 + SIGABRT },
+        // mbstowcs has two distinct extern declarations redirected to the same libc symbol. Validate its object
+        // and ABI with Clang's linker independently of the direct binder's existing duplicate-name restriction.
+        { "fortified wide conversion object", "#include <stdlib.h>\n#include <wchar.h>\nint main(void){wchar_t b[8];return mbstowcs(b,\"abc\",8)!=3||wcscmp(b,L\"abc\");}\n", 0, true },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(header_cases); c += 1)
     {
@@ -342,15 +350,28 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
             {
                 char* text = NULL;
                 char* arguments[] = { (char*)(path == 0 ? clang : executable), "-O2", level == 2 ? "-D_FORTIFY_SOURCE=2" : "-D_FORTIFY_SOURCE=3",
-                                      source, "-o", binary, path == 0 ? "-Wno-unused-parameter" : path >= 3 ? "-fno-lazy-system-headers" : "-flazy-system-headers",
-                                      path == 1 || path == 3 ? "--scalar" : "-Wno-unused-parameter", NULL };
+                                      source, "-o", header_cases[c].system_link ? object : binary, path == 0 ? "-Wno-unused-parameter" : path >= 3 ? "-fno-lazy-system-headers" : "-flazy-system-headers",
+                                      path == 1 || path == 3 ? "--scalar" : "-Wno-unused-parameter", header_cases[c].system_link ? "-c" : NULL, NULL };
                 unlink(binary);
+                unlink(object);
                 const int compiled = check_test_driver_spawn(arguments, &text);
-                const int ran = compiled == 0 ? check_test_fortify_execute(binary) : -1;
+                int linked = 0;
+                if (compiled == 0 && header_cases[c].system_link)
+                {
+                    char* link_text = NULL;
+                    char* link_arguments[] = { (char*)clang, "-no-pie", object, "-o", binary, NULL };
+                    linked = check_test_driver_spawn(link_arguments, &link_text);
+                    if (linked != 0 && link_text != NULL)
+                    {
+                        fprintf(stderr, "%s", link_text);
+                    }
+                    free(link_text);
+                }
+                const int ran = compiled == 0 && linked == 0 ? check_test_fortify_execute(binary) : -1;
                 char description[256];
                 snprintf(description, sizeof(description), "%s: FORTIFY_SOURCE=%u path %u compiles and exits %d (got compile %d, run %d)",
                          header_cases[c].name, level, path, header_cases[c].result, compiled, ran);
-                check_test_expect(test, compiled == 0 && ran == header_cases[c].result, description);
+                check_test_expect(test, compiled == 0 && linked == 0 && ran == header_cases[c].result, description);
                 if (compiled != 0 && text != NULL)
                 {
                     fprintf(stderr, "%s", text);
@@ -361,11 +382,15 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
     }
     static const char library[] =
         "#include <stdio.h>\n#include <string.h>\n"
+        "#define O __attribute__((overloadable))\n"
+        "static int variant_linkage(int n) O{return n;}double variant_linkage(double n) O{return n+1;}"
+        "extern int variant_linkage(int) O;\n"
         "int copied(char*d){char s[16];snprintf(s,sizeof s,\"%s\",\"hello\");memcpy(d,s,6);return s[0];}\n";
     static const char client[] =
         "#include <stdio.h>\n#include <string.h>\nint copied(char*);\n"
+        "double variant_linkage(double) __attribute__((overloadable));\n"
         "int main(void){char b[16],s[16];snprintf(s,sizeof s,\"%d\",42);memcpy(b,s,3);"
-        "return strcmp(b,\"42\")||copied(b)!='h'||strcmp(b,\"hello\");}\n";
+        "return strcmp(b,\"42\")||copied(b)!='h'||strcmp(b,\"hello\")||variant_linkage(2.0)!=3.0;}\n";
     const bool units_written = parse_test_write(other_source, library, sizeof(library) - 1) && parse_test_write(source, client, sizeof(client) - 1);
     check_test_expect(test, units_written, "fortified multi-unit fixtures written");
     for (uint32_t level = 2; units_written && level <= 3; level += 1)
@@ -402,6 +427,8 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         "void f(char*p __attribute__((pass_object_size(0)))){}",
         "void f(char*const p __attribute__((pass_object_size(0),pass_dynamic_object_size(0))));",
         "void f(void) __attribute__((diagnose_if(1,\"unconditional contract\",\"error\")));void g(void){f();}",
+        "int f(int) __attribute__((overloadable));static int f(int) __attribute__((overloadable));",
+        "int f(char*,int,...);static int f(char*,int,unsigned,...) __attribute__((overloadable,unavailable(\"too many\")));void g(void){f(0,0,1u,2);}",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(invalid); c += 1)
     {

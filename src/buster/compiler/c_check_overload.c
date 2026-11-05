@@ -108,7 +108,7 @@ static bool check_overload_candidate_valid(const TypeTable* table, const CheckOv
     if (valid && candidate->object_sizes != NULL)
     {
         uint32_t count = 0;
-        type_parameters(table, candidate->type, &count);
+        type_parameters(table, type_strip_aligned(table, candidate->type), &count);
         valid = count != 0 && count == candidate->object_size_count;
         for (uint32_t p = 0; valid && p < count; p += 1)
         {
