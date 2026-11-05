@@ -402,9 +402,21 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     char needed[256] = { 0 };
     check_test_expect(test, written && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libm.so.6 libc.so.6") == 0,
                       "libm.so.6 needed before libc.so.6");
-    char expected[256];
-    const double logarithm = lgamma(-0.5);
-    snprintf(expected, sizeof(expected), "%f %f %f %f %f %d\n", sin(2), sqrt(2.0), pow(2.0, 10.0), cos(0.5), logarithm, signgam);
+    // The host libm's results, from test_libm (#652): lgamma sets that libm's signgam.
+    double (*const libm_sin)(double) = (double (*)(double))test_libm("sin");
+    double (*const libm_sqrt)(double) = (double (*)(double))test_libm("sqrt");
+    double (*const libm_pow)(double, double) = (double (*)(double, double))test_libm("pow");
+    double (*const libm_cos)(double) = (double (*)(double))test_libm("cos");
+    double (*const libm_lgamma)(double) = (double (*)(double))test_libm("lgamma");
+    const int* const libm_signgam = (const int*)test_libm("signgam");
+    const bool oracle = libm_sin != NULL && libm_sqrt != NULL && libm_pow != NULL && libm_cos != NULL && libm_lgamma != NULL && libm_signgam != NULL;
+    check_test_expect(test, oracle, "find libm's functions for the program's expected output");
+    char expected[256] = { 0 };
+    if (oracle)
+    {
+        const double logarithm = libm_lgamma(-0.5);
+        snprintf(expected, sizeof(expected), "%f %f %f %f %f %d\n", libm_sin(2), libm_sqrt(2.0), libm_pow(2.0, 10.0), libm_cos(0.5), logarithm, *libm_signgam);
+    }
     char captured[256] = { 0 };
     FILE* output = written ? popen(outputs[0], "r") : NULL;
     const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
@@ -484,8 +496,9 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return where its
-// unwinding isn't made (a variadic function's, one within an expression, one beside a musttail call); the constant
-// strings' objects, which clang makes and this compiler doesn't; z/OS's va_start and
+// unwinding isn't made (a variadic function's, one within an expression, one beside a musttail call), and an NSString of
+// no literal, which clang's code reads as one
+// (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
 // vector); dump_struct's generated calls; and
@@ -508,31 +521,20 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_eh_return within an expression, not a statement of its own" },
         { "int g(void* p, int c);\nint f(void* p, int c) { if (c) __builtin_eh_return(8, p); __attribute__((musttail)) return g(p, c); }\n",
           "unsupported: a musttail call in a function that calls __builtin_eh_return" },
-        { "const void* f(void) { return __builtin___CFStringMakeConstantString(\"x\"); }\n",
-          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
-          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
+          "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
         { "void f(char** a, char** b) { __builtin_zos_va_copy(a, b); }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
-        { "int g(void);\nvoid* f(void* b) { return __builtin_os_log_format(b, \"%1$d %1$d\", g()); }\n",
-          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
-          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
-        { "int g(void);\nvoid* f(void* b, int n) { return __builtin_os_log_format(b, \"%1$d %2$d %1$d\", n, g()); }\n",
-          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
-          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
-        { "void* f(void* b, __float128 q) { return __builtin_os_log_format(b, \"%f\", q); }\n",
-          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
-          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
-        { "typedef char V __attribute__((vector_size(2)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
-          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
-          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
         { "typedef float V __attribute__((vector_size(32)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
-          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
-          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
-        { "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s) { __builtin_dump_struct(s, printf); }\n",
-          "unsupported: __builtin_dump_struct, whose calls of its printing function this compiler doesn't make" },
+          "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
+        { "void* f(void* b, _BitInt(200) w) { return __builtin_os_log_format(b, \"%d\", w); }\n",
+          "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
+        { "struct S { int a; };\nstruct T { int x; } g(const char*, ...);\nvoid f(struct S* s) { __builtin_dump_struct(s, g); }\n",
+          "unsupported: __builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" },
+        { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",
+          "unsupported: __builtin_dump_struct whose printer or other arguments have a statement expression or more than 4096 nodes, which its calls evaluate again" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
           "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
     };
@@ -1080,6 +1082,210 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
     unlink(outputs[0]);
     unlink(outputs[1]);
     unlink(outputs[2]);
+}
+
+// __builtin_dump_struct by the driver (#148): a program of clang's dumps of records (every kind of field: the integer types,
+// bool and the character types as numbers, size_t's, ptrdiff_t's and intmax_t's typedefs, enums, the floating types,
+// strings, pointers, arrays, bit-fields and unnamed ones, anonymous members, nested and unnamed records with their
+// scopes (a pointer member's record's too), those of records in functions, of parameters, of no written prototype,
+// unions, vectors, a packed record, _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its
+// typedefs), through printf, a variadic
+// printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer through a
+// pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls, the rest of the
+// arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and without it, each
+// printing what clang's build does.
+static void check_test_driver_dump_struct(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] =
+                                  "#include <stdarg.h>\n"
+                                  "#include <stddef.h>\n"
+                                  "#include <stdint.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <string.h>\n"
+                                  "typedef struct { int q; short r; } Anon;\n"
+                                  "typedef struct Point { int x, y; } Point;\n"
+                                  "enum Color { RED, GREEN };\n"
+                                  "enum Neg { MINUS = -1 };\n"
+                                  "typedef enum { A1, B1 } AnonE;\n"
+                                  "typedef unsigned long mysize;\n"
+                                  "typedef size_t wrapped;\n"
+                                  "typedef const char *cstr;\n"
+                                  "typedef cstr cstr2;\n"
+                                  "typedef float V4 __attribute__((vector_size(16)));\n"
+                                  "typedef int I4 __attribute__((vector_size(16)));\n"
+                                  "typedef int E2 __attribute__((ext_vector_type(2)));\n"
+                                  "typedef double D2 __attribute__((vector_size(16)));\n"
+                                  "typedef signed char C16 __attribute__((vector_size(16)));\n"
+                                  "typedef long L2 __attribute__((vector_size(16)));\n"
+                                  "typedef unsigned short S8 __attribute__((vector_size(16)));\n"
+                                  "struct S {\n"
+                                  "    _Bool b; char c; signed char sc; unsigned char uc; short s; unsigned short us;\n"
+                                  "    int i; unsigned u; long l; unsigned long ul; long long ll; unsigned long long ull;\n"
+                                  "    float f; double d; long double ld;\n"
+                                  "    const char *str; char *mstr; signed char *sstr; const unsigned char *ustr; void *vp; int *ip; cstr2 s2; const cstr cs;\n"
+                                  "    int arr[3]; char carr[4];\n"
+                                  "    uint32_t u32; size_t sz; wrapped wsz; mysize ms; int8_t i8; ptrdiff_t pd; intmax_t im; uintmax_t um;\n"
+                                  "    enum Color col; enum Neg ng; AnonE ae;\n"
+                                  "    Point p; Anon an; struct Point *pp; const volatile int cvi;\n"
+                                  "    int bf : 3; unsigned ubf : 5; int : 4; _Bool bb : 1; long long lbf : 40; unsigned long long ubig : 63; enum Color cbf : 2;\n"
+                                  "    struct { int ia; union { int ib; float fc; }; struct { char deep; }; };\n"
+                                  "    struct { int named_in; } named;\n"
+                                  "    union U { int x; char y; } un;\n"
+                                  "    __int128 i128; _Complex double cd; _Atomic int at; int (*fp)(int); unsigned _BitInt(40) ub; Point pts[2];\n"
+                                  "    V4 v4; I4 i4;\n"
+                                  "};\n"
+                                  "struct __attribute__((packed)) Packed { char a; int b : 7; unsigned c : 20; long long d; };\n"
+                                  "struct Vec { E2 e; D2 d; C16 c; L2 l; S8 s; };\n"
+                                  "struct O { struct I { int a; } i; struct { int b; struct { int c; } deep; } un; union { int d; } u2; };\n"
+                                  "typedef struct { struct { int e; } in; } T;\n"
+                                  "static const char *base;\n"
+                                  "static int pr(int tag, const char *f, ...)\n"
+                                  "{\n"
+                                  "    va_list ap;\n"
+                                  "    va_start(ap, f);\n"
+                                  "    printf(\"<%d>\", tag);\n"
+                                  "    for (const char *p = f; *p; p++)\n"
+                                  "    {\n"
+                                  "        if (*p != '%') { putchar(*p); continue; }\n"
+                                  "        char spec[32]; int n = 0; spec[n++] = *p++;\n"
+                                  "        while (strchr(\"-+ #0123456789.\", *p)) spec[n++] = *p++;\n"
+                                  "        int v = 0; if (*p == 'v') { v = 1; p++; while (*p >= '0' && *p <= '9') p++; }\n"
+                                  "        char len[3] = { 0 }; int ln = 0; while (strchr(\"hlLzjt\", *p)) len[ln++] = *p, spec[n++] = *p++;\n"
+                                  "        char c = *p; spec[n++] = c; spec[n] = 0;\n"
+                                  "        if (v && c == 'f') { V4 x = va_arg(ap, V4); printf(\"[%g %g %g %g]\", x[0], x[1], x[2], x[3]); }\n"
+                                  "        else if (v) { I4 x = va_arg(ap, I4); printf(\"[%d %d %d %d]\", x[0], x[1], x[2], x[3]); }\n"
+                                  "        else if (c == 's') { const char *s = va_arg(ap, const char *); printf(spec, s ? s : \"(null)\"); }\n"
+                                  "        else if (c == 'p') { const char *q = va_arg(ap, const char *); if (q) printf(\"@%ld\", (long)(q - base)); else printf(\"nil\"); }\n"
+                                  "        else if (c == 'f' && len[0] == 'L') printf(spec, va_arg(ap, long double));\n"
+                                  "        else if (c == 'f') printf(spec, va_arg(ap, double));\n"
+                                  "        else if (!strcmp(len, \"ll\")) printf(spec, va_arg(ap, long long));\n"
+                                  "        else if (len[0] == 'l' || len[0] == 'z' || len[0] == 'j' || len[0] == 't') printf(spec, va_arg(ap, long));\n"
+                                  "        else printf(spec, va_arg(ap, int));\n"
+                                  "    }\n"
+                                  "    va_end(ap);\n"
+                                  "    return 0;\n"
+                                  "}\n"
+                                  "static int calls;\n"
+                                  "static int next(void) { return calls++; }\n"
+                                  "typedef int (*P)(int, const char *, ...);\n"
+                                  "static P get(void) { printf(\"get\\n\"); return pr; }\n"
+                                  "static int kr();\n"
+                                  "static int kr(tag, f) int tag; const char *f; { printf(\"kr %d %s\", tag, f); return 0; }\n"
+                                  "struct Ctx { int calls; };\n"
+                                  "static int counted(struct Ctx *c, const char *f, ...) { (void)f; c->calls++; return 0; }\n"
+                                  "static void prefixed(double x, const char *f, ...) { va_list ap; va_start(ap, f); printf(\"[%g] \", x); vprintf(f, ap); va_end(ap); }\n"
+                                  "static void scoped(int a, const char *b, ...)\n"
+                                  "{\n"
+                                  "    (void)b;\n"
+                                  "    typedef struct { uint16_t w; } Word;\n"
+                                  "    struct Local { uint32_t u; size_t z; Word word; struct { int q; } in; } l = { 1, 2, { 3 }, { a } };\n"
+                                  "    __builtin_dump_struct(&l, printf);\n"
+                                  "    __builtin_dump_struct(&l.in, printf);\n"
+                                  "    struct { struct { int k; } in; } r = { { a } };\n"
+                                  "    __builtin_dump_struct(&r.in, printf);\n"
+                                  "}\n"
+                                  "static void old_style(a) int a; { struct Old { struct { int k; } in; } r = { { a } }; __builtin_dump_struct(&r.in, printf); }\n"
+                                  "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
+                                  "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
+                                  "static struct S s;\n"
+                                  "static struct Packed packed = { 'z', -5, 99999, -77 };\n"
+                                  "int main(int argc, char **argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    int n = argc;\n"
+                                  "    base = (const char *)&s;\n"
+                                  "    s.b = 1; s.c = -3; s.sc = -4; s.uc = 250; s.s = -300; s.us = 65000; s.i = -7 * n; s.u = 4000000000u; s.l = -8; s.ul = 9; s.ll = -10; s.ull = 11;\n"
+                                  "    s.f = 1.5f; s.d = -2.25; s.ld = 3.125L; s.str = \"hello\"; s.mstr = \"a string longer than thirty-two characters for sure\"; s.vp = &s.i;\n"
+                                  "    s.s2 = \"two\"; s.u32 = 5; s.sz = 6; s.wsz = 7; s.ms = 8; s.i8 = -9; s.pd = -10; s.im = -11; s.um = 12; s.col = GREEN; s.ng = MINUS; s.ae = B1;\n"
+                                  "    s.p.x = 1; s.p.y = 2; s.an.q = 3; s.an.r = 4; s.pp = &s.p; s.bf = -2; s.ubf = 17; s.bb = 1; s.lbf = -12345678901LL; s.ubig = 0x7fffffffffffffffULL;\n"
+                                  "    s.cbf = GREEN; s.ia = 13; s.ib = 14; s.deep = 'x'; s.named.named_in = 15; s.un.x = 0x41; s.v4 = (V4){ 1, 2, 3, 4 }; s.i4 = (I4){ -1, 2, -3, 4 };\n"
+                                  "    __builtin_dump_struct(&s, pr, 1);\n"
+                                  "    __builtin_dump_struct(&s.p, printf);\n"
+                                  "    Anon an = { 5, 6 };\n"
+                                  "    __builtin_dump_struct(&an, printf);\n"
+                                  "    union U u = { 0x42 };\n"
+                                  "    __builtin_dump_struct(&u, printf);\n"
+                                  "    __builtin_dump_struct(&s.named, pr, next());\n"
+                                  "    printf(\"calls=%d\\n\", calls);\n"
+                                  "    __builtin_dump_struct(&an, get(), calls++);\n"
+                                  "    printf(\"calls=%d\\n\", calls);\n"
+                                  "    __builtin_dump_struct(&s.p, kr, 2);\n"
+                                  "    __builtin_dump_struct(&packed, printf);\n"
+                                  "    struct Vec v = { { 1, 2 }, { 1.5, -2.5 }, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, { 7, -8 }, { 1, 2, 3, 4, 5, 6, 7, 8 } };\n"
+                                  "    __builtin_dump_struct(&v, printf);\n"
+                                  "    struct O o = { { 1 }, { 2, { 3 } }, { 4 } };\n"
+                                  "    T t = { { 5 } };\n"
+                                  "    struct { int z; } local = { 6 };\n"
+                                  "    __builtin_dump_struct(&o.i, printf);\n"
+                                  "    __builtin_dump_struct(&o.un, printf);\n"
+                                  "    __builtin_dump_struct(&o.un.deep, printf);\n"
+                                  "    __builtin_dump_struct(&o.u2, printf);\n"
+                                  "    __builtin_dump_struct(&t.in, printf);\n"
+                                  "    __builtin_dump_struct(&local, printf);\n"
+                                  "    __builtin_dump_struct(&o, printf);\n"
+                                  "    struct Ctx c = { 0 };\n"
+                                  "    __builtin_dump_struct(&o, counted, &c);\n"
+                                  "    printf(\"counted=%d\\n\", c.calls);\n"
+                                  "    __builtin_dump_struct(&o.i, prefixed, 1.5f);\n"
+                                  "    const struct Point *cp = &s.p;\n"
+                                  "    __builtin_dump_struct(cp, printf);\n"
+                                  "    scoped(n, \"x\");\n"
+                                  "    old_style(n);\n"
+                                  "    struct Top2 top2 = { { { 7 } }, { 8 } };\n"
+                                  "    __builtin_dump_struct(&top2.m.u, printf);\n"
+                                  "    __builtin_dump_struct(&top2.y, printf);\n"
+                                  "    struct Pointee pointee;\n"
+                                  "    __typeof__(*pointee.p) pointed = { 42 };\n"
+                                  "    pointee.p = &pointed;\n"
+                                  "    __builtin_dump_struct(pointee.p, printf);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[5][256];
+    snprintf(source, sizeof(source), "%s/dump_struct.c", directory);
+    for (uint32_t o = 0; o < 5; o += 1)
+    {
+        snprintf(outputs[o], sizeof(outputs[o]), "%s/dump_struct-%u", directory, o);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the record dumps' program written");
+    char* text = NULL;
+    char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
+    const int built = written ? check_test_driver_spawn(reference, &text) : 1;
+    free(text);
+    static char expected[16384];
+    static char captured[16384];
+    const bool ran = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+    check_test_expect(test, ran && strlen(expected) > 2000, "clang's build of the record dumps runs");
+    static const char* const option_names[] = { "the direct path", "--scalar", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; ran && path < 4; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-w", "-o", outputs[path], source, NULL };
+        char* scalar[] = { (char*)executable, "--scalar", "-w", "-o", outputs[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-w", "-o", outputs[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-w", "-o", outputs[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? scalar : path == 2 ? tier1 : tier1_scalar;
+        text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        const bool same = status == 0 && check_test_driver_capture(outputs[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0;
+        char description[256];
+        snprintf(description, sizeof(description), "the record dumps by %s print what clang's build does", option_names[path]);
+        check_test_expect(test, same, description);
+        if (status == 0 && !same)
+        {
+            fprintf(stderr, "record dumps by %s:\n%s\nclang's build:\n%s\n", option_names[path], captured, expected);
+        }
+    }
+    unlink(source);
+    for (uint32_t o = 0; o < 5; o += 1)
+    {
+        unlink(outputs[o]);
+    }
 }
 
 // __builtin_call_with_static_chain (#148): calls whose callees read the chain in r10 through naked functions (direct,
@@ -1950,6 +2156,172 @@ static void check_test_driver_section_bounds(CheckTest* test, const char* clang,
     unlink(object);
     unlink(linked_path);
     unlink(reference);
+}
+
+// Constant CFStrings in code (#148, check_data_cfstring_keys): clang's build of a unit of them, and the unit's -c objects by
+// each path and tier, linked by cc beside a driver that defines __CFConstantStringClassReference, and the direct path's
+// link of both, each printing clang's: one object of each literal (a static initializer's, NSString's and another
+// function's), an address constant cast and offset, the records' fields (the class's address, the flags, ASCII and
+// UTF-16 characters, a surrogate pair, a NUL, a conversion cut short, parentheses and a cast, the empty string) and the
+// record's size, and literals whose lowest calls are in a function nothing calls and in a static initializer nothing reads
+// (their records are the program's all the same).
+// The unit doesn't declare the class: its object's symbol is the program's own, an undefined global. A unit that declares
+// it takes the declaration's object. And a unit of a CFString in sizeof alone, whose record nothing references, has no
+// record, characters or class (#1363's review): its object, by -c and by -c --lower-all, names no class, and it links
+// without one, by cc and by the direct path.
+static bool check_test_driver_file_holds(const char* path, const char* needle)
+{
+    FILE* file = fopen(path, "rb");
+    char buffer[1 << 16];
+    const size_t length = file != NULL ? fread(buffer, 1, sizeof(buffer), file) : 0;
+    const bool result = file != NULL && memmem(buffer, length, needle, strlen(needle)) != NULL;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    return result;
+}
+
+static void check_test_driver_cfstrings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char unit[] =
+        "static const void* never_called(void) { return __builtin___CFStringMakeConstantString(\"only\"); }\n"
+        "static const void* never_read = __builtin___CFStringMakeConstantString(\"initial\");\n"
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
+        "static const void* s1 = __builtin___CFStringMakeConstantString(\"hello\");\n"
+        "static const void* s2 = __builtin___NSStringMakeConstantString(\"hello\");\n"
+        "static long as_long = (long)__builtin___CFStringMakeConstantString(\"x\");\n"
+        "static const char* shifted = (const char*)__builtin___CFStringMakeConstantString(\"y\") + 8;\n"
+        "static const void* other(void) { return __builtin___CFStringMakeConstantString(\"hello\"); }\n"
+        "const int* class_reference(void);\n"
+        "static void bytes(const CF* c)\n"
+        "{\n"
+        "    mix(c->isa == class_reference()); mix((unsigned)c->flags); mix((unsigned long)c->length);\n"
+        "    if (c->flags == 0x7d0) { const unsigned short* u = (const unsigned short*)c->str; for (long i = 0; i <= c->length; i++) mix(u[i]); }\n"
+        "    else { for (long i = 0; i <= c->length; i++) mix((unsigned char)c->str[i]); }\n"
+        "}\n"
+        "int tested(int n)\n"
+        "{\n"
+        "    h = (unsigned)n;\n"
+        "    const CF* a = (const CF*)__builtin___CFStringMakeConstantString(\"hello\");\n"
+        "    mix(a == s1); mix(a == s2); mix(a == other()); mix((long)a == as_long);\n"
+        "    mix((const CF*)as_long == (const CF*)__builtin___CFStringMakeConstantString(\"x\"));\n"
+        "    mix(shifted == (const char*)__builtin___CFStringMakeConstantString(\"y\") + 8);\n"
+        "    bytes(a); bytes((const CF*)__builtin___CFStringMakeConstantString(\"\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"h\\xc3\\xa9llo \\xf0\\x9f\\x98\\x80\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"a\\0b\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"cut \\xc3\\x28 here\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString((\"pa\" \"ren\")));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString((const char*)\"cast\"));\n"
+        "    bytes((const CF*)__builtin___NSStringMakeConstantString(\"ns\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"only\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"initial\"));\n"
+        "    mix(__builtin___NSStringMakeConstantString(\"ns\") == __builtin___CFStringMakeConstantString(\"ns\"));\n"
+        "    mix(__builtin___CFStringMakeConstantString(\"a\\0b\") != __builtin___CFStringMakeConstantString(\"a\"));\n"
+        "    mix(__builtin___CFStringMakeConstantString(\"abc\")->length * 10 + sizeof(*__builtin___CFStringMakeConstantString(\"q\")));\n"
+        "    return (int)(h ^ (h >> 32));\n"
+        "}\n";
+    static const char driver[] =
+        "#include <stdio.h>\n"
+        "int __CFConstantStringClassReference[4];\n"
+        "const int* class_reference(void) { return __CFConstantStringClassReference; }\n"
+        "int tested(int);\n"
+        "int main(void) { printf(\"%d %d\\n\", tested(3), tested(-2)); return 0; }\n";
+    static const char declared[] =
+        "extern const int __CFConstantStringClassReference[];\n"
+        "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
+        "const int* class_reference(void);\n"
+        "int tested(int n) { const CF* c = (const CF*)__builtin___CFStringMakeConstantString(\"d\"); return n + (c->isa == class_reference()) * 10 +\n"
+        "(c->isa == __CFConstantStringClassReference) * 100 + (int)c->length * 1000; }\n";
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        char source[256];
+        char main_source[256];
+        char object[256];
+        char reference[256];
+        char linked[256];
+        snprintf(source, sizeof(source), "%s/cfstrings-%u.c", directory, variant);
+        snprintf(main_source, sizeof(main_source), "%s/cfstrings-main.c", directory);
+        snprintf(object, sizeof(object), "%s/cfstrings-%u.o", directory, variant);
+        snprintf(reference, sizeof(reference), "%s/cfstrings-clang", directory);
+        snprintf(linked, sizeof(linked), "%s/cfstrings-linked", directory);
+        const char* program = variant == 0 ? unit : declared;
+        const bool written = parse_test_write(source, program, strlen(program)) && parse_test_write(main_source, driver, sizeof(driver) - 1);
+        check_test_expect(test, written, "the constant CFStrings' fixture is written");
+        char* text = NULL;
+        char* clang_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, main_source, NULL };
+        const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+        free(text);
+        text = NULL;
+        char expected[64] = { 0 };
+        const bool oracle = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+        check_test_expect(test, oracle, variant == 0 ? "clang's build of the constant CFStrings runs" : "clang's build of a declared class's CFString runs");
+        static const char* const names[] = { "-c's object, linked by cc", "-c --scalar's", "-c --tier1's", "-c --tier1 --scalar's", "the direct path's link" };
+        for (uint32_t path = 0; oracle && path < 5; path += 1)
+        {
+            char* plain[] = { (char*)executable, "-w", "-c", "-o", object, source, NULL };
+            char* scalar[] = { (char*)executable, "--scalar", "-w", "-c", "-o", object, source, NULL };
+            char* tier1[] = { (char*)executable, "--tier1", "-w", "-c", "-o", object, source, NULL };
+            char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-w", "-c", "-o", object, source, NULL };
+            char* direct[] = { (char*)executable, "-w", "-o", linked, source, main_source, NULL };
+            char* const* arguments = path == 0 ? plain : path == 1 ? scalar : path == 2 ? tier1 : path == 3 ? tier1_scalar : direct;
+            int status = check_test_driver_spawn(arguments, &text);
+            free(text);
+            text = NULL;
+            char* link_arguments[] = { "cc", "-o", linked, object, main_source, NULL };
+            status = status == 0 && path < 4 ? check_test_driver_spawn(link_arguments, &text) : status;
+            free(text);
+            text = NULL;
+            char captured[64] = { 0 };
+            char description[160];
+            snprintf(description, sizeof(description), "%s CFStrings: %s prints clang's build's output", variant == 0 ? "the unit's" : "a declared class's", names[path]);
+            check_test_expect(test, status == 0 && check_test_driver_capture(linked, captured, sizeof(captured)) && strcmp(captured, expected) == 0, description);
+            unlink(linked);
+        }
+        unlink(source);
+        unlink(main_source);
+        unlink(object);
+        unlink(reference);
+    }
+    // Its files' names hold no "cfstring", which the object is searched for.
+    static const char unreferenced[] = "int main(void) { return sizeof(__builtin___CFStringMakeConstantString(\"x\")) != sizeof(void *); }\n";
+    char source[256];
+    char object[256];
+    char linked[256];
+    snprintf(source, sizeof(source), "%s/constant-string-sizeof.c", directory);
+    snprintf(object, sizeof(object), "%s/constant-string-sizeof.o", directory);
+    snprintf(linked, sizeof(linked), "%s/constant-string-sizeof", directory);
+    const bool written = parse_test_write(source, unreferenced, sizeof(unreferenced) - 1);
+    check_test_expect(test, written, "the unreferenced CFString's fixture is written");
+    for (uint32_t path = 0; written && path < 4; path += 1)
+    {
+        const bool all = (path & 1) != 0;
+        const bool direct = (path & 2) != 0;
+        char* plain[] = { (char*)executable, "-w", "-c", "-o", object, source, NULL };
+        char* plain_all[] = { (char*)executable, "--lower-all", "-w", "-c", "-o", object, source, NULL };
+        char* linking[] = { (char*)executable, "-w", "-o", linked, source, NULL };
+        char* linking_all[] = { (char*)executable, "--lower-all", "-w", "-o", linked, source, NULL };
+        char* const* arguments = direct ? (all ? linking_all : linking) : (all ? plain_all : plain);
+        char* text = NULL;
+        int status = check_test_driver_spawn(arguments, &text);
+        free(text);
+        text = NULL;
+        const bool clean = direct || (status == 0 && !check_test_driver_file_holds(object, "__CFConstantStringClassReference") &&
+                                      !check_test_driver_file_holds(object, "cfstring"));
+        char* link_arguments[] = { "cc", "-o", linked, object, NULL };
+        status = status == 0 && !direct ? check_test_driver_spawn(link_arguments, &text) : status;
+        free(text);
+        text = NULL;
+        char captured[16] = { 0 };
+        char description[160];
+        snprintf(description, sizeof(description), "a CFString in sizeof alone%s: %s, no record or class, links and runs", all ? " (--lower-all)" : "",
+                 direct ? "the direct path's link" : "-c's object, linked by cc");
+        check_test_expect(test, clean && status == 0 && check_test_driver_capture(linked, captured, sizeof(captured)), description);
+        unlink(linked);
+    }
+    unlink(source);
+    unlink(object);
 }
 
 // #1122's own program, one atom in the section, whose count is 1: by clang, by -c's object that cc links, by the direct
@@ -7406,6 +7778,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_dump_struct(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_static_chain(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -7560,6 +7936,10 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_asm_symbols(&test, executable, directory);
                 check_test_driver_setjmp_held(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_cfstrings(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

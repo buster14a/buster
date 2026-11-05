@@ -50,6 +50,17 @@
 //   the same status; in a child limited as above, the first and the last of them by --lanes 8, each one lane's; each
 //   failing program by --lanes 8, with lanes, with the ids in another order and in such a child, by each path: the exit
 //   status and diagnostics of --lanes 1; and --lanes', --worker-budget's and --id-order's values it refuses.
+// - The driver's deferred bodies (--deferred-bodies, check_input_deferred_compile): the checker reads a unit's bodies
+//   apart, on rounds of the command's flow. The same four programs by the vector path, by --lanes 1, 2, 3 and 8, by
+//   default and by --lanes 8 with the ids in another order: source order's objects and executables, byte for byte, the
+//   executables exiting alike; the program of 600 functions by --lanes 8 with --time-stages, its bodies read on more
+//   than one lane (with more than one CPU) and merged, by --lanes 1 in source order, after a `#pragma clang section`
+//   line in source order before its top level's walk, and by --no-deferred-bodies after --deferred-bodies in source
+//   order; under a jobserver pipe of none, 1, 3 and 7 spare tokens, on a lane per token up to the CPUs (none: source
+//   order), every token back in the pipe once, and by --worker-budget 1 and 3 on no more lanes than the budget, each
+//   object source order's; a unit of 16-byte lock-free queries by -mcx16, source order's object, which -mno-cx16's isn't;
+//   in a child limited as above, its object by --lanes 8 source order's; and each
+//   failing program by --lanes 2, 3 and 8, and in such a child: the exit status and diagnostics of --lanes 1.
 // - The driver's session's threads (#905): a library preloaded into the driver counts its calls of pthread_create,
 //   which its session makes once, before any source is read: none for --lanes 1, --worker-budget=1 and a source's
 //   -fsyntax-only, and an object compiled on one CPU; one per lane past the first of --lanes 3 and, by default, of the
@@ -1941,6 +1952,295 @@ static void check_lanes_test_driver_failing(CheckLanesTestTally* tally, const ch
     printf("  driver: %u failing programs' diagnostics on lanes and with the ids in another order, each one lane's\n", compared);
 }
 
+// The deferred reader's lines of a --time-stages report at `path` (CheckClock.deferred): the lanes its bodies took into
+// `lanes` and the deferred-merged value into `merged` ("yes", or why the unit went to source order); false if it has none.
+static bool check_lanes_test_report_deferred(const char* path, uint32_t* lanes, char* merged, uint32_t capacity)
+{
+    FILE* file = fopen(path, "r");
+    char line[256];
+    bool found = false;
+    *lanes = 0;
+    merged[0] = 0;
+    while (file != NULL && fgets(line, sizeof(line), file) != NULL)
+    {
+        unsigned value = 0;
+        if (sscanf(line, "time-check\tdeferred-lanes\t%u", &value) == 1)
+        {
+            *lanes = value;
+            found = true;
+        }
+        else if (strncmp(line, "time-check\tdeferred-merged\t", 27) == 0)
+        {
+            snprintf(merged, capacity, "%s", line + 27);
+            merged[strcspn(merged, "\n")] = 0;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    return found && merged[0] != 0;
+}
+
+// #151's deferred bodies in the driver (--deferred-bodies, check_input_deferred_compile): the checker reads a unit's
+// bodies apart, on the command's lanes, as rounds of its flow. The four generated programs of check_lanes_test_driver by
+// the vector path, by --deferred-bodies with --lanes 1, 2, 3 and 8, by default, and by --lanes 8 with the ids in another
+// order: their objects and executables source order's on one lane (check_lanes_test_driver's --lanes 1), byte for byte,
+// and the executables exit alike. With --time-stages, the program of 600 functions on 8 lanes reads its bodies on more than one
+// lane (with more than one CPU) and merges them, on 1 lane goes to source order, and after a `#pragma clang section` line
+// goes to source order before its top level's walk; under a jobserver's spare tokens and a worker budget, its bodies
+// take the lanes they give, and every token goes back; a unit's 16-byte lock-free queries answer by -mcx16 as in source
+// order; in a child whose lanes don't start, by --lanes 8, its object is source order's. Each failing program by --deferred-bodies with --lanes 2, 3 and 8,
+// and in such a child: --lanes 1's exit status and diagnostics. And --no-deferred-bodies after it reads in source order.
+static void check_lanes_test_driver_deferred(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs, uint64_t id_order)
+{
+    static const char* const ways[] = { "--lanes=1", "--lanes=2", "--lanes=3", "--lanes=8", NULL, "--lanes=8" };
+    const uint32_t chosen[] = { 2, 3, 5, programs };
+    char detail[PATH_MAX + 128];
+    uint32_t compared = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(chosen) && chosen[i] < programs + 2; i += 1)
+    {
+        const uint32_t p = chosen[i];
+        char source[PATH_MAX];
+        char errors[PATH_MAX];
+        char first_object[PATH_MAX];
+        char first_program[PATH_MAX];
+        snprintf(source, sizeof(source), "%s/program_%u.c", directory, p);
+        snprintf(errors, sizeof(errors), "%s/deferred_%u.errors", directory, p);
+        snprintf(first_object, sizeof(first_object), "%s/driver_%u_0_0.o", directory, p);
+        snprintf(first_program, sizeof(first_program), "%s/driver_%u_0_0", directory, p);
+        char* first_run[] = { first_program, NULL };
+        const int first_status = check_lanes_test_run(first_run, "/dev/null");
+        for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(ways); w += 1)
+        {
+            char object[PATH_MAX];
+            char program[PATH_MAX];
+            char order[48];
+            snprintf(object, sizeof(object), "%s/deferred_%u_%u.o", directory, p, w);
+            snprintf(program, sizeof(program), "%s/deferred_%u_%u", directory, p, w);
+            snprintf(order, sizeof(order), "--id-order=%llu", (unsigned long long)(id_order + p));
+            char* object_arguments[12] = { (char*)executable, (char*)"--deferred-bodies" };
+            char* program_arguments[12] = { (char*)executable, (char*)"--deferred-bodies" };
+            uint32_t count = 2;
+            if (ways[w] != NULL)
+            {
+                object_arguments[count] = (char*)ways[w];
+                program_arguments[count++] = (char*)ways[w];
+            }
+            if (w + 1 == BUSTER_ARRAY_LENGTH(ways))
+            {
+                object_arguments[count] = order;
+                program_arguments[count++] = order;
+            }
+            object_arguments[count] = (char*)"-c";
+            program_arguments[count] = (char*)"-o";
+            object_arguments[count + 1] = (char*)"-o";
+            program_arguments[count + 1] = program;
+            object_arguments[count + 2] = object;
+            program_arguments[count + 2] = source;
+            object_arguments[count + 3] = source;
+            const bool objected = check_lanes_test_run(object_arguments, errors) == 0;
+            const bool linked = check_lanes_test_run(program_arguments, errors) == 0;
+            char* run_arguments[] = { program, NULL };
+            const int status = linked ? check_lanes_test_run(run_arguments, "/dev/null") : -1;
+            snprintf(detail, sizeof(detail), "%s, --deferred-bodies %s%s%s", source, ways[w] != NULL ? ways[w] : "by default",
+                     w + 1 == BUSTER_ARRAY_LENGTH(ways) ? " " : "", w + 1 == BUSTER_ARRAY_LENGTH(ways) ? order : "");
+            check_lanes_test_expect(tally, objected && check_test_driver_same_files(object, first_object), "the driver's object with deferred bodies is source order's",
+                                    detail);
+            check_lanes_test_expect(tally, linked && check_test_driver_same_files(program, first_program) && status == first_status && first_status >= 0,
+                                    "the driver's executable with deferred bodies is source order's, and exits as it does", detail);
+            compared += 1;
+        }
+    }
+    // The program of 600 functions: its bodies on lanes and merged, by --lanes 8, and on one lane in source order.
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    char report[PATH_MAX];
+    char first_object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/program_%u.c", directory, programs);
+    snprintf(object, sizeof(object), "%s/deferred_report.o", directory);
+    snprintf(report, sizeof(report), "%s/deferred_report.errors", directory);
+    snprintf(first_object, sizeof(first_object), "%s/driver_%u_0_0.o", directory, programs);
+    const uint32_t cpus = check_driver_cpus();
+    static const char* const reported[] = { "--lanes=8", "--lanes=1" };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(reported); r += 1)
+    {
+        char* arguments[] = { (char*)executable, (char*)"--deferred-bodies", (char*)reported[r], (char*)"--time-stages", (char*)"-c", (char*)"-o", object, source, NULL };
+        const bool objected = check_lanes_test_run(arguments, report) == 0;
+        uint32_t lanes = 0;
+        char merged[128];
+        const bool found = check_lanes_test_report_deferred(report, &lanes, merged, sizeof(merged));
+        const bool laned = r == 0 && cpus > 1;
+        snprintf(detail, sizeof(detail), "%s, --deferred-bodies %s on %u CPUs: %u lanes, merged: %s", source, reported[r], cpus, lanes, found ? merged : "(no report)");
+        check_lanes_test_expect(tally,
+                                objected && found && check_test_driver_same_files(object, first_object) &&
+                                    (laned ? lanes > 1 && strcmp(merged, "yes") == 0 : lanes == 0 && strcmp(merged, "one lane") == 0),
+                                laned ? "the driver reads the bodies on lanes and merges them" : "the driver reads a unit on one lane in source order", detail);
+    }
+    // A unit with a `#pragma clang section` line, which the deferred reader leaves to source order before its top level's
+    // walk (check_deferred_sections): the program of 600 functions after one, source order's object.
+    char sectioned[PATH_MAX];
+    char sectioned_object[PATH_MAX];
+    snprintf(sectioned, sizeof(sectioned), "%s/deferred_section.c", directory);
+    snprintf(sectioned_object, sizeof(sectioned_object), "%s/deferred_section_source_order.o", directory);
+    FILE* section_file = fopen(sectioned, "w");
+    const bool section_written = section_file != NULL && fprintf(section_file, "#pragma clang section text = \".text.lanes\"\n#include \"%s\"\n", source) > 0;
+    if (section_file != NULL)
+    {
+        fclose(section_file);
+    }
+    char* section_order[] = { (char*)executable, (char*)"--lanes=8", (char*)"-c", (char*)"-o", sectioned_object, sectioned, NULL };
+    char* section_deferred[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-c", (char*)"-o", object, sectioned, NULL };
+    uint32_t section_lanes = 0;
+    char section_merged[128] = { 0 };
+    const bool section_compiled = section_written && check_lanes_test_run(section_order, report) == 0 && check_lanes_test_run(section_deferred, report) == 0;
+    const bool section_reported = section_compiled && check_lanes_test_report_deferred(report, &section_lanes, section_merged, sizeof(section_merged));
+    snprintf(detail, sizeof(detail), "%s: %u lanes, merged: %s", sectioned, section_lanes, section_reported ? section_merged : "(no report)");
+    check_lanes_test_expect(tally,
+                            section_reported && section_lanes == 0 && strcmp(section_merged, "#pragma clang section") == 0 &&
+                                check_test_driver_same_files(object, sectioned_object),
+                            "the driver reads a unit with #pragma clang section in source order, before its top level's walk", detail);
+    // The target's 16-byte atomics (cx16), which the lock-free queries read from the caller's table after the merge
+    // (check_input_target_table, #1403's review): a unit whose eight bodies ask for 16 bytes' lock-freedom, by -mcx16 on
+    // 8 lanes, source order's object; and by -mno-cx16 another, so that the queries' answers reach the object.
+    char atomics[PATH_MAX];
+    char atomics_order[PATH_MAX];
+    char atomics_narrow[PATH_MAX];
+    snprintf(atomics, sizeof(atomics), "%s/deferred_cx16.c", directory);
+    snprintf(atomics_order, sizeof(atomics_order), "%s/deferred_cx16_source_order.o", directory);
+    snprintf(atomics_narrow, sizeof(atomics_narrow), "%s/deferred_cx16_narrow.o", directory);
+    FILE* atomics_file = fopen(atomics, "w");
+    bool atomics_written = atomics_file != NULL;
+    for (uint32_t f = 0; atomics_written && f < 8; f += 1)
+    {
+        atomics_written = fprintf(atomics_file,
+                                  "int q%u(int x) { int y = x * %u; for (int i = 0; i < x; i += 1) { y += i; } "
+                                  "return y + __atomic_always_lock_free(16, 0) * 2 + __atomic_is_lock_free(16, 0); }\n",
+                                  f, f) > 0;
+    }
+    if (atomics_file != NULL)
+    {
+        atomics_written = fclose(atomics_file) == 0 && atomics_written;
+    }
+    char* atomics_source_order[] = { (char*)executable, (char*)"--lanes=8", (char*)"-mcx16", (char*)"-c", (char*)"-o", atomics_order, atomics, NULL };
+    char* atomics_deferred[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-mcx16", (char*)"-c", (char*)"-o",
+                                 object, atomics, NULL };
+    char* atomics_without[] = { (char*)executable, (char*)"--lanes=8", (char*)"-mno-cx16", (char*)"-c", (char*)"-o", atomics_narrow, atomics, NULL };
+    uint32_t atomics_lanes = 0;
+    char atomics_merged[128] = { 0 };
+    const bool atomics_compiled = atomics_written && check_lanes_test_run(atomics_source_order, report) == 0 && check_lanes_test_run(atomics_without, report) == 0 &&
+                                  check_lanes_test_run(atomics_deferred, report) == 0;
+    const bool atomics_reported = atomics_compiled && check_lanes_test_report_deferred(report, &atomics_lanes, atomics_merged, sizeof(atomics_merged));
+    snprintf(detail, sizeof(detail), "%s by -mcx16: %u lanes, merged: %s", atomics, atomics_lanes, atomics_reported ? atomics_merged : "(no report)");
+    check_lanes_test_expect(tally,
+                            atomics_reported && (cpus < 2 || (atomics_lanes > 1 && strcmp(atomics_merged, "yes") == 0)) &&
+                                check_test_driver_same_files(object, atomics_order) && !check_test_driver_same_files(atomics_order, atomics_narrow),
+                            "the driver's deferred bodies answer 16-byte lock-free queries by the target's cx16, as source order does", detail);
+    // The worker budget (#673): under a jobserver pipe of none, 1, 3 and 7 spare tokens, by --lanes 8, the bodies' grant
+    // takes a lane for each token it finds, without waiting, up to the CPUs (none: source order); every token is back in the
+    // pipe once as the command returns; and by --worker-budget 1 and 3 alone, no more lanes than the budget.
+    static const uint32_t spare[] = { 0, 1, 3, 7 };
+    const uint32_t most = cpus < 8 ? cpus : 8;
+    for (uint32_t k = 0; cpus > 1 && k < BUSTER_ARRAY_LENGTH(spare); k += 1)
+    {
+        int fds[2] = { -1, -1 };
+        uint8_t tokens[8];
+        for (uint32_t i = 0; i < spare[k]; i += 1)
+        {
+            tokens[i] = (uint8_t)(0x30 + i);
+        }
+        const bool ready = pipe(fds) == 0 && (spare[k] == 0 || write(fds[1], tokens, spare[k]) == (ssize_t)spare[k]);
+        char makeflags[96];
+        snprintf(makeflags, sizeof(makeflags), "MAKEFLAGS=-j --jobserver-auth=%d,%d", fds[0], fds[1]);
+        char* arguments[] = { (char*)"env", makeflags, (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-c", (char*)"-o",
+                              object, source, NULL };
+        const int status = ready ? check_lanes_test_run(arguments, report) : -1;
+        uint32_t lanes = 0;
+        char merged[128] = { 0 };
+        const bool found = status == 0 && check_lanes_test_report_deferred(report, &lanes, merged, sizeof(merged));
+        const uint32_t expected = 1 + spare[k] < most ? 1 + spare[k] : most;
+        snprintf(detail, sizeof(detail), "%s, %u spare tokens on %u CPUs: status %d, %u lanes, merged: %s", source, spare[k], cpus, status, lanes,
+                 found ? merged : "(no report)");
+        check_lanes_test_expect(tally,
+                                found && check_test_driver_same_files(object, first_object) &&
+                                    (expected > 1 ? lanes == expected && strcmp(merged, "yes") == 0 : lanes == 0 && strcmp(merged, "too few lanes") == 0),
+                                "the deferred bodies take a lane for each spare token, source order's object", detail);
+        check_lanes_test_expect(tally, ready && worker_budget_test_tokens(fds[0], tokens, spare[k]), "the deferred bodies return every token they took once",
+                                detail);
+        if (fds[0] >= 0)
+        {
+            close(fds[0]);
+        }
+        if (fds[1] >= 0)
+        {
+            close(fds[1]);
+        }
+    }
+    static const char* const budgets[] = { "--worker-budget=1", "--worker-budget=3" };
+    static const uint32_t budget_lanes[] = { 1, 3 };
+    for (uint32_t b = 0; cpus > 1 && b < BUSTER_ARRAY_LENGTH(budgets); b += 1)
+    {
+        char* arguments[] = { (char*)"env", (char*)"MAKEFLAGS=", (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)budgets[b], (char*)"--time-stages",
+                              (char*)"-c", (char*)"-o", object, source, NULL };
+        const int status = check_lanes_test_run(arguments, report);
+        uint32_t lanes = 0;
+        char merged[128] = { 0 };
+        const bool found = status == 0 && check_lanes_test_report_deferred(report, &lanes, merged, sizeof(merged));
+        const uint32_t expected = budget_lanes[b] < most ? budget_lanes[b] : most;
+        snprintf(detail, sizeof(detail), "%s, %s on %u CPUs: status %d, %u lanes, merged: %s", source, budgets[b], cpus, status, lanes, found ? merged : "(no report)");
+        check_lanes_test_expect(tally,
+                                found && check_test_driver_same_files(object, first_object) &&
+                                    (expected > 1 ? lanes == expected && strcmp(merged, "yes") == 0 : lanes == 0 && strcmp(merged, "one lane") == 0),
+                                "the deferred bodies take no more lanes than the worker budget, source order's object", detail);
+    }
+    // --no-deferred-bodies after --deferred-bodies: source order's reader, which reports nothing of the deferred one.
+    char* undone[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--no-deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-c", (char*)"-o",
+                       object, source, NULL };
+    uint32_t undone_lanes = 0;
+    char undone_merged[128];
+    const bool undone_written = check_lanes_test_run(undone, report) == 0;
+    check_lanes_test_expect(tally,
+                            undone_written && !check_lanes_test_report_deferred(report, &undone_lanes, undone_merged, sizeof(undone_merged)) &&
+                                check_test_driver_same_files(object, first_object),
+                            "--no-deferred-bodies reads the unit in source order", source);
+    uint32_t unstarted = 0;
+    if (geteuid() != 0)
+    {
+        char* arguments[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"-c", (char*)"-o", object, source, NULL };
+        check_lanes_test_expect(tally, check_lanes_test_run_unstarted(arguments, report) == 0 && check_test_driver_same_files(object, first_object),
+                                "the driver's object with deferred bodies whose lanes don't start is source order's", source);
+        unstarted += 1;
+    }
+    // The failing programs: --lanes 1's exit status and diagnostics (check_lanes_test_driver_failing's, by the vector
+    // path), on lanes and in a child whose lanes don't start.
+    static const char* const failing_ways[] = { "--lanes=2", "--lanes=3", "--lanes=8", "--lanes=8" };
+    uint32_t failures = 0;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_lanes_test_failures); f += 1)
+    {
+        char failing[PATH_MAX];
+        char first_errors[PATH_MAX];
+        char errors[PATH_MAX];
+        snprintf(failing, sizeof(failing), "%s/failure_%u.c", directory, f);
+        snprintf(first_errors, sizeof(first_errors), "%s/failure_%u_0_0.errors", directory, f);
+        snprintf(errors, sizeof(errors), "%s/failure_%u_deferred.errors", directory, f);
+        snprintf(object, sizeof(object), "%s/failure_deferred.o", directory);
+        for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(failing_ways) && (w + 1 < BUSTER_ARRAY_LENGTH(failing_ways) || geteuid() != 0); w += 1)
+        {
+            char* arguments[] = { (char*)executable, (char*)"--deferred-bodies", (char*)failing_ways[w], (char*)"-c", (char*)"-o", object, failing, NULL };
+            const bool alone = w + 1 == BUSTER_ARRAY_LENGTH(failing_ways);
+            const int status = alone ? check_lanes_test_run_unstarted(arguments, errors) : check_lanes_test_run(arguments, errors);
+            snprintf(detail, sizeof(detail), "%s, --deferred-bodies %s%s: exit status %d", check_lanes_test_failures[f].name, failing_ways[w],
+                     alone ? " that don't start" : "", status);
+            check_lanes_test_expect(tally, status == 1 && check_test_driver_same_files(errors, first_errors), "the driver's diagnostic with deferred bodies is one lane's",
+                                    detail);
+            failures += 1;
+        }
+    }
+    printf("  driver: %u objects and executables with deferred bodies, %u whose lanes didn't start, each source order's, and %u failing programs' "
+           "diagnostics, each one lane's\n",
+           compared, unstarted, failures);
+}
+
 // The benchmark's untimed object warm-ups must place named sections as -c does, and reject a section -c refuses.
 // Timed runs still measure only the function emission. One pass and two requested lanes are sufficient for these
 // acceptance controls; no timing is judged here. The benchmark command is only present in the vector host build.
@@ -2562,6 +2862,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_rule(&tally, directory);
             check_lanes_test_driver(&tally, executable, directory, programs, id_order);
             check_lanes_test_driver_failing(&tally, executable, directory, id_order);
+            check_lanes_test_driver_deferred(&tally, executable, directory, programs, id_order);
             check_lanes_test_grow_gate(&tally);
             check_lanes_test_driver_growth(&tally, executable, directory, programs);
             check_lanes_test_session_threads(&tally, executable, directory);

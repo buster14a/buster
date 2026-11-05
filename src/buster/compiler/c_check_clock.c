@@ -235,6 +235,11 @@ struct CheckClock
     uint64_t transition_misses;
     uint64_t transition_folds;
     uint64_t transition_entries;
+    // The checker's deferred bodies (#151, check_input_deferred_compile): whether the unit's reading read them apart, the
+    // lanes its bodies took, and why the unit went to source order instead (null for none); `time-check deferred-*` lines.
+    bool deferred;
+    uint32_t deferred_lanes;
+    const char* deferred_reason;
 };
 
 // The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
@@ -404,6 +409,11 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     fprintf(stream, "time-check\ttransition-misses\t%llu\n", (unsigned long long)stage_clock->transition_misses);
     fprintf(stream, "time-check\ttransition-folds\t%llu\n", (unsigned long long)stage_clock->transition_folds);
     fprintf(stream, "time-check\ttransition-entries\t%llu\n", (unsigned long long)stage_clock->transition_entries);
+    if (stage_clock->deferred)
+    {
+        fprintf(stream, "time-check\tdeferred-lanes\t%u\n", stage_clock->deferred_lanes);
+        fprintf(stream, "time-check\tdeferred-merged\t%s\n", stage_clock->deferred_reason == NULL ? "yes" : stage_clock->deferred_reason);
+    }
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);

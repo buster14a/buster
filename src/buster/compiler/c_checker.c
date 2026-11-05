@@ -47,6 +47,9 @@ struct CheckBuiltinCall
     // Whether that literal is a UTF-8 one (u8"..."), which the CFString builtins refuse, and its first token.
     bool nan_payload_utf8;
     uint32_t nan_payload_token;
+    // A constant CFString's call's name (#148): its token and the `(` after it are the objects check_data_cfstring_keys
+    // takes, where it makes them, for the class reference and for the characters' UTF-16 array.
+    uint32_t cfstring_name;
     // __builtin_infer_alloc_token's token, where its arguments give one (check_input_alloc_token_evidence, #148).
     bool alloc_token_known;
     uint64_t alloc_token;
@@ -232,8 +235,10 @@ struct CheckGraph
     const CheckInputMarkedMember* marked_members;
     uint32_t marked_member_count;
     const uint8_t* availability_contexts;
-    // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0.
+    // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0;
+    // and then the object of its file-scope declaration of __CFConstantStringClassReference with external linkage, or 0.
     TypeId ns_constant_string;
+    uint32_t cfstring_class;
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
     // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf_of). Other nodes use types/member as
     // action data.
@@ -2451,6 +2456,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alloc_token_known = witness != NULL && witness->alloc_token_known,
             .alloc_token = witness != NULL ? witness->alloc_token : 0,
             .static_chain_call = witness != NULL && witness->static_chain_call,
+            .cfstring_object = graph->tokens != NULL && graph->tokens[node] < UINT32_MAX ? graph->tokens[node] + 1 : 0,
             .os_log_items = witness != NULL ? witness->os_log_items : NULL,
             .os_log_count = witness != NULL ? witness->os_log_count : 0,
             .os_log_known = witness != NULL && witness->os_log_known,

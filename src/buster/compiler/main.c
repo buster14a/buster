@@ -199,6 +199,8 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_builtin_catalog.c"
 #include "buster/compiler/test_process.c"
+// libm's functions for the tests' oracles, which the compiler's link doesn't take (#652).
+#include "buster/compiler/test_libm.c"
 // The clang and gcc runs the tests compare with, kept between runs (#542), and its tests, for the test-oracle-cache
 // command.
 #include "buster/compiler/oracle_cache.c"
@@ -774,9 +776,9 @@ static bool main_assembly_source(int count, char** arguments)
 }
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
-// is, so that the other units' branches fold to false (at the top). The driver's last branch, which no command takes,
-// runs the compiler itself.
-static int main_command(int argc, char** argv, bool* found)
+// is, so that the other units' branches fold to false (at the top). What no unit takes runs the compiler itself
+// (main_source_command), in a frame of its own: noinline keeps this function's frame, the tests' locals, out of main's.
+static __attribute__((noinline)) int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
     *found = true;
@@ -1137,11 +1139,13 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
         arena_static_base_pages();
+        arena_limits_fix();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
         arena_static_base_pages();
+        arena_limits_fix();
         result = run_parse_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
@@ -1648,16 +1652,6 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_c_testsuite_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
-    {
-        arena_static_base_pages();
-        // Semantic checking and object emission share the same typed source stream in the checker's unit.
-        if (!main_information(argc - 1, argv + 1, &result))
-        {
-            result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
-                     run_source_check_command(argc - 1, argv + 1);
-        }
-    }
     else
     {
         *found = false;
@@ -1666,6 +1660,23 @@ static int main_command(int argc, char** argv, bool* found)
 }
 
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
+// The commands of source files (-E, -fsyntax-only, -c and a link, main_information's): what no unit's main_command
+// takes. It runs after the driver's main_command has returned rather than inside it (#652): that function's frame is 140
+// KB, the inlined locals of the tests' and benchmarks' commands, and a compile run below it touched pages of it that its
+// build's inlining decided, 5 more of them in an empty file's -E after an unrelated change.
+static __attribute__((noinline)) int main_source_command(int argc, char** argv)
+{
+    int result = 1;
+    arena_static_base_pages();
+    arena_limits_fix();
+    // Semantic checking and object emission share the same typed source stream in the checker's unit.
+    if (!main_information(argc - 1, argv + 1, &result))
+    {
+        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) : run_source_check_command(argc - 1, argv + 1);
+    }
+    return result;
+}
+
 #if BUSTER_FUZZ_AVAILABLE
 #include BUSTER_FUZZ_ENTRY
 extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const uint8_t*, size_t));
@@ -1733,6 +1744,10 @@ static int main_driver(int argc, char** argv)
     if (!found)
     {
         result = main_command(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_source_command(argc, argv);
     }
     return result;
 }
