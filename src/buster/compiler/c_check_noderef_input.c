@@ -67,31 +67,29 @@ static const CheckNoderefType* check_input_noderef_base(const CheckNoderefType* 
     return type != NULL ? type->base : NULL;
 }
 
-static const CheckNoderefType* check_input_noderef_parameter(const CheckNoderefType* type, uint32_t index)
+// Append only to a fresh prototype's unpublished list. Its increasing source indexes let every call consume the
+// sparse annotations once; no repeated scan of all annotated parameters is needed for each argument.
+static void check_input_noderef_parameter_add(CheckInputReader* reader, CheckNoderefParameter** first, CheckNoderefParameter** last,
+                                             const CheckNoderefType* type, uint32_t index)
 {
-    const CheckNoderefParameter* parameter = type != NULL ? type->parameters : NULL;
-    while (parameter != NULL && parameter->index != index)
-    {
-        parameter = parameter->next;
-    }
-    return parameter != NULL ? parameter->type : NULL;
-}
-
-static const CheckNoderefParameter* check_input_noderef_parameter_add(CheckInputReader* reader, const CheckNoderefParameter* parameters,
-                                                                   const CheckNoderefType* type, uint32_t index)
-{
-    const CheckNoderefParameter* result = parameters;
     if (type != NULL)
     {
         CheckNoderefParameter* item = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckNoderefParameter, 1);
         reader->output->resource |= item == NULL;
         if (item != NULL)
         {
-            *item = (CheckNoderefParameter){ .type = type, .next = parameters, .index = index };
-            result = item;
+            *item = (CheckNoderefParameter){ .type = type, .index = index };
+            if (*last != NULL)
+            {
+                (*last)->next = item;
+            }
+            else
+            {
+                *first = item;
+            }
+            *last = item;
         }
     }
-    return result;
 }
 
 // Parameter adjustment changes only a function's shape: arrays and their adjusted pointers already share theirs.

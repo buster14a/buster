@@ -4559,6 +4559,7 @@ struct CheckDeclaratorFrame
     uint8_t abi_origin;
     uint8_t state;
     bool group;
+    bool group_noderef;
     bool parameter;
     bool parameter_context;
     bool star_array;
@@ -4832,6 +4833,10 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
                     bool before = true;
                     for (uint32_t p = order; before && p != BUSTER_CHECK_NONE; p = parts[p].next)
                     {
+                        if (parts[p].kind == BUSTER_TYPE_KIND_NONE)
+                        {
+                            continue;
+                        }
                         before = parts[p].kind == BUSTER_TYPE_KIND_POINTER ? parts[p].token < attribute->first : close != UINT32_MAX && parts[p].token > close;
                         here = before ? parts[p].type : here;
                     }
@@ -4867,6 +4872,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     break;
                 }
             }
+            frame->group_noderef = frame->group && check_input_noderef_new_attributes(frame->attributes, 0);
             while (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_STAR)
             {
                 const uint32_t token = i;
@@ -5175,6 +5181,21 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             }
             if (valid && frame->group)
             {
+                if (frame->group_noderef)
+                {
+                    // A parenthesized chunk marks the type composed outside it without adding a canonical layer.
+                    // Its opening parenthesis bounds this extra part within the token-sized parts allocation.
+                    if (frame->last != BUSTER_CHECK_NONE)
+                    {
+                        parts[frame->last].next = part_count;
+                    }
+                    else
+                    {
+                        frame->first = part_count;
+                    }
+                    parts[part_count] = (CheckDeclaratorPart){ .next = BUSTER_CHECK_NONE, .token = frame->end, .kind = BUSTER_TYPE_KIND_NONE, .noderef = true };
+                    frame->last = part_count++;
+                }
                 CheckDeclaratorFrame* parent = &frames[depth - 2];
                 parent->name = frame->name;
                 parent->missing_name = frame->missing_name;
@@ -5187,9 +5208,13 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             }
             else if (valid)
             {
-                const uint32_t first = frame->first;
+                uint32_t first = frame->first;
+                while (first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_NONE)
+                {
+                    first = parts[first].next;
+                }
                 uint32_t reverse = BUSTER_CHECK_NONE;
-                for (uint32_t part = first; part != BUSTER_CHECK_NONE;)
+                for (uint32_t part = frame->first; part != BUSTER_CHECK_NONE;)
                 {
                     const uint32_t next = parts[part].next;
                     parts[part].next = reverse;
@@ -5207,7 +5232,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     {
                         check_input_noderef_placement(reader, part->token, i);
                     }
-                    noderef_pending = part->noderef;
+                    noderef_pending = part->kind != BUSTER_TYPE_KIND_NONE ? part->noderef : noderef_pending;
                     if (part->kind == BUSTER_TYPE_KIND_POINTER)
                     {
                         const bool restrict_function = (part->qualifiers & BUSTER_TYPE_RESTRICT) != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
@@ -5239,17 +5264,18 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         TypeId* parameter_types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
                         reader->output->resource |= parameter_types == 0;
                         uint32_t count = 0;
-                        const CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated = NULL;
+                        CheckNoderefParameter* annotated_last = NULL;
                         for (uint32_t parameter = part->parameter_first; parameter_types != 0 && parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                         {
-                            annotated = check_input_noderef_parameter_add(reader, annotated, parameters[parameter].noderef, count);
+                            check_input_noderef_parameter_add(reader, &annotated, &annotated_last, parameters[parameter].noderef, count);
                             parameter_types[count++] = parameters[parameter].type;
                         }
                         type = valid && parameter_types != 0 ? check_input_type_result(reader, type_function(reader->types, type, parameter_types, count, part->flags)) : 0;
                         noderef = check_input_noderef_make(reader, noderef, annotated, false);
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
-                    else
+                    else if (part->kind != BUSTER_TYPE_KIND_NONE)
                     {
                         type = check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent);
                         noderef = check_input_noderef_wrap(reader, noderef);

@@ -697,40 +697,6 @@ static bool check_input_alignas_underaligned(CheckInputReader* reader, CheckInpu
     return !underaligned;
 }
 
-// clang's Expr::getExprLoc of the expression from `first` to `end` (#147), where some handlers report an argument: a
-// binary operator's (an assignment's and a comma's too) at its operator, a member access at the member's name, a postfix
-// increment or decrement at its operator, a subscript at its base's, and any other (a conditional, a call, a cast, a
-// prefix operator, a parenthesized expression, a primary one) at its first token. Its root is the token whose parent is
-// outside it.
-static uint32_t check_input_expression_location(const Parser* parser, uint32_t first, uint32_t end)
-{
-    uint32_t result = first;
-    uint32_t last = end;
-    bool searching = first < end && end <= parser->tokens.count;
-    while (searching)
-    {
-        uint32_t root = BUSTER_CHECK_NONE;
-        for (uint32_t token = first; root == BUSTER_CHECK_NONE && token < last; token += 1)
-        {
-            const uint32_t parent = parser->tree.parents[token];
-            root = parent < first || parent >= last ? token : BUSTER_CHECK_NONE;
-        }
-        const uint8_t role = root != BUSTER_CHECK_NONE ? parser->tree.roles[root] : PARSE_ROLE_NONE;
-        uint32_t opener = BUSTER_CHECK_NONE;
-        for (uint32_t token = first; role == PARSE_ROLE_CLOSE_SUBSCRIPT && opener == BUSTER_CHECK_NONE && token < root; token += 1)
-        {
-            opener = parser->tree.parents[token] == root && parser->tree.roles[token] == PARSE_ROLE_OPEN_SUBSCRIPT ? token : BUSTER_CHECK_NONE;
-        }
-        const bool binary = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL ||
-                            role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR ||
-                            role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA;
-        result = binary || role == PARSE_ROLE_POSTFIX ? root : role == PARSE_ROLE_MEMBER_OPERATOR && root + 1 < last ? root + 1 : first;
-        searching = opener != BUSTER_CHECK_NONE && opener > first;
-        last = opener;
-    }
-    return result;
-}
-
 // An argument of more than 32 bits (CheckInputAttribute.wide), clang's err_ice_too_large at its expression, from `first`
 // to `end`, printing `value`: the declaration's first attribute error.
 static void check_input_attribute_too_large(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t first, uint32_t end,

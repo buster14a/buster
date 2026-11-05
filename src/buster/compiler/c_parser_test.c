@@ -904,8 +904,9 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x __attribute__ (( (unused)));\n", "1:23: expected ')'", 0 },
     { "int x __attribute__ ((aligned(4 4)));\n", "1:32: expected ')'", 0 },
     { "int x __attribute__ ((aligned(;)));\n", "1:31: expected expression", 0 },
-    { "int x __attribute__((section(,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0 },
-    { "int x __attribute__((section(1,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0 },
+    // Clang classifies the required string's diagnostic as semantic, including an empty or malformed argument.
+    { "int x __attribute__((section(,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0, true },
+    { "int x __attribute__((section(1,)));\n", "1:30: expected string literal as argument of 'section' attribute", 0, true },
     { "int x __attribute__ ( unused));\n", "1:22: expected '(' after '('", 0 },
     // A for-statement's missing `;` is at the token clang finds instead.
     { "void f(int n) { for (int i = 0; i n < ; i++) { } }\n", "1:35: expected ';' in 'for' statement specifier", 0 },
