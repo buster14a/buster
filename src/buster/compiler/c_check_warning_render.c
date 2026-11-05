@@ -1210,6 +1210,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                 valid = valid && suffix != NULL;
                 if (valid)
                 {
+                    const PPDiagnosticRecord* previous = pp->diagnostic_last;
                     const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
                     const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? pp->output.count + 1 :
                         check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
@@ -1240,6 +1241,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    pp_diagnostic_suborder(pp, previous, event->suborder);
                     valid = !pp->diagnostic_collection_failed;
                 }
                 arena_pop_to(scratch, mark);

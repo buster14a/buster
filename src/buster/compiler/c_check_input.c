@@ -397,6 +397,8 @@ struct CheckInputReport
     uint32_t pragma;
     // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
     uint32_t completion;
+    // Optional order among a completed declaration's diagnostics, whose locations need not follow that order.
+    uint64_t suborder;
     // The declaration a message located elsewhere names (an attribute's, #147), plus one; 0 for none.
     uint32_t subject;
     // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.
@@ -604,6 +606,9 @@ struct CheckInput
     // Source-only GNU noderef type shadows, absent from units that do not spell the attribute. These never change a
     // canonical TypeId or a checked value. Annotated members use their completed record's member indexes.
     CheckSparseWide noderef_types;
+    // One bit per checked graph value: its immediate pointed-to source level is noderef. Initializer warnings
+    // consume this immutable receipt without retaining the graph pass's temporary annotation trees.
+    const uint64_t* noderef_values;
     CheckNoderefMember* noderef_members;
     uint32_t noderef_member_count;
     uint32_t noderef_member_capacity;
@@ -2756,10 +2761,6 @@ static bool check_input_attribute_only(const Parser* parser, uint32_t first, uin
             const uint32_t open = kind == PARSE_KIND_L_SQUARE ? token : token + 1;
             const uint32_t close = open < end ? parser->tree.parents[open] : end;
             token = close > open && close < end ? close + 1 : end;
-        }
-        else if (kind == PARSE_KIND_EXTENSION)
-        {
-            token += 1;
         }
         else
         {
@@ -6322,7 +6323,13 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             }
             else
             {
+                const uint32_t reports = reader->output->report_count;
                 check_input_report(reader, parameter, CHECK_INPUT_KR_IMPLICIT_INT);
+                if (reader->output->report_count != reports)
+                {
+                    // The missing type becomes known when the old-style declaration list ends, after its parser errors.
+                    reader->output->reports[reports].completion = body;
+                }
                 valid = false;
             }
         }

@@ -707,9 +707,21 @@ static void pp_diagnostic_take(Preprocessor* pp, Preprocessor* replay)
     pp->diagnostic_collection_failed |= replay->diagnostic_collection_failed;
 }
 
+// Retain a completed construct's own ordering across producers that render its warnings and errors separately.
+// Only the new records are visited; notes remain attached to their primary, and ordinary diagnostics pass zero.
+static __attribute__((unused)) void pp_diagnostic_suborder(Preprocessor* pp, const PPDiagnosticRecord* previous, uint64_t suborder)
+{
+    for (PPDiagnosticRecord* record = suborder != 0 ? (previous != NULL ? previous->next : pp->diagnostic_first) : NULL;
+         record != NULL; record = record->next)
+    {
+        record->suborder = suborder;
+    }
+}
+
 // Stable bottom-up merging needs no second allocation on the rejected-unit path. The order key is the expansion
-// output boundary for preprocessing and the exact output token for parser/checker groups. Equal keys retain the
-// discovery order, including several directive reports before the next source token.
+// output boundary for preprocessing and the exact output token for parser/checker groups. A completed construct may
+// refine that boundary by its own nonzero suborder; ordinary records follow it. Equal keys retain discovery order,
+// including several directive reports before the next source token.
 static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
 {
     uint64_t width = 1;
@@ -733,7 +745,10 @@ static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
             uint64_t right_count = width;
             while (left_count != 0 || (right_count != 0 && right != NULL))
             {
-                const bool take_left = left_count != 0 && (right_count == 0 || right == NULL || left->position <= right->position);
+                const uint64_t left_order = left != NULL && left->suborder != 0 ? left->suborder : UINT64_MAX;
+                const uint64_t right_order = right != NULL && right->suborder != 0 ? right->suborder : UINT64_MAX;
+                const bool take_left = left_count != 0 && (right_count == 0 || right == NULL || left->position < right->position ||
+                                                         (left->position == right->position && left_order <= right_order));
                 PPDiagnosticRecord* next = take_left ? left : right;
                 left = take_left ? left->next : left;
                 right = !take_left ? right->next : right;

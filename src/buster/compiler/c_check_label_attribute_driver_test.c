@@ -1305,6 +1305,10 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void ([[gnu::x]] *p)(void) __attribute__((noinline));\n",
         "void f(int ([[gnu::x]] *p) __attribute__((cold))) __attribute__((stdcall));\n",
         "__attribute__((noinline)) void ([[gnu::x]] ([[gnu::y]] *p))(void);\n",
+        // A handler's preliminary warning precedes its own error, after the completed type's warnings and any
+        // earlier declaration attributes. Kernel-only checks follow the entire attribute list.
+        "void __attribute__((stdcall, unknown, amdgpu_num_sgpr(0))) f(void);\n",
+        "void __attribute__((stdcall, unknown, amdgpu_num_vgpr(4294967296))) f(void);\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {
@@ -1320,11 +1324,16 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
             arguments[5] = scalar != 0 ? "--scalar" : NULL;
             char* actual = NULL;
             const int status = check_test_driver_spawn(arguments, &actual);
-            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
-            char description[2048];
-            snprintf(description, sizeof(description), "attributed statement %u, %s: status %d (clang %d), lines\n%s(clang\n%s)", s,
-                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
-            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            const bool compared = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES);
+            const bool same = compared && strcmp(expected_lines, actual_lines) == 0 && (status != 0) == (oracle != 0);
+            char description[160];
+            snprintf(description, sizeof(description), "attributed statement %u, %s: status %d (clang %d), diagnostic lines agree", s,
+                     scalar != 0 ? "scalar" : "vector", status, oracle);
+            check_test_expect(test, same, description);
+            if (!same)
+            {
+                fprintf(stderr, "%s:\n%s(clang\n%s)\n", description, compared ? actual_lines : actual != NULL ? actual : "<no output>\n", expected_lines);
+            }
             free(actual);
         }
         check_test_expect(test, made && lines, "attributed statements: fixture written and clang's lines read");

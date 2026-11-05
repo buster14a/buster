@@ -6314,6 +6314,13 @@ arguments against the function. The checker now gives these as clang does.
   cancels its lvalue's dereference, including array-member address computations,
   while loading an intermediate pointer member still warns. Implicit pointer
   conversions that remove the annotation warn; explicit casts do not.
+  Initializer conversion diagnostics follow the actual selected member or
+  array element, including nested designators, union alternatives, atomic
+  pointer elements and GNU ranges. The graph pass retains one bit per value
+  for these consumers; its temporary expression shadows remain disposable.
+  The initializer's existing warning sink deduplicates repeated range writes
+  and scalar initializers already diagnosed by the graph pass, and applies
+  the same unevaluated-query suppression before publication.
   Function redeclarations preserve the previous composite function type's
   sugar, while an object's most recent declaration and a definition's own
   parameters keep their own sugar. A body's annotated record members request

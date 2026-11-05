@@ -1214,7 +1214,8 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
                     found = found || check_input_declaration_boundary(parser->tree.roles[at]);
                 }
             }
-            else if ((returning || op == CHECK_OP_ASSIGN) && token + 1 < parser->tokens.count)
+            // Assignment's sign warning points at its operator; its qualifier warning points at the source expression.
+            else if ((returning || (op == CHECK_OP_ASSIGN && warning == CHECK_WARNING_DISCARDED_QUALIFIERS)) && token + 1 < parser->tokens.count)
             {
                 *located = token + 1;
             }
@@ -1608,12 +1609,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     }
                     if (source != BUSTER_CHECK_NONE)
                     {
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
                         // An alias or ifunc definition's error is clang's after the multiversioning error at the
                         // function's name, though its location is its earlier attribute (#839).
                         if (phase == 0 && input->reports[index].sort != 0)
                         {
-                            publication = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                            const uint32_t sorted = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                            publication = publication < sorted ? sorted : publication;
                         }
                         // The report's identifier supplies its spelling. Its sorted publication key can be a later
                         // expression's end, as for an attribute count diagnosed after an argument's call error.
@@ -2300,6 +2303,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
                         }
+                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder : 0);
                     }
                     else
                     {
@@ -4172,7 +4176,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         const CheckWarningEvent* event = input.warning_events.events + i;
                         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
-                        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || selected)
+                        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION || selected)
                         {
                             const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
                             initializer_warning_storage = check_warning_set_add(&initializer_warning_keys, key);

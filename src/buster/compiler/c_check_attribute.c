@@ -4182,6 +4182,7 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             default:
                 break;
         }
+        const uint32_t before = reader->output->multiversion_report_count;
         if (earlier != BUSTER_CHECK_NONE && !incompatible[i])
         {
             // An earlier different-kind attribute is still present: clang reports the incompatibility, not the
@@ -4195,6 +4196,12 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_DUPLICATE, 0, attribute->name_token,
                                             attributes->records[duplicate].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
             incompatible[i] = true;
+        }
+        for (uint32_t r = before; r < reader->output->multiversion_report_count; r += 1)
+        {
+            CheckInputReport* report = reader->output->multiversion_reports + r;
+            report->completion = reader->attribute_completion;
+            report->suborder = (uint64_t)attribute->first + 2;
         }
     }
     // The active multiversioning attribute: the first target("default"), target_clones, cpu_specific or cpu_dispatch
@@ -5602,7 +5609,8 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         }
     }
     // Subject checks run after the declarator's type is complete. Give their warnings and errors that same boundary,
-    // retaining the handlers' order and keeping parameters before the containing declarator's checks. Parser macro
+    // retaining each handler's earlier ordering key separately, so its introductory warning still precedes its error
+    // and the final kernel checks follow both. Keep parameters before the containing declarator's checks. Parser macro
     // warnings retain their own lexical boundaries, including any read by an attribute's nested type expression.
     for (uint32_t w = warning_begin; w < reader->warning_events.count; w += 1)
     {
@@ -5610,12 +5618,14 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         if (event->kind != CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE && event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN &&
             event->completion < completion)
         {
+            event->suborder = (uint64_t)event->completion + 1;
             event->completion = completion;
         }
     }
     for (uint32_t r = report_begin; r < reader->output->report_count; r += 1)
     {
         CheckInputReport* report = reader->output->reports + r;
+        report->suborder = (uint64_t)(report->sort != 0 ? report->sort : report->completion != 0 ? report->completion : report->token) + 1;
         report->completion = report->completion < completion ? completion : report->completion;
     }
     return valid;

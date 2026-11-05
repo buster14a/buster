@@ -102,9 +102,16 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
     const uint32_t count = graph->count;
     const uint32_t token_count = parser->tokens.count;
     const uint64_t mark = reader->scratch->length;
+    const uint64_t words = ((uint64_t)count + 63) / 64;
+    uint64_t* marked_values = words != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, words) : NULL;
     const CheckNoderefType** shadows = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const CheckNoderefType*, count);
     uint8_t* accesses = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
-    reader->output->resource |= count != 0 && (shadows == NULL || accesses == NULL);
+    reader->output->resource |= count != 0 && (shadows == NULL || accesses == NULL || marked_values == NULL);
+    if (marked_values != NULL)
+    {
+        memset(marked_values, 0, words * sizeof(uint64_t));
+    }
+    reader->output->noderef_values = marked_values;
     Arena* output = reader->arena;
     // These expression-only shadows live for this pass. No sparse column may point into its rolled-back scratch.
     reader->arena = reader->scratch;
@@ -135,6 +142,10 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         else
         {
             shadows[node] = check_input_noderef_action(reader, op, types, values, destination, graph->members[node]);
+        }
+        if (check_noderef_graph_marked(reader, check_stream_type(stream, node), shadows[node]))
+        {
+            marked_values[node / 64] |= UINT64_C(1) << (node % 64);
         }
         if (op == CHECK_OP_DEREFERENCE || op == CHECK_OP_ARROW || op == CHECK_OP_SUBSCRIPT)
         {

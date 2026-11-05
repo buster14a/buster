@@ -89,6 +89,9 @@ requirements. [Command index](README.md).
   address-cancellation and unevaluated-expression fixtures with pinned Clang
   in GNU C17 and C23. It checks complete diagnostic lines and notes through
   scalar, ordinary and poisoned deferred-reader paths, plus `-Werror=noderef`.
+  Aggregate cases cover arrays, nested designators, anonymous records,
+  overlapping union alternatives, atomic pointer elements, compound literals
+  and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
