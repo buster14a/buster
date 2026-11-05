@@ -52,13 +52,15 @@ traffic. It changes no host setting and needs no root. It needs
     `CSV.done` is written after both succeed. One that is unfinished runs again
     whole. Any fanout batches it measured lose their completion records first, so
     that they run inside the new measurement instead of being skipped under it.
+    Reports read only committed CSVs and completed profile tables. Stage medians
+    use only logs with successful time records, including A/B stage tables.
   - **Inputs.** Records are reused by their names alone, so
     `results/HOST/identity.txt` binds the results to the inputs they were
     measured with: the SHA-256 of every build in `bin/`, `self-main.i`, the
     predefines, the corpus's `MANIFESTS.sha256`, `workloads.sh`, the host
     profile, and the counter groups as the run expands them (with `TD_WIDTH` and
     `TD_RESYNC`). Every step except `setup`, `build-commit` and `summarize`
-    checks it first, and is refused once a recorded input changed (a rebuilt
+    checks it first, and is refused once a recorded input disappears or changed (a rebuilt
     checkout, another corpus, workload options or host profile). Move the results
     away to measure the new inputs. A build first seen, such as a `build-commit`
     one, is added. Results with no `identity.txt` (from before it) are refused
@@ -107,18 +109,19 @@ compilers, a fake perf, a fake tcc and a two-commit fake checkout. It checks:
 - that `env` keeps a catalog that numbers results when perf's list changes, even
   to a shifted list of the same length, and that `sweep` refuses results numbered
   by another catalog;
-- that `summarize` passes a campaign without some steps and fails when a reducer
-  fails;
+- that `summarize` passes a campaign without some steps, excludes failed and
+  interrupted stage logs, and fails when a reducer fails;
 - that `env` fails on a `perf list` that fails or lists nothing, and that
   `sweep` and `metrics` fail without a catalog;
 - that a step whose CPU can't be pinned fails;
 - that after `setup` rebuilds the checkout, a step that measures the old results
   is refused until they are moved away, that a `build-commit` build is added to
-  the inputs, and that results without `identity.txt` are refused;
+  the inputs, and that missing recorded inputs and results without `identity.txt`
+  are refused;
 - that a changed host profile or `TD_WIDTH` refuses the results, and that a
   done profile of another `PROFILE_WORKLOAD` and `PROFILE_RUNS` fails;
-- `tables.sh`'s scaling report under `gawk --posix`, and its failure when a
-  command fails;
+- `tables.sh`'s scaling report under `gawk --posix`, exclusion of unfinished
+  energy, uncore and A/B stage records, and failure when a command fails;
 - that `pack.sh` archives every raw file, fails when a `tar` fails or its output
   misses a file, and refuses foreign lock lines in the raw files.
 

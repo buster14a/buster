@@ -349,9 +349,36 @@ chmod +x "$work/fake/uarch-fails"
 mkdir -p "$results/profiles/a"
 : > "$results/profiles/a/td1.tsv"
 : > "$results/profiles/a/td2.tsv"
+UARCH=$ROOT/uarch tables
+expect '[[ $status -eq 0 ]] && ! grep -q "Per-function top-down" "$work/tables.md"' "tables: unfinished profiles excluded"
+: > "$results/profiles/a/td1.done"
+: > "$results/profiles/a/td2.done"
 UARCH=$work/fake/uarch-fails tables
 expect '[[ $status -ne 0 ]] && grep -q "tables.sh: line" "$work/tables.err"' "tables.sh: a failed command fails the report"
 rm -rf -- "${results:?}/profiles"
+
+# A report consumes only committed measurements, including each component of a row.
+mkdir -p "$results/energy" "$results/uncore"
+printf '100,,energy-pkg,1000000000\n' > "$results/energy/idle.csv"
+printf '100,,msr/tsc/,1000000000\n100,,msr/aperf/,1000000000\n100,,msr/mperf/,1000000000\n100,,cycles,1000000000\n100,,instructions,1000000000\n' > "$results/energy/a.freq.csv"
+printf '100,,energy-pkg,1000000000\n' > "$results/energy/a.pkg.csv"
+printf '0,0,100,0,energy-core\n' > "$results/energy/a.core.csv"
+printf '100,,cas_cmd.rd,1000000000\n100,,cas_cmd.wr,1000000000\n100,,act_cmd,1000000000\n' > "$results/uncore/single.csv"
+: > "$results/energy/idle.csv.done"
+: > "$results/energy/a.freq.csv.done"
+: > "$results/energy/a.pkg.csv.done"
+UARCH=$ROOT/uarch tables
+expect '[[ $status -eq 0 ]] && ! grep -q "^| a |" "$work/tables.md" && ! grep -q "DRAM traffic" "$work/tables.md"' "tables: unfinished energy component and uncore excluded"
+: > "$results/energy/a.core.csv.done"
+: > "$results/uncore/single.csv.done"
+UARCH=$ROOT/uarch tables
+expect '[[ $status -eq 0 ]] && grep -q "^| a |" "$work/tables.md" && grep -q "^| single |" "$work/tables.md"' "tables: committed energy and uncore included"
+printf '999,,energy-pkg,1000000000\n' > "$results/scaling/fanout-energy-1.r99.csv"
+UARCH=$ROOT/uarch tables
+expect '! grep -q "999.00" "$work/tables.md"' "tables: unfinished fanout energy excluded"
+rm -f -- "$results/scaling"/fanout-energy-1.r*.csv.done
+UARCH=$ROOT/uarch tables
+expect 'grep -q "^| 1 |.* |  |$" "$work/tables.md"' "tables: missing fanout energy is blank rather than zero"
 
 # pack.sh: every raw file in the archive; a failing or lossy tar fails the pack.
 if command -v zstd > /dev/null; then
@@ -413,6 +440,21 @@ reset
 run time
 run summarize
 expect '[[ $status -eq 0 && -f $results/time/time-summary.tsv && -f $results/stages-a.tsv ]]' "summarize: a campaign without the self steps passes"
+# Only successful time records may feed stage medians, including self and AB.
+mkdir -p "$results/time-self/logs" "$results/ab-test/logs"
+for prefix in "$results/time/logs/stages-a" "$results/time-self/logs/stages-self-a" "$results/ab-test/logs/build"; do
+    printf 'time-stage\tcheck-program\t1\t0\t0\t0\t0\n' > "$prefix.r0.log"
+    printf 'label\t0\t0\n' > "$prefix.r0.time"
+    printf 'time-stage\tcheck-program\t999\t0\t0\t0\t0\n' > "$prefix.r90.log"
+    printf 'label\t90\t1\n' > "$prefix.r90.time"
+    printf 'time-stage\tcheck-program\t999\t0\t0\t0\t0\n' > "$prefix.r91.log"
+done
+run summarize
+expect '[[ $status -eq 0 ]] && grep -q "^time-stage.check-program.ms.1.1.1.1$" "$results/stages-a.tsv" && grep -q "^time-stage.check-program.ms.1.1.1.1$" "$results/stages-self-a.tsv"' "summarize: failed and orphan stage logs excluded"
+printf 'label\truns\tfailed\twall_ms\tmin\tmax\tuser_ms\tsystem_ms\tmaxrss_kb\n' > "$results/ab-test/time-summary.tsv"
+printf 'build\t1\t0\t1\t1\t1\t1\t0\t1\n' >> "$results/ab-test/time-summary.tsv"
+UARCH=$ROOT/uarch tables
+expect '[[ $status -eq 0 ]] && grep -q "^time-stage.check-program.ms.1.1.1.1$" "$results/ab-test/stages-build.tsv"' "tables: failed and orphan AB stage logs excluded"
 rm -f -- "$results/time/time-summary.tsv"
 mkdir "$results/time/time-summary.tsv"
 run summarize
@@ -513,6 +555,14 @@ expect '[[ $status -eq 0 ]] && grep -q "^compiler-znver4 " "$results/identity.tx
 REPOSITORY=$repository run build-commit other "$second" znver4
 run time
 expect '[[ $status -eq 0 ]] && grep -q "^compiler-other-znver4 " "$results/identity.txt"' "time: a build first seen is added to the inputs"
+mv "$ROOT/bin/compiler-other-znver4" "$ROOT/bin/saved"
+run time
+expect '[[ $status -ne 0 ]] && grep -q "compiler-other-znver4, which is now missing" "$results/run.log"' "time: a removed recorded build is refused"
+mv "$ROOT/bin/saved" "$ROOT/bin/compiler-other-znver4"
+mv "$ROOT/self-main.i" "$ROOT/self-main.saved"
+run time
+expect '[[ $status -ne 0 ]] && grep -q "self-main.i, which is now missing" "$results/run.log"' "time: a removed recorded self input is refused"
+mv "$ROOT/self-main.saved" "$ROOT/self-main.i"
 # Another state of the checkout, rebuilt as setup asks: the old results stay its.
 echo fifth > "$repository/VERSION"
 rm -f -- "$ROOT/bin/compiler-znver4" "$ROOT/bin/compiler-znver4.commit" "$ROOT/self-main.i"

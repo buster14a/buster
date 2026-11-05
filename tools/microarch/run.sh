@@ -868,6 +868,17 @@ check_campaign()
             status=1
         fi
     done <<< "$current"
+    # Inputs may be added as builds are prepared, but a recorded input may not
+    # disappear: existing completion records would otherwise be reused.
+    if [[ -f $recorded ]]; then
+        while read -r name hash; do
+            [[ -n $name ]] || continue
+            if ! awk -v name="$name" '$1 == name { found = 1 } END { exit !found }' <<< "$current"; then
+                log "results/$HOST was measured with $name, which is now missing: restore it or move the results away"
+                status=1
+            fi
+        done < "$recorded"
+    fi
     if [[ $status -eq 0 && -n $added ]]; then
         { cat "$recorded" 2> /dev/null; printf '%s' "$added"; } > "$recorded.tmp" && mv -f "$recorded.tmp" "$recorded" || status=1
     fi
@@ -884,14 +895,32 @@ step_summarize()
             "$UARCH" summarize "$d" || { log "summarize: $d failed"; status=1; }
         fi
     done
+    local log record
+    local logs=()
     for v in $VARIANTS; do
-        if compgen -G "$OUT/time/logs/stages-$v.r*.log" > /dev/null; then
-            "$UARCH" stages "$OUT"/time/logs/stages-"$v".r*.log > "$OUT/stages-$v.tsv" || { log "summarize: stages-$v failed"; status=1; }
+        logs=()
+        for log in "$OUT"/time/logs/stages-"$v".r*.log; do
+            [[ -f $log ]] || continue
+            record=${log%.log}.time
+            if [[ -f $record ]] && awk -F '\t' 'NR == 1 && $3 == "0" { ok = 1 } END { exit !ok }' "$record"; then logs+=("$log"); fi
+        done
+        if [[ ${#logs[@]} -gt 0 ]]; then
+            "$UARCH" stages "${logs[@]}" > "$OUT/stages-$v.tsv" || { log "summarize: stages-$v failed"; status=1; }
+        else
+            rm -f -- "$OUT/stages-$v.tsv"
         fi
     done
     for v in $SELF_VARIANTS; do
-        if compgen -G "$OUT/time-self/logs/stages-self-$v.r*.log" > /dev/null; then
-            "$UARCH" stages "$OUT"/time-self/logs/stages-self-"$v".r*.log > "$OUT/stages-self-$v.tsv" || { log "summarize: stages-self-$v failed"; status=1; }
+        logs=()
+        for log in "$OUT"/time-self/logs/stages-self-"$v".r*.log; do
+            [[ -f $log ]] || continue
+            record=${log%.log}.time
+            if [[ -f $record ]] && awk -F '\t' 'NR == 1 && $3 == "0" { ok = 1 } END { exit !ok }' "$record"; then logs+=("$log"); fi
+        done
+        if [[ ${#logs[@]} -gt 0 ]]; then
+            "$UARCH" stages "${logs[@]}" > "$OUT/stages-self-$v.tsv" || { log "summarize: stages-self-$v failed"; status=1; }
+        else
+            rm -f -- "$OUT/stages-self-$v.tsv"
         fi
     done
     return $status

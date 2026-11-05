@@ -118,7 +118,7 @@ fi
 
 for h in "${hosts[@]}"; do
     for p in "$(dir "$h")"/profiles/*/; do
-        [[ -f $p/td1.tsv && -f $p/td2.tsv ]] || continue
+        [[ -f $p/td1.tsv && -f $p/td1.done && -f $p/td2.tsv && -f $p/td2.done ]] || continue
         echo "## Per-function top-down, $(name "$h"), $(basename "$p") build (leader-sampled groups, functions with at least 0.7% of user cycles)"
         echo
         echo "| function | cycles | IPC | retiring | frontend | backend | backend memory | bad spec | mispredicts PKI |"
@@ -131,7 +131,7 @@ done
 
 for h in "${hosts[@]}"; do
     for p in "$(dir "$h")"/profiles/*/; do
-        [[ -f $p/lbr.tsv ]] || continue
+        [[ -f $p/lbr.tsv && -f $p/lbr.done ]] || continue
         echo "## Mispredicted branches by site, $(name "$h"), $(basename "$p") build (LBR, 8 compiles)"
         echo
         head -1 "$p/lbr.tsv" | awk -F'\t' '{ printf "%s LBR entries, %s mispredicted\n\n", $2, $4 }'
@@ -154,17 +154,19 @@ for h in "${hosts[@]}"; do
     echo "| independent compiles | batch wall ms (median of 4) | MB/s | user ms per compile | system ms per compile | package J per compile |"
     echo "| ---: | ---: | ---: | ---: | ---: | ---: |"
     for k in $(awk -F'\t' 'NR > 1 { print $3 }' "$s/fanout.tsv" | sort -n | uniq); do
-        energy=$(awk -F, '$3 ~ /energy-pkg/ { print $1 }' /dev/null "$s"/fanout-energy-"$k".r*.csv | median)
+        energy_files=()
+        for f in "$s"/fanout-energy-"$k".r*.csv; do [[ -f $f.done ]] && energy_files+=("$f"); done
+        energy=$(awk -F, '$3 ~ /energy-pkg/ { print $1 }' /dev/null "${energy_files[@]}" | median)
         wall=$(awk -F'\t' -v k="$k" 'NR > 1 && $3 == k { print $5 }' "$s/fanout.tsv" | median)
         awk -F'\t' -v k="$k" -v bytes=$SQLITE_BYTES -v energy="$energy" -v m="$wall" 'NR > 1 && $3 == k { n += 1; u += $6; s += $7 }
-            END { if (n > 0 && m > 0) printf "| %d | %.1f | %.1f | %.1f | %.1f | %.2f |\n", k, m, k * bytes / m / 1000, u / n / k, s / n / k, energy / k }' "$s/fanout.tsv"
+            END { if (n > 0 && m > 0) printf "| %d | %.1f | %.1f | %.1f | %.1f | %s |\n", k, m, k * bytes / m / 1000, u / n / k, s / n / k, (energy == "" ? "" : sprintf("%.2f", energy / k)) }' "$s/fanout.tsv"
     done
     echo
 done
 
 for h in "${hosts[@]}"; do
     e=$(dir "$h")/energy
-    [[ -f $e/idle.csv ]] || continue
+    [[ -f $e/idle.csv && -f $e/idle.csv.done ]] || continue
     echo "## Energy and clock of single-core sq-c, $(name "$h") (10 compiles per build)"
     echo
     idle=$(awk -F, '$3 ~ /energy-pkg/ { print $1 / ($4 / 1e9) }' "$e/idle.csv")
@@ -174,6 +176,7 @@ for h in "${hosts[@]}"; do
     echo "| --- | ---: | ---: | ---: | ---: | ---: |"
     for f in "$e"/*.freq.csv; do
         v=$(basename "$f" .freq.csv)
+        [[ -f $f.done && -f $e/$v.pkg.csv && -f $e/$v.pkg.csv.done && -f $e/$v.core.csv && -f $e/$v.core.csv.done ]] || continue
         tsc_mhz=$(awk -F, '$3 == "msr/tsc/" { t = $1 } END { print t }' "$f")
         awk -F, -v v="$v" -v idle="$idle" -v pkgfile="$e/$v.pkg.csv" -v corefile="$e/$v.core.csv" '
             $3 == "msr/aperf/" { a = $1 } $3 == "msr/mperf/" { m = $1 } $3 == "msr/tsc/" { t = $1; ns = $4 } $3 == "cycles" { c = $1 } $3 == "instructions" { i = $1 }
@@ -198,31 +201,37 @@ for h in "${hosts[@]}"; do
         header="| stage |"
         rule="| --- |"
         for label in $labels; do
-            "$UARCH" stages "$a"/logs/"$label".r*.log > "$a/stages-${label//:/-}.tsv"
+            logs=()
+            for log in "$a"/logs/"$label".r*.log; do
+                record=${log%.log}.time
+                if [[ -f $record ]] && awk -F '\t' 'NR == 1 && $3 == "0" { ok = 1 } END { exit !ok }' "$record"; then logs+=("$log"); fi
+            done
+            [[ ${#logs[@]} -gt 0 ]] || continue
+            "$UARCH" stages "${logs[@]}" > "$a/stages-${label//:/-}.tsv"
             files+=("$a/stages-${label//:/-}.tsv")
             header+=" $label |"
             rule+=" ---: |"
         done
         echo "$header"
         echo "$rule"
-        awk -F'\t' 'FNR == 1 { file += 1 } $1 == "time-stage" && $3 == "ms" { if (!($2 in seen)) { seen[$2] = 1; order[++n] = $2 } value[$2, file] = $4 }
+        if [[ ${#files[@]} -gt 0 ]]; then awk -F'\t' 'FNR == 1 { file += 1 } $1 == "time-stage" && $3 == "ms" { if (!($2 in seen)) { seen[$2] = 1; order[++n] = $2 } value[$2, file] = $4 }
             END { for (i = 1; i <= n; i += 1) { s = order[i]; line = "| " s " |"; any = 0
                   for (f = 1; f <= file; f += 1) { if (value[s, f] >= 0.05) any = 1; line = line sprintf(" %.2f |", value[s, f]) }
-                  if (any) print line } }' "${files[@]}"
+                  if (any) print line } }' "${files[@]}"; fi
         echo
     done
 done
 
 for h in "${hosts[@]}"; do
     u=$(dir "$h")/uncore
-    [[ -f $u/single.csv ]] || continue
+    [[ -f $u/single.csv && -f $u/single.csv.done ]] || continue
     echo "## DRAM traffic (UMC CAS, system-wide, both channels, 64 bytes per CAS), $(name "$h")"
     echo
     echo "| run | compiles | read CAS | write CAS | activates | window s | GB/s | DRAM bytes per source byte | activates per CAS |"
     echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     for f in idle:0 single:8 fanout8:16; do
         file=$u/${f%%:*}.csv
-        [[ -f $file ]] || continue
+        [[ -f $file && -f $file.done ]] || continue
         awk -F, -v run="${f%%:*}" -v n="${f##*:}" -v bytes=$SQLITE_BYTES '
             $3 ~ /cas_cmd.rd/ { rd = $1; ns = $4 } $3 ~ /cas_cmd.wr/ { wr = $1 } $3 ~ /act_cmd/ { act = $1 }
             END { window = ns / 2 / 1e9
