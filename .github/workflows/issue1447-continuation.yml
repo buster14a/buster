@@ -5,37 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  combined-correctness:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_ORACLE_CACHE: check
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          ref: 23622f494ecbf5468d50c858aefa80da91089400
-          persist-credentials: false
-      - name: Install pinned Clang
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build combined revision
-        run: ./build.sh --config Release --jobs 4
-      - name: Check parser
-        if: success() || failure()
-        run: build/compiler test-parser
-      - name: Check types
-        if: success() || failure()
-        run: build/compiler test-types
-      - name: Check binding and input paths
-        if: success() || failure()
-        run: build/compiler test-checker --part 1/4
-      - name: Check complete driver diagnostics and emission
-        if: success() || failure()
-        run: build/compiler test-checker-driver
-      - name: Check translation units
-        if: success() || failure()
-        run: build/compiler test-check-units
-  linkage-oracle:
+  diagnostic-oracle:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -44,16 +14,14 @@ jobs:
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Probe linkage pragma symbol effects
+      - name: Probe diagnostic spelling and argument notes
         shell: bash
         run: |
           set +e
           ulimit -c 0
-          for case in {1..38}; do
-            echo "LINKAGE CASE=$case"
-            clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" -S -emit-llvm tools/issue1447-linkage-pragmas.c -o "$RUNNER_TEMP/linkage.ll" 2>&1
-            status=$?
-            echo "STATUS=$status"
-            if [ "$status" = 0 ]; then grep -E '^@|^define|^declare' "$RUNNER_TEMP/linkage.ll" || true; fi
+          for case in {1..24}; do
+            echo "DIAGNOSTIC CASE=$case"
+            clang -std=gnu23 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-diagnostic-followup.c 2>&1
+            echo "STATUS=$?"
           done
           exit 0
