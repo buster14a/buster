@@ -958,7 +958,7 @@ static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* s
     const uint32_t columns = emitted->prepared.call_save_columns;
     const uint64_t mark = scratch->length;
     Tier1EmitSavePositions saves;
-    bool ok = tier1_emit_save_positions(plan, columns, base, scratch, &saves);
+    bool ok = tier1_emit_save_positions(plan, columns, base, emitted->prepared.call_count, emitted->fixed_count, scratch, &saves);
     const uint32_t* calls = saves.positions;
     const uint32_t call_count = saves.call_count;
     uint32_t row_count = 0;

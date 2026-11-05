@@ -994,7 +994,11 @@ static bool tier1_emit_covers(const uint32_t* positions, uint32_t count, uint32_
 
 // The calls' definition phases, and each fixed register's sequences' (a division's rax and rdx, a shift's rcx, of the
 // registers in `columns`), `base` past the plan's node positions, in position order: the calls' in `positions` from 0, then
-// each register's run from `offsets[reg]` to `offsets[reg + 1]`, the registers in order. Their room on `scratch`.
+// each register's run from `offsets[reg]` to `offsets[reg + 1]`, the registers in order. Their room on `scratch`. The
+// function's `calls` and `fixed` nodes (Tier1EmitPrepared.call_count, the fixed registers' sequences' count) say how many:
+// a function with neither, most leaves, has no positions and takes no pass over its nodes, and one without fixed
+// registers' sequences one; a node's registers are its mask's set bits alone (#177's measurement: a loop over all 16 for
+// every node cost 0.46% of `--tier1 -c sqlite3.c`'s instructions). A count past `calls` is refused.
 typedef struct Tier1EmitSavePositions Tier1EmitSavePositions;
 struct Tier1EmitSavePositions
 {
@@ -1003,19 +1007,18 @@ struct Tier1EmitSavePositions
     uint32_t offsets[BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 1];
 };
 
-static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t columns, uint32_t base, Arena* scratch, Tier1EmitSavePositions* saves)
+static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t columns, uint32_t base, uint32_t calls, uint32_t fixed_nodes, Arena* scratch, Tier1EmitSavePositions* saves)
 {
     const IrFunction* function = plan->function;
-    const uint32_t count = function->instruction_count;
-    uint32_t calls = 0;
+    const uint32_t count = calls != 0 || fixed_nodes != 0 ? function->instruction_count : 0;
     memset(saves, 0, sizeof(*saves));
-    for (uint32_t node = 0; node < count; node += 1)
+    for (uint32_t node = 0; fixed_nodes != 0 && node < count; node += 1)
     {
-        calls += tier1_select_function_call(function, node) ? 1 : 0;
-        const uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
+        while (fixed != 0)
         {
-            saves->offsets[reg + 1] += (fixed >> reg) & 1;
+            saves->offsets[__builtin_ctz(fixed) + 1] += 1;
+            fixed &= fixed - 1;
         }
     }
     saves->offsets[0] = calls;
@@ -1031,17 +1034,18 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
     for (uint32_t node = 0; ok && saves->positions != 0 && node < count; node += 1)
     {
         const uint32_t position = base + 2 * node + 1;
-        if (tier1_select_function_call(function, node))
+        const bool call = tier1_select_function_call(function, node);
+        ok = !call || saves->call_count < calls;
+        if (ok && call)
         {
             saves->positions[saves->call_count++] = position;
         }
-        const uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        uint32_t fixed = fixed_nodes == 0 || plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
+        while (fixed != 0)
         {
-            if (((fixed >> reg) & 1) != 0)
-            {
-                saves->positions[cursors[reg]++] = position;
-            }
+            const uint32_t reg = (uint32_t)__builtin_ctz(fixed);
+            saves->positions[cursors[reg]++] = position;
+            fixed &= fixed - 1;
         }
     }
     return ok;
@@ -1074,7 +1078,7 @@ static Tier1EmitError tier1_emit_saves(const Tier1SelectPlan* plan, Arena* scrat
     const uint32_t columns = emitted->prepared.call_save_columns;
     const uint64_t mark = scratch->length;
     Tier1EmitSavePositions saves;
-    const bool ok = tier1_emit_save_positions(plan, columns, 0, scratch, &saves);
+    const bool ok = tier1_emit_save_positions(plan, columns, 0, emitted->prepared.call_count, emitted->prepared.fixed_count, scratch, &saves);
     uint32_t saved = 0;
     for (uint32_t i = 0; ok && saves.positions != 0 && i < allocation->interval_count; i += 1)
     {
