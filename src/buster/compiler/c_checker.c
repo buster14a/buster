@@ -182,8 +182,56 @@ struct CheckGraphValidation
     uint32_t vector_blocks;
 };
 
+// A struct's or union's member that a deprecated or unavailable attribute marks (#147): its index in the type table's
+// members, its declaration's name, the attribute's first token (the deprecated note's place) and its message's string
+// (BUSTER_CHECK_WARNING_NO_SOURCE for none). Its uses are check_input_member_uses' and the initializers' walk's.
+typedef struct CheckInputMarkedMember CheckInputMarkedMember;
+struct CheckInputMarkedMember
+{
+    uint32_t member;
+    uint32_t name;
+    uint32_t attribute;
+    uint32_t message;
+    bool unavailable;
+};
+
+// A token's availability context (CheckInput.availability_contexts, #147): in a deprecated or an unavailable function's
+// body or declaration's declarator and initializer, where clang's ShouldDiagnoseAvailabilityInContext drops a use's
+// diagnostic (a deprecated context a deprecated use's, an unavailable one either's).
+#define BUSTER_CHECK_CONTEXT_DEPRECATED 0x01
+#define BUSTER_CHECK_CONTEXT_UNAVAILABLE 0x02
+
+// The marked member of the type table's member `member` among `members` (`count`, ascending by index), or null.
+static __attribute__((unused)) const CheckInputMarkedMember* check_marked_member(const CheckInputMarkedMember* members, uint32_t count, uint32_t member)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = members[middle].member < member;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    const CheckInputMarkedMember* result = low < count && members[low].member == member ? members + low : NULL;
+    return result;
+}
+
+// Whether a use of a marked member at a token of `context` (BUSTER_CHECK_CONTEXT_*) is dropped, as clang's context rules
+// drop it: a deprecated one's in a deprecated or unavailable context, an unavailable one's in an unavailable one.
+static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedMember* marked, uint8_t context)
+{
+    const bool result = (context & BUSTER_CHECK_CONTEXT_UNAVAILABLE) != 0 || (!marked->unavailable && (context & BUSTER_CHECK_CONTEXT_DEPRECATED) != 0);
+    return result;
+}
+
 struct CheckGraph
 {
+    // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+    // and 0 for none.
+    const CheckInputMarkedMember* marked_members;
+    uint32_t marked_member_count;
+    const uint8_t* availability_contexts;
     // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0.
     TypeId ns_constant_string;
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not

@@ -844,6 +844,15 @@ the three passes, in pages the parse's temporaries already touched.
 - The parser's diagnostics don't show the preprocessor's expansion notes yet
   ("expanded from macro"): #229's `pp_diagnose_output` renders them for an
   output token, which each diagnostic's token gives.
+- An expected closer's error at a token has clang's note "to match this '('"
+  (`[`, `{`) at the innermost open frame of its kind (#147,
+  `ParseDiagnostic.note`, set where the first error is recorded,
+  `parse_scalar_error_argument`), as clang's balanced delimiter tracker gives
+  it; the builtins clang reads without one (`__builtin_va_arg`) and a GNU
+  attribute's list have none. At the unit's end, where the error has no token,
+  the note comes with the location's diagnostic (`pp_diagnose_note`).
+  `test-checker-driver` compares each kind of group with clang's whole output
+  (`c_check_parse_note_driver_test.c`).
 - Ordinary declarations that shadow typedef names still use the scalar
   fallback; K3 now handles unshadowed block-scope aliases directly (#128).
 - Multicore (#149, #151): top-level declarations start with empty stacks at

@@ -345,6 +345,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "_Static_assert(__builtin_os_log_format_buffer_size(\"%2$s %1$d\", 1, \"x\") == 18, \"\");\n"
           "_Static_assert(__builtin_os_log_format_buffer_size(\"%.*s %{public, mask.abcdefghij}d\", 3, \"x\", 1, 2) == 34, \"\");\n"
           "_Static_assert(__builtin_os_log_format_buffer_size(u8\"%d\", (struct S){ 1 }) == 8, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%f %f %f\", (_Float16)1, (__bf16)1, (__fp16)1) == 20, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%Lf %d %d\", 1.0L, (__int128)1, (_BitInt(72))1) == 56, \"\");\n"
           "void* f(void* b, char* c, int i, struct S s)\n{\nunsigned long n = __builtin_os_log_format_buffer_size(\"%d\", i++);\n"
           "(void)__builtin_os_log_format(c, (\"%d\"), i);\n(void)__builtin_os_log_format(b, (const char*)\"%s %f\", \"x\", 1.5f);\n"
           "(void)__builtin_os_log_format(b, \"%d\", 1, s);\n(void)__builtin_os_log_format(b, \"%P %{mask.ab}d\", n, 1);\n"
@@ -816,6 +818,31 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "__builtin_os_log_format(buffer, \"%%%% %{public}d %%\\0%s %d\", n); bytes(__builtin_os_log_format_buffer_size(\"%%%% %{public}d %%\\0%s %d\", n));\n"
         "return (int)(h ^ (h >> 32)); }\n",
         "generic-os-log", clang);
+    // __builtin_os_log_format's data in its items' order (#148, as clang's emitBuiltinOSLogFormat evaluates it): positions
+    // that take the data out of order (their calls' order checked), data no item takes (its call never made), data taken
+    // again where no side effect ran since (a field width's and a precision's argument too); and data of 16 bytes or of
+    // 2, unpromoted: a long double's 10 bytes then zeros, an __int128, a 16-byte vector, _Float16 and __bf16 (an __fp16 as
+    // a double), and signed _BitInts narrower than their classes, zero-extended from their widths, as clang stores them.
+    check_test_program_source(test,
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "static unsigned char buffer[512]; static int order[8]; static int made;\n"
+        "static int next(int v) { order[made++ & 7] = v; return v; }\n"
+        "static void bytes(unsigned long n) { for (unsigned long i = 0; i < n; i++) mix(buffer[i]); }\n"
+        "typedef float V4 __attribute__((vector_size(16))); typedef short V2 __attribute__((vector_size(4)));\n"
+        "int tested(int n) { h = (unsigned)n;\n"
+        "__builtin_os_log_format(buffer, \"%3$d %1$d %2$d\", next(n), next(n + 1), next(n + 2));\n"
+        "bytes(__builtin_os_log_format_buffer_size(\"%3$d %1$d %2$d\", 1, 2, 3)); for (int i = 0; i < made; i++) mix(order[i]); made = 0;\n"
+        "__builtin_os_log_format(buffer, \"%d\", n, next(5)); bytes(__builtin_os_log_format_buffer_size(\"%d\", 1, 2)); mix(made);\n"
+        "__builtin_os_log_format(buffer, \"%1$d %1$d %2$d\", n * 3, next(n)); bytes(__builtin_os_log_format_buffer_size(\"%1$d %1$d %2$d\", 1, 2));\n"
+        "__builtin_os_log_format(buffer, \"%2$*1$d %2$.*1$d\", n, n + 7); bytes(__builtin_os_log_format_buffer_size(\"%2$*1$d %2$.*1$d\", 1, 1));\n"
+        "long double l = -1.5L * n; __int128 w = -(__int128)n << 70; V4 v = { 1.0f, 2.0f, -1.0f, (float)n }; V2 s = { (short)-n, 7 };\n"
+        "__builtin_os_log_format(buffer, \"%Lf %d %d %d\", l, w, v, s); bytes(__builtin_os_log_format_buffer_size(\"%Lf %d %d %d\", l, w, v, s));\n"
+        "_Float16 f = (_Float16)(n * 0.5); __bf16 b = (__bf16)(n * 0.25f); __fp16 p = (__fp16)n;\n"
+        "__builtin_os_log_format(buffer, \"%f %f %f\", f, b, p); bytes(__builtin_os_log_format_buffer_size(\"%f %f %f\", f, b, p));\n"
+        "_BitInt(24) a = -n; _BitInt(7) c = -n; _BitInt(72) d = -n; _BitInt(40) e = -n; unsigned _BitInt(24) u = (unsigned _BitInt(24))-n;\n"
+        "__builtin_os_log_format(buffer, \"%d %d %d %d %d\", a, c, d, e, u); bytes(__builtin_os_log_format_buffer_size(\"%d %d %d %d %d\", a, c, d, e, u));\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-os-log-order", clang);
     // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
     // evaluated once, as the call's.
     check_test_program_source(test,

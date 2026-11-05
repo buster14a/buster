@@ -1624,7 +1624,10 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
   `__builtin_ptrauth_strip`) need a target x86 isn't: every call is an error, as
   clang's is ("is only available in C++", "this target does not support pointer
   authentication"), the latter's after their arity. `__has_builtin` answers 1
-  for them, as clang's does, and `__has_constexpr_builtin` as clang's.
+  for the ten, and `201802L` for `__builtin_operator_new` and
+  `__builtin_operator_delete` in every language, as clang's does (the date of
+  the change that let them call any usual allocation function, which libc++
+  asks about); `__has_constexpr_builtin` answers as clang's.
 
 `__builtin_preserve_access_index` and `__builtin_hlsl_resource_getpointer_typed`
 (0x452 and 0x453, #148) are checked as clang's Sema checks them in C, and `-c`
@@ -1703,8 +1706,8 @@ compile, and this compiler doesn't yet:
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns;
 - `__builtin_call_with_static_chain`, whose chain register (`r10`);
-- `__builtin_os_log_format` of data its items take out of order, or of
-  more than 8 bytes;
+- `__builtin_os_log_format` of data its items take again across side
+  effects, or of a `__float128` or a 2-byte vector;
 - `__builtin_dump_struct`, whose generated calls.
 
 `__builtin_available` with an empty version (`0.0.0`) is refused too, as
@@ -1794,7 +1797,8 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   count (from the precision's argument, or its constant as 4 bytes) or any
   other's precision when it is an argument, and its value (none for `%m`).
   A data argument's size is its promoted type's: arrays and functions as
-  pointers, float and half as double.
+  pointers, float and `__fp16` as double. `_Float16` and `__bf16` aren't
+  promoted, and take 2 bytes.
   - The pass pushes each item on the checker's arena as it finds it, 16
     bytes each and nothing else (`check_os_log_format`, #1329). Escaped
     `%%`, bytes past the format's NUL and specifiers of fewer items take no
@@ -1819,10 +1823,22 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   - It writes the summary byte (0x1 for private items, 0x2 for items other
     than scalars), the items' count, then each item's descriptor
     (`kind << 4 | privacy`), its size and its data.
-  - clang evaluates the data in its items' order, once each. A format whose
-    items take the data other than once each in order (positions, a repeat,
-    an unused argument) is refused by name, and so is data of other than 1,
-    2, 4 or 8 bytes (a `long double`, an `__int128`).
+  - clang evaluates each item's data when it stores it, in the items' order,
+    so positions reorder the data's side effects, and data no item takes
+    isn't evaluated. Here each argument is evaluated once, at its first
+    item, into a temporary. That is clang's result where an argument taken
+    again has no side effects and none ran since its first item (a field
+    width's argument that a precision takes too). Other data taken again is
+    refused by name.
+  - Each item's data is an unsigned integer of its size, as clang's helper
+    takes it. A signed `_BitInt` narrower than its class is zero-extended
+    from its width, and a `long double`'s 10 bytes are followed by 6 zeros.
+    Data of 16 bytes (a `long double`, an `__int128`, a `_BitInt(65)` to
+    `_BitInt(128)`, a 16-byte vector) and of 2 (`_Float16`, `__bf16`) is
+    stored.
+  - A `__float128` and a 2-byte vector are refused by name, and so are a
+    32- or 64-byte vector and a `_BitInt` past 128 bits, on which clang's
+    code generation crashes.
 - **Limits.** At most 31 arguments are taken, and clang takes up to the
   format's plus 255.
 

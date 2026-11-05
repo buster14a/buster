@@ -105,6 +105,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_DEDUCED_ARRAY: result = "cannot use 'auto' with array in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_BIT_FIELD: result = "cannot pass bit-field as auto initializer in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_MISMATCH: result = "'auto' deduced types differ within one declaration"; break;
+        case CHECK_INPUT_AUTO_TYPE_MISMATCH: result = "'__auto_type' deduced types differ within one declaration"; break;
         case CHECK_INPUT_CONSTEXPR_INITIALIZER: result = "constexpr variable must be initialized by a constant expression"; break;
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
@@ -1599,15 +1600,22 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const CheckInputReport* report = input->reports + index;
                             const uint32_t used = parser->tokens.names[token];
                             const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
+                            // The note names its declaration: an enumerator's enum's where the enum marks it.
+                            const uint32_t declared = report->note_token < count && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ?
+                                                      parser->tokens.names[report->note_token] : used;
                             char noted[160];
-                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, used), intern_bytes(pp->table, used));
+                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, declared), intern_bytes(pp->table, declared));
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = noted,
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
-                                                        (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
-                                                        (int)message.length, message.pointer);
+                            // Once more for each of a tag's declarators after the first (report->value).
+                            for (uint64_t copy = 0; copy <= report->value; copy += 1)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "'%.*s' is unavailable%s%.*s", (int)intern_length(pp->table, used), intern_bytes(pp->table, used),
+                                                            message.length != 0 ? ": " : "", (int)message.length, message.pointer);
+                            }
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
                         {
@@ -3825,7 +3833,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
                     CheckMusttails musttails = { 0 };
-                    const bool expression_valid = input_valid && stream.report_count == 0;
+                    // The reader's reports after checking are unavailable members' uses (check_input_member_uses, #147).
+                    const bool expression_valid = input_valid && stream.report_count == 0 && input.report_count == 0;
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
                     CheckDriverDiagnostic fallback[4] = { 0 };
                     CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);

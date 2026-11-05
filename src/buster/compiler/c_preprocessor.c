@@ -17072,16 +17072,20 @@ static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, ui
 // refuses by name (docs/c-builtins-integration.md's "Checked, refused in code"), that clang makes a builtin of the unit by its
 // language modes and whose required target features hold there, as clang answers (pp_builtin_language,
 // pp_builtin_features). Every __builtin_ library builtin is one of all of clang's languages without features, and a plain
-// one is a builtin where pp_library_builtin says so.
+// one is a builtin where pp_library_builtin says so. The answer is 1, but __builtin_operator_new's and
+// __builtin_operator_delete's: 201802 in every language, as clang's EvaluateHasBuiltin answers them, the date of the change
+// that let them call any usual allocation and deallocation function, which libc++ asks about.
 static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     const CBuiltinSourceScope* scope = cbuiltin_source_scope(name, length);
     const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) && pp_builtin_language(options, cbuiltin_languages(name, length));
     const bool intrinsic =
         cbuiltin_source_intrinsic(name, length) && pp_builtin_language(options, scope->languages) && pp_builtin_features(options, scope->features);
-    const uint32_t result =
+    const uint32_t answer =
         pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, options->language.standard) | catalog |
         intrinsic | cbuiltin_fortify_source(name, length) | cbuiltin_library_source(name, length) | pp_library_builtin(options, name, length);
+    const CBuiltinId id = catalog ? cbuiltin_resolve((const char*)name, length) : CBUILTIN_NONE;
+    const uint32_t result = answer != 0 && (id == CBUILTIN_OPERATOR_NEW || id == CBUILTIN_OPERATOR_DELETE) ? 201802 : answer;
     return result;
 }
 
