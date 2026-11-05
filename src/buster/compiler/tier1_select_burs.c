@@ -32,6 +32,7 @@
 //   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
 //   cheaper but a record longer as a lea of their registers than as an add from memory).
 
+#include <stdio.h>
 #include <sys/mman.h>
 
 // The nonterminals.
@@ -755,6 +756,18 @@ static bool tier1_burs_build(uint8_t* working)
         }
     }
     tier1_burs_state_count = builder.state_count;
+    if (!builder.valid)
+    {
+        uint32_t max_representers = 0;
+        for (uint32_t slot = 0; slot < 2 * TIER1_BURS_OPERATORS; slot += 1)
+        {
+            const uint32_t count = builder.representer_counts[slot];
+            max_representers = count > max_representers ? count : max_representers;
+        }
+        fprintf(stderr, "tier1 BURS table generation failed: states %u/%u, representers %u/%u, pool %u/%u, rules %u/256\n",
+            builder.state_count, BUSTER_TIER1_BURS_MAX_STATES, max_representers, BUSTER_TIER1_BURS_MAX_REPRESENTERS,
+            length, BUSTER_TIER1_BURS_POOL, tier1_burs_rule_count);
+    }
     return builder.valid;
 }
 
