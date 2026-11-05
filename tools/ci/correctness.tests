@@ -199,9 +199,20 @@ mapfile -d '' -t flags < "$flags_file"
 mapfile -d '' -t sources < "$sources_file"
 test "${#flags[@]}" -gt 0
 test "${#sources[@]}" -gt 0
+# #1423: host-only detector and frame controls don't belong to a semantic request. Keep -fsanitize= and -fPIE,
+# which affect source feature queries and predefines, and every other build argument. The compiler running this
+# check is still instrumented; these exact exclusions don't admit unsupported options to the driver.
+check_flags=()
+for flag in "${flags[@]}"; do
+    case "$flag" in
+        -fsanitize-address-use-after-scope|-fsanitize-address-use-after-return=always|-fsanitize-memory-track-origins=2|\
+        -fno-sanitize-recover=all|-fno-sanitize-trap=all|-fno-omit-frame-pointer|-fno-optimize-sibling-calls) ;;
+        *) check_flags+=("$flag") ;;
+    esac
+done
 for unit in "${sources[@]}"; do
     [[ "${unit##*/}" == main_unit_* ]] && continue
-    "$BUSTER_COMPILER" -fsyntax-only "${flags[@]}" "$unit"
+    "$BUSTER_COMPILER" -fsyntax-only "${check_flags[@]}" "$unit"
 done
 rm "$flags_file" "$sources_file"
 == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources

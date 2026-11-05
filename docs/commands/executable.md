@@ -116,7 +116,10 @@ requirements. [Command index](README.md).
   when it has another link (which keeps its bytes), when it is a symbolic link,
   when a process runs it (which runs on), when it is someone else's (checked
   only when the test may `chown`, as root), past a file a killed link left
-  under the name without random digits, and with a name of `NAME_MAX` bytes;
+  under the name without random digits, and with a name of `NAME_MAX` bytes.
+  The running child's `/proc/PID/exe` must match the output's device and inode
+  before replacement: probing with a writable open can itself make `execve`
+  fail with `ETXTBSY` (#1421);
   and written in order into a FIFO, which a failed link leaves in place: for
   a reader that opens it and reads to the first end of file, with inotify
   counting one close after writing, and for one that holds the read end of a
