@@ -3269,6 +3269,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     {
         // Every value a call stores, a mask's opmask row among them, is loaded back (#1116).
         ok = tier1_masks_test_expect(test, tier1_emit_test_saves_loaded(&emitted) && tier1_emit_test_saves_seen(&emitted), "every value a call stores is loaded back");
+        ok = tier1_masks_test_expect(test, tier1_emit_test_general_rows_used(&emitted), "a general call-save row is a register some call stores (#177)") && ok;
         // The opmask class's allocation, by the independent checker; its moves through k0 and of masks.
         Tier1CfgCheck check;
         ok = tier1_masks_test_expect(test, tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check), "the CFG checker accepts the masks' allocation");

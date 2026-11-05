@@ -444,6 +444,22 @@ static bool tier1_emit_test_saves_seen(const Tier1EmitResult* emitted)
     return !emitted->general || (vectors && masks);
 }
 
+// Whether the general registers' call-save rows are exactly those the records store to (#177): each row the frame has is
+// one a call or a fixed register's sequence stores a value in, and none goes unused, where every caller-saved register's
+// had a row in every function that calls. A store to a register with no row the emitter refuses itself
+// (TIER1_EMIT_ALLOCATION).
+static bool tier1_emit_test_general_rows_used(const Tier1EmitResult* emitted)
+{
+    uint64_t stored = 0;
+    for (uint32_t r = 0; r < emitted->code.count; r += 1)
+    {
+        bool load = false;
+        const uint64_t row = tier1_emit_test_save_row(emitted, r, &load);
+        stored |= !load && row < (1ull << 16) ? row : 0;
+    }
+    return stored == emitted->prepared.call_save_mask;
+}
+
 // Whether every call-save store is loaded back (#1116), of a general, an xmm or an opmask register: a call owes its
 // general registers' loads until something needs them, and loads the others back right after it, but each value it
 // stores lives past it, so a load of that register from its row follows before the code leaves the straight-line run it
