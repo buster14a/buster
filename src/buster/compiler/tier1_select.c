@@ -3803,6 +3803,51 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
+        // A bounded signed offset can be computed at 64 bits directly. Every skipped I32 add/sub must be proven not
+        // to overflow; the remaining base must be nonnegative with physically zero upper bits, including after spills.
+        // This covers Lua's signed instruction fields: sext64((masked_i32 - bias) + 1), without assuming I32 wrapping
+        // arithmetic in general is a 64-bit address expression. Eight signed imm32 additions cannot overflow int64_t.
+        if (op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && base.rule == TIER1_RULE_SIGN_EXTEND && forest->known_bits != 0 && forest->canonical != 0)
+        {
+            uint32_t value = a;
+            int64_t addend = 0;
+            Tier1SelectPattern affine = base;
+            for (uint32_t depth = 0; depth < BUSTER_TIER1_SELECT_WALK && tier1_select_tree_child(forest, node, value); depth += 1)
+            {
+                const uint32_t operation = function->op[value];
+                uint32_t input = function->a[value];
+                uint32_t constant = function->b[value];
+                if (operation == IR_ADD && function->op[constant] != IR_CONST && function->op[input] == IR_CONST)
+                {
+                    const uint32_t swap = constant;
+                    constant = input;
+                    input = swap;
+                }
+                const bool arithmetic = (operation == IR_ADD || operation == IR_SUB) && function->type[value] == IR_I32 && function->op[constant] == IR_CONST;
+                const uint32_t input_signed = arithmetic ? forest->known_bits[input] >> 8 : 32;
+                const uint32_t constant_signed = arithmetic ? forest->known_bits[constant] >> 8 : 32;
+                if (!arithmetic || input_signed >= 32 || constant_signed >= 32)
+                {
+                    break;
+                }
+                const int64_t immediate = (int32_t)function->constants[function->a[constant]].low;
+                addend += operation == IR_SUB ? -immediate : immediate;
+                tier1_select_fold(forest, node, value, &affine);
+                tier1_select_fold(forest, node, constant, &affine);
+                value = input;
+            }
+            if (value != a && function->type[value] == IR_I32 && (forest->known_bits[value] & 255) < 32 && forest->canonical[value] != 0 && addend == (int64_t)(int32_t)addend)
+            {
+                affine.rule = addend == 0 ? TIER1_RULE_COPY : TIER1_RULE_LEA_ADD;
+                affine.width = 8;
+                affine.source_width = 0;
+                affine.values[0] = value;
+                affine.values[1] = BUSTER_IR_NONE;
+                affine.displacement = (int32_t)addend;
+                affine.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, affine);
+            }
+        }
         // Signed widening is transitive: sext64(sext32(i8)) needs only the final extension. Following single-use
         // extensions also exposes their original load, avoiding movsbl followed by movslq for a signed-byte index.
         uint32_t signed_source = a;

@@ -362,6 +362,11 @@ Volatile and atomic accesses retain their separate access.
 An exact-width store can read the original value of a single-use truncation:
 the memory instruction itself discards the unwanted upper bits, preserving
 the same address, byte count and observable access.
+For a signed 32-bit offset followed by extension to 64 bits, selection can
+combine a single-use chain of constant additions/subtractions into one 64-bit
+`lea`. Every intermediate operation must be proven nonoverflowing and the
+remaining base must have a zero sign bit and canonical storage. An unbounded
+32-bit subtraction retains its extension and wrapping semantics.
 
 The bounds occupy two scratch bytes per node and the storage certificate one.
 The independent range seeds are classified in 32-node SIMD batches with masked
