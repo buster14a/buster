@@ -127,6 +127,9 @@ static void check_test_driver_noderef(CheckTest* test, const char* clang, const 
         "void f(_Atomic(NP) p) { (void)p[0]; }\n",
         "int (__attribute__((noderef)) *p)[3]; void f(void) { (void)p[0]; }\n",
         "int (__attribute__((noderef)) *p)[3]; void f(void) { (void)p[0][0]; }\n",
+        "struct S { NP p[1][1]; }; void f(struct S s) { int *q = s.p[0][0]; (void)q; }\n",
+        "void f(NP **p) { int *q = p++[0][0]; (void)q; }\n",
+        "void f(NP **p) { int *q = (p + 1)[0][0]; (void)q; }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

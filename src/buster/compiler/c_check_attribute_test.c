@@ -78,6 +78,43 @@ static void check_test_attribute_storage(CheckTest* test)
     arena_release(&storage);
 }
 
+// The diagnostic for object.member[0][0]... stays at member. A large tree exercises the location walk without
+// involving type construction or retaining parser-derived columns: the only available edges are parent links.
+static void check_test_attribute_expression_location(CheckTest* test)
+{
+    enum { DEPTH = 32768, TOKENS = 3 + DEPTH * 3 };
+    Arena storage = arena_reserve(UINT64_C(1) << 20);
+    Parser parser = { 0 };
+    parser.tokens.count = TOKENS;
+    parser.tree.parents = BUSTER_ARENA_PUSH_ARRAY(&storage, uint32_t, TOKENS);
+    parser.tree.roles = BUSTER_ARENA_PUSH_ARRAY(&storage, uint8_t, TOKENS);
+    const bool ready = parser.tree.parents != NULL && parser.tree.roles != NULL;
+    check_test_expect(test, ready, "deep expression location fixture storage");
+    if (ready)
+    {
+        parser.tree.parents[0] = 1;
+        parser.tree.parents[1] = 5;
+        parser.tree.parents[2] = 1;
+        parser.tree.roles[0] = PARSE_ROLE_OPERAND;
+        parser.tree.roles[1] = PARSE_ROLE_MEMBER_OPERATOR;
+        parser.tree.roles[2] = PARSE_ROLE_MEMBER;
+        for (uint32_t i = 0; i < DEPTH; i += 1)
+        {
+            const uint32_t open = 3 + i * 3;
+            const uint32_t close = open + 2;
+            parser.tree.parents[open] = close;
+            parser.tree.parents[open + 1] = close;
+            parser.tree.parents[close] = i + 1 < DEPTH ? close + 3 : BUSTER_PARSE_ROOT;
+            parser.tree.roles[open] = PARSE_ROLE_OPEN_SUBSCRIPT;
+            parser.tree.roles[open + 1] = PARSE_ROLE_OPERAND;
+            parser.tree.roles[close] = PARSE_ROLE_CLOSE_SUBSCRIPT;
+        }
+        check_test_expect(test, check_input_expression_location(&parser, 0, TOKENS) == 2,
+                          "deep subscripts retain the member base's expression location using parent links");
+    }
+    arena_release(&storage);
+}
+
 static void check_test_attribute_arguments(CheckTest* test)
 {
     enum { ARGUMENTS = 8192, TOKENS_PER_ARGUMENT = 8 };
@@ -643,6 +680,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
 {
     check_test_attribute_storage(test);
     check_test_attribute_vocabulary(test);
+    check_test_attribute_expression_location(test);
     check_test_attribute_arguments(test);
     check_test_attribute_abis(test);
     const CheckAttributeFixture fixtures[] =

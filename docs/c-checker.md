@@ -6228,6 +6228,8 @@ arguments against the function. The checker now gives these as clang does.
   decay or atomic value conversion, and only fixed prototype parameters
   supply assignment conversions at calls. Conversion locations share the
   attribute argument reader's expression spelling, including parentheses.
+  This lookup follows the first token's parent chain once, retaining a
+  subscript base's location without repeatedly scanning nested prefixes.
   Initializer conversion diagnostics follow the actual selected member or
   array element, including nested designators, union alternatives, atomic
   pointer elements and GNU ranges. The graph pass retains one bit per value
