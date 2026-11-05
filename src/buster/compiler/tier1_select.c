@@ -2556,7 +2556,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             }
         }
     }
-    tier1_select_sign_requests(function, known, canonical, vector);
+    tier1_select_sign_requests(function, known, canonical, workspace, vector);
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
     {
         bool changed = false;
@@ -3684,7 +3684,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t width = tier1_select_width(type);
     const bool sign_storage = type == IR_I32 && forest->canonical != 0 &&
                               (forest->canonical[node] & (BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN)) == BUSTER_TIER1_STORAGE_SIGN;
-    const bool sign_result = sign_storage && tier1_select_sign_birth(function, node);
+    const bool sign_result = sign_storage && (op == IR_PARAM || tier1_select_sign_birth(function, node));
     Tier1SelectCandidates candidates = {0};
     Tier1SelectPattern base =
     {

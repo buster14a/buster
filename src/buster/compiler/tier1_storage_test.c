@@ -720,6 +720,117 @@ static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
     }
 }
 
+static void tier1_storage_parameter_tests(Tier1EmitTest* test)
+{
+    const uint32_t samples[] = { 0, 1, 127, 65535, INT32_MAX, UINT32_C(0x80000000), UINT32_C(0x80000001), UINT32_MAX };
+    uint64_t random = UINT64_C(0x1219ae44b823c099);
+    for (uint32_t shape = 0; shape < 3; shape += 1)
+    {
+        const uint64_t input_mark = test->input.length;
+        const uint32_t parameters = shape == 0 ? 3 : 7;
+        const uint32_t second = shape == 0 ? 2 : 6;
+        const bool cfg = shape == 2;
+        const IrSizes sizes = { .instruction_count = parameters + 15 + cfg, .block_count = cfg ? 2 : 1, .parameter_count = parameters };
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create shared signed parameter regression");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            for (uint32_t p = 0; p < parameters; p += 1)
+            {
+                function.parameter_types[p] = IR_I32;
+                tier1_select_test_node(&function, p, IR_PARAM, IR_I32, p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            uint32_t next = parameters;
+            if (cfg)
+            {
+                tier1_select_test_node(&function, next++, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.block_offsets[1] = next;
+            }
+            function.block_offsets[sizes.block_count] = (uint32_t)sizes.instruction_count;
+            const uint32_t copied = next++;
+            tier1_select_test_node(&function, copied, IR_COPY, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            uint32_t values[7];
+            for (uint32_t v = 0; v < 7; v += 1)
+            {
+                values[v] = next++;
+                const uint32_t source = v == 0 || v == 2 ? 0 : v == 1 ? copied : v < 6 ? second : 1;
+                tier1_select_test_node(&function, values[v], v == 2 || v == 5 ? IR_ZEXT : IR_SEXT, IR_I64, source, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            uint32_t sum = values[0];
+            for (uint32_t v = 1; v < 7; v += 1)
+            {
+                const uint32_t added = next++;
+                tier1_select_test_node(&function, added, IR_ADD, IR_I64, sum, values[v], BUSTER_IR_NONE);
+                sum = added;
+            }
+            tier1_select_test_node(&function, next++, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_emit_test_expect(test, next == function.instruction_count, "shared signed parameter fixture fills its exact columns");
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                {
+                    const uint64_t output_mark = test->output.length;
+                    IrDominance dominance;
+                    const bool dominated = tier1_terminal_dominance(test, &function, path != 0, &dominance);
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "shared signed parameters select");
+                    if (selected == TIER1_SELECT_OK)
+                    {
+                        tier1_emit_test_expect(test, plan.patterns[0].sign_result && plan.patterns[second].sign_result && !plan.patterns[1].sign_result &&
+                                               plan.patterns[values[0]].rule == TIER1_RULE_COPY && plan.patterns[values[1]].rule == TIER1_RULE_COPY &&
+                                               plan.patterns[values[3]].rule == TIER1_RULE_COPY && plan.patterns[values[4]].rule == TIER1_RULE_COPY &&
+                                               plan.patterns[values[6]].rule == TIER1_RULE_SIGN_EXTEND,
+                                               "two widening roots share an explicit entry conversion while a single use remains local");
+                        const Tier1EmitOptions options = {
+                            .certify = true,
+                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                            .vector = path != 0,
+                            .rematerialize = pressure != 0,
+                        };
+                        Tier1EmitResult emitted;
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "shared signed parameter allocation and code certify");
+                        if (error == TIER1_EMIT_OK)
+                        {
+                            tier1_emit_test_expect(test, emitted.prepared.sizes[0] == 8 && emitted.prepared.sizes[second] == 8 && emitted.prepared.sizes[1] == 4,
+                                                   "shared signed parameters preserve eight-byte storage without widening the single-use control");
+                            void* executable = MAP_FAILED;
+                            uint64_t bytes = 0;
+                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            {
+                                uint64_t (*run)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+                                memcpy(&run, &executable, sizeof(run));
+                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
+                                {
+                                    const uint32_t x = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t y = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[BUSTER_ARRAY_LENGTH(samples) - sample - 1] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t z = (uint32_t)tier1_emit_test_random(&random);
+                                    const uint64_t a = UINT64_C(0xa55ac0de00000000) | x;
+                                    const uint64_t b = UINT64_C(0x39a17e5400000000) | y;
+                                    const uint64_t c = UINT64_C(0xdeadbeef00000000) | z;
+                                    const uint64_t expected = 2 * (uint64_t)(int64_t)(int32_t)x + x + 2 * (uint64_t)(int64_t)(int32_t)y + y + (uint64_t)(int64_t)(int32_t)z;
+                                    const uint64_t actual = run(a, c, b, 0, 0, 0, b);
+                                    tier1_emit_test_expect(test, actual == expected, "shared entry conversion preserves signed and unsigned uses of poisoned register and stack arguments");
+                                }
+                            }
+                            if (executable != MAP_FAILED)
+                            {
+                                munmap(executable, bytes);
+                            }
+                        }
+                    }
+                    arena_pop_to(&test->output, output_mark);
+                }
+            }
+        }
+        arena_pop_to(&test->input, input_mark);
+    }
+}
+
 static void tier1_storage_midpoint_tests(Tier1EmitTest* test)
 {
     const uint32_t samples[] = { 0, 1, 2, 3, 127, 65535, INT32_MAX, UINT32_C(0x80000000), UINT32_C(0x80000001), UINT32_MAX };

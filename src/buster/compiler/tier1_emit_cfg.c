@@ -1578,7 +1578,8 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
             const bool in_vector = found && kind == BUSTER_TIER1_ALLOCATE_REGISTER && float_width != 0 && tier1_emit_cfg_vector_location(location);
             const bool in_register = found && kind == BUSTER_TIER1_ALLOCATE_REGISTER && float_width == 0 && location < 16;
             const bool in_slot = found && kind == BUSTER_TIER1_ALLOCATE_SPILL && tier1_emit_cfg_slot(emitted, location, &slot);
-            const uint16_t general_form = type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+            const bool signed_parameter = type == IR_I32 && plan->patterns[node].sign_result;
+            const uint16_t general_form = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
             const uint8_t target = in_vector ? (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION) : in_register ? (uint8_t)location : (uint8_t)BUSTER_TIER1_SELECT_SCRATCH;
             const X86Instruction load = { .form = in_vector ? tier1_select_float_forms(float_width)->load : general_form, .reg = target, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = offset };
             const uint32_t width = emitted->prepared.sizes[node];
@@ -3057,17 +3058,18 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     }
     emitted->body_record = buffer.count;
     tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_FRAME, 0), BUSTER_IR_NONE);
-    // A narrow parameter into its canonical 32-bit storage, in its register before anything reads it: its caller
-    // extends it by its own type (sign or zero), which the canonical form doesn't keep.
+    // Parameter representations, before anything reads or moves their incoming registers. Narrow values become
+    // canonical zero-extended I32; an I32 with shared signed uses explicitly establishes its full signed I64 bits.
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
     {
         const uint32_t type = function->type[node];
         const uint32_t narrow = type == IR_I1 || type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
-        const Tier1SelectPlace place = function->op[node] == IR_PARAM && narrow != 0 ? tier1_select_parameter_place(function, function->a[node]) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
+        const bool signed_parameter = type == IR_I32 && plan->patterns[node].sign_result;
+        const Tier1SelectPlace place = function->op[node] == IR_PARAM && (narrow != 0 || signed_parameter) ? tier1_select_parameter_place(function, function->a[node]) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
         if (place.kind == BUSTER_TIER1_PLACE_GENERAL && emitted->node_values[node] != BUSTER_TIER1_CFG_NONE)
         {
             const uint8_t reg = (uint8_t)tier1_select_parameter_registers[place.index];
-            const X86Instruction extend = { .form = narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
+            const X86Instruction extend = { .form = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
             error = tier1_emit_append(&buffer, extend) ? error : TIER1_EMIT_MEMORY;
             tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_ENTRY, node), node);
         }

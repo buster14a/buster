@@ -404,8 +404,14 @@ spills, reloads and CFG edge moves. Edge moves use the source's width, so an
 I32 phi and every incoming value in its connected component share eight-byte
 spill storage if any member needs it. Union by rank and path halving closes
 arbitrarily long phi chains in the dead positions workspace. This width
-obligation grants no upper-bit fact to opaque inputs. ABI inputs, calls and
-opaque rows receive no sign certificate.
+obligation grants no upper-bit fact to opaque inputs. Calls and opaque rows
+receive no sign certificate. An I32 parameter with two distinct signed widening
+roots (directly or through same-type copies) explicitly establishes its signed
+representation once at entry. General-register inputs receive `movsxd` before
+entry moves or reads; a stack input uses a four-byte `movsxd` load. Unsigned
+widening still clears the upper half, and a single signed use stays local.
+The dead positions workspace counts these requests before its storage-component
+role; this adds no allocation and assumes nothing about incoming ABI upper bits.
 For a requested loop state with that strict endpoint, an ordinary I32 ALU
 definition can establish signed storage once: perform its wrapping 32-bit
 operation, then sign-extend its result. Later widening of the state is a copy,

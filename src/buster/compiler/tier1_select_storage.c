@@ -187,8 +187,25 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
 
 // Only a real signed-widening use requests this representation. Incoming values, calls, arithmetic and opaque rows
 // are never assumed sign-extended, and narrowing a memory access is never part of the request.
-static void tier1_select_sign_requests(const IrFunction* function, const uint16_t* known, uint8_t* storage, bool vector)
+// Two distinct widening roots may share an entry conversion. Count only direct I32 parameter uses (through
+// same-type copies), not visits through arbitrary expression walks. The emitter establishes this representation
+// explicitly before any argument moves or reads; no ABI upper-bit promise is used.
+static void tier1_select_sign_parameter(const IrFunction* function, uint8_t* storage, uint32_t* requests, uint32_t input)
 {
+    const uint32_t source = tier1_select_range_source(function, input);
+    if (source < function->instruction_count && function->type[source] == IR_I32 && function->op[source] == IR_PARAM)
+    {
+        requests[source] += requests[source] < 2;
+        if (requests[source] == 2)
+        {
+            storage[source] = BUSTER_TIER1_STORAGE_SIGN;
+        }
+    }
+}
+
+static void tier1_select_sign_requests(const IrFunction* function, const uint16_t* known, uint8_t* storage, uint32_t* parameter_requests, bool vector)
+{
+    memset(parameter_requests, 0, (uint64_t)function->instruction_count * sizeof(uint32_t));
     if (BUSTER_VECTOR_PATH(vector))
     {
         for (uint32_t first = 0; first < function->instruction_count;)
@@ -201,6 +218,7 @@ static void tier1_select_sign_requests(const IrFunction* function, const uint16_
             while (requests != 0)
             {
                 const uint32_t node = first + (uint32_t)__builtin_ctz(requests);
+                tier1_select_sign_parameter(function, storage, parameter_requests, function->a[node]);
                 tier1_select_sign_request(function, known, storage, function->a[node]);
                 requests &= requests - 1;
             }
@@ -213,6 +231,7 @@ static void tier1_select_sign_requests(const IrFunction* function, const uint16_
         {
             if (function->op[node] == IR_SEXT && function->type[node] == IR_I64)
             {
+                tier1_select_sign_parameter(function, storage, parameter_requests, function->a[node]);
                 tier1_select_sign_request(function, known, storage, function->a[node]);
             }
         }
