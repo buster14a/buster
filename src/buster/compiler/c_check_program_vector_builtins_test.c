@@ -877,9 +877,10 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector funnel shifts of 8-bit elements without XOP", 3 },
         { "znver5", "__attribute__((target(\"xop\"))) void tested(v8qs* a,v8qs* b,v8qs* c){*a=__builtin_elementwise_fshl(*a,*b,*c);}",
           "vector funnel shifts of 8-bit elements outside 16-byte XOP vectors", 0 },
-        // A 2-byte vector's element reads through its compound literal's object (#137), but a shuffle of one has no row.
-        { "znver5", "int tested(int n){v2qs a={(signed char)n,1};v2qs c=__builtin_shufflevector(a,a,1,0);return c[0];}",
-          "vector types of other than 4, 8, 16, 32 or 64 bytes", 2 },
+        // A 2-byte vector's shuffle computes element by element (#137, c_check_program_transport.c), but its elementwise
+        // builtins have no transport computation.
+        { "znver5", "int tested(int n){v2qs a={(signed char)n,1};v2qs c=__builtin_elementwise_abs(a);return c[0];}",
+          "elementwise and floating vector builtins of vectors of 1 or 2 bytes", 2 },
         { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),(v2qs){(signed char)n},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);"
           "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },
         { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",

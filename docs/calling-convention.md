@@ -1552,7 +1552,10 @@ bit-fields, packing and member alignments. Vectors of 1 and 2 bytes and of
 producer passes, returns, copies and stores them by their bytes, as an
 aggregate's value (#137, `check_lower_transport_type`), at the locations the
 module gives them (`bool`'s eight to 64 as an integer or an SSE eightbyte; the
-signatures pass none the module refuses, which records hold). They leave out
+signatures pass none the module refuses, which records hold), and computes
+with them into frame objects of their types (`c_check_program_transport.c`,
+docs/c-lowering.md's "Computing with transport vectors"), which
+`test-checker --program-vectors` runs against clang at every level. They leave out
 what the producer refuses by name: a complex `_BitInt` past 128 bits of an odd number of limbs,
 which clang lays out wrong (above); and the record
 runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
