@@ -617,6 +617,7 @@ struct Tier1SelectHoles
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
+    bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
@@ -1846,6 +1847,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){0});
         break;
     }
+    if (holes->sign_result)
+    {
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVSXD_R64_RM32, destination, destination));
+    }
     return result;
 }
 
@@ -2110,6 +2115,8 @@ struct Tier1SelectPattern
     uint8_t nops;
     // A sign-preserving I32 representation uses eight bytes in spills and CFG edge moves; zero means the type width.
     uint8_t storage_width;
+    // An ordinary I32 ALU operation writes its wrapping result first, then establishes signed 64-bit storage once.
+    bool sign_result;
 };
 
 typedef struct Tier1SelectPlan Tier1SelectPlan;
@@ -2359,8 +2366,8 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
                 const uint32_t op = operations[node];
                 const uint32_t a = inputs_a[node];
                 const uint32_t b = inputs_b[node];
-                const uint32_t ua = a < count ? known[a] & 255 : bits;
-                const uint32_t ub = b < count ? known[b] & 255 : bits;
+                const uint32_t ua = a < count ? known[a] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : bits;
+                const uint32_t ub = b < count ? known[b] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : bits;
                 const uint32_t sa = a < count ? known[a] >> 8 : bits;
                 const uint32_t sb = b < count ? known[b] >> 8 : bits;
                 uint32_t unsigned_bits = bits;
@@ -2428,7 +2435,7 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
                 else if (op == IR_SELECT)
                 {
                     const uint32_t c = inputs_c[node];
-                    unsigned_bits = ub > (known[c] & 255) ? ub : known[c] & 255;
+                    unsigned_bits = ub > (known[c] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) ? ub : known[c] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK;
                     signed_bits = sb > (known[c] >> 8) ? sb : known[c] >> 8;
                 }
                 else if (op == IR_PHI)
@@ -2439,18 +2446,19 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
                     for (uint32_t p = 0; p < operands; p += 1)
                     {
                         const uint32_t value = ir_operand(function, node, p, blocks[node]).value;
-                        unsigned_bits = unsigned_bits > (known[value] & 255) ? unsigned_bits : known[value] & 255;
+                        unsigned_bits = unsigned_bits > (known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) ? unsigned_bits : known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK;
                         signed_bits = signed_bits > (known[value] >> 8) ? signed_bits : known[value] >> 8;
                     }
                 }
                 unsigned_bits = unsigned_bits < bits ? unsigned_bits : bits;
                 signed_bits = signed_bits < bits ? signed_bits : bits;
                 const uint16_t previous = known[node];
-                unsigned_bits = unsigned_bits < (previous & 255) ? unsigned_bits : previous & 255;
+                unsigned_bits = unsigned_bits < (previous & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) ? unsigned_bits : previous & BUSTER_TIER1_KNOWN_UNSIGNED_MASK;
                 signed_bits = signed_bits < (previous >> 8) ? signed_bits : previous >> 8;
                 // A zero sign bit is also a signed-range proof (including zero, which needs one signed bit).
                 signed_bits = unsigned_bits < signed_bits ? unsigned_bits + 1 : signed_bits;
-                const uint16_t next = (uint16_t)(unsigned_bits | (signed_bits << 8));
+                const uint16_t endpoint = op == IR_COPY && type == IR_I32 && types[a] == IR_I32 ? known[a] & BUSTER_TIER1_KNOWN_BELOW_MAX : 0;
+                const uint16_t next = (uint16_t)(unsigned_bits | (signed_bits << 8) | (previous & BUSTER_TIER1_KNOWN_BELOW_MAX) | endpoint);
                 changed |= previous != next;
                 known[node] = next;
             }
@@ -2523,7 +2531,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
                 break;
             case IR_TRUNC:
                 // Truncation to I32 can coalesce without writing, retaining the source's whole upper half.
-                canonical[node] = type != IR_I32 || (known[function->a[node]] & 255) <= 32;
+                canonical[node] = type != IR_I32 || (known[function->a[node]] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= 32;
                 break;
             case IR_ADD:
             case IR_SUB:
@@ -2554,7 +2562,9 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
         bool changed = false;
         for (uint32_t node = 0; node < count; node += 1)
         {
-            if ((canonical[node] & BUSTER_TIER1_STORAGE_ZERO) == 0 && (tier1_select_narrow_width(function->type[node]) != 0 || function->type[node] == IR_I32))
+            if ((canonical[node] & BUSTER_TIER1_STORAGE_ZERO) == 0 &&
+                (function->type[node] != IR_I32 || (canonical[node] & BUSTER_TIER1_STORAGE_SIGN) == 0) &&
+                (tier1_select_narrow_width(function->type[node]) != 0 || function->type[node] == IR_I32))
             {
                 const uint32_t op = function->op[node];
                 const uint32_t a = function->a[node];
@@ -2624,7 +2634,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
                     }
                 }
                 facts |= sign ? BUSTER_TIER1_STORAGE_SIGN : 0;
-                if ((known[node] & 255) < 32 && facts != 0)
+                if ((known[node] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 32 && facts != 0)
                 {
                     // For a nonnegative I32, sign-extended and zero-extended storage are the same bits.
                     facts |= BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN;
@@ -3405,6 +3415,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_pattern_cost(
 static inline __attribute__((always_inline)) void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
 {
     assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
+    pattern.intrinsic_cost += pattern.sign_result;
     candidates->patterns[candidates->count] = pattern;
     candidates->costs[candidates->count] = tier1_select_pattern_cost(forest, node, &pattern);
     candidates->count += 1;
@@ -3673,14 +3684,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t width = tier1_select_width(type);
     const bool sign_storage = type == IR_I32 && forest->canonical != 0 &&
                               (forest->canonical[node] & (BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN)) == BUSTER_TIER1_STORAGE_SIGN;
+    const bool sign_result = sign_storage && tier1_select_sign_birth(op);
     Tier1SelectCandidates candidates = {0};
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
         .stack_object = BUSTER_IR_NONE,
         .operation = (uint8_t)tier1_select_operation(op),
-        .width = (uint8_t)(sign_storage ? 8 : width),
+        .width = (uint8_t)(sign_storage && !sign_result ? 8 : width),
         .storage_width = type == IR_I32 && forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_STORAGE_WIDE) != 0 ? 8 : 0,
+        .sign_result = sign_result,
     };
     const bool integer = type == IR_I32 || type == IR_I64;
     // A mask's operations (#179): the stored mask's width for a store, the result's for the others; and a floating
@@ -4118,7 +4131,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // this copy covers a comparison the fold leaves alone.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         const uint32_t source_bits = ir_type_bits[function->type[a]];
-        const uint32_t unsigned_bits = forest->known_bits != 0 ? forest->known_bits[a] & 255 : source_bits;
+        const uint32_t unsigned_bits = forest->known_bits != 0 ? forest->known_bits[a] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : source_bits;
         const bool nonnegative = op == IR_SEXT && (unsigned_bits < source_bits ||
                                                   (forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_RANGE_NONNEGATIVE_USE) != 0));
         const bool canonical = forest->canonical != 0 && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0;
@@ -4151,8 +4164,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             const uint32_t bits = ir_type_bits[type];
             const bool unary = operation == IR_NEG || operation == IR_NOT;
             const bool binary = operation == IR_ADD || operation == IR_SUB;
-            const bool first = left < function->instruction_count && (forest->known_bits[left] & 255) <= bits && (forest->canonical[left] & BUSTER_TIER1_STORAGE_ZERO) != 0;
-            const bool second = unary || (right < function->instruction_count && (forest->known_bits[right] & 255) <= bits && (forest->canonical[right] & BUSTER_TIER1_STORAGE_ZERO) != 0);
+            const bool first = left < function->instruction_count && (forest->known_bits[left] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= bits && (forest->canonical[left] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+            const bool second = unary || (right < function->instruction_count && (forest->known_bits[right] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= bits && (forest->canonical[right] & BUSTER_TIER1_STORAGE_ZERO) != 0);
             if ((unary || binary) && first && second)
             {
                 Tier1SelectPattern narrow = base;
@@ -4216,12 +4229,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 const bool arithmetic = (operation == IR_ADD || operation == IR_SUB) && function->type[value] == IR_I32 && function->op[constant] == IR_CONST;
                 const uint32_t input_signed = arithmetic ? forest->known_bits[input] >> 8 : 32;
                 const uint32_t constant_signed = arithmetic ? forest->known_bits[constant] >> 8 : 32;
-                if (!arithmetic || input_signed >= 32 || constant_signed >= 32)
+                const int64_t immediate = arithmetic ? (int32_t)function->constants[function->a[constant]].low : 0;
+                const int64_t delta = operation == IR_SUB ? -immediate : immediate;
+                const bool plus_one = arithmetic && delta == 1 && (forest->known_bits[input] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0;
+                if (!arithmetic || (input_signed >= 32 && !plus_one) || constant_signed >= 32)
                 {
                     break;
                 }
-                const int64_t immediate = (int32_t)function->constants[function->a[constant]].low;
-                addend += operation == IR_SUB ? -immediate : immediate;
+                addend += delta;
                 tier1_select_fold(forest, node, value, &affine);
                 tier1_select_fold(forest, node, constant, &affine);
                 value = input;
@@ -5437,6 +5452,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
+        .sign_result = pattern->sign_result,
         .nops = pattern->nops,
     };
     switch (pattern->rule)

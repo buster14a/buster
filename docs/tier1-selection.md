@@ -344,6 +344,8 @@ possibly nonzero low bits and the smallest signed width. Constants, masks,
 shifts, bounded arithmetic, extensions and truncations supply the bounds; copies, selects and phis
 propagate them. They start unknown, including on loop backedges, and improve
 in at most eight sweeps per round. Unresolved cycles retain the full range.
+Widths need seven bits each; the spare low-byte bit records a proved I32 value
+strictly below `INT_MAX` without adding a scratch column.
 
 A checked induction certificate can then establish a nonnegative I32 loop
 index. Every initial edge must supply a nonnegative constant or a run-time value
@@ -369,6 +371,13 @@ proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated
 tests, unknown strides and possible wrapping sums retain their extensions.
 Only a complete certificate supplies facts, followed by one additional bounded
 propagation round. The candidate scan is masked SIMD with a scalar twin.
+
+A separate phi certificate excludes `INT_MAX` when every incoming edge supplies
+an independently bounded value or necessarily tests that incoming value with
+a strict upper guard. Arithmetic may wrap before the guard: only the selected
+value entering the phi receives the endpoint fact. A guard of the old phi
+does not constrain its increment. Constant `INT_MAX` seeds and unsigned guards
+that can admit it refuse the certificate.
 
 A sign extension of a single-use register truncation reads the original
 register's low bits directly. This removes the intermediate mask without
@@ -397,6 +406,13 @@ spill storage if any member needs it. Union by rank and path halving closes
 arbitrarily long phi chains in the dead positions workspace. This width
 obligation grants no upper-bit fact to opaque inputs. ABI inputs, calls and
 opaque rows receive no sign certificate.
+For a requested loop state with that strict endpoint, an ordinary I32 ALU
+definition can establish signed storage once: perform its wrapping 32-bit
+operation, then sign-extend its result. Later widening of the state is a copy,
+and its separately proved `+1` can use a 64-bit `lea`. The original loop update
+retains its I32 wrapping semantics. Multiplication, division, shifts and
+no-write copy identities do not use this definition form. The selected pattern
+records the extra operation, and both emitters preserve its eight-byte storage.
 
 A branch can prove a value nonnegative only at a guarded conversion. The
 selected successor must have the conditional block as its only predecessor

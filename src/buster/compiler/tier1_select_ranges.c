@@ -8,6 +8,9 @@
 
 #define BUSTER_TIER1_INDUCTION_EDGES 8
 #define BUSTER_TIER1_RANGE_NONNEGATIVE_USE 8u
+// Widths need at most seven bits. The spare low-byte bit certifies a strict signed-I32 upper endpoint.
+#define BUSTER_TIER1_KNOWN_UNSIGNED_MASK 127u
+#define BUSTER_TIER1_KNOWN_BELOW_MAX 128u
 
 // This is the plan's dead positions workspace, before level ordering fills it, not another CFG allocation.
 // A scalar edge scatter records one predecessor or ambiguity per block. If there is indirect control flow, all
@@ -135,9 +138,9 @@ static uint32_t tier1_select_range_condition(const IrFunction* function, uint32_
 static bool tier1_select_range_fact(uint16_t* known, uint32_t value, uint64_t maximum)
 {
     const uint32_t bits = maximum == 0 ? 0 : 64 - (uint32_t)__builtin_clzll(maximum);
-    const uint32_t u = (known[value] & 255) < bits ? known[value] & 255 : bits;
+    const uint32_t u = (known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < bits ? known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : bits;
     const uint32_t s = (known[value] >> 8) < bits + 1 ? known[value] >> 8 : bits + 1;
-    const uint16_t next = (uint16_t)(u | (s << 8));
+    const uint16_t next = (uint16_t)(u | (s << 8) | (known[value] & BUSTER_TIER1_KNOWN_BELOW_MAX));
     const bool changed = known[value] != next;
     known[value] = next;
     return changed;
@@ -145,7 +148,7 @@ static bool tier1_select_range_fact(uint16_t* known, uint32_t value, uint64_t ma
 
 static bool tier1_select_range_positive_edge(const IrFunction* function, const uint16_t* known, uint32_t limit, uint32_t predicate)
 {
-    const bool bounded = (known[limit] & 255) < 32;
+    const bool bounded = (known[limit] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 32;
     const bool constant = function->op[limit] == IR_CONST;
     const int64_t bound = constant ? (int32_t)function->constants[function->a[limit]].low : INT64_MIN;
     const uint64_t unsigned_bound = constant ? (uint32_t)function->constants[function->a[limit]].low : UINT64_MAX;
@@ -275,7 +278,7 @@ static bool tier1_select_range_upper_guard(const IrFunction* function, const uin
                 (((function->b[branch] == target) != negated) == less_when_true);
         if (valid)
         {
-            *upper = (UINT64_C(1) << (known[limit] & 255)) - 1;
+            *upper = (UINT64_C(1) << (known[limit] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK)) - 1;
             if (predicate < IR_ULT)
             {
                 const uint64_t signed_upper = (UINT64_C(1) << ((known[limit] >> 8) - 1)) - 1;
@@ -336,11 +339,11 @@ static bool tier1_select_induction_phi(const IrFunction* function, const IrDomin
             maximum = maximum > initial ? maximum : initial;
             seeded = true;
         }
-        else if ((known[value] & 255) < 32)
+        else if ((known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 32)
         {
             // These facts were established from unknown backedges before this certificate. They cannot be an
             // optimistic assumption about this loop; masked or zero-extended run-time seeds are safe too.
-            const uint64_t initial = (UINT64_C(1) << (known[value] & 255)) - 1;
+            const uint64_t initial = (UINT64_C(1) << (known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK)) - 1;
             maximum = maximum > initial ? maximum : initial;
             seeded = true;
         }
@@ -354,7 +357,7 @@ static bool tier1_select_induction_phi(const IrFunction* function, const IrDomin
             const uint32_t left = tier1_select_range_source(function, function->a[value]);
             const uint32_t right = tier1_select_range_source(function, function->b[value]);
             const uint32_t stride = left == node ? right : right == node ? left : BUSTER_IR_NONE;
-            valid = stride < function->instruction_count && function->type[stride] == IR_I32 && (known[stride] & 255) < 32;
+            valid = stride < function->instruction_count && function->type[stride] == IR_I32 && (known[stride] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 32;
             if (!valid)
             {
                 break;
@@ -367,7 +370,7 @@ static bool tier1_select_induction_phi(const IrFunction* function, const IrDomin
                 const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
                 valid = tier1_select_range_upper_guard(function, known, branch, target, value, &upper);
             }
-            const uint64_t delta = (UINT64_C(1) << (known[stride] & 255)) - 1;
+            const uint64_t delta = (UINT64_C(1) << (known[stride] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK)) - 1;
             const uint64_t admitted = (upper != 0 ? upper - 1 : 0) + (input_guarded ? delta : 0);
             valid = valid && admitted <= INT32_MAX;
             maximum = maximum > admitted ? maximum : admitted;
@@ -391,6 +394,34 @@ static bool tier1_select_induction_phi(const IrFunction* function, const IrDomin
     return changed;
 }
 
+// All incoming edges must exclude INT_MAX. A guard checks the incoming value itself, after any wrapping arithmetic;
+// no stride, nonnegative invariant or no-overflow assumption is needed. This fact belongs to the phi, not the value
+// on an unselected edge. In particular a header test of the OLD phi cannot constrain its increment's backedge value.
+static bool tier1_select_range_phi_endpoint(const IrFunction* function, const uint32_t* blocks, const uint32_t* predecessors, uint16_t* known, uint32_t node)
+{
+    const uint32_t incoming = function->b[node];
+    bool bounded = incoming >= 2 && incoming <= BUSTER_TIER1_INDUCTION_EDGES;
+    for (uint32_t edge = 0; bounded && edge < incoming; edge += 1)
+    {
+        const uint32_t predecessor = function->extra[function->a[node] + edge * 2];
+        const uint32_t value = tier1_select_range_source(function, function->extra[function->a[node] + edge * 2 + 1]);
+        const bool constant = function->op[value] == IR_CONST;
+        bounded = (known[value] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0 || (known[value] >> 8) < 32 ||
+                  (known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 31 ||
+                  (constant && (int32_t)function->constants[function->a[value]].low != INT32_MAX);
+        if (!bounded)
+        {
+            uint32_t target = blocks[node];
+            const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
+            uint64_t upper = 0;
+            bounded = tier1_select_range_upper_guard(function, known, branch, target, value, &upper);
+        }
+    }
+    const bool changed = bounded && (known[node] & BUSTER_TIER1_KNOWN_BELOW_MAX) == 0;
+    known[node] |= bounded ? BUSTER_TIER1_KNOWN_BELOW_MAX : 0;
+    return changed;
+}
+
 static bool tier1_select_induction_bounds(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
 {
     bool changed = false;
@@ -408,7 +439,9 @@ static bool tier1_select_induction_bounds(const IrFunction* function, const IrDo
                 uint32_t candidates = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_PHI)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I32));
                 while (candidates != 0)
                 {
-                    changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, first + (uint32_t)__builtin_ctz(candidates));
+                    const uint32_t node = first + (uint32_t)__builtin_ctz(candidates);
+                    changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, node);
+                    changed |= tier1_select_range_phi_endpoint(function, blocks, predecessors, known, node);
                     candidates &= candidates - 1;
                 }
                 first += left < 32 ? left : 32;
@@ -421,6 +454,7 @@ static bool tier1_select_induction_bounds(const IrFunction* function, const IrDo
                 if (function->op[node] == IR_PHI && function->type[node] == IR_I32)
                 {
                     changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, node);
+                    changed |= tier1_select_range_phi_endpoint(function, blocks, predecessors, known, node);
                 }
             }
         }

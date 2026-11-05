@@ -9,6 +9,12 @@
 #define BUSTER_TIER1_STORAGE_SIGN 2u
 #define BUSTER_TIER1_STORAGE_WIDE 4u
 
+static bool tier1_select_sign_birth(uint32_t op)
+{
+    const bool writes = op == IR_ADD || op == IR_SUB || op == IR_NEG || op == IR_NOT || op == IR_AND || op == IR_OR || op == IR_XOR;
+    return writes;
+}
+
 static uint32_t tier1_select_storage_root(uint32_t* parents, uint32_t value)
 {
     while (parents[value] != value)
@@ -108,7 +114,7 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
     {
         source = pending[--count];
         if (source >= function->instruction_count || function->type[source] != IR_I32 ||
-            ((known[source] & 255) < 32 && (storage[source] & BUSTER_TIER1_STORAGE_ZERO) != 0))
+            ((known[source] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 32 && (storage[source] & BUSTER_TIER1_STORAGE_ZERO) != 0))
         {
             continue;
         }
@@ -125,7 +131,15 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
         {
             for (uint32_t edge = 0; edge < function->b[source] && count < BUSTER_TIER1_SELECT_WALK; edge += 1)
             {
-                pending[count++] = function->extra[function->a[source] + edge * 2 + 1];
+                const uint32_t value = function->extra[function->a[source] + edge * 2 + 1];
+                const uint32_t birth = tier1_select_range_source(function, value);
+                if ((known[source] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0 && tier1_select_sign_birth(function->op[birth]))
+                {
+                    // Preserve I32 wrapping first, then establish its full signed representation once at this
+                    // definition. Its loop phi can reuse it, including for a separately proven nonoverflowing +1.
+                    storage[birth] = BUSTER_TIER1_STORAGE_SIGN;
+                }
+                pending[count++] = value;
             }
         }
         else
@@ -139,7 +153,10 @@ static void tier1_select_sign_request(const IrFunction* function, const uint16_t
             const bool constant = b < function->instruction_count && function->op[b] == IR_CONST;
             const bool subtract = op == IR_SUB && constant && sa < 32 && sb < 32;
             const bool shift = op == IR_ASHR && constant && function->constants[function->a[b]].low < 32;
-            if (op == IR_COPY || op == IR_NOT || (op == IR_NEG && sa < 32) || subtract || shift)
+            const int64_t delta = constant ? (int32_t)function->constants[function->a[b]].low : 0;
+            const bool plus_one = (op == IR_ADD || op == IR_SUB) && constant && (op == IR_ADD ? delta : -delta) == 1 &&
+                                  (known[a] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0;
+            if (op == IR_COPY || op == IR_NOT || (op == IR_NEG && sa < 32) || subtract || shift || plus_one)
             {
                 children[0] = a;
             }

@@ -698,7 +698,7 @@ static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1S
         equal = p->immediate == q->immediate && memcmp(p->values, q->values, sizeof(p->values)) == 0 && p->displacement == q->displacement &&
                 p->stack_object == q->stack_object && p->rule == q->rule && p->operation == q->operation && p->width == q->width &&
                 p->source_width == q->source_width && p->storage_width == q->storage_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
-                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->nops == q->nops;
+                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->sign_result == q->sign_result && p->nops == q->nops;
         equal = equal && a->covered[node] == b->covered[node] && a->costs[node] == b->costs[node] && a->effective_use_offsets[node] == b->effective_use_offsets[node];
     }
     equal = equal && a->effective_use_offsets[count] == b->effective_use_offsets[count];

@@ -597,3 +597,125 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
         arena_pop_to(&test->input, input_mark);
     }
 }
+
+static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
+{
+    const uint32_t strides[] = { 0, 1, 3, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX };
+    for (uint32_t shape = 0; shape < 6; shape += 1)
+    {
+        const bool bridge = shape == 5;
+        const bool proven = shape == 0 || shape == 1 || bridge;
+        const uint32_t initial = shape == 2 ? INT32_MAX : shape >= 1 && shape <= 4 ? INT32_MAX - 1 : 2;
+        const uint32_t limit = shape == 1 || shape == 3 ? INT32_MAX : shape == 2 || shape == 4 ? UINT32_C(0x80000000) : 0;
+        const uint64_t input_mark = test->input.length;
+        const IrSizes sizes = { .instruction_count = bridge ? 15 : 14, .block_count = bridge ? 4 : 3, .constant_count = 3, .extra_count = 4, .parameter_count = 1 };
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create wrapping loop-state storage regression");
+        if (created)
+        {
+            function.parameter_types[0] = IR_I32;
+            function.result_type = IR_I64;
+            function.constants[0].low = initial;
+            function.constants[1].low = limit;
+            function.constants[2].low = 1;
+            function.block_offsets[1] = 5;
+            function.block_offsets[2] = 9;
+            function.block_offsets[3] = bridge ? 10 : 14;
+            if (bridge)
+            {
+                function.block_offsets[4] = 15;
+            }
+            function.extra[0] = 0;
+            function.extra[1] = 1;
+            function.extra[2] = bridge ? 2 : 1;
+            function.extra[3] = 6;
+            tier1_select_test_node(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 5, IR_PHI, IR_I32, 0, 2, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_ADD, IR_I32, 5, 0, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 7, IR_ICMP, IR_I1, shape == 3 ? 5 : 6, 2, shape == 4 ? IR_ULT : IR_LT);
+            tier1_select_test_node(&function, 8, IR_CBR, IR_VOID, 7, bridge ? 2 : 1, bridge ? 3 : 2);
+            const uint32_t exit = bridge ? 10 : 9;
+            if (bridge)
+            {
+                tier1_select_test_node(&function, 9, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            tier1_select_test_node(&function, exit, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, exit + 1, IR_ADD, IR_I32, 5, 3, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, exit + 2, IR_SEXT, IR_I64, exit + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, exit + 3, IR_ADD, IR_I64, exit, exit + 2, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, exit + 4, IR_RET, IR_VOID, exit + 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                {
+                    const uint64_t output_mark = test->output.length;
+                    IrDominance dominance;
+                    const bool dominated = tier1_terminal_dominance(test, &function, path != 0, &dominance);
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "wrapping loop state selects");
+                    if (selected == TIER1_SELECT_OK)
+                    {
+                        tier1_emit_test_expect(test, plan.patterns[6].sign_result == proven && plan.patterns[exit + 2].rule == (proven ? TIER1_RULE_LEA_ADD : TIER1_RULE_SIGN_EXTEND),
+                                               "every incoming edge must exclude INT_MAX before a signed loop state permits +1 at 64 bits");
+                        const Tier1EmitOptions options = {
+                            .certify = true,
+                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                            .vector = path != 0,
+                            .rematerialize = pressure != 0,
+                        };
+                        Tier1EmitResult emitted;
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "wrapping loop state allocation and code certify");
+                        if (error == TIER1_EMIT_OK)
+                        {
+                            tier1_emit_test_expect(test, emitted.prepared.sizes[5] == (proven ? 8 : 4) && emitted.prepared.sizes[6] == (proven ? 8 : 4),
+                                                   "signed loop state and its wrapping definition retain the same spill width");
+                            void* executable = MAP_FAILED;
+                            uint64_t bytes = 0;
+                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            {
+                                const uint32_t samples = shape == 0 || bridge ? BUSTER_ARRAY_LENGTH(strides) : 1;
+                                for (uint32_t sample = 0; sample < samples; sample += 1)
+                                {
+                                    const uint32_t stride = samples == 1 ? 1 : strides[sample];
+                                    uint32_t phi = initial;
+                                    bool again = true;
+                                    for (uint32_t iteration = 0; again && iteration < 3; iteration += 1)
+                                    {
+                                        const uint32_t next = phi + stride;
+                                        const uint32_t tested = shape == 3 ? phi : next;
+                                        again = shape == 4 ? tested < limit : (int32_t)tested < (int32_t)limit;
+                                        if (again)
+                                        {
+                                            phi = next;
+                                        }
+                                    }
+                                    tier1_emit_test_expect(test, !again, "wrapping-state oracle terminates within its independent bound");
+                                    if (!again)
+                                    {
+                                        const uint64_t expected = (uint64_t)(int64_t)(int32_t)phi + (uint64_t)(int64_t)(int32_t)(phi + 1u);
+                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55a123400000000) | stride, 0);
+                                        tier1_emit_test_expect(test, actual == expected, "loop arithmetic wraps at 32 bits while separate signed uses retain negative and INT_MAX boundaries");
+                                    }
+                                }
+                            }
+                            if (executable != MAP_FAILED)
+                            {
+                                munmap(executable, bytes);
+                            }
+                        }
+                    }
+                    arena_pop_to(&test->output, output_mark);
+                }
+            }
+        }
+        arena_pop_to(&test->input, input_mark);
+    }
+}
