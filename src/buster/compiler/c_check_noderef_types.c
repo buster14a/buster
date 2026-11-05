@@ -7,6 +7,9 @@
 // parameters retain only annotated entries. These immutable arena records contain no TypeIds or member indexes:
 // typedef sharing and the deferred reader's replay cannot change their meaning or canonical type identity.
 
+#ifndef BUSTER_CHECK_NODEREF_TYPES
+#define BUSTER_CHECK_NODEREF_TYPES 1
+
 typedef struct CheckNoderefType CheckNoderefType;
 typedef struct CheckNoderefParameter CheckNoderefParameter;
 struct CheckNoderefType
@@ -30,3 +33,35 @@ struct CheckNoderefMember
     uint32_t member;
     uint32_t token;
 };
+
+// Initializer warnings need only one bit per source graph value, plus the original destination's source shape.
+// No expression-only shadow pointer survives the graph warning pass.
+typedef struct CheckNoderefInitializer CheckNoderefInitializer;
+struct CheckNoderefInitializer
+{
+    const uint64_t* values;
+    const CheckNoderefType* root;
+    const CheckNoderefMember* members;
+    uint32_t member_count;
+};
+
+static const CheckNoderefType* check_noderef_member(const CheckNoderefMember* members, uint32_t count, uint32_t member)
+{
+    uint32_t first = 0;
+    uint32_t end = count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        if (members[middle].member < member)
+        {
+            first = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return first < count && members[first].member == member ? members[first].type : NULL;
+}
+
+#endif

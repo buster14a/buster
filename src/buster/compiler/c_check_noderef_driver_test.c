@@ -72,6 +72,23 @@ static void check_test_driver_noderef(CheckTest* test, const char* clang, const 
         "void f(int *__attribute__((noderef)) *p) { (void)&**p; }\n",
         "int __attribute__((noderef)) (*p)(void);\n",
         "#pragma clang diagnostic ignored \"-Wnoderef\"\nvoid f(NP p) { (void)*p; }\n",
+        "void f(NP p) { int *a[] = {p}; (void)a; }\n",
+        "void f(NP p) { NP a[] = {p}; (void)a; }\n",
+        "void f(NP p) { int *a[2][2] = {[1][0] = p}; (void)a; }\n",
+        "void f(NP p) { NP a[2][2] = {[1][0] = p}; (void)a; }\n",
+        "struct S { int *p; }; void f(NP p) { struct S s = {p}; (void)s; }\n",
+        "struct S { NP p; }; void f(NP p) { struct S s = {.p = p}; (void)s; }\n",
+        "union U { NP marked; int *plain; }; void f(NP p) { union U u = {.plain = p}; (void)u; }\n",
+        "union U { int *plain; NP marked; }; void f(NP p) { union U u = {.marked = p}; (void)u; }\n",
+        "struct S { union { NP marked; int *plain; }; }; void f(NP p) { struct S s = {.plain = p}; (void)s; }\n",
+        "struct S { NP p[2]; }; void f(NP p) { struct S s = {.p[1] = p}; (void)s; }\n",
+        "void f(NP p) { int *a[3] = {[0 ... 2] = p}; (void)a; }\n",
+        "void f(NP p) { (void)(int *[]){p}; }\n",
+        "void f(NP p) { (void)(NP[]){p}; }\n",
+        "void f(NP p) { (void)sizeof(int *[]){p}; }\n",
+        "void f(NP p) { int *q = (p); (void)q; }\n",
+        "void f(NP p) { _Atomic(int *) a[1] = {p}; (void)a; }\n",
+        "void f(NP p) { _Atomic(NP) a[1] = {p}; (void)a; }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

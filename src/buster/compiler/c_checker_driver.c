@@ -4101,7 +4101,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         const CheckWarningEvent* event = input.warning_events.events + i;
                         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
-                        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || selected)
+                        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION || selected)
                         {
                             const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
                             initializer_warning_storage = check_warning_set_add(&initializer_warning_keys, key);

@@ -340,6 +340,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     if (valid)
     {
         input->warning_events = staged.warning_events;
+        input->noderef_values = staged.noderef_values;
         // The unavailable members' errors (check_input_member_uses), in the reports' capacity the reader gave them.
         input->report_count = staged.report_count;
     }

@@ -220,6 +220,19 @@ static bool check_init_warning_collector(CheckInitWarningCollector* collector, C
     return valid;
 }
 
+static void check_initializers_noderef(CheckInitWarningSink* warnings, const CheckInput* input, uint32_t declaration)
+{
+    if (warnings != NULL)
+    {
+        warnings->noderef = (CheckNoderefInitializer){
+            .values = input->noderef_values,
+            .root = check_input_noderef_at(input, declaration),
+            .members = input->noderef_members,
+            .member_count = input->noderef_member_count,
+        };
+    }
+}
+
 // The warnings' tokens the collector added to its sink from `first` on, in token order: the tokens it saw, 64 at a time
 // (the scalar path takes every token), where it added any.
 static void check_init_warning_order(CheckInitWarningCollector* collector, uint32_t first, bool scalar)
@@ -379,6 +392,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         if (eligible)
         {
             CheckInitializer plan = { 0 };
+            check_initializers_noderef(warnings, input, declaration);
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
@@ -528,6 +542,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         }
         else
         {
+            check_initializers_noderef(&warnings, input, token);
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                       input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
                                       check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
@@ -608,7 +623,7 @@ static bool check_initializers_warning_context(CheckWarningBuffer* events, const
     for (uint32_t i = 0; !context && i < events->count; i += 1)
     {
         const CheckWarningEvent* event = events->events + i;
-        context = event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
+        context = event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION ||
                   (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0);
     }
     const bool ready = !context || check_input_warning_queries(&reader);
@@ -616,7 +631,7 @@ static bool check_initializers_warning_context(CheckWarningBuffer* events, const
     {
         CheckWarningEvent* event = events->events + i;
         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
-        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || selected)
+        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION || selected)
         {
             reader.warning_bound_open = BUSTER_CHECK_NONE;
             for (uint32_t vla = 0; vla < input->vla_count; vla += 1)

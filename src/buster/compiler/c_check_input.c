@@ -604,6 +604,9 @@ struct CheckInput
     // Source-only GNU noderef type shadows, absent from units that do not spell the attribute. These never change a
     // canonical TypeId or a checked value. Annotated members use their completed record's member indexes.
     CheckSparseWide noderef_types;
+    // One bit per checked graph value: its immediate pointed-to source level is noderef. Initializer warnings
+    // consume this immutable receipt without retaining the graph pass's temporary annotation trees.
+    const uint64_t* noderef_values;
     CheckNoderefMember* noderef_members;
     uint32_t noderef_member_count;
     uint32_t noderef_member_capacity;

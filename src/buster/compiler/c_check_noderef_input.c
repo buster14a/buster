@@ -203,21 +203,7 @@ static void check_input_noderef_member_add(CheckInputReader* reader, uint32_t me
 
 static const CheckNoderefType* check_input_noderef_member(const CheckInput* input, uint32_t member)
 {
-    uint32_t first = 0;
-    uint32_t end = input->noderef_member_count;
-    while (first < end)
-    {
-        const uint32_t middle = first + (end - first) / 2;
-        if (input->noderef_members[middle].member < member)
-        {
-            first = middle + 1;
-        }
-        else
-        {
-            end = middle;
-        }
-    }
-    return first < input->noderef_member_count && input->noderef_members[first].member == member ? input->noderef_members[first].type : NULL;
+    return check_noderef_member(input->noderef_members, input->noderef_member_count, member);
 }
 
 typedef struct CheckNoderefPair CheckNoderefPair;
