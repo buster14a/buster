@@ -2490,14 +2490,14 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
             const IrFunction function = { .instruction_count = count, .op = operations, .type = type, .a = operands, .b = operands };
             for (uint32_t path = 0; path < 2; path += 1)
             {
-                tier1_select_known_bits(&function, 0, 0, known, path != 0);
+                tier1_select_known_bits(&function, 0, 0, 0, known, path != 0);
                 IrFunction scan = function;
                 scan.block_count = 2;
-                tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, operands, 0, known, path != 0),
+                tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded type tails admit no induction certificate without a phi");
                 scan.op = type;
                 scan.type = void_types;
-                tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, operands, 0, known, path != 0),
+                tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded opcode tails admit no induction certificate without an integer phi");
                 for (uint32_t n = 0; n < count; n += 1)
                 {
@@ -2533,7 +2533,7 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
         const uint32_t blocks[] = { 0, 0, 1, 1 };
         uint16_t known[4];
         uint8_t canonical[4];
-        tier1_select_known_bits(&loop, blocks, 0, known, true);
+        tier1_select_known_bits(&loop, 0, blocks, 0, known, true);
         tier1_select_canonical(&loop, blocks, known, canonical);
         tier1_select_test_expect(test, known[2] == (32 | 32 << 8) && canonical[2] == 0, "a backedge does not invent a range or register-storage proof");
     }

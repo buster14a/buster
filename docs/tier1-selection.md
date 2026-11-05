@@ -347,14 +347,20 @@ in at most eight sweeps per round. Unresolved cycles retain the full range.
 
 A checked induction certificate can then establish a nonnegative I32 loop
 index. Every initial edge must supply a nonnegative constant. Every other edge
-must add a known nonnegative stride to that same phi and take a strict
-upper-bound guard on the sum back to the phi. At most eight unconditional
-bridge blocks may separate that edge from its guard, each with exactly one
-incoming predecessor; an alternate entrance refuses the proof. The predecessor
+must add a known nonnegative stride to that same phi. A strict upper-bound
+guard may check the sum on the backedge: a walk of at most eight blocks may
+follow unconditional bridges to that guard, each bridge with exactly one
+incoming predecessor. An alternate entrance refuses the proof. The predecessor
 map reuses selection's positions workspace before level ordering. Indirect
-control flow disables bridge walking. One maximum
-covers all starts and all admitted backedge values; adding the largest stride
-must still fit signed I32 before the guard. Unsigned guards also require a
+control flow disables bridge walking. A header guard before the increment also
+works when the selected successor has only the header as its predecessor and
+the existing verified dominance intervals prove that successor dominates the
+increment. This bounds the increment by the admitted index plus its stride,
+including the terminating index; merely dominating it with the header does
+not prove that the guarded edge executes. One maximum covers all starts and all
+admitted backedge values. Every increment must fit signed I32: after a header
+guard, its admitted index plus stride; before a sum guard, the common maximum
+plus stride. Unsigned guards also require a
 proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated
 tests, unknown strides and possible wrapping sums retain their extensions.
 Only a complete certificate supplies facts, followed by one additional bounded

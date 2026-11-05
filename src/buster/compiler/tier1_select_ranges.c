@@ -3,8 +3,8 @@
 //
 // Checked nonnegative induction bounds for #1219. This is an inductive certificate, not optimistic phi iteration:
 // every initial value is a nonnegative constant; every other incoming value adds a bounded nonnegative stride to
-// this phi and reaches it only through a strict upper-bound guard on that sum. One common bound covers ALL incoming
-// edges. Its sum with the largest stride must fit signed I32, including before the guard executes.
+// this phi. A strict upper-bound guard either checks that sum on the backedge or guards the phi before the increment.
+// One common bound covers ALL incoming edges; every executed sum must fit signed I32 before any subsequent guard.
 
 #define BUSTER_TIER1_INDUCTION_EDGES 8
 
@@ -122,7 +122,61 @@ static bool tier1_select_range_fact(uint16_t* known, uint32_t value, uint64_t ma
     return changed;
 }
 
-static bool tier1_select_induction_phi(const IrFunction* function, const uint32_t* blocks, const uint32_t* predecessors, uint16_t* known, uint32_t node)
+// The selected edge must imply tested < limit. Return a conservative nonnegative upper bound on that limit.
+static bool tier1_select_range_upper_guard(const IrFunction* function, const uint16_t* known, uint32_t branch, uint32_t target, uint32_t tested, uint64_t* upper)
+{
+    bool valid = branch < function->instruction_count && function->op[branch] == IR_CBR &&
+                 ((function->b[branch] == target) != (function->c[branch] == target));
+    bool negated = false;
+    const uint32_t condition = valid ? tier1_select_range_condition(function, function->a[branch], &negated) : BUSTER_IR_NONE;
+    valid = valid && condition < function->instruction_count && function->op[condition] == IR_ICMP;
+    if (valid)
+    {
+        const uint32_t a = tier1_select_range_source(function, function->a[condition]);
+        const uint32_t b = tier1_select_range_source(function, function->b[condition]);
+        const uint32_t predicate = function->c[condition];
+        const bool forward = a == tested && (predicate == IR_LT || predicate == IR_GE || predicate == IR_ULT || predicate == IR_UGE);
+        const bool reversed = b == tested && (predicate == IR_GT || predicate == IR_LE || predicate == IR_UGT || predicate == IR_ULE);
+        const bool less_when_true = predicate == IR_LT || predicate == IR_GT || predicate == IR_ULT || predicate == IR_UGT;
+        const uint32_t limit = forward ? b : a;
+        valid = (forward || reversed) && limit < function->instruction_count && function->type[limit] == IR_I32 &&
+                (((function->b[branch] == target) != negated) == less_when_true);
+        if (valid)
+        {
+            *upper = (UINT64_C(1) << (known[limit] & 255)) - 1;
+            if (predicate < IR_ULT)
+            {
+                const uint64_t signed_upper = (UINT64_C(1) << ((known[limit] >> 8) - 1)) - 1;
+                *upper = *upper < signed_upper ? *upper : signed_upper;
+            }
+            valid = *upper <= INT32_MAX;
+        }
+    }
+    return valid;
+}
+
+// A header guard on phi, before its increment: its selected successor must have this header as its only predecessor
+// AND dominate the increment. The existing verified dominator intervals make this an O(1) query per edge. Merely
+// dominating the increment with the header would not prove the conditional edge, nor an increment before the guard.
+static bool tier1_select_range_input_guard(const IrFunction* function, const IrDominance* dominance, const uint32_t* predecessors,
+                                           const uint16_t* known, uint32_t block, uint32_t step_block, uint32_t node, uint64_t* upper)
+{
+    const uint32_t branch = function->block_offsets[block + 1] - 1;
+    bool guarded = false;
+    if (dominance != 0 && predecessors != 0 && function->op[branch] == IR_CBR && dominance->leave[step_block] != 0)
+    {
+        for (uint32_t edge = 0; !guarded && edge < 2; edge += 1)
+        {
+            const uint32_t target = edge == 0 ? function->b[branch] : function->c[branch];
+            guarded = predecessors[target] == block && dominance->leave[target] != 0 &&
+                      dominance->enter[target] <= dominance->enter[step_block] && dominance->leave[target] >= dominance->leave[step_block] &&
+                      tier1_select_range_upper_guard(function, known, branch, target, node, upper);
+        }
+    }
+    return guarded;
+}
+
+static bool tier1_select_induction_phi(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, const uint32_t* predecessors, uint16_t* known, uint32_t node)
 {
     const uint32_t block = blocks[node];
     const uint32_t incoming = function->b[node];
@@ -132,6 +186,7 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
     uint64_t maximum = 0;
     uint64_t stride_maximum = 0;
     uint32_t steps[BUSTER_TIER1_INDUCTION_EDGES];
+    uint64_t step_maximum[BUSTER_TIER1_INDUCTION_EDGES];
     uint32_t step_count = 0;
     for (uint32_t edge = 0; valid && edge < incoming; edge += 1)
     {
@@ -159,48 +214,29 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
             const uint32_t left = tier1_select_range_source(function, function->a[value]);
             const uint32_t right = tier1_select_range_source(function, function->b[value]);
             const uint32_t stride = left == node ? right : right == node ? left : BUSTER_IR_NONE;
-            uint32_t target = block;
-            const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
-            valid = stride < function->instruction_count && function->type[stride] == IR_I32 && (known[stride] & 255) < 32 &&
-                    branch < function->instruction_count && ((function->b[branch] == target) != (function->c[branch] == target));
+            valid = stride < function->instruction_count && function->type[stride] == IR_I32 && (known[stride] & 255) < 32;
             if (!valid)
             {
                 break;
             }
-            bool negated = false;
-            const uint32_t condition = tier1_select_range_condition(function, function->a[branch], &negated);
-            valid = condition < function->instruction_count && function->op[condition] == IR_ICMP;
-            if (!valid)
+            uint64_t upper = 0;
+            const bool input_guarded = tier1_select_range_input_guard(function, dominance, predecessors, known, block, blocks[value], node, &upper);
+            if (!input_guarded)
             {
-                break;
+                uint32_t target = block;
+                const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
+                valid = tier1_select_range_upper_guard(function, known, branch, target, value, &upper);
             }
-            const uint32_t a = tier1_select_range_source(function, function->a[condition]);
-            const uint32_t b = tier1_select_range_source(function, function->b[condition]);
-            const uint32_t predicate = function->c[condition];
-            const bool forward = a == value && (predicate == IR_LT || predicate == IR_GE || predicate == IR_ULT || predicate == IR_UGE);
-            const bool reversed = b == value && (predicate == IR_GT || predicate == IR_LE || predicate == IR_UGT || predicate == IR_ULE);
-            const bool less_when_true = predicate == IR_LT || predicate == IR_GT || predicate == IR_ULT || predicate == IR_UGT;
-            const uint32_t limit = forward ? b : a;
-            valid = (forward || reversed) && limit < function->instruction_count && function->type[limit] == IR_I32 &&
-                    (((function->b[branch] == target) != negated) == less_when_true);
-            if (!valid)
-            {
-                break;
-            }
-            const uint32_t unsigned_bits = known[limit] & 255;
-            const uint32_t signed_bits = known[limit] >> 8;
-            uint64_t upper = (UINT64_C(1) << unsigned_bits) - 1;
-            if (predicate < IR_ULT)
-            {
-                const uint64_t signed_upper = (UINT64_C(1) << (signed_bits - 1)) - 1;
-                upper = upper < signed_upper ? upper : signed_upper;
-            }
-            valid = upper <= INT32_MAX;
-            const uint64_t admitted = upper != 0 ? upper - 1 : 0;
             const uint64_t delta = (UINT64_C(1) << (known[stride] & 255)) - 1;
+            const uint64_t admitted = (upper != 0 ? upper - 1 : 0) + (input_guarded ? delta : 0);
+            valid = valid && admitted <= INT32_MAX;
             maximum = maximum > admitted ? maximum : admitted;
-            stride_maximum = stride_maximum > delta ? stride_maximum : delta;
-            steps[step_count++] = value;
+            if (!input_guarded)
+            {
+                stride_maximum = stride_maximum > delta ? stride_maximum : delta;
+            }
+            steps[step_count] = value;
+            step_maximum[step_count++] = input_guarded ? admitted : UINT64_MAX;
         }
     }
     bool changed = false;
@@ -209,13 +245,13 @@ static bool tier1_select_induction_phi(const IrFunction* function, const uint32_
         changed |= tier1_select_range_fact(known, node, maximum);
         for (uint32_t step = 0; step < step_count; step += 1)
         {
-            changed |= tier1_select_range_fact(known, steps[step], maximum + stride_maximum);
+            changed |= tier1_select_range_fact(known, steps[step], step_maximum[step] != UINT64_MAX ? step_maximum[step] : maximum + stride_maximum);
         }
     }
     return changed;
 }
 
-static bool tier1_select_induction_bounds(const IrFunction* function, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
+static bool tier1_select_induction_bounds(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
 {
     bool changed = false;
     if (blocks != 0 && function->block_count >= 2)
@@ -232,7 +268,7 @@ static bool tier1_select_induction_bounds(const IrFunction* function, const uint
                 uint32_t candidates = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_PHI)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I32));
                 while (candidates != 0)
                 {
-                    changed |= tier1_select_induction_phi(function, blocks, predecessors, known, first + (uint32_t)__builtin_ctz(candidates));
+                    changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, first + (uint32_t)__builtin_ctz(candidates));
                     candidates &= candidates - 1;
                 }
                 first += left < 32 ? left : 32;
@@ -244,7 +280,7 @@ static bool tier1_select_induction_bounds(const IrFunction* function, const uint
             {
                 if (function->op[node] == IR_PHI && function->type[node] == IR_I32)
                 {
-                    changed |= tier1_select_induction_phi(function, blocks, predecessors, known, node);
+                    changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, node);
                 }
             }
         }

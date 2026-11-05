@@ -1440,7 +1440,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         ok = ok && tier1_pipeline_expect(test, plan.vector || tier1_select_test_plan_costs(&plan, &test->arenas[TIER1_PIPELINE_SCRATCH]) == 0,
                                                          "each computed node's cost is its pattern's subtree cost, by the scalar path");
                         const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
-                        tier1_burs_check_function(&test->burs, &function, &test->arenas[TIER1_PIPELINE_SCRATCH]);
+                        tier1_burs_check_function(&test->burs, &function, &dominance, &test->arenas[TIER1_PIPELINE_SCRATCH]);
                         ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,
                                                          "the bottom-up rewrite's twins classify, label and choose alike, every covered class with a candidate");
                     }
