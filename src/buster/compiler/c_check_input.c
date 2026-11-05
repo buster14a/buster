@@ -1612,7 +1612,7 @@ struct CheckInputReader
     // (check_input_attribute_late_bit) and two words of the other kinds (check_input_attribute_after_kinds).
     uint8_t* late_attribute_masks;
     uint64_t* late_attribute_kinds;
-    // Allocated only at the first block-scope declaration with linkage and attributes that has a visible previous
+    // Allocated only at the first block-scope declaration with linkage that has a visible previous
     // declaration, on the serial path: each such declaration's scope's last token, BUSTER_CHECK_NONE for the rest (#147),
     // a block's first declaration of its entity among them, which a later file-scope one links to. Only the declarations in whose scope a later one is see it, as
     // clang's lookup finds an entity's previous declaration (check_input_declaration_visible).
@@ -7591,11 +7591,11 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
         reader->linked_types[name] = composite;
-        // (Only an attributed one's scope is read, and recorded: check_input_attribute_merge_exclusions and the late masks.
-        // One without a visible previous declaration records none: a later declaration that sees no other finds it, as
-        // clang's findLocallyScopedExternCDecl does, and its definition inherits its attributes.)
-        if (!reader->lane && reader->scope_count != 0 && linked_visible && reader->arena != NULL && check_sparse_wide_present(reader->output->attributes) &&
-            check_input_attributes_at(reader->output, token) != NULL)
+        // Attribute evaluation may publish a declaration's attributes after it binds. Retain its scope independently of
+        // that publication, for check_input_attribute_merge_exclusions and the late masks. One without a visible
+        // previous declaration records none: a later declaration that sees no other finds it, as clang's
+        // findLocallyScopedExternCDecl does, and its definition inherits its attributes.
+        if (!reader->lane && reader->scope_count != 0 && linked_visible && reader->arena != NULL)
         {
             const uint32_t count = reader->parser->tokens.count;
             if (reader->declaration_scope_ends == NULL)

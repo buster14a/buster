@@ -6136,10 +6136,12 @@ arguments against the function. The checker now gives these as clang does.
   the attributes after it are checked against, only from a block's first
   declaration of its entity, which a later file-scope declaration that sees
   none links to and inherits from; the late masks take file scope's and
-  those. Each attributed block-scope declaration with linkage that has a
+  those. Each block-scope declaration with linkage that has a
   visible previous one records its scope's end
   (`CheckInputReader.declaration_scope_ends`, allocated at the first); the
-  others count as file scope's.
+  others count as file scope's. Recording the scope does not depend on
+  whether attribute evaluation has published the declaration's attributes
+  yet, so delayed publication cannot make a closed block visible again.
 - **Bodies on lanes** (`check_input_attribute_late`). A body read on a lane
   can't read its entity's other declarations' attributes, which other lanes'
   columns hold, nor publish its own to later ones. A redeclaration there that
@@ -6220,8 +6222,6 @@ arguments against the function. The checker now gives these as clang does.
     (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
     clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
     that print such a type differ the same way.
-  - A block-scope declaration whose attributes are set after it binds (by a
-    constant's job) records no scope, and is taken as a file scope's.
   - A supported attribute's argument count is checked after its subject, as
     clang's (`int x __attribute__((format(printf)));` is the subject's
     warning alone), and after the errors clang's parser gives of its
