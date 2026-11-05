@@ -501,9 +501,11 @@ A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of 
 them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
 its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
 does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
-and an element of one whose elements are bytes is read and written through that address. What would compute with one
-(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
-builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+and an element of one whose elements are bytes is read and written through that address. What computes with one writes
+its result into a frame object of its type, whose address is the result (`c_check_program_transport.c`, docs/c-lowering.md's
+"Computing with transport vectors"): ordinary entries an element at a time for a vector of 1 or 2 bytes, the ordinary
+vectors' `X86` rows a register's width at a time for one of more than 64 bytes, and integer or vector-row bitwise
+operations on a `bool` vector's bytes. What that doesn't take is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
 lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
 builtins on vectors, as on structs, call libatomic's generic functions.
 
