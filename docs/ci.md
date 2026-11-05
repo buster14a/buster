@@ -404,12 +404,15 @@ whose pull request's head lacked a workflow change main already had, and none
 of the three other states (two merges whose heads had main's workflow files, one
 commit with a single parent). By that pattern, 27 of the cycle's 49 states would
 be refused. The token can't take the `workflows` permission that GitHub asks
-for to create such refs. A refused branch warns, and the state is skipped for
-the rest of that coordinator job, so it neither keeps a preparation slot nor
-stays the oldest ready state while later states wait. Each job tries it once
-again. The report counts and names the skipped states, with an alert. A
-refused snapshot is replaced by the newest eligible earlier state, as an
-ineligible one is. Measuring the refused states needs another way to make their
+for to create such refs. A refused branch warns, the state is skipped for the
+rest of that coordinator job, and the job plans again at once: nothing was
+launched, so it doesn't wait as for a run in flight. The state neither keeps a
+preparation slot nor stays the oldest ready state while later states wait. Each
+job tries it once again. Any other failure to create a branch (a timeout, a 429
+or 5xx, a failed lookup) is not a refusal: it warns, and a later step tries
+again. A branch that another step made meanwhile is used. The report counts
+and names the skipped states, with an alert. A refused snapshot is replaced by
+the newest eligible earlier state, as an ineligible one is. Measuring the refused states needs another way to make their
 branches, which is the owner's decision.
 
 **Time.** The tz database's Europe/Madrid is checked at three points:
