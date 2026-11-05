@@ -117,6 +117,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
     { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
     { "-Wassume", NULL, "assumption is ignored because it contains (potential) side-effects" },
+    { NULL, NULL, "weak identifier never declared" },
+    { "-Wpragmas", NULL, "#pragma redefine_extname is applicable to external C declarations only" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -624,6 +626,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         memset(handled, 0, count);
         valid = check_input_diagnostic_pragmas(&reader, handled);
         valid = valid && check_input_visibility_pragmas(&reader, handled, false);
+        valid = valid && check_input_symbol_pragmas(&reader, handled, false);
         if (valid && result->visibility_pragmas != NULL)
         {
             CheckInputVisibilityPragmas* history = result->visibility_pragmas;
@@ -665,6 +668,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     if (valid)
     {
         valid = check_input_ignored_pragmas(&reader, handled);
+        valid = valid && check_input_symbol_syntax_warnings(&reader);
     }
     if (valid)
     {

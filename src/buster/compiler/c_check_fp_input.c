@@ -110,7 +110,7 @@ static bool check_input_fp_name(const CheckInputReader* reader, uint32_t source,
 }
 
 // Only complete supported extension forms acquire a handled mark. A recognized prefix must not swallow an
-// unsupported evaluation method, a macro argument or malformed punctuation.
+// unsupported evaluation method or malformed punctuation.
 // Unsupported forms remain with the semantic-pragma diagnostic, which retains their original spelling.
 // The unqualified fenv_access handler is not registered in Clang's accepted Linux mode; it belongs to the unknown
 // pragma policy. The standard FENV_ACCESS form below supplies the runtime environment semantics.
@@ -178,11 +178,11 @@ static bool check_input_fp_extension(CheckInputReader* reader, uint64_t** macros
             selected.push = pushing || trailing_push;
         }
     }
-    // These handlers read macro-expanded arguments, but the retained stream is unexpanded. Even a literal-looking
-    // word such as 'on' can have been a macro. Use the existing conservative unit-history guard; pragma namespace
-    // and handler names themselves are not expanded. The count pass prepares this scratch before publishing state.
+    // Semantic preprocessing expands these operands at their source point. A caller supplying the ordinary -E
+    // stream has no such proof: even 'on' can have been a macro, so retain its conservative history guard. The
+    // namespace and handler names themselves are never expanded.
     const uint32_t first = source + (clang ? 4 : 3);
-    for (uint32_t token = first; supported && token < last; token += 1)
+    for (uint32_t token = first; !reader->pp->options.semantic_pragmas && supported && token < last; token += 1)
     {
         const IdentId name = check_input_pragma_name(reader, token);
         supported = name == 0 || !check_input_pragma_macro(reader, macros, name);

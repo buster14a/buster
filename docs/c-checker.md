@@ -405,10 +405,12 @@ does, each rule checked against clang's answers on probes of it:
   operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
   one does not erase the other. `eval_method` remains refused because changing
   intermediate evaluation precision requires additional lowering support.
-  The handler names are not macro-expanded, but their argument words are, so a
-  spelling that was a macro anywhere in the unit is refused conservatively
-  rather than read unexpanded. Unsupported arguments, malformed forms and
-  invalid placements are hard semantic-pragma errors.
+  The handler names are not macro-expanded. Semantic preprocessing expands
+  their operands at the original source point, including `_Pragma`, function
+  macros and subsequent redefinitions. Ordinary `-E` output keeps them raw;
+  direct checker callers supplying that raw stream retain the conservative
+  refusal for argument words that were macro names. Unsupported arguments,
+  malformed forms and invalid placements are hard semantic-pragma errors.
   The unqualified `#pragma fenv_access` uses the unknown-pragma warning
   policy in the accepted Linux mode, as Clang 23 does. Its handler requires
   `-fms-extensions`, which the driver refuses. Use `#pragma STDC FENV_ACCESS`
@@ -6307,8 +6309,31 @@ reading source (the instrumentation boundary in the introduction), while a
 non-emitting action refuses each `#pragma omp` directive through the checker. A
 subsequent `-fno-openmp` restores the ignore behavior for both.
 
-Known unsupported semantic effects remain hard, named errors, including
-`redefine_extname`, `weak`, `ms_struct` and layout-changing `align=packed`.
+`#pragma weak NAME` applies weak ELF binding to an external variable or function,
+including tentative definitions and undefined references. A directive after an
+explicit definition keeps that definition's existing binding. Lookup uses the
+translation unit's declarations, so a local shadow does not redirect it. Forward
+directives that never acquire an external declaration warn at EOF; forward
+typedefs and internal `redefine_extname` declarations retain Clang's distinct
+warning groups and locations. A weak directive after an existing internal declaration
+or typedef is a silent no-op, as in the oracle.
+
+`#pragma redefine_extname NAME SYMBOL` uses the existing asm-label emission path
+for declarations and subsequent references. The first pending rename and explicit
+asm labels take precedence; a directive after an explicit definition keeps its
+already emitted name. Source-time macro expansion applies to both directives'
+operands. Malformed forms use `-Wignored-pragmas`, including missing names and
+trailing tokens. These lexical warnings survive parser recovery.
+
+Renaming after an earlier evaluated reference remains explicitly refused: Clang
+may already have cached a symbol name when it emitted that reference, and the
+reader does not yet have that emission/control-flow proof. `#pragma weak ALIAS =
+TARGET` also remains refused because it can create a typed alias declaration
+without a C declarator. These boundaries are separate from ordinary weak binding
+and renaming before use.
+
+Other unsupported semantic effects remain hard, named errors, including
+`ms_struct` and layout-changing `align=packed`.
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 

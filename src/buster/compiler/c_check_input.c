@@ -486,6 +486,7 @@ typedef struct CheckInputNonnullPragmas CheckInputNonnullPragmas;
 typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputVisibilityPragmas CheckInputVisibilityPragmas;
+typedef struct CheckInputSymbolPragmas CheckInputSymbolPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
 typedef struct CheckInputPackedMember CheckInputPackedMember;
@@ -586,6 +587,7 @@ struct CheckInput
     CheckInputNonnullPragmas* nonnull_pragmas;
     CheckInputPackPragmas* pack_pragmas;
     CheckInputVisibilityPragmas* visibility_pragmas;
+    CheckInputSymbolPragmas* symbol_pragmas;
     uint8_t* object_visibility;
     bool visibility_error;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
@@ -3862,6 +3864,7 @@ static inline __attribute__((always_inline)) bool check_input_spelling(CheckInpu
 #include "c_check_ignored_pragma.c"
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
+#include "c_check_symbol_pragma.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
@@ -10903,11 +10906,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_visibility_pragmas(&reader, handled, true);
+                prepared = prepared && check_input_symbol_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_ignored_pragmas(&reader, handled);
+                prepared = prepared && check_input_symbol_syntax_warnings(&reader);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -11142,6 +11147,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_packed_members(&reader);
                 }
                 check_input_multiversion_flush(&reader);
+                if (input->symbol_pragmas != NULL && !input->resource)
+                {
+                    check_input_symbol_finish(&reader, complete_translation_unit && input->report_count == 0);
+                }
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
                 if (!input->resource)
                 {

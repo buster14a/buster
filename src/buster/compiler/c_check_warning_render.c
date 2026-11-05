@@ -448,6 +448,34 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
+        case CHECK_WARNING_EVENT_PRAGMA:
+        {
+            const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
+            if (record != NULL)
+            {
+                const char* handler = record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE ? "redefine_extname" : "weak";
+                if (record->warning == CHECK_SYMBOL_WARNING_IDENTIFIER || record->warning == CHECK_SYMBOL_WARNING_EXTRA)
+                {
+                    result = check_warning_text(scratch, "%s '#pragma %s' - ignored",
+                        record->warning == CHECK_SYMBOL_WARNING_IDENTIFIER ? "expected identifier in" : "extra tokens at end of", handler);
+                }
+                else if (record->warning == CHECK_SYMBOL_WARNING_UNDECLARED)
+                {
+                    result = check_warning_text(scratch, "weak identifier '%.*s' never declared", (int)name.length, name.pointer);
+                }
+                else if (record->warning == CHECK_SYMBOL_WARNING_TYPEDEF)
+                {
+                    result = "'weak' attribute only applies to variables and functions";
+                }
+                else if (record->warning == CHECK_SYMBOL_WARNING_INTERNAL)
+                {
+                    const bool function = record->declaration < input->token_count && input->declaration_kinds[record->declaration] == C_BINDING_FUNCTION;
+                    result = check_warning_text(scratch, "#pragma redefine_extname is applicable to external C declarations only; not applied to %s '%.*s'",
+                                                function ? "function" : "variable", (int)name.length, name.pointer);
+                }
+            }
+            break;
+        }
         case CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE:
             result = "'gnu_inline' attribute requires function to be marked 'inline', attribute ignored";
             break;
@@ -1014,7 +1042,20 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                     if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
-                        pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                        const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
+                        const bool semantic = record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED;
+                        if (record != NULL && record->diagnostic_location != 0)
+                        {
+                            const uint32_t saved_position = pp->diagnostic_position;
+                            pp->diagnostic_position = event->payload.token;
+                            pp_diagnose(pp, disposition, record->diagnostic_location, "%s%s", message, suffix);
+                            pp->diagnostic_position = saved_position;
+                        }
+                        else
+                        {
+                            pp_diagnose_output_phase(pp, disposition, source, semantic ? boundary : event->payload.token,
+                                                     semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                        }
                     }
                     else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER) &&
                              event->completion_kind != CHECK_WARNING_COMPLETE_TU_END)
