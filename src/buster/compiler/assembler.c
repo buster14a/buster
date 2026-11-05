@@ -1313,7 +1313,7 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                         {
                             asm_fail(parser, token.start, "expected address register");
                         }
-                        const uint32_t section = asm_find_latest_section(parser, text);
+                        const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, text) : asm_find_section(parser, text, 0);
                         uint32_t symbol = 0;
                         if (section != 0)
                         {

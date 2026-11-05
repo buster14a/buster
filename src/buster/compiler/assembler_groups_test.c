@@ -174,14 +174,49 @@ static void asm_test_group_link(AsmTest* test, const char* directory)
     unlink(program);
 }
 
+// Check names and declaration order independently: a reference may precede the first declaration, and creating a
+// new namesake changes subsequent references while reopening an existing identity does not. Keep GNU as's target
+// comparison, which distinguishes sections by both name and group, as the oracle for every variant.
+static void asm_test_group_section_names(AsmTest* test, const char* directory, bool cross_check)
+{
+    static const char* const names[] = {"plain_name", ".dotted_name"};
+    static const char* const formats[] = {
+        ".long %s\n.section %s,\"G\",@progbits,first,comdat\n.long %s\n.section %s,\"G\",@progbits,second,comdat\n.long %s\n.section %s,\"G\",@progbits,first,comdat\n.long %s\n",
+        ".long %s\n.section %s,\"\",@progbits\n.long %s\n.section %s,\"G\",@progbits,first,comdat\n.long %s\n.section %s,\"\",@progbits\n.long %s\n",
+        ".long %s\n.section %s,\"G\",@progbits,first,comdat\n.long %s\n.section %s,\"\",@progbits\n.long %s\n.section %s,\"G\",@progbits,first,comdat\n.long %s\n",
+        ".section %s,\"\",@progbits\n.long %s\n.section marker,\"G\",@progbits,first,comdat\n.long %s\n.long %s\n.long %s\n.long %s\n.long %s\n",
+    };
+    for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+    {
+        const char* name = names[n];
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(formats); f += 1)
+        {
+            char source[1024];
+            const int length = snprintf(source, sizeof(source), formats[f], name, name, name, name, name, name, name);
+            const bool fits = length >= 0 && (uint64_t)length < sizeof(source);
+            asm_test_check(test, fits, "section-name matrix fits", 0);
+            if (fits)
+            {
+                asm_test_pair(test, (String8){.pointer = source, .length = (uint64_t)length}, 1, X86_ARCH_BASELINE);
+                if (cross_check)
+                {
+                    asm_test_oracle(test, source, directory, X86_ARCH_BASELINE);
+                }
+            }
+        }
+    }
+}
+
 static void asm_test_groups(AsmTest* test, const char* directory, bool cross_check)
 {
+    asm_test_group_section_names(test, directory, cross_check);
     // GNU as binds each section-name expression to the last-created namesake, not the current group.
     static const char section_names[] =
         ".long .debug_macro\n.long plain\n.long early\n.long .early\n"
         ".section early,\"\",@progbits\n.long early\n"
         ".section .early,\"\",@progbits\n.long .early\n"
-        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n.long early\n.long .early\n"
+        ".section unreferenced,\"\",@progbits\n.long unreferenced\n"
+        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n.long early\n.long .early\n.long unreferenced\n"
         ".section .debug_macro,\"G\",@progbits,second,comdat\n.long .debug_macro\n"
         ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
         ".section plain,\"G\",@progbits,first,comdat\n.long plain\n"
