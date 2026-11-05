@@ -1,0 +1,85 @@
+name: Issue 1447 focused qualification
+
+# Temporary qualification branch only; not part of the implementation PRs.
+on:
+  push:
+    branches: [codex/issue-1447-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Record Clang attribute diagnostics
+        run: |
+          mkdir -p build/issue1447-oracle
+          clang --version
+          while IFS=$'\t' read -r source flags; do
+            args=()
+            read -r -a args <<< "$flags"
+            printf '\nCASE %s\n' "$source"
+            set +e
+            clang -std=gnu23 -fsyntax-only -fno-color-diagnostics -fno-caret-diagnostics -fdiagnostics-show-option "${args[@]}" "tools/issue1447-attribute-probes/$source" > "build/issue1447-oracle/$source.log" 2>&1
+            status=$?
+            set -e
+            cat "build/issue1447-oracle/$source.log"
+            printf 'STATUS %s\n' "$status"
+          done < tools/issue1447-attribute-probes/cases.tsv
+      - name: Record Clang declaration and flow diagnostics
+        run: |
+          for case in $(seq 1 40); do
+            printf '\nDIAGNOSTIC CASE %s\n' "$case"
+            set +e
+            clang -std=gnu17 -fsyntax-only -fno-color-diagnostics -fno-caret-diagnostics -fdiagnostics-show-option -DCASE="$case" tools/issue1447-diagnostic-probes/cases.c > "build/issue1447-oracle/diagnostic-$case.log" 2>&1
+            status=$?
+            set -e
+            cat "build/issue1447-oracle/diagnostic-$case.log"
+            printf 'STATUS %s\n' "$status"
+          done
+          for case in 18 19 20 25 26 37 38 39; do
+            printf '\nDECLARATION IR CASE %s\n' "$case"
+            clang -std=gnu17 -S -emit-llvm -O0 -DCASE="$case" tools/issue1447-diagnostic-probes/cases.c -o "build/issue1447-oracle/declaration-$case.ll"
+            cat "build/issue1447-oracle/declaration-$case.ll"
+          done
+      - name: Record Clang vector semantics
+        run: |
+          for element in int _Float16 __bf16 _Bool; do
+            for attribute in 'vector_size(16)' 'ext_vector_type(4)'; do
+              printf '\nINCREMENT %s %s\n' "$element" "$attribute"
+              set +e
+              clang -std=gnu17 -fsyntax-only -DELEMENT="$element" -DATTRIBUTE="$attribute" tools/issue1447-vector-probes/increment.c
+              status=$?
+              set -e
+              printf 'STATUS %s\n' "$status"
+            done
+          done
+          clang -std=gnu17 -O0 -S -emit-llvm -march=x86-64 tools/issue1447-vector-probes/logical.c -o build/issue1447-oracle/vector-logical.ll
+          cat build/issue1447-oracle/vector-logical.ll
+          clang -std=gnu17 -O0 -march=x86-64 tools/issue1447-vector-probes/logical-effects.c -o build/issue1447-oracle/vector-effects
+          build/issue1447-oracle/vector-effects
+          clang -std=gnu17 -O0 -S -emit-llvm -march=znver5 tools/issue1447-vector-probes/reductions.c -o build/issue1447-oracle/vector-reductions.ll
+          cat build/issue1447-oracle/vector-reductions.ll
+          clang -std=gnu17 -O0 -S -march=znver5 tools/issue1447-vector-probes/reductions.c -o build/issue1447-oracle/vector-reductions.s
+          cat build/issue1447-oracle/vector-reductions.s
+      - name: Check cache change and CI selector
+        run: |
+          bash tests/ci/caches.sh
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/changes" tools/ci/changes.c
+          "$RUNNER_TEMP/changes" --self-test
+      - name: Keep oracle outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1447-oracle
+          path: build/issue1447-oracle

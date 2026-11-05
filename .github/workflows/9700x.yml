@@ -1925,11 +1925,11 @@ jobs:
           # SQLite 3.53.2's test/speedtest1.c (#136's) and Lua 5.4.8's release, by their hashes.
           inputs="$RUNNER_TEMP/tier1-programs"
           mkdir -p "$inputs"
-          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
-            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
-          curl --fail --location --retry 3 --output "$inputs/lua-5.4.8.tar.gz" https://www.lua.org/ftp/lua-5.4.8.tar.gz
-          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" \
-            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz" | sha256sum --check
+          bash tools/ci/cached-download.sh \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c \
+            b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c"
+          bash tools/ci/cached-download.sh https://www.lua.org/ftp/lua-5.4.8.tar.gz \
+            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz"
           tar -xzf "$inputs/lua-5.4.8.tar.gz" -C "$inputs"
           # tcc as measure-compile's step pins it.
           tcc="$(command -v tcc)"

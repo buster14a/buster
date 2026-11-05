@@ -1,0 +1,71 @@
+empty_cpu_specific.c	
+empty_cpu_specific_object.c	
+empty_cpu_dispatch.c	
+empty_no_sanitize.c	
+empty_no_sanitize_object.c	
+empty_target_clones.c	
+empty_target_clones_object.c	
+format_subject_first.c	
+format_bad_first.c	
+section_empty_argument.c	
+section_bad_second.c	
+count_sizeof_incomplete.c	
+count_builtin_invalid.c	
+count_builtin_valid.c	
+count_builtin_undeclared.c	
+count_call_valid.c	
+count_call_invalid.c	
+count_typeof_incomplete.c	
+parameter_before_convention.c	
+function_chunk_before_convention.c	
+group_type_spelling.c	
+nested_group_type_spelling.c	
+group_array_type_spelling.c	
+group_qualified_type_spelling.c	
+specifier_ms_abi.c	
+specifier_regparm.c	
+specifier_stdcall.c	
+specifier_ms_pointer.c	
+atomic_pointer_attribute.c	
+atomic_const_pointer_attribute.c	
+noderef_integer.c	
+noderef_pointer.c	
+noderef_before_base.c	
+noderef_use.c	
+noderef_member.c	
+noderef_array.c	
+noderef_count.c	
+noderef_assign.c	
+selectany_tentative.c	
+selectany_initialized.c	
+selectany_static.c	
+selectany_function.c	
+selectany_type.c	
+selectany_local.c	
+annotate_nonconstant.c	
+annotate_local_constant.c	
+annotate_call.c	
+annotate_divzero.c	
+annotate_float.c	
+thread_member_error.c	
+thread_scalar.c	-Wthread-safety-attributes
+thread_pointer.c	-Wthread-safety-attributes
+thread_capability.c	-Wthread-safety-attributes
+thread_literal.c	-Wthread-safety-attributes
+thread_string.c	-Wthread-safety-attributes
+thread_trylock_expression.c	-Wthread-safety-attributes
+thread_trylock_integer.c	-Wthread-safety-attributes
+thread_guarded_var.c	-Wthread-safety-attributes
+thread_pt_guarded.c	-Wthread-safety-attributes
+format_kind_nonconstant.c	
+alloc_size_nonpointer.c	
+alloc_align_nonpointer.c	
+mode_wrong_base.c	
+mode_wrong_base_valid.c	
+target_escape.c	
+clang_multiple.c	
+clang_unscoped.c	
+clang_location.c	
+clang_scope_error.c	
+type_keyword_name_order.c	
+sizeof_name_order.c
