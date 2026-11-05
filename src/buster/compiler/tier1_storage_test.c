@@ -804,6 +804,20 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                         {
                             fprintf(stderr, "  signed parameter shape=%u path=%u pressure=%u error=%u node=%u cause=%u detail=%u\n", shape, path, pressure,
                                     (unsigned)error, failed, (unsigned)diagnostic.cause, diagnostic.error);
+                            if (error == TIER1_EMIT_CERTIFICATE)
+                            {
+                                Tier1EmitOptions inspected = options;
+                                inspected.certify = false;
+                                Tier1EmitResult raw;
+                                if (tier1_emit_function(&plan, &inspected, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
+                                {
+                                    Tier1CertReport report = { 0 };
+                                    Tier1CertEmittedStats stats = { 0 };
+                                    const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(&plan, &raw, &test->output, &test->scratch, &report, &stats);
+                                    fprintf(stderr, "  signed entry checker reason=%u record=%u error=%u block=%u instruction=%u\n", (unsigned)reason, stats.record,
+                                            (unsigned)report.error, report.block, report.instruction);
+                                }
+                            }
                         }
                         if (error == TIER1_EMIT_OK)
                         {
