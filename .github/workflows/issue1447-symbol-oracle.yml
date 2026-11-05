@@ -1,0 +1,31 @@
+name: Issue 1447 symbol pragma oracle
+on:
+  push:
+    branches: [codex/issue-1447-symbol-oracles-01a1ad8e]
+permissions:
+  contents: read
+jobs:
+  symbol-pragmas:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang
+        run: bash tools/ci/setup-hosted.sh
+      - name: Inspect symbol pragma declarations and IR
+        run: |
+          clang --version
+          for case_id in $(seq 1 32); do
+            echo "::group::Symbol pragma case $case_id"
+            clang -std=gnu17 -O0 -fno-caret-diagnostics -DCASE="$case_id" -S -emit-llvm tools/issue1447-symbol-semantics.c -o /tmp/issue1447-symbol.ll > /tmp/issue1447-symbol.out 2>&1
+            result=$?
+            cat /tmp/issue1447-symbol.out
+            echo "clang status $result"
+            if test "$result" -eq 0; then
+              grep -E '^(@|define|declare)|load |store |call ' /tmp/issue1447-symbol.ll || true
+            fi
+            echo "::endgroup::"
+          done
+        shell: bash {0}
