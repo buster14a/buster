@@ -499,10 +499,14 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     for (uint32_t tail = 0; error == UNWIND_OK && tail < tail_count; tail += 1)
     {
         const uint32_t jump = code->tail_records[tail];
-        // An eh_return's teardown has rax's and rdx's pops after its release, and rsp's mov from rcx before its jump.
+        // An eh_return's teardown has rax's and rdx's pops after its release, and rsp's mov from rcx before its jump; and
+        // before the release, rcx the CFA plus the offset, lea rcx, [rbp + rcx + 16] (#1420's review).
         const uint32_t torn = teardown + (eh ? eh_pushes + 1 : 0);
-        error = jump >= next && jump - next >= torn && jump < code->count - epilogue ? UNWIND_OK : UNWIND_ERROR_INVALID;
+        error = jump >= next && jump - next >= torn + (eh ? 1 : 0) && jump < code->count - epilogue ? UNWIND_OK : UNWIND_ERROR_INVALID;
         uint32_t record = error == UNWIND_OK ? jump - torn : 0;
+        const X86Instruction* cfa = error == UNWIND_OK && eh ? &records[record - 1] : 0;
+        error = cfa == 0 || (cfa->form == X86_FORM_LEA_R64_M && cfa->reg == X86_REGISTER_RCX && cfa->rm == X86_REGISTER_RBP && cfa->index == X86_REGISTER_RCX &&
+                             cfa->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) && cfa->displacement == 16) ? error : UNWIND_ERROR_UNSUPPORTED;
         uint32_t ends[BUSTER_UNWIND_EVENTS];
         uint32_t ended = 0;
         if (error == UNWIND_OK && (pointer || reserved))

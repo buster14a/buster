@@ -5652,7 +5652,9 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
     // The statement's node, or its conversion (to void) or cast of the call.
     const uint32_t root = writer->statement;
     const bool alone = node == root || (root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) && graph->operand0[root] == node);
-    if (!alone || writer->variadic || writer->tails)
+    // A musttail call's tail, not an earlier __builtin_eh_return's (#1420's review): a function may have several.
+    const bool musttail = writer->tails && !writer->eh_return;
+    if (!alone || writer->variadic || musttail)
     {
         check_lower_unsupported(writer, !alone ? "__builtin_eh_return within an expression, not a statement of its own" :
                                         writer->variadic        ? "__builtin_eh_return in a variadic function" :

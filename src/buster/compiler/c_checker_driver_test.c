@@ -1188,7 +1188,8 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
 
 // __builtin_eh_return (#148): a function that unwinds to a handler, as libgcc's _Unwind_RaiseException does through
 // uw_install_context: after __builtin_unwind_init, it writes rax's and rdx's save slots (at the CFA less 72 and 64, as its
-// CFI and clang's say) and eh_returns, at offsets 0, 16 and 32, into an assembly handler that records the registers it
+// CFI and clang's say) and eh_returns from one of its two sites (#1420's review: the second after a branch to the first,
+// rax's slot written again), at offsets 0, 16 and 32, into an assembly handler that records the registers it
 // finds (the callee-saved ones restored, rax and rdx from their slots) and rsp (the CFA plus the offset); and one that
 // returns normally. Built by both paths at Tier 0 (with --verify, whose verifier proves its frame events) and with
 // --tier1 --verify (Tier 0's frame, which Tier 1 falls back to), each the output of clang -O0's build.
@@ -1216,6 +1217,7 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "        \"popq %r15\\npopq %r14\\npopq %r13\\npopq %r12\\npopq %rbx\\nret\\n\");\n"
                                   "}\n"
                                   "static volatile long sink;\n"
+                                  "static volatile int pick;\n"
                                   "__attribute__((noinline)) static long churn(long x) { sink = x; return x * 7; }\n"
                                   "__attribute__((noinline)) void thrower(long offset, void* h)\n"
                                   "{\n"
@@ -1225,6 +1227,7 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "    long* frame = __builtin_frame_address(0);\n"
                                   "    frame[-7] = 0x7a7a + offset;\n"
                                   "    frame[-6] = 0x6d6d + offset;\n"
+                                  "    if (pick) { frame[-7] = 0x5151 + offset; __builtin_eh_return(offset, h); }\n"
                                   "    __builtin_eh_return(offset, h);\n"
                                   "}\n"
                                   "__attribute__((noinline)) void maybe(long offset, void* h, int go)\n"
@@ -1235,9 +1238,10 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "}\n"
                                   "int main(void)\n"
                                   "{\n"
-                                  "    for (long offset = 0; offset <= 32; offset += 16)\n"
+                                  "    for (long offset = 0; offset <= 32; offset += 8)\n"
                                   "    {\n"
-                                  "        long r = run(offset);\n"
+                                  "        pick = (offset & 8) != 0;\n"
+                                  "        long r = run(offset & ~8);\n"
                                   "        printf(\"%ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld\\n\", r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before);\n"
                                   "    }\n"
                                   "    maybe(0, 0, 0);\n"
