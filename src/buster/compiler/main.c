@@ -1708,6 +1708,16 @@ static int main_driver(int argc, char** argv)
     // dispatch, including -E and parse commands that need no worker lease themselves.
     bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
     int result = guardian >= 0 ? guardian : 0;
+    // An option first (-E, -fsyntax-only, -c, ...) is a source command's (#652), but for the assembler unit's -c of a .s
+    // or .S file (main_assembly_source): no unit's command name starts with '-' (the two that do, --fuzz and the
+    // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
+    // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
+    // compile needs nothing else of.
+    if (!found && argc >= 2 && argv[1][0] == '-' && !main_assembly_source(argc - 1, argv + 1))
+    {
+        result = main_source_command(argc, argv);
+        found = true;
+    }
     if (!found)
     {
         result = main_unit_x86(argc, argv, &found);
@@ -1758,6 +1768,29 @@ static int main_driver(int argc, char** argv)
     }
     return result;
 }
+
+#if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+// A static executable's start without registering its .eh_frame with libgcc's unwinder (#652). Where the unwinder is
+// linked, which glibc's pthread_exit and pthread_cancel bring, crtbeginT.o's frame_dummy registers it, and libgcc 13
+// and later then sorts its every FDE: 1.16 million of the 1.41 million instructions of an empty file's -fsyntax-only, and
+// its 634 KB read at every start. The link wraps both functions (cmake/BusterSettings.cmake) into these, which do
+// nothing: libgcc finds the frames through glibc's _dl_find_object without the registration, as a dynamic executable's
+// crtbegin.o leaves it to, and test-lanes checks that backtrace walks them.
+void __wrap___register_frame_info(const void* begin, void* object);
+void* __wrap___deregister_frame_info(const void* begin);
+
+void __wrap___register_frame_info(const void* begin, void* object)
+{
+    (void)begin;
+    (void)object;
+}
+
+void* __wrap___deregister_frame_info(const void* begin)
+{
+    (void)begin;
+    return 0;
+}
+#endif
 
 int main(int argc, char** argv)
 {

@@ -110,8 +110,8 @@ typedef enum CheckWarningEventKind
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
-    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_function_types):
-    // payload.name the attribute's name, payload.first_type the declarator's type, payload.data its typedef spelling.
+    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_type_warnings):
+    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling.
     CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_NONSTRING_TYPE,
     CHECK_WARNING_EVENT_TRANSPARENT_UNION,

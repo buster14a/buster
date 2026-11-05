@@ -390,8 +390,11 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-interpreter-native
 "$BUSTER_COMPILER" test-interpreter-link
 "$BUSTER_COMPILER" test-ir-interpreter
-# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen.
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen, or in a
+# static executable in test_libm.c's table.
 "$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
+# And one of the C library's, which a static executable's table names too.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=getpid tests/ir/libm-call.ir
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
@@ -506,6 +509,22 @@ corpus=$BUSTER_CORPUS
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Test the scalar and AVX-512 assembly frontends
 "$BUSTER_COMPILER" test-assembler --cross-check
+== Assemble a .s and a .S file that -c comes before
+# #652: a first argument that starts with '-' goes to the source commands at once, past the units' chains of command
+# names, but for the assembler's -c of a .s or .S file (main_assembly_source). Each assembles, the .S preprocessed, and
+# a program linked from them returns what their functions do.
+directory=$(mktemp -d)
+printf '.text\n.globl plain\nplain:\n\tmovl $5, %%eax\n\tret\n' > "$directory/plain.s"
+printf '#define VALUE 7\n.text\n.globl preprocessed\npreprocessed:\n\tmovl $VALUE, %%eax\n\tret\n' > "$directory/preprocessed.S"
+printf 'int plain(void);\nint preprocessed(void);\nint main(void) { return plain() * 10 + preprocessed(); }\n' > "$directory/main.c"
+"$BUSTER_COMPILER" -c "$directory/plain.s" -o "$directory/plain.o"
+"$BUSTER_COMPILER" -c "$directory/preprocessed.S" -o "$directory/preprocessed.o"
+"$BUSTER_COMPILER" -c "$directory/main.c" -o "$directory/main.o"
+clang "$directory/main.o" "$directory/plain.o" "$directory/preprocessed.o" -o "$directory/program"
+status=0
+"$directory/program" || status=$?
+test "$status" -eq 57
+rm -r "$directory"
 == Test generated-code ISA selection and native records
 "$BUSTER_COMPILER" test-x86-target-selection
 == Test binding
@@ -732,3 +751,9 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-bindings
 == Test the partial Zen 5 model and instruction harness
 "$BUSTER_COMPILER" test-x86-zen5
+== Test Tier 1 integer truth round trips against native and instruction-shape oracles
+# #1218: the subject must compile at Tier 1 with no fallback, by both host paths. Clang builds the independent
+# execution oracle; objdump checks all branch-only fixtures for one comparison and no setcc materialization.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
+./build/test-driver-tier1-truth "$BUSTER_COMPILER" "$(command -v clang)"
