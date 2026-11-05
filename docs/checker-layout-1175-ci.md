@@ -26,8 +26,9 @@ with GCC, Clang and AddressSanitizer/UndefinedBehaviorSanitizer, and checks the 
 syntax. These are harness tests, not performance measurements.
 
 It then reads **every page** of the latest attempt's jobs for a successful main-push `9700x.yml`
-run of each exact source SHA. Both hosted architectures' plain tests, all reported hosted test
-rows, three fuzz jobs and the native correctness step must have succeeded. Missing, skipped or
+run of each exact source SHA. All 48 expected hosted shards across both architectures and
+sanitizer modes, all reported hosted test rows, the three named fuzz jobs and the native
+correctness step must have succeeded. Missing, skipped or
 failed qualification refuses hardware admission. A successful Measurement storage job or an
 all-skipped aggregate is not accepted. The JSON responses are retained separately as qualification
 receipts. This is qualification of the two historical compilers actually built, not a substitute

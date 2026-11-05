@@ -76,6 +76,28 @@ jobs:
           set -euo pipefail
           directory="$RUNNER_TEMP/layout-1175-qualification"
           mkdir -p "$directory"
+          # These exact matrices belong to the two fixed historical revisions.
+          # A successful aggregate or a partially present matrix is insufficient.
+          validate_jobs() {
+              jq -e '
+                [.[].jobs[]] as $jobs |
+                [$jobs[] | select(.name | startswith("Tests on Ubuntu "))] as $tests |
+                [$jobs[] | select(.name | startswith("libFuzzer ("))] as $fuzz |
+                ([ ["x86-64", "native"][] as $arch |
+                   ["none", "address", "undefined", "thread", "memory"][] as $san |
+                   range(1; 5) as $shard |
+                   "Tests on Ubuntu 26.04 (Clang 23, \($arch), \($san), O3, shard \($shard) of 4)" ] +
+                 [ ["x86-64", "native"][] as $arch | range(1; 5) as $shard |
+                   "Tests on Ubuntu 26.04 (Clang 23, \($arch), address, O1, shard \($shard) of 4)" ]) as $expected |
+                all($expected[]; . as $name | any($tests[]; .name == $name and .conclusion == "success")) and
+                all($tests[]; .conclusion == "success") and
+                all(["frontend", "crash-replay-proof", "elf-override"][];
+                    . as $entry | any($fuzz[]; .name == ("libFuzzer (ASan + UBSan + leaks, " + $entry + ")") and .conclusion == "success")) and
+                ($fuzz | length == 3) and all($fuzz[]; .conclusion == "success") and
+                any($jobs[]; .name == "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)" and .conclusion == "success" and
+                    any(.steps[]?; .name == "Run complete native vector correctness before benchmarks" and .conclusion == "success"))
+              ' "$1" > /dev/null
+          }
           for pair in "base=$BASE_SHA" "head=$HEAD_SHA"; do
               name=${pair%%=*}
               sha=${pair#*=}
@@ -83,8 +105,26 @@ jobs:
               run=$(jq -r --arg sha "$sha" '.workflow_runs | map(select(.head_sha == $sha and .head_branch == "main" and .event == "push" and .path == ".github/workflows/9700x.yml" and .status == "completed" and .conclusion == "success" and .repository.id == 1421805693 and .head_repository.id == 1421805693)) | .[0].id // empty' "$directory/$name-runs.json")
               test -n "$run"
               gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" > "$directory/$name-jobs.json"
-              # Read all pages. A green aggregate with skipped tests is not source qualification.
-              jq -e '[.[].jobs[]] as $jobs | [$jobs[] | select(.name | startswith("Tests on Ubuntu "))] as $tests | [$jobs[] | select(.name | startswith("libFuzzer ("))] as $fuzz | ($tests | length > 0) and all($tests[]; .conclusion == "success") and any($tests[]; .name | contains(", x86-64, none,")) and any($tests[]; .name | contains(", native, none,")) and ($fuzz | length == 3) and all($fuzz[]; .conclusion == "success") and any($jobs[]; .name == "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)" and .conclusion == "success" and any(.steps[]?; .name == "Run complete native vector correctness before benchmarks" and .conclusion == "success"))' "$directory/$name-jobs.json"
+              # Read all pages, and prove missing or failed shards cannot pass.
+              validate_jobs "$directory/$name-jobs.json"
+              for missing in \
+                  'Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)' \
+                  'Tests on Ubuntu 26.04 (Clang 23, native, memory, O3, shard 3 of 4)' \
+                  'Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)' \
+                  'libFuzzer (ASan + UBSan + leaks, frontend)' \
+                  'Native tests and benchmarks on Benchpress (Ryzen 7 9700X)'; do
+                  jq --arg missing "$missing" 'map(.jobs |= map(select(.name != $missing)))' "$directory/$name-jobs.json" > "$directory/mutant.json"
+                  if validate_jobs "$directory/mutant.json"; then
+                      echo "qualification accepted a missing job: $missing" >&2
+                      exit 1
+                  fi
+              done
+              jq 'map(.jobs |= map(if .name == "Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 4)" then .conclusion = "skipped" else . end))' "$directory/$name-jobs.json" > "$directory/mutant.json"
+              if validate_jobs "$directory/mutant.json"; then
+                  echo 'qualification accepted a skipped shard' >&2
+                  exit 1
+              fi
+              rm "$directory/mutant.json"
               printf '%s_run=%s\n' "$name" "$run" >> "$GITHUB_OUTPUT"
               printf '%s %s %s/actions/runs/%s\n' "$name" "$sha" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$run" >> "$directory/sources.txt"
           done
