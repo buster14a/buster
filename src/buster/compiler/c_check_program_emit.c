@@ -1573,13 +1573,14 @@ static void check_program_emit_admitted(CheckEmitRun* run)
     }
 }
 
-// The flow's other lanes: each round's bodies' parts on its lanes, until lane 0 ends the flow.
+// The flow's other lanes: each round's part on its lanes, until lane 0 ends the flow: the checker's deferred bodies and
+// its merge's pass (check_deferred_follow, #151), or the emission's bodies' parts.
 static void check_program_emit_follow(LaneFlow* flow)
 {
     void* argument = NULL;
     for (uint32_t round = lane_flow_next(flow, &argument); round != 0; round = lane_flow_next(flow, &argument))
     {
-        CheckEmitRun* run = argument;
+        CheckEmitRun* run = check_deferred_follow(round, argument) ? NULL : argument;
         if (run != NULL && run->growth != NULL)
         {
             check_program_emit_admitted(run);
