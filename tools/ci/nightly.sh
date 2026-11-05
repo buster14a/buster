@@ -372,10 +372,11 @@ harvest()
     "$tool" harvest --ledger "$ledger" --facts "$work/harvest.tsv" --states "$states" --records "$records" >> "$ledger"
 }
 
-# nightly/SHA at SHA: 0 when it is there; 2 when GitHub refuses the workflow token the branch (HTTP 403, "Resource not
-# accessible by integration", as it did on 2026-11-05 for merges whose pull request's head lacked main's workflow
-# changes), which the job then stops asking for; 1 for anything else (a timeout, a 429 or 5xx, a failed lookup, a
-# branch that points elsewhere), which a later step asks for again.
+# nightly/SHA at SHA: 0 when it is there. 2 when it can't be had for the rest of the job, which then stops asking for
+# it: GitHub refuses the workflow token the branch (HTTP 403, "Resource not accessible by integration", as it did on
+# 2026-11-05 for merges whose pull request's head lacked main's workflow changes), or the branch exists and points
+# elsewhere (until a person fixes it, never dispatched). 1 for anything else (a timeout, a 429 or 5xx, a failed
+# lookup), which a later step asks for again.
 ensure_branch()
 {
     local commit=$1 found answer result=0
@@ -388,14 +389,15 @@ ensure_branch()
                 result=0
             elif grep -F 'Resource not accessible by integration' <<< "$answer" | grep -F -q 'HTTP 403'; then
                 result=2
+                printf '::warning title=Nightly branch::GitHub refused the workflow token nightly/%s, so nothing is dispatched for it in this job; later states are planned instead (docs/ci.md)\n' "$commit"
             else
                 result=1
                 printf '::warning title=Nightly branch::nightly/%s could not be created (%s); a later step tries again\n' "$commit" "$(tail -n 1 <<< "$answer")"
             fi
         fi
     elif [ "$found" != "$commit" ]; then
-        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it\n' "$commit" "$found"
-        result=1
+        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it in this job, and planning later states instead\n' "$commit" "$found"
+        result=2
     fi
     return "$result"
 }
@@ -576,7 +578,6 @@ coordinate()
                     elif [ "$branch" -eq 2 ]; then
                         printf '%s\n' "$commit" >> "$refused"
                         replan=true
-                        printf '::warning title=Nightly branch::GitHub refused the workflow token nightly/%s, so nothing is dispatched for it in this job; later states are planned instead (docs/ci.md)\n' "$commit"
                     fi
                     sequence=$((sequence + 1))
                     ;;

@@ -1597,8 +1597,9 @@ struct NightlyState
     NightlyStatus status;
     // This plan dispatched it: its nightly/SHA ref is in use now, whatever its status was before the plan.
     bool dispatched;
-    // This job couldn't create its nightly/SHA branch (the workflow token's refusal): nothing is dispatched for it
-    // again in this job, so that it neither holds a preparation slot nor stays the oldest ready state all night.
+    // This job can't have its nightly/SHA branch (the workflow token's refusal, or a branch at another commit): nothing
+    // is dispatched for it again in this job, so that it neither holds a preparation slot nor stays the oldest ready
+    // state all night.
     bool refused;
 };
 
@@ -1706,7 +1707,7 @@ struct NightlyPlanInput
     // nightly/SHA branches that exist.
     char (*refs)[41];
     uint32_t ref_count;
-    // States whose nightly/SHA branch this job couldn't create.
+    // States whose nightly/SHA branch this job can't have.
     char (*refused)[41];
     uint32_t refused_count;
     int64_t now;
@@ -1753,7 +1754,7 @@ struct NightlyCycleState
     uint32_t completed;
     uint32_t failed;
     uint32_t deferred;
-    // States in scope whose nightly/SHA branch this job couldn't create, and so skips.
+    // States in scope whose nightly/SHA branch this job can't have, and so skips.
     uint32_t refused;
 };
 
@@ -2052,7 +2053,7 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     fprintf(report, "Capacity: %.1f code states a day arrived over the last %.1f days; %.1f completed per cycle over %u cycles.\n", arrival_rate, span, completion_rate, date_count);
     if (cycle->refused != 0)
     {
-        fprintf(report, "\n**Branch refused**: this job could not create the nightly branch of %u states, so it skips them and moves on to later states (docs/ci.md, \"Nightly main measurements\"):", cycle->refused);
+        fprintf(report, "\n**Branch refused**: this job could not create or use the nightly branch of %u states, so it skips them and moves on to later states (docs/ci.md, \"Nightly main measurements\"):", cycle->refused);
         for (int64_t i = 0; i <= scope; i += 1)
         {
             if (states->items[i].refused)
@@ -2061,7 +2062,7 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
             }
         }
         fprintf(report, ".\n");
-        fprintf(output, "alert\t%u states skipped: their nightly branch could not be created\n", cycle->refused);
+        fprintf(output, "alert\t%u states skipped: their nightly branch could not be created or used\n", cycle->refused);
     }
     if (alert)
     {
@@ -2233,7 +2234,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 }
                 else if (blocked)
                 {
-                    cycle.substitute_reason = snapshot->refused ? "its nightly branch could not be created" : snapshot->plain == NIGHTLY_PLAIN_FAILED ? "its plain hosted rows failed" : snapshot->blocked_native ? "its native correctness failed on the 9700X" : "its measurements failed repeatedly";
+                    cycle.substitute_reason = snapshot->refused ? "its nightly branch could not be created or used" : snapshot->plain == NIGHTLY_PLAIN_FAILED ? "its plain hosted rows failed" : snapshot->blocked_native ? "its native correctness failed on the 9700X" : "its measurements failed repeatedly";
                     for (int64_t i = cycle.snapshot - 1; i >= 0 && target < 0; i -= 1)
                     {
                         const NightlyState* state = &states->items[i];
@@ -3400,7 +3401,7 @@ static void nightly_test_plan(NightlyTest* test)
     const bool first = nightly_has(scenario, line);
     snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[4].sha);
     nightly_expect(test, !first && nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 3, "a refused state's preparation slot goes to the next states");
-    nightly_expect(test, nightly_has(scenario, "alert\t2 states skipped: their nightly branch could not be created\n") && strstr(scenario->report, "**Branch refused**: this job could not create the nightly branch of 2 states") != NULL && strstr(scenario->report, "ready (branch refused)") == NULL && strstr(scenario->report, "needs-preparation (branch refused)") != NULL, "refused states are counted once and reported");
+    nightly_expect(test, nightly_has(scenario, "alert\t2 states skipped: their nightly branch could not be created or used\n") && strstr(scenario->report, "**Branch refused**: this job could not create or use the nightly branch of 2 states") != NULL && strstr(scenario->report, "ready (branch refused)") == NULL && strstr(scenario->report, "needs-preparation (branch refused)") != NULL, "refused states are counted once and reported");
     nightly_scenario_free(scenario);
     scenario = nightly_scenario(4, committed);
     nightly_scenario_pushes(scenario);
@@ -3422,7 +3423,7 @@ static void nightly_test_plan(NightlyTest* test)
     scenario->refused_count = 2;
     nightly_scenario_plan(scenario, opening);
     snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[1].sha);
-    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 0 && strstr(scenario->report, "ineligible (its nightly branch could not be created)") != NULL, "a refused snapshot is replaced by the newest eligible state that isn't refused");
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 0 && strstr(scenario->report, "ineligible (its nightly branch could not be created or used)") != NULL, "a refused snapshot is replaced by the newest eligible state that isn't refused");
     nightly_scenario_free(scenario);
 
     // Branches: a finished state's is pruned, one in flight is kept; the alert when arrivals outpace completions

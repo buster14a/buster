@@ -410,7 +410,10 @@ launched, so it doesn't wait as for a run in flight. The state neither keeps a
 preparation slot nor stays the oldest ready state while later states wait. Each
 job tries it once again. Any other failure to create a branch (a timeout, a 429
 or 5xx, a failed lookup) is not a refusal: it warns, and a later step tries
-again. A branch that another step made meanwhile is used. The report counts
+again. A branch that another step made meanwhile is used. A `nightly/SHA`
+branch that already points at another commit is never dispatched; it is an
+error, and the state is skipped for the job as a refused one is, since it stays
+wrong until a person fixes it. The report counts
 and names the skipped states, with an alert. A refused snapshot is replaced by
 the newest eligible earlier state, as an ineligible one is. Measuring the refused states needs another way to make their
 branches, which is the owner's decision.

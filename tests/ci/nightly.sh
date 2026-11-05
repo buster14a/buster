@@ -652,6 +652,17 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epo
 expect_match "$fixtures/calls.log" '^sleep 300$' 'after the usual wait'
 expect_no_match "$work/flaky-branch/report.md" 'Branch refused' 'and it is not reported as refused'
 rm -f "$fixtures/flaky-$epoch" "$fixtures"/count-*
+# A nightly branch that already points at another commit is never dispatched, and the state is skipped for the job
+# (it stays wrong until a person fixes it), at once: the next state is prepared without the wait.
+printf '{"object":{"sha":"%s"}}\n' "$merge" > "$fixtures/ref-$epoch.json"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9665 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/mispointed-branch" prepare run
+expect_match "$work/coordinate.log" "::error title=Nightly branch::nightly/$epoch points at $merge; refusing to dispatch it" 'a branch at another commit is an error'
+expect_no_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch |-X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'and is neither dispatched nor made again'
+test "$(grep -c "^api repos/buster14a/buster/git/ref/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 1 || fail 'it is looked up once a job'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9665\.3\.defer$" 'the next state is prepared in its place'
+expect_no_match "$fixtures/calls.log" '^sleep ' 'at once'
+rm -f "$fixtures/ref-$epoch.json" "$fixtures"/count-*
 # A branch another step made meanwhile (the POST fails, the branch is then there at the commit) is used as it is.
 printf '{"object":{"sha":"%s"}}\n' "$epoch" > "$fixtures/ref-$epoch.json.2"
 : > "$fixtures/refuse-$epoch"
