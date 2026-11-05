@@ -561,7 +561,7 @@ coordinate()
         limit=1
     fi
     # A prepare job that will wait for the window keeps preparing while it waits, as hosted runs complete and free their
-    # slots (the planner admits no hardware before 04:00): every five minutes until the window opens.
+    # slots (the planner admits no hardware before 02:00): every five minutes until the window opens.
     local waits=false
     if [ "$phase" = prepare ] && [ "$mode" = run ] && [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
         waits=true
@@ -657,7 +657,7 @@ coordinate()
             sleep "${NIGHTLY_SLEEP:-$(( remaining < 300 ? remaining : 300 ))}"
             continue
         fi
-        # An override (a manual run's reason) admits past 07:00: the loop then ends when nothing more is admissible.
+        # An override (a manual run's reason) admits past 08:00: the loop then ends when nothing more is admissible.
         if [ "$verdict" != wait ] || { [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -ge "$deadline" ]; }; then
             break
         fi

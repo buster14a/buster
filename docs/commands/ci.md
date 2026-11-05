@@ -182,7 +182,7 @@ the policy. In short:
   from its pull request, whose 9700X job skips native correctness (#1272).
   A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows, and enforces
-  04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
+  02:00-08:00 Europe/Madrid. The 9700X job checks the window again after it
   takes the lock, right after the host's OS and CPU-model check. That is
   before the host identity's package queries and hashing, and before any
   setup.
@@ -191,7 +191,7 @@ the policy. In short:
   records into its ledger. It pins the cycle's snapshot, prepares hosted
   qualifications before the window, and dispatches `9700x.yml` on
   `nightly/SHA` branches with `purpose` `backlog` or `snapshot`. It runs one
-  9700X run at a time, and only work that fits before 07:00, unless a manual
+  9700X run at a time, and only work that fits before 08:00, unless a manual
   `mode: run` gives an `override` reason. The snapshot's comprehensive run is
   required every cycle. States start at the epoch (the merge that added
   `tools/ci/nightly.c`); earlier ones predate the worker and are reported as

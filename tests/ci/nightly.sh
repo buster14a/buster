@@ -279,11 +279,11 @@ expect_line "$GITHUB_OUTPUT" 'hosted=reused' 'a backlog run reuses its commit'"'
 expect_line "$GITHUB_OUTPUT" 'hosted_source=800' 'naming the run'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'inside the window it is admitted'
 expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a backlog run is in the plain scope'
-expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 04:00')" 'the cycle'"'"'s window opens at 04:00 Madrid'
-expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 07:00')" 'and closes at 07:00'
+expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 02:00')" 'the cycle'"'"'s window opens at 02:00 Madrid'
+expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 08:00')" 'and closes at 08:00'
 expect_line "$GITHUB_OUTPUT" 'window_override=false' 'without an override'
-NIGHTLY_NOW=$(madrid '2026-11-04 06:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 07:00, it is not'
+NIGHTLY_NOW=$(madrid '2026-11-04 07:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 08:00, it is not'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=window' 'and says why'
 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head EVIDENCE_OVERRIDE='manual check' run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'an override admits outside the window'
@@ -316,19 +316,19 @@ window_case()
     : > "$GITHUB_OUTPUT"
     FAKE_NOW=$1 WINDOW_START=$2 WINDOW_DEADLINE=$3 WINDOW_OVERRIDE=$4 BOUND=$5 PATH="$work/clock:$PATH" bash "$window_step" > /dev/null
 }
-start_epoch=$(madrid '2026-11-04 04:00')
-deadline_epoch=$(madrid '2026-11-04 07:00')
+start_epoch=$(madrid '2026-11-04 02:00')
+deadline_epoch=$(madrid '2026-11-04 08:00')
 window_case $((start_epoch + 600)) "$start_epoch" "$deadline_epoch" false 25 || fail 'the window step admits inside the window'
 expect_line "$GITHUB_OUTPUT" 'window=open' 'and says so'
 if window_case $((deadline_epoch - 20 * 60)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken at 06:40 admitted a 25-minute bound'
+    fail 'a lock taken at 07:40 admitted a 25-minute bound'
 fi
 expect_line "$GITHUB_OUTPUT" 'window=closed' 'a lock taken too late closes the window'
 if window_case $((deadline_epoch + 3600)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken after 07:00 admitted'
+    fail 'a lock taken after 08:00 admitted'
 fi
 if window_case $((start_epoch - 60)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken before 04:00 admitted'
+    fail 'a lock taken before 02:00 admitted'
 fi
 if window_case $((start_epoch + 600)) '' '' false 25; then
     fail 'missing instants admitted'
@@ -481,7 +481,7 @@ sequence_case()
     done
 }
 sequence_case $((deadline_epoch + 600))
-expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 07:00 refuses'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 08:00 refuses'
 test ! -s "$sequence/work.log" || { cat "$sequence/work.log" >&2; fail 'and queries no package and hashes nothing first'; }
 expect_no_match "$GITHUB_OUTPUT" '^host=' 'nor records an identity'
 sequence_case $((start_epoch + 600))

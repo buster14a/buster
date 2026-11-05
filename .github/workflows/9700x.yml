@@ -11,7 +11,7 @@ on:
     branches: [main]
   # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
   # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
-  # against its first parent, or comprehensively, inside 04:00-07:00 Europe/Madrid unless `override` gives a reason.
+  # against its first parent, or comprehensively, inside 02:00-08:00 Europe/Madrid unless `override` gives a reason.
   workflow_dispatch:
     inputs:
       purpose:
@@ -33,7 +33,7 @@ on:
         type: string
         default: manual
       override:
-        description: 'backlog/snapshot with admit: why to measure outside 04:00-07:00 Europe/Madrid (reported); empty enforces the window'
+        description: 'backlog/snapshot with admit: why to measure outside 02:00-08:00 Europe/Madrid (reported); empty enforces the window'
         type: string
         default: ''
   # Once a day, the measurements a push to main leaves out (`changes`), until the nightly mode (vars.BUSTER_NIGHTLY
@@ -169,7 +169,7 @@ jobs:
   # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
   # correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
-  # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
+  # plain hosted rows of the commit's own earlier run, and the 02:00-08:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
   evidence:
     name: Reuse evidence and hardware admission
@@ -189,7 +189,7 @@ jobs:
       hardware: ${{ steps.decide.outputs.hardware }}
       hardware_reason: ${{ steps.decide.outputs.hardware_reason }}
       retired: ${{ steps.decide.outputs.retired }}
-      # A nightly dispatch's window as instants (the cycle's 04:00 and 07:00 Europe/Madrid), and whether an override
+      # A nightly dispatch's window as instants (the cycle's 02:00 and 08:00 Europe/Madrid), and whether an override
       # admits it anyway: the 9700X job compares them with its clock before any setup.
       window_start: ${{ steps.decide.outputs.window_start }}
       window_deadline: ${{ steps.decide.outputs.window_deadline }}
@@ -700,7 +700,7 @@ jobs:
         # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
         # may have waited past its window for it: right after the host's own check, before the host identity's package
         # queries and hashing and before any setup, the job's whole bound (its timeout and 5 minutes to clean up) must
-        # still end by 07:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
+        # still end by 08:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
         # override's reason. A refusal fails the job here, having done nothing else, which the record reads as a
         # deferral, not a failure; the job's timeout bounds the rest.
         id: window

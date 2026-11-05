@@ -283,8 +283,9 @@ cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualificatio
 
 ## Nightly main measurements
 
-Main's first-parent states (#1207) are measured on the 9700X between 04:00 and
-07:00 Europe/Madrid. A branch's internal commits are not states; a merge of
+Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
+08:00 Europe/Madrid, the window the owner widened from 04:00-07:00 on
+2026-11-05. A branch's internal commits are not states; a merge of
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
 whose first-parent change is documentation alone needs no targeted measurements,
@@ -365,7 +366,7 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    the oldest states that have none, three at a time and forty a cycle. A
    prepare job that waits for the window plans again every five minutes until
    it opens, so each completed preparation frees its slot for the next. It
-   never admits hardware, even when a step lands at 04:00 or carries an
+   never admits hardware, even when a step lands at 02:00 or carries an
    override: admission is the window job's alone. The window job starts from
    the prepare job's ledger and its pending dispatches, so a dispatch the API
    doesn't show yet isn't repeated. The pending dispatches come as a job
@@ -435,8 +436,8 @@ unlike the workflow token's, but every workflow's `push` trigger is limited to
 - at admission, by the `evidence` job;
 - after the 9700X job's hook took the lock, by its first step after the host's
   own check. That check reads only the operating system, the architecture and
-  the CPU model. The window step compares the clock with the cycle's 04:00 and
-  07:00, which the `evidence` job computed as instants. It runs before the host
+  the CPU model. The window step compares the clock with the cycle's 02:00 and
+  08:00, which the `evidence` job computed as instants. It runs before the host
   identity's package queries and hashing, and before the checkout, the cache
   and the toolchain's staging. So a job that took the lock too late does
   nothing but refuse. The self-test pins that order, and the glue test runs
@@ -444,8 +445,13 @@ unlike the workflow token's, but every workflow's `push` trigger is limited to
   package is queried and nothing is hashed.
 
 If the database is unavailable, nothing is admitted. The self-test checks the
-database against the EU's rule every hour from 2026 to 2030. A run is admitted
-only if its whole bound still ends by 07:00: the job's timeout (20 minutes for
+database against the EU's rule every hour from 2026 to 2030. Spain changes its
+clocks at 02:00 local time, so the window opens at the first instant the local
+time reaches 02:00. When the clocks go forward, 02:00 doesn't exist, and the
+window opens at 03:00 CEST, five hours before 08:00. When they go back, it
+opens at the first of the two 02:00s, seven hours before 08:00. The pin at
+22:00 is four hours ahead either way. A run is admitted
+only if its whole bound still ends by 08:00: the job's timeout (20 minutes for
 backlog runs, 25 for the snapshot) plus 5 minutes, and the coordinator adds
 the hosted jobs' time. A refusal after the lock fails the job before any work,
 which the record reads as a deferral. The job's timeout ends anything that
@@ -453,17 +459,22 @@ runs over, and the hook then releases the lock. The lock's protocol and its
 fairness to agent sessions are unchanged; nightly work is kept out of the day
 rather than given priority.
 
+The window job starts when the window opens and must end within GitHub's six
+hours. So it stops once no backlog run could still end by 08:00, about 07:35,
+even with a hardware run in flight. That run ends by 08:00 under its own bound,
+and the next coordinator run harvests its record.
+
 **Late schedules.** GitHub starts this repository's scheduled runs hours late.
 In the week of 2026-10-28, the daily run's `23 7 * * *` started 6h22m to
 9h53m late, and `selfhost.yml`'s `47 5 * * *` started 7h13m late. So the
 coordinator has nine schedules:
 
 - every two hours from 16:07 to 04:07;
-- then 05:37 and 07:17.
+- then 05:37 and 08:17, after the window.
 
 A run that prepares before the window waits for it when it opens within 5 hours
-55 minutes of the job's start. For any common delay up to about 14 hours, some
-run starts between 22:05 and 06:35, close enough to wait or still inside the
+55 minutes of the job's start. For any common delay up to about 15 hours, some
+run starts between 20:05 and 07:35, close enough to wait or still inside the
 window. Unless delayed, the earlier schedules start before 22:00: they harvest
 and report, and pin nothing (step 2). Any other run waits in the concurrency
 group, or reports.
