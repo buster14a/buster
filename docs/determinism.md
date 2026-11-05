@@ -170,7 +170,10 @@ that occurs after the initial global symbols have been created.
   both paths at 1/2/3/8 lanes with changed IDs and poisoned arenas. Missing
   nested includes and `-Wfatal-errors` must retain the earlier unit and the
   first fatal's complete notes and summary, even when source-size scheduling
-  runs the later fatal first. Multi-input `-E` is currently sequential; both
+  runs the later fatal first. An injected type-table reservation failure also
+  checks driver-level fatals, which do not set the preprocessor's fatal flag;
+  that case runs the reusable driver in a child with its failure target fixed
+  before any workers start. Multi-input `-E` is currently sequential; both
   marker modes and kernels must concatenate the valid units' standalone
   output and diagnostics, preserving macro isolation.
 - `tests/driver/multicore.c`: the shared correctness suite compiles single-
@@ -271,7 +274,9 @@ source drivers are now implemented, with these integration checks:
   in command-line input order through the first fatal unit. This preserves
   the lexicographic unit/source/job order without sorting already ordered
   unit streams again. The fatal state is retained explicitly before the
-  preprocessor is released; diagnostic text is never parsed to discover it.
+  preprocessor is released and includes direct driver capacity/setup failures
+  and failure to retain a unit's link; diagnostic text is never parsed to
+  discover it.
   Final objects, executables, debug information, preprocessed text and
   diagnostics have their actual driver checks, including changed IDs.
 

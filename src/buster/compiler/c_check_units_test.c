@@ -35,7 +35,8 @@
 // - Fatal diagnostics (#153): a slow earlier warning, two fatal units and a trailing warning, with the later fatal
 //   scheduled before the first by source size. By both paths and --lanes 1/2/3/8, with changed IDs and poisoned arenas,
 //   -fsyntax-only, -c and linking publish the first two units' standalone diagnostics alone, including notes and the
-//   summary. Cover a missing nested include and -Wfatal-errors; a later fatal never cancels an earlier unit.
+//   summary. Cover a missing nested include, -Wfatal-errors and an injected driver type-table failure; a later fatal
+//   never cancels an earlier unit. The injected case calls the reusable driver in a child, as the reservation probes do.
 // - Multi-input -E, whose driver is sequential: the before/last units' stdout and diagnostics, with and without
 //   markers, by both kernels, are each standalone invocation's concatenated bytes; macro state stays unit-local.
 // - Refusals: a name two units define (multiple definition), a name none defines (undefined reference), -c with -o,
@@ -138,7 +139,7 @@ static uint64_t check_units_test_random(CheckUnitsTestTally* tally)
 // (RLIMIT_NPROC), so that it can start no thread. Its exit status, or -1 if it didn't exit; an alarm, which exec keeps,
 // ends one that hangs. It writes no core file: a crashing driver's dump, of arenas that reserve tens of gigabytes, took
 // half a minute through systemd-coredump.
-static int check_units_test_run(const char* directory, char* const* arguments, const char* output, const char* errors, bool unstarted)
+static int check_units_test_run_mode(const char* directory, char* const* arguments, const char* output, const char* errors, bool unstarted, bool fail_types)
 {
     fflush(stdout);
     fflush(stderr);
@@ -160,6 +161,20 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
         if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 && limited)
         {
             alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+            if (fail_types)
+            {
+                // Run this build's reusable driver, with one immutable failure target shared by all its workers. No
+                // environment override or public driver option is needed, and the parent never changes its own state.
+                check_driver_test_failed_types = "fatal.c";
+                int count = 0;
+                while (arguments[count] != NULL)
+                {
+                    count += 1;
+                }
+                const int status = run_check_command(count - 1, (char**)arguments + 1, true);
+                fflush(NULL);
+                _exit(status);
+            }
             execvp(arguments[0], arguments);
         }
         _exit(127);
@@ -167,6 +182,11 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
     int status = 0;
     const bool waited = child > 0 && waitpid(child, &status, 0) == child;
     return waited && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_units_test_run(const char* directory, char* const* arguments, const char* output, const char* errors, bool unstarted)
+{
+    return check_units_test_run_mode(directory, arguments, output, errors, unstarted, false);
 }
 
 // The bytes of the file at `path`, which the caller frees, and their length; null if it can't be read.
@@ -839,7 +859,11 @@ static void check_units_test_fatals(CheckUnitsTestTally* tally, const char* exec
     static const char* const lane_counts[] = { "1", "2", "3", "8" };
     static const char* const modes[] = { "-fsyntax-only", "-c", "-o" };
     static const char header[] = "#line 900 \"presumed153.h\"\n#include \"missing-header153.h\"\n";
-    static const char* const fatal_sources[] = { "#include \"nested153.h\"\n", "int fatal153(void) { return missing_name153; }\n" };
+    static const char* const fatal_sources[] = {
+        "#include \"nested153.h\"\n",
+        "int fatal153(void) { return missing_name153; }\n",
+        "int fatal153(void) { return 3; }\n",
+    };
     static const char padding[] = "// source-size scheduling must not decide which fatal is published\n";
     char root[PATH_MAX];
     char path[PATH_MAX];
@@ -881,12 +905,13 @@ static void check_units_test_fatals(CheckUnitsTestTally* tally, const char* exec
         bool reference = written;
         for (uint32_t u = 0; reference && u < 2; u += 1)
         {
-            char* arguments[] = { (char*)executable, "-fsyntax-only", (char*)names[u], scenario != 0 ? "-Wfatal-errors" : NULL, NULL };
-            const int status = check_units_test_run(root, arguments, "/dev/null", errors, false);
+            char* arguments[] = { (char*)executable, "-fsyntax-only", (char*)names[u], scenario == 1 ? "-Wfatal-errors" : NULL, NULL };
+            const int status = check_units_test_run_mode(root, arguments, "/dev/null", errors, false, scenario == 2);
             uint64_t length = 0;
             char* text = check_units_test_read(errors, &length);
+            const char* required = u == 0 ? "earlier_warning153" : scenario == 2 ? "fatal error: can't reserve type table" : "fatal error:";
             reference = text != NULL && length != 0 && status == (u == 0 ? 0 : 1) &&
-                        strstr(text, u == 0 ? "earlier_warning153" : "fatal error:") != NULL;
+                        strstr(text, required) != NULL;
             char* grown = reference ? realloc(expected, expected_length + length + 1) : NULL;
             reference = grown != NULL;
             if (grown != NULL)
@@ -917,7 +942,7 @@ static void check_units_test_fatals(CheckUnitsTestTally* tally, const char* exec
                     {
                         arguments[used++] = "--scalar";
                     }
-                    if (scenario != 0)
+                    if (scenario == 1)
                     {
                         arguments[used++] = "-Wfatal-errors";
                     }
@@ -932,7 +957,7 @@ static void check_units_test_fatals(CheckUnitsTestTally* tally, const char* exec
                     }
                     arguments[used] = NULL;
                     unlink(output);
-                    const int status = check_units_test_run(root, arguments, "/dev/null", errors, false);
+                    const int status = check_units_test_run_mode(root, arguments, "/dev/null", errors, false, scenario == 2);
                     uint64_t length = 0;
                     char* text = check_units_test_read(errors, &length);
                     char detail[128];
@@ -946,7 +971,7 @@ static void check_units_test_fatals(CheckUnitsTestTally* tally, const char* exec
         }
         free(expected);
     }
-    printf("  fatal diagnostics: nested include and -Wfatal-errors, both paths, 1/2/3/8 lanes, changed IDs and poisoned arenas\n");
+    printf("  fatal diagnostics: nested include, -Wfatal-errors and driver type-table failure, both paths, 1/2/3/8 lanes, changed IDs and poisoned arenas\n");
 }
 
 // Multi-input -E currently runs inputs sequentially; its actual output must still be the input-order concatenation.
