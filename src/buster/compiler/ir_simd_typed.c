@@ -95,11 +95,17 @@ struct IrSimdTypedForm
 
 // The features Tier 1's moves, spills and reloads of a vector of `bytes` take at a target of `target_features`
 // (tier1_select_class_forms, tier1_select_vector_forms): AVX512F's of a zmm register; of an xmm or a ymm one AVX512F's and
-// VL's EVEX forms where the target has both, else AVX's VEX ones (#1281), which name registers below 16 alone.
+// VL's EVEX forms where the target has both, else AVX's VEX ones (#1281), which name registers below 16 alone; and of an
+// xmm one at a target without AVX (#141's SSE targets) legacy SSE's movups and movaps, x86-64's own (none past it). A
+// 32-byte vector and an SSE carrier still need AVX: a legacy target has no ymm register, nor the carriers' zeroing moves
+// (vmovq, vinsertps) Tier 1 takes.
 static uint64_t ir_typed_vector_moves(uint32_t bytes, uint64_t target_features)
 {
     const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
-    return bytes == 64 ? BUSTER_X86_FEATURE(AVX512F) : (target_features & evex) == evex ? evex : BUSTER_X86_FEATURE(AVX);
+    return bytes == 64                                                           ? BUSTER_X86_FEATURE(AVX512F) :
+           (target_features & evex) == evex                                      ? evex :
+           bytes == 16 && (target_features & BUSTER_X86_FEATURE(AVX)) == 0 ? 0 :
+                                                                                   BUSTER_X86_FEATURE(AVX);
 }
 
 static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
@@ -202,6 +208,36 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
         { { X86_FORM_VDIVPS_X_X_XM128, X86_FORM_VDIVPS_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_FDIV, IR_SIMD_LANE_F32 },
         { { X86_FORM_VDIVPD_X_X_XM128, X86_FORM_VDIVPD_Y_Y_YM256, X86_FORM_NONE }, IR_SIMD_FDIV, IR_SIMD_LANE_F64 },
     };
+    // The same operations' legacy SSE forms at targets without AVX (#141's SSE targets), as
+    // c_check_program_vectors_baseline.c's rows have them: two operands, `op v0, v1`, the destination's the first, at 16
+    // bytes alone; SSE2's but pmulld, SSE4.1's (its form's feature), and the bitwise operations' packed singles' forms
+    // (andps, orps, xorps) as the rows take them, the same bits. No shift by each lane's count, which is AVX2's.
+    static const IrSimdTypedForm sse_binary[] = {
+        { { X86_FORM_PADDB_X_XM128 }, IR_SIMD_ADD, IR_SIMD_LANE_I8 },
+        { { X86_FORM_PADDW_X_XM128 }, IR_SIMD_ADD, IR_SIMD_LANE_I16 },
+        { { X86_FORM_PADDD_X_XM128 }, IR_SIMD_ADD, IR_SIMD_LANE_I32 },
+        { { X86_FORM_PADDQ_X_XM128 }, IR_SIMD_ADD, IR_SIMD_LANE_I64 },
+        { { X86_FORM_PSUBB_X_XM128 }, IR_SIMD_SUB, IR_SIMD_LANE_I8 },
+        { { X86_FORM_PSUBW_X_XM128 }, IR_SIMD_SUB, IR_SIMD_LANE_I16 },
+        { { X86_FORM_PSUBD_X_XM128 }, IR_SIMD_SUB, IR_SIMD_LANE_I32 },
+        { { X86_FORM_PSUBQ_X_XM128 }, IR_SIMD_SUB, IR_SIMD_LANE_I64 },
+        { { X86_FORM_PMULLW_X_XM128 }, IR_SIMD_MUL, IR_SIMD_LANE_I16 },
+        { { X86_FORM_PMULLD_X_XM128 }, IR_SIMD_MUL, IR_SIMD_LANE_I32 },
+        { { X86_FORM_PAND_X_XM128 }, IR_SIMD_AND, IR_SIMD_LANE_I32 },
+        { { X86_FORM_POR_X_XM128 }, IR_SIMD_OR, IR_SIMD_LANE_I32 },
+        { { X86_FORM_PXOR_X_XM128 }, IR_SIMD_XOR, IR_SIMD_LANE_I32 },
+        { { X86_FORM_ANDPS_X_XM128 }, IR_SIMD_AND, IR_SIMD_LANE_I32 },
+        { { X86_FORM_ORPS_X_XM128 }, IR_SIMD_OR, IR_SIMD_LANE_I32 },
+        { { X86_FORM_XORPS_X_XM128 }, IR_SIMD_XOR, IR_SIMD_LANE_I32 },
+        { { X86_FORM_ADDPS_X_XM128 }, IR_SIMD_FADD, IR_SIMD_LANE_F32 },
+        { { X86_FORM_ADDPD_X_XM128 }, IR_SIMD_FADD, IR_SIMD_LANE_F64 },
+        { { X86_FORM_SUBPS_X_XM128 }, IR_SIMD_FSUB, IR_SIMD_LANE_F32 },
+        { { X86_FORM_SUBPD_X_XM128 }, IR_SIMD_FSUB, IR_SIMD_LANE_F64 },
+        { { X86_FORM_MULPS_X_XM128 }, IR_SIMD_FMUL, IR_SIMD_LANE_F32 },
+        { { X86_FORM_MULPD_X_XM128 }, IR_SIMD_FMUL, IR_SIMD_LANE_F64 },
+        { { X86_FORM_DIVPS_X_XM128 }, IR_SIMD_FDIV, IR_SIMD_LANE_F32 },
+        { { X86_FORM_DIVPD_X_XM128 }, IR_SIMD_FDIV, IR_SIMD_LANE_F64 },
+    };
     IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
     IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
     uint32_t width = 0;
@@ -225,7 +261,21 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
             const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
             const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
             X86Instruction expected = { .form = record->form, .reg = v0, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT };
-            if (source->record_count == 1 && source->operand_count == 2 && memcmp(record, &expected, sizeof(expected)) == 0)
+            // A legacy form's row: its destination its first operand, no vvvv.
+            const X86Instruction legacy = { .form = record->form, .reg = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT };
+            if (source->record_count == 1 && source->operand_count == 2 && width == 0 && memcmp(record, &legacy, sizeof(legacy)) == 0)
+            {
+                for (uint32_t form = 0; form < sizeof(sse_binary) / sizeof(*sse_binary); form += 1)
+                {
+                    if (record->form == sse_binary[form].forms[0])
+                    {
+                        candidate.operation = sse_binary[form].operation;
+                        candidate.lane = sse_binary[form].lane;
+                        candidate.required_features = ir_typed_vector_moves(16, target_features) | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
+                    }
+                }
+            }
+            else if (source->record_count == 1 && source->operand_count == 2 && memcmp(record, &expected, sizeof(expected)) == 0)
             {
                 for (uint32_t form = 0; form < sizeof(binary) / sizeof(*binary); form += 1)
                 {
