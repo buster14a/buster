@@ -2,12 +2,16 @@
 
 `src/buster/compiler/ir_optimize_inline.c` implements the small-function
 inlining slice of [#139](https://github.com/buster14a/buster/issues/139).
-It consumes the shared [`IrFunction`](ir.md) representation after SSA
-construction. It is a callable component; wiring it into the complete C
-translation-unit driver and establishing corpus and performance acceptance
-remain pending.
+It consumes the shared [`IrFunction`](ir.md) representation, SSA's or the
+lowering's memory form. The C driver's `--tier1` runs it on each body's
+always_inline callees (#1282, [the Tier 1 guide](tier1.md)'s "Inlining");
+inlining by size thresholds in the C driver, and its corpus and performance
+acceptance, remain pending.
 
-The first scope expands single-block leaf bodies with no stack objects. It
+The first scope expanded single-block leaf bodies with no stack objects; #1282
+takes a straight chain of blocks, stack objects, SIMD values and machine rows,
+and calls whose by-value aggregates' ABI records are the callee's own ("SIMD
+callees and by-value vectors", below). It
 preserves arbitrary valid caller control flow, including loop phis and switch
 tables. A callee is rewritten before its callers, so a small acyclic function
 that originally called another small function can become an eligible leaf.
@@ -39,7 +43,9 @@ The metadata producer is responsible for marking a definition
 External-linkage definitions, unknown symbols, indirect calls, noinline
 definitions and variadic definitions remain calls, and so do calls with ABI
 records (#131's `IrCall.abi`: a call that passes or returns an aggregate by
-value, or passes one the convention ignores). Unknown flag bits are errors. Every known direct call's variadic
+value, or passes one the convention ignores) other than those #1282 inlines:
+records of the call's own that match its callee's, argument by argument, with no
+hidden pointer and no ignored argument. A row call (#141) is no call site. Unknown flag bits are errors. Every known direct call's variadic
 status, and every other one's result type and fixed parameter types/count, must
 agree with its table entry, even when expansion is disabled. A call with ABI
 records has the convention's shape instead, which only its records give: its
@@ -81,9 +87,11 @@ Algorithms*, SIAM Journal on Computing 1(2), 146–160, 1972,
 tests are original. Tarjan traversal is linear in its graph; symbol lookup,
 IR verification and body rewriting are additional work.
 
-A candidate's rewritten body must have exactly one block ending in `IR_RET`,
-no slot rows, labels or ABI records of its own, and no remaining calls, phis,
-stack addresses or other terminators. A typed return adds a `COPY`; a void
+A candidate's rewritten body must be one straight line of blocks, each but the
+last ending in a `br` to the next and the last in `IR_RET` (the `br`s are
+dropped), with no labels, no incoming frame of a variadic definition and no
+remaining calls but row calls, phis, dynamic stack operations or other
+terminators. A typed return adds a `COPY`; a void
 return disappears. Each `IR_PARAM` maps directly to the already evaluated
 actual argument. All other
 operations, including faulting arithmetic, memory accesses and volatile
@@ -92,7 +100,8 @@ callee CFGs, clone stack-object lifetimes or expand recursive/variadic calls.
 
 Each eligible call receives separate `uint32_t` cost and expansion-size
 columns. Its structural cost is the number of cloned instructions, including
-the result `COPY`, plus all copied constant and address rows. The default
+the result `COPY` and #1282's aggregate copies, plus all copied constant,
+address, vector constant, machine row and slot rows. The default
 maximum is 32 cost units. This is a provisional size rule, not a measurement
 of instruction bytes, latency or profitability.
 
@@ -113,6 +122,45 @@ admission budget retains that call with an explicit decision. A call whose
 callee's constant or address rows would carry the caller's table past 2²⁰
 rows is also retained, as a growth decision, rather than failing the unit. Disabled mode
 still validates and clones the unit, retaining every call.
+
+## SIMD callees and by-value vectors (#1282)
+
+The x86 intrinsics' wrappers are SIMD functions: vectors, masks, vector
+constants and machine rows, stack objects for their by-value vectors, and a
+preheader of their own. The pass verifies every function with the optimizer's
+SIMD-taking preparation, and an expansion appends the callee's vector constants,
+machine rows and slots to the caller's, rebasing `IR_VCONST`'s index,
+`IrCall.row` and `IR_STACK_ADDR`'s and `IR_LIFETIME`'s slot. A cloned row call
+gets a fresh descriptor, argument slice and fixed-type slice, as the caller's
+kept calls do. A callee's slots have no lifetime markers of their own in the
+caller unless they had them: they live throughout it.
+
+A call with ABI records whose records are its callee's own (each argument's
+bytes or type, its result's bytes, no hidden pointer, no ignored argument) is
+expanded as the convention runs it: each aggregate argument's bytes are copied
+into a fresh slot of the caller (address-taken, of its size), whose address the
+callee's parameter becomes, since the callee owns its copy; and an aggregate
+result's bytes are copied from the address the callee returns into the call's
+destination. Where a vector register holds the aggregate whole and
+`IrInlineOptions.vector_copies` allows its width (bit 0 16 bytes, bit 1 32, bit
+2 64: the target's AVX-512F, and VL for the narrower), a copy is one vector load
+and store; otherwise 8-, 4-, 2- and 1-byte integers, each piece past the first
+through an `ADDRESS` of each side. Default options copy by integers. The
+copies' instructions, addresses and slots are counted in the expansion's size,
+cost and growth bounds, and the result is verified as any other.
+
+The copies are memory: SROA with #1282's options ([the field splitting
+guide](ir-scalar-replacement.md)) splits every slot whose accesses are whole
+vectors into vector slots, which promotion then makes values, so an inlined
+wrapper's arguments, parameter objects and result leave no memory access.
+Integer copies of a vector the callee reads whole overlap its vector field and
+stay memory, correctly. `test-ir-inline` runs a by-value unit on the IR's
+interpreter before and after inlining (both copy kinds, both twins), after SROA
+and after promotion, which leaves only the parameter's two loads and its store;
+and checks a rows fixture's columns (the interpreter has no model of x86
+records). The original aggregates fixture runs its expansions with stores and
+loads compared by the memory they leave, since an inlined copy reads and writes
+an aggregate's bytes otherwise than the interpreted call.
 
 ## Rewrite and consumer handoff
 

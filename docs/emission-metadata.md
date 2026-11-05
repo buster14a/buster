@@ -429,9 +429,10 @@ Remaining beyond this change:
 - Statement-level rows and variable locations for Tier 1's code need source
   positions carried through the IR (lowering, SSA, the optimizer and selection),
   which it doesn't have.
-- The driver requests no probes (`BUSTER_TIER1_FRAME_PROBE_STACK`); the probe
-  frame's unwinding is proved and checked natively in isolation only, as the
-  issue asked, before any production option.
+- The driver requests probes (`BUSTER_TIER1_FRAME_PROBE_STACK`) under
+  `-fstack-clash-protection` (#177, [the frame guide](tier1-frame.md)'s
+  "Stack-clash protection on request"); `--verify` proves the probe frames'
+  events, and the probe loop's unwinding is checked natively in isolation.
 - Frames within 56 bytes of 2 GB: the events' signed 32-bit values can't carry
   their CFA offsets, so the emission refuses them as unsupported
   ([#1149](https://github.com/buster14a/buster/issues/1149)).

@@ -364,7 +364,7 @@ static void asm_cfi_finish(AsmParser* parser)
     if (parser->cfi_debug_frame && parser->procedure_count != 0 && parser->result.error == 0)
     {
         const uint32_t previous = parser->section;
-        const uint32_t existing = asm_find_section(parser, BUSTER_S8(".debug_frame"));
+        const uint32_t existing = asm_find_section(parser, BUSTER_S8(".debug_frame"), 0);
         if (asm_section_holds(parser, existing))
         {
             asm_fail(parser, 0, "explicit .debug_frame conflicts with CFI");

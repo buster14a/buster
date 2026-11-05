@@ -214,12 +214,12 @@ static void check_vector_baseline_compare(CheckVectorBaseline* context, CheckVec
     }
 }
 
-// An operator's row on `bytes` bytes of `vector`'s elements: the vector's own, or a piece of a wider one's that the target's
-// registers hold (check_lower_vector_split, #1193). Every row here is elementwise, a piece's elements its own.
-static const char* check_vector_lower_baseline_piece(const TypeTable* types, const X86Target* target, uint32_t op, TypeId vector, uint32_t bytes,
-                                                    uint8_t scalar_class, Tier0Operation* row)
+// An operator's row on `bytes` bytes of `element`s: a vector's own, or a piece of a wider one's that the target's
+// registers hold (check_lower_vector_split, #1193), or of a transport vector's (check_lower_transport_rows, #137). Every
+// row here is elementwise, a piece's elements its own.
+static const char* check_vector_lower_baseline_element(const X86Target* target, uint32_t op, CheckVectorElement element, uint32_t bytes, uint8_t scalar_class,
+                                                      Tier0Operation* row)
 {
-    const CheckVectorElement element = check_vector_lower_element(types, vector);
     const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
     const bool compare = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
@@ -317,6 +317,12 @@ static const char* check_vector_lower_baseline_piece(const TypeTable* types, con
                  compare ? "vector comparison unavailable at this target" : "vector operator unavailable at this target";
     }
     return reason;
+}
+
+static const char* check_vector_lower_baseline_piece(const TypeTable* types, const X86Target* target, uint32_t op, TypeId vector, uint32_t bytes,
+                                                    uint8_t scalar_class, Tier0Operation* row)
+{
+    return check_vector_lower_baseline_element(target, op, check_vector_lower_element(types, vector), bytes, scalar_class, row);
 }
 
 static const char* check_vector_lower_baseline_row(const TypeTable* types, const X86Target* target, uint32_t op, TypeId vector, uint8_t scalar_class,

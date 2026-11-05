@@ -32,8 +32,15 @@
 // - Diagnostics: three units, one with a warning, one with an error and one clean, by --lanes 1, 2, 3 and 8, with -c,
 //   -fsyntax-only and into an executable: standard error is each unit's own alone, in the command line's order, the
 //   exit status 1; -c writes the objects of the units without errors, and the link no executable.
+// - Fatal diagnostics (#153): a slow earlier warning, two fatal units and a trailing warning, with the later fatal
+//   scheduled before the first by source size. By both paths and --lanes 1/2/3/8, with changed IDs and poisoned arenas,
+//   -fsyntax-only, -c and linking publish the first two units' standalone diagnostics alone, including notes and the
+//   summary. Cover a missing nested include, -Wfatal-errors and an injected driver type-table failure; a later fatal
+//   never cancels an earlier unit. The injected case calls the reusable driver in a child, as the reservation probes do.
+// - Multi-input -E, whose driver is sequential: the before/last units' stdout and diagnostics, with and without
+//   markers, by both kernels, are each standalone invocation's concatenated bytes; macro state stays unit-local.
 // - Refusals: a name two units define (multiple definition), a name none defines (undefined reference), -c with -o,
-//   --dump-typed, --id-order, and two units whose objects have one name: exit status 1, the message, and no output.
+//   --dump-typed and two units whose objects have one name: exit status 1, the message, and no output.
 //   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
 //   (check_units_test_poison): it must exit with status 1 and its message, as with a clean stack, where a local the
 //   driver read before setting it would release an arena of that address and unmap the child's code.
@@ -132,7 +139,7 @@ static uint64_t check_units_test_random(CheckUnitsTestTally* tally)
 // (RLIMIT_NPROC), so that it can start no thread. Its exit status, or -1 if it didn't exit; an alarm, which exec keeps,
 // ends one that hangs. It writes no core file: a crashing driver's dump, of arenas that reserve tens of gigabytes, took
 // half a minute through systemd-coredump.
-static int check_units_test_run(const char* directory, char* const* arguments, const char* output, const char* errors, bool unstarted)
+static int check_units_test_run_mode(const char* directory, char* const* arguments, const char* output, const char* errors, bool unstarted, bool fail_types)
 {
     fflush(stdout);
     fflush(stderr);
@@ -154,6 +161,20 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
         if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 && limited)
         {
             alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+            if (fail_types)
+            {
+                // Run this build's reusable driver, with one immutable failure target shared by all its workers. No
+                // environment override or public driver option is needed, and the parent never changes its own state.
+                check_driver_test_failed_types = "fatal.c";
+                int count = 0;
+                while (arguments[count] != NULL)
+                {
+                    count += 1;
+                }
+                const int status = run_check_command(count - 1, (char**)arguments + 1, true);
+                fflush(NULL);
+                _exit(status);
+            }
             execvp(arguments[0], arguments);
         }
         _exit(127);
@@ -161,6 +182,11 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
     int status = 0;
     const bool waited = child > 0 && waitpid(child, &status, 0) == child;
     return waited && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_units_test_run(const char* directory, char* const* arguments, const char* output, const char* errors, bool unstarted)
+{
+    return check_units_test_run_mode(directory, arguments, output, errors, unstarted, false);
 }
 
 // The bytes of the file at `path`, which the caller frees, and their length; null if it can't be read.
@@ -472,7 +498,7 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
         const bool poisoned = c == BUSTER_ARRAY_LENGTH(lane_counts);
         const bool limited = c == BUSTER_ARRAY_LENGTH(lane_counts) + 1;
         const char* options[] = { "--lanes", poisoned || limited ? "8" : lane_counts[c], "-c", NULL };
-        const char* poisoned_options[] = { "--poison-arenas", "--lanes", "8", "-c", NULL };
+        const char* poisoned_options[] = { "--poison-arenas", "--id-order", "153", "--lanes", "8", "-c", NULL };
         const char* limited_options[] = { "--units-memory=1", "--lanes", "8", "-c", NULL };
         check_units_test_command(arguments, names, executable,
                                  poisoned ? poisoned_options : limited ? limited_options : lane_counts[c] != NULL ? options : options + 2, count);
@@ -507,7 +533,7 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
             const bool poisoned = c == BUSTER_ARRAY_LENGTH(lane_counts);
             char output[64];
             snprintf(output, sizeof(output), "program_%u_%u", scalar, c);
-            const char* options[8];
+            const char* options[10];
             uint32_t used = 0;
             if (scalar != 0)
             {
@@ -516,6 +542,8 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
             if (poisoned)
             {
                 options[used++] = "--poison-arenas";
+                options[used++] = "--id-order";
+                options[used++] = "153";
                 options[used++] = "--lanes";
                 options[used++] = "8";
             }
@@ -562,10 +590,10 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
     }
     // -g (#779): all units at once into an executable with their DWARF, by --lanes 1 and 8, by 8 with the lanes' arenas
     // poisoned and by the scalar path: the same bytes, which run as clang's program does.
-    static const char* const debug_options[][8] = {
+    static const char* const debug_options[][10] = {
         { "-g", "--lanes", "1", "-o", "debug_1", NULL },
         { "-g", "--lanes", "8", "-o", "debug_8", NULL },
-        { "-g", "--poison-arenas", "--lanes", "8", "-o", "debug_poisoned", NULL },
+        { "-g", "--poison-arenas", "--id-order", "153", "--lanes", "8", "-o", "debug_poisoned", NULL },
         { "-g", "--scalar", "--lanes", "3", "-o", "debug_scalar", NULL },
     };
     for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(debug_options); d += 1)
@@ -607,7 +635,7 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
     }
     snprintf(detail, sizeof(detail), "program %u, %u units, -c -g by --lanes 8", program, count);
     check_units_test_expect(tally, debug_alone, "each unit alone writes its object with -c -g", detail);
-    const char* debug_objects[] = { "-c", "-g", "--lanes", "8", NULL };
+    const char* debug_objects[] = { "-c", "-g", "--id-order", "153", "--lanes", "8", NULL };
     check_units_test_command(arguments, names, executable, debug_objects, count);
     const bool debug_written = debug_alone && check_units_test_run(directory, arguments, "/dev/null", errors_path, false) == 0;
     check_units_test_expect(tally, debug_written, "the units at once write their objects with -c -g", detail);
@@ -823,6 +851,204 @@ static void check_units_test_diagnostics(CheckUnitsTestTally* tally, const char*
     printf("  diagnostics: each unit's alone, in the command line's order, by %u lane counts\n", (uint32_t)BUSTER_ARRAY_LENGTH(lane_counts));
 }
 
+// #153: every job finishes, but publication stops at input order's first fatal. Source sizes make the one-lane work
+// order before/later/last/fatal, unlike input order; several lanes may report a fatal before the earlier warning.
+static void check_units_test_fatals(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    static const char* const names[] = { "before.c", "fatal.c", "later.c", "last.c" };
+    static const char* const lane_counts[] = { "1", "2", "3", "8" };
+    static const char* const modes[] = { "-fsyntax-only", "-c", "-o" };
+    static const char header[] = "#line 900 \"presumed153.h\"\n#include \"missing-header153.h\"\n";
+    static const char* const fatal_sources[] = {
+        "#include \"nested153.h\"\n",
+        "int fatal153(void) { return missing_name153; }\n",
+        "int fatal153(void) { return 3; }\n",
+    };
+    static const char padding[] = "// source-size scheduling must not decide which fatal is published\n";
+    char root[PATH_MAX];
+    char path[PATH_MAX];
+    char errors[PATH_MAX];
+    char output[PATH_MAX];
+    snprintf(root, sizeof(root), "%s/fatal153", directory);
+    snprintf(errors, sizeof(errors), "%s/errors.txt", root);
+    snprintf(output, sizeof(output), "%s/program", root);
+    bool written = mkdir(root, 0755) == 0;
+    snprintf(path, sizeof(path), "%s/nested153.h", root);
+    written = written && parse_test_write(path, header, sizeof(header) - 1);
+    check_units_test_expect(tally, written, "create the fatal-prefix directory and nested header", root);
+    for (uint32_t scenario = 0; written && scenario < BUSTER_ARRAY_LENGTH(fatal_sources); scenario += 1)
+    {
+        const char* const sources[] = {
+            "#define SHARED153 9\n#warning earlier_warning153\nint before153 = SHARED153;\n",
+            fatal_sources[scenario],
+            "#include \"later-missing153.h\"\n",
+            "#ifdef SHARED153\n#error macro_leaked153\n#endif\n#warning later_warning153\nint last153;\n",
+        };
+        static const uint32_t blocks[] = { 3, 0, 2, 1 };
+        for (uint32_t u = 0; written && u < BUSTER_ARRAY_LENGTH(names); u += 1)
+        {
+            snprintf(path, sizeof(path), "%s/%s", root, names[u]);
+            FILE* file = fopen(path, "w");
+            written = file != NULL && fputs(sources[u], file) >= 0;
+            for (uint32_t p = 0; written && p < blocks[u] * 1024; p += 1)
+            {
+                written = fputs(padding, file) >= 0;
+            }
+            if (file != NULL)
+            {
+                written = fclose(file) == 0 && written;
+            }
+        }
+        check_units_test_expect(tally, written, "write the fatal-prefix units", root);
+        char* expected = NULL;
+        uint64_t expected_length = 0;
+        bool reference = written;
+        for (uint32_t u = 0; reference && u < 2; u += 1)
+        {
+            char* arguments[] = { (char*)executable, "-fsyntax-only", (char*)names[u], scenario == 1 ? "-Wfatal-errors" : NULL, NULL };
+            const int status = check_units_test_run_mode(root, arguments, "/dev/null", errors, false, scenario == 2);
+            uint64_t length = 0;
+            char* text = check_units_test_read(errors, &length);
+            const char* required = u == 0 ? "earlier_warning153" : scenario == 2 ? "fatal error: can't reserve type table" : "fatal error:";
+            reference = text != NULL && length != 0 && status == (u == 0 ? 0 : 1) &&
+                        strstr(text, required) != NULL;
+            char* grown = reference ? realloc(expected, expected_length + length + 1) : NULL;
+            reference = grown != NULL;
+            if (grown != NULL)
+            {
+                expected = grown;
+                memcpy(expected + expected_length, text, length);
+                expected_length += length;
+                expected[expected_length] = 0;
+            }
+            free(text);
+        }
+        check_units_test_expect(tally, reference, "standalone warning and fatal groups form the expected prefix", root);
+        for (uint32_t scalar = 0; reference && scalar < 2; scalar += 1)
+        {
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+            {
+                for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+                {
+                    char* arguments[20];
+                    uint32_t used = 0;
+                    arguments[used++] = (char*)executable;
+                    arguments[used++] = "--id-order";
+                    arguments[used++] = "153";
+                    arguments[used++] = "--poison-arenas";
+                    arguments[used++] = "--lanes";
+                    arguments[used++] = (char*)lane_counts[c];
+                    if (scalar != 0)
+                    {
+                        arguments[used++] = "--scalar";
+                    }
+                    if (scenario == 1)
+                    {
+                        arguments[used++] = "-Wfatal-errors";
+                    }
+                    arguments[used++] = (char*)modes[m];
+                    if (m == 2)
+                    {
+                        arguments[used++] = "program";
+                    }
+                    for (uint32_t u = 0; u < BUSTER_ARRAY_LENGTH(names); u += 1)
+                    {
+                        arguments[used++] = (char*)names[u];
+                    }
+                    arguments[used] = NULL;
+                    unlink(output);
+                    const int status = check_units_test_run_mode(root, arguments, "/dev/null", errors, false, scenario == 2);
+                    uint64_t length = 0;
+                    char* text = check_units_test_read(errors, &length);
+                    char detail[128];
+                    snprintf(detail, sizeof(detail), "fatal scenario %u, scalar %u, --lanes %s, %s", scenario, scalar, lane_counts[c], modes[m]);
+                    check_units_test_expect(tally, status == 1 && text != NULL && length == expected_length && memcmp(text, expected, length) == 0,
+                                            "only input order's warning and first fatal, with all notes and the summary", detail);
+                    check_units_test_expect(tally, !check_units_test_exists(output), "a fatal leaves no executable", detail);
+                    free(text);
+                }
+            }
+        }
+        free(expected);
+    }
+    printf("  fatal diagnostics: nested include, -Wfatal-errors and driver type-table failure, both paths, 1/2/3/8 lanes, changed IDs and poisoned arenas\n");
+}
+
+// Multi-input -E currently runs inputs sequentially; its actual output must still be the input-order concatenation.
+// Use the two valid units above: a warning in each, and the first unit's macro forbidden in the second.
+static void check_units_test_preprocessed(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    char root[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(root, sizeof(root), "%s/fatal153", directory);
+    snprintf(output, sizeof(output), "%s/preprocessed.txt", root);
+    snprintf(errors, sizeof(errors), "%s/preprocessed-errors.txt", root);
+    const char* const paths[] = { output, errors };
+    static const char* const names[] = { "before.c", "last.c" };
+    for (uint32_t plain = 0; plain < 2; plain += 1)
+    {
+        char* expected[2] = { 0 };
+        uint64_t expected_length[2] = { 0 };
+        bool reference = true;
+        for (uint32_t u = 0; reference && u < BUSTER_ARRAY_LENGTH(names); u += 1)
+        {
+            char* arguments[] = { (char*)executable, "-E", (char*)names[u], plain != 0 ? "-P" : NULL, NULL };
+            reference = check_units_test_run(root, arguments, output, errors, false) == 0;
+            for (uint32_t stream = 0; reference && stream < 2; stream += 1)
+            {
+                uint64_t length = 0;
+                char* text = check_units_test_read(paths[stream], &length);
+                char* grown = text != NULL ? realloc(expected[stream], expected_length[stream] + length + 1) : NULL;
+                reference = grown != NULL;
+                if (grown != NULL)
+                {
+                    expected[stream] = grown;
+                    memcpy(grown + expected_length[stream], text, length);
+                    expected_length[stream] += length;
+                    grown[expected_length[stream]] = 0;
+                }
+                free(text);
+            }
+        }
+        reference = reference && strstr(expected[0], "before153") != NULL && strstr(expected[0], "last153") != NULL &&
+                    strstr(expected[1], "earlier_warning153") != NULL && strstr(expected[1], "later_warning153") != NULL;
+        check_units_test_expect(tally, reference, "standalone -E contains both units and their warnings", root);
+        for (uint32_t scalar = 0; reference && scalar < 2; scalar += 1)
+        {
+            char* arguments[9];
+            uint32_t used = 0;
+            arguments[used++] = (char*)executable;
+            arguments[used++] = "-E";
+            if (plain != 0)
+            {
+                arguments[used++] = "-P";
+            }
+            if (scalar != 0)
+            {
+                arguments[used++] = "--scalar";
+            }
+            arguments[used++] = (char*)names[0];
+            arguments[used++] = (char*)names[1];
+            arguments[used] = NULL;
+            const int status = check_units_test_run(root, arguments, output, errors, false);
+            for (uint32_t stream = 0; stream < 2; stream += 1)
+            {
+                uint64_t length = 0;
+                char* text = check_units_test_read(paths[stream], &length);
+                char detail[128];
+                snprintf(detail, sizeof(detail), "-E%s, scalar %u, %s", plain != 0 ? " -P" : "", scalar, stream == 0 ? "stdout" : "diagnostics");
+                check_units_test_expect(tally, status == 0 && text != NULL && length == expected_length[stream] && memcmp(text, expected[stream], length) == 0,
+                                        "multi-input -E concatenates each unit's standalone bytes", detail);
+                free(text);
+            }
+        }
+        free(expected[0]);
+        free(expected[1]);
+    }
+    printf("  preprocessing: multi-input -E text and diagnostics, both kernels and marker modes, each unit's alone\n");
+}
+
 // The words of stack check_units_test_poison fills: a quarter of a megabyte below its caller's frame.
 #define BUSTER_CHECK_UNITS_TEST_POISON_WORDS 32768
 
@@ -916,7 +1142,6 @@ static void check_units_test_refusals(CheckUnitsTestTally* tally, const char* ex
         { "a name no unit defines", "undefined reference to 'missing_function'", "refused", { (char*)executable, "-o", "refused", "caller.c", "other.c", NULL } },
         { "-c with -o", "cannot specify -o when generating multiple output files", "refused.o", { (char*)executable, "-c", "-o", "refused.o", "other.c", "second.c", NULL } },
         { "a dump", "take one source file", NULL, { (char*)executable, "--dump-typed", "other.c", "second.c", NULL } },
-        { "--id-order", "take one source file", NULL, { (char*)executable, "--id-order", "153", "-c", "other.c", "second.c", NULL } },
         { "two units of one object's name", "would both write other.o", "other.o", { (char*)executable, "-c", "other.c", "nested/other.c", NULL } },
     };
     for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
@@ -2216,11 +2441,12 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
     check_units_test_expect(tally, made, "make the corpus's directories", directory);
     char errors_path[PATH_MAX];
     snprintf(errors_path, sizeof(errors_path), "%s/corpus_errors.txt", directory);
-    // Each file alone: its status and its diagnostics, which the command of all of them prints in their order.
+    // Each file alone: its status and diagnostic groups, through the first fatal file's groups in input order.
     uint32_t compiled = 0;
     char* diagnostics = NULL;
     uint64_t diagnostic_length = 0;
     bool any_failed = false;
+    bool diagnostic_stopped = false;
     int* statuses = count != 0 ? calloc(count, sizeof(int)) : NULL;
     char** arguments = calloc((uint64_t)count + option_count + 8, sizeof(char*));
     for (uint32_t f = 0; made && arguments != NULL && statuses != NULL && f < count; f += 1)
@@ -2239,7 +2465,7 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
         compiled += statuses[f] == 0;
         uint64_t length = 0;
         char* text = check_units_test_read(errors_path, &length);
-        char* grown = text != NULL ? realloc(diagnostics, diagnostic_length + length + 1) : NULL;
+        char* grown = text != NULL && !diagnostic_stopped ? realloc(diagnostics, diagnostic_length + length + 1) : NULL;
         if (grown != NULL)
         {
             diagnostics = grown;
@@ -2247,6 +2473,9 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
             diagnostic_length += length;
             diagnostics[diagnostic_length] = 0;
         }
+        // These are the external compiler's rendered records, not the production driver's fatal-state interface.
+        diagnostic_stopped |= text != NULL && statuses[f] != 0 && (strncmp(text, "fatal error:", 12) == 0 ||
+                              strstr(text, "\nfatal error:") != NULL || strstr(text, ": fatal error:") != NULL);
         free(text);
     }
     for (uint32_t poisoned = 0; made && arguments != NULL && statuses != NULL && poisoned < 2; poisoned += 1)
@@ -2463,6 +2692,8 @@ static int run_check_units_tests(int argc, char** argv)
 #endif
         check_units_test_programs(&tally, executable, clang, directory, programs != 0 ? programs : 1);
         check_units_test_diagnostics(&tally, executable, directory);
+        check_units_test_fatals(&tally, executable, directory);
+        check_units_test_preprocessed(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
         check_units_test_bounds(&tally, executable, directory);

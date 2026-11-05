@@ -1,0 +1,37 @@
+function (v4i32, ptr, i64) -> v8i32 {
+  row #0 (vector16) -> vector8
+  row #1 (vector16) -> vector4
+  row #2 (vector8, vector8) -> vector8 [VPADDB_X_X_XM128_EVEX 0x80 0x80 0x81 0x00 0x00 0x00 0 0]
+  row #3 (vector8, vector4) -> vector8 [VPXORQ_X_X_XM128 0x80 0x80 0x81 0x00 0x00 0x00 0 0]
+  row #4 (vector8) -> vector32 [VPMOVZXBD_Y_XM64_EVEX 0x80 0x00 0x80 0x00 0x00 0x00 0 0]
+  row #5 (vector4) -> vector16 [VPMOVZXBD_X_XM32_EVEX 0x80 0x00 0x80 0x00 0x00 0x00 0 0]
+  row #6 (u64, vector8) -> void [VMOVQ_XM64_X_EVEX 0x81 0x00 0x80 0x00 0x0c 0x00 0 0]
+b0:
+  %0 = param.v4i32 0
+  %1 = param.ptr 1
+  %2 = param.i64 2
+  %3 = call.f64 row #0(%0) fixed=(v4i32) variadic=0
+  %4 = call.f32 row #1(%0) fixed=(v4i32) variadic=0
+  %5 = const.f64 0x00000000000000007ff0000000012345
+  %6 = const.f32 0x00000000000000000000000080000000
+  %7 = load.f64 %1 align=1
+  %8 = store.void %1, %5 align=1
+  %9 = address.ptr %1 offset=8
+  %10 = store.void %9, %6 align=1
+  %11 = br.void b1
+b1:
+  %12 = phi.f64 [%3, b0], [%15, b1]
+  %13 = phi.i64 [%2, b0], [%17, b1]
+  %14 = call.f64 row #2(%12, %7) fixed=(f64, f64) variadic=0
+  %15 = call.f64 row #3(%14, %4) fixed=(f64, f32) variadic=0
+  %16 = const.i64 0x00000000000000000000000000000001
+  %17 = sub.i64 %13, %16
+  %18 = icmp.i1 %17, %16 ne
+  %19 = cbr.void %18, b1, b2
+b2:
+  %20 = ptrtoint.i64 %1
+  %21 = call.void row #6(%20, %15) fixed=(i64, f64) variadic=0
+  %22 = call.v4i32 row #5(%6) fixed=(f32) variadic=0
+  %23 = call.v8i32 row #4(%15) fixed=(f64) variadic=0
+  %24 = ret.void %23
+}

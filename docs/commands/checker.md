@@ -162,11 +162,10 @@ and `-fsanitize-coverage=0` ask for nothing, a value clang doesn't know is
 clang's error, and the bare `-fsanitize-coverage`, which clang doesn't take, is
 refused by name. The auxiliary `-fsanitize-coverage-*` options (such as
 `-fsanitize-coverage-allowlist=` and the cc1-only `-fsanitize-coverage-type=`)
-are not covered by the "auxiliary hardening options" above: they reach the
-generic `-f` handling, which accepts them, and are left to the wider `-f`/`-m`
-audit. An active coverage request they refine is still refused where code is
-emitted. Negative flags retain their
-existing handling. Within these families, any unsupported request is an error
+are refused by the semantic option admission boundary below. The resolved
+`-fsanitize-coverage=` and `-fno-sanitize-coverage=` grammars are unchanged;
+admitting either never admits a `-fsanitize-coverage-*` prefix. Negative flags
+are admitted only by an explicit owner or compatibility entry. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
 Clang's last-option-wins policy. Unlike `-fstack-protector*` and
 `-fcf-protection=*`, which are resolved separately and do honor a later
@@ -186,6 +185,77 @@ filenames, not hardening requests.
 ./build/compiler`, checks all six reported options, missing and existing output
 files, a missing source, option-looking include and output names, both tiers
 and paths, non-emitting actions, malformed/auxiliary forms and exact inactive
-defaults. This closes these option families, not the driver's entire unknown
-`-f`/`-m` acceptance policy; the wider allowlist audit and #1112 and #1123
-remain separate work. The object and linkage options of #1124 are above.
+defaults. The default-deny boundary below closes the remaining generic
+`-f`/`-m` acceptance path. The object and linkage options of #1124 are above.
+
+
+## Code-generation option admission (#1125)
+
+The semantic driver and every shared-request client now refuse an unclassified
+`-f` or `-m` argument, including unknown negative forms, with
+`error: unsupported code generation option '…'`. The first such argument is
+retained. This check runs before source IO or output creation, including
+`-fsyntax-only`, `check` and dumps, on both tiers and scalar/vector paths.
+Consumed option values and arguments after `--` are not scanned as options.
+Pure preprocessing keeps its separate contract: `-E` can model flags without
+promising to implement their code generation.
+
+`c_check_options.c` owns admission, not option parsing. Its `handled` and
+`values` tables name existing semantic/frontend consumers and resolved refusal
+paths; the frontend's `pp_families` inventory and the target's exact plain
+feature names are reused. The existing parsers still validate values and
+resolve order. Sanitizers, coverage, OpenMP, PIC, visibility, section options,
+stack protection and layout retain their existing resolved policies. In
+particular, enabling then disabling coverage still compiles, while requesting
+an auxiliary coverage allowlist, ignorelist or cc1 coverage type is refused.
+The unconditional hardening families above remain conservative.
+
+Being known to `predefines_option` is not sufficient. `predefines_neutral`
+means only “does not change macros”; it is not a backend capability table.
+Consequently `-mretpoline`, `-mspeculative-load-hardening`, `-mlvi-hardening`,
+`-mharden-sls=all`, `-mfunction-return=thunk-extern`, `-mstackrealign` and
+`-mms-bitfields` now fail rather than silently weakening code or changing its
+advertised ABI. Active LTO and OpenACC requests are also refused. Other
+unimplemented options fail by default, without adding another blacklist entry.
+
+The `compatible` table is an exact-spelling list, not a family-prefix escape:
+
+- Inactive/default controls: `-ftrivial-auto-var-init=uninitialized`,
+  `-fzero-call-used-regs=skip`, `-mcmodel=small`, `-fno-split-stack`,
+  `-fno-trapv`, `-fno-stack-check`,
+  `-fno-instrument-functions`, `-fno-profile-arcs`, `-fno-test-coverage`,
+  `-fno-profile-generate`, `-fno-profile-instr-generate`, `-fno-lto`,
+  `-fno-blocks`, `-fplt`, `-ffp-contract=off`, `-mfpmath=sse`, `-m64`,
+  `-mred-zone`, `-mno-ms-bitfields`, `-mno-rtd` and `-mno-iamcu`.
+- Existing integer/aliasing behavior and permissions that do not require an
+  optimization: `-fwrapv`, `-fno-wrapv`, `-fstrict-overflow`,
+  `-fno-strict-overflow`, `-fstrict-aliasing`, `-fno-strict-aliasing` and
+  `-fno-semantic-interposition`. These flags do not promise that an
+  optimization will be performed. `-mtune=` is a validated scheduling
+  preference, not a promise of target-specific scheduling. The frame pointer's
+  `-f[no-]omit-frame-pointer` and `-m[no-]omit-leaf-frame-pointer` are
+  `handled` (#177): both tiers' frames take them ([the driver
+  guide](driver.md)), and so are `-f[no-]stack-clash-protection`, whose probes
+  both tiers' frames and allocations take.
+- Presentation and C-inapplicable controls: `-frtti`, `-fno-rtti`,
+  `-fdwarf2-cfi-asm`, `-fno-dwarf2-cfi-asm`, `-fdiagnostics-color`,
+  `-fno-diagnostics-color`, its exact `=always`, `=never`, `=auto` forms,
+  `-fcolor-diagnostics` and `-fno-color-diagnostics`. Diagnostics remain
+  uncolored; the driver emits objects rather than alternative assembly CFI
+  spellings. C `-fexceptions` is handled separately: it requests implemented
+  unwind tables, not merely a no-op.
+
+Unknown extensions to these names or values are not accepted. The one open
+name suffix is `-fno-builtin-NAME`: the frontend records the nonempty function
+name, not a code-generation suboption. Adding another admission requires an
+owner or a documented no-op and a regression; do not grant whole `-fno-`,
+`-mno-`, `-fdiagnostics-*` or `-fsanitize-*` namespaces.
+
+`c_check_options_driver_test.c` extends `test-checker-driver` with independent
+unknown, negative, auxiliary, alias and macro-neutral machine fixtures,
+output preservation, first-error ordering, option-looking include values,
+compatibility byte comparisons and the separate `-E` behavior.
+`test-checker --requests` checks shared-client/driver refusal parity and a
+zeroed configuration on failure. The existing instrumentation tests retain
+coverage cancellation and non-emitting predefines. This is the `-f`/`-m`
+semantic boundary, not a claim to audit every `-g`, `-O`, `-W` or linker option.

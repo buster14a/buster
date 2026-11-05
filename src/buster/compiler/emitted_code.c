@@ -136,10 +136,108 @@ static bool emitted_cfa_fits(uint32_t saved, uint32_t frame_size)
 }
 
 // The rows of a fixed descriptor at most: the prologue's (2 per push and rbp's pointing, 15), the epilogue's (2 per
-// pop, 16) and each tail's (its bracket and the epilogue's, 18).
+// pop, 16) and each tail's (its bracket and the epilogue's, 18); an eh_return function's rdx's and rax's saves
+// (emitted_tier0_eh_rows); and a probed reservation's loop's two (#177, emitted_tier0_probe_rows), which only a frame
+// without a frame pointer has, and so never an eh_return function's.
 static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 {
-    return 31 + 18 * (uint64_t)code->tail_count;
+    return 31 + 18 * (uint64_t)code->tail_count + (code->frame_eh_return ? 4 + 2 * (uint64_t)code->tail_count : 0) + 2;
+}
+
+// A row into rows sorted by their offsets, after those at its offset or before (room for it). Returns the count.
+static uint32_t emitted_insert_row(EmissionFrameRow* rows, uint32_t count, EmissionFrameRow row)
+{
+    uint32_t at = count;
+    while (at > 0 && rows[at - 1].offset > row.offset)
+    {
+        rows[at] = rows[at - 1];
+        at -= 1;
+    }
+    rows[at] = row;
+    return count + 1;
+}
+
+// An eh_return function's frame (#148, Tier0Code.frame_eh_return): rdx's and rax's saves, which its prologue pushes after
+// the callee-saved registers and which no fixed descriptor describes, into its fixed shape's `count` rows (room for
+// emitted_tier0_frame_room's more): after the prologue's rows (rbp's three and one per push), at the boundary after rax's
+// push, as LLVM's CSR_64EHRet frame's CFI has them for libgcc's uw_install_context to write; a later row before that
+// boundary, a tail's remembered state at its row before, moves to it. Their rules are restored where their slots are
+// released: after the epilogue's release, which steps over them, after each __builtin_eh_return's pops of them (its
+// tail's, Tier0Code.tail_records: the release, rax's pop and rdx's, the other pops, rbp's, rsp's mov and the jump), and
+// after each musttail call's release, which steps over them as the epilogue's does (#148: a tail whose jump isn't
+// emitted_handed's).
+// Returns the rows' count.
+static bool emitted_handed(const X86Instruction* records, uint32_t i);
+
+static uint32_t emitted_tier0_eh_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t prologue = 3 + pushes;
+    // Record boundaries (emitted_from_tier0's rows are before branch sizing): rbp's push and mov, the pushes, rdx's and rax's.
+    const uint32_t boundary = 2 + pushes + 2;
+    const int32_t rdx = -(int32_t)(16 + 8 * (pushes + 1));
+    for (uint32_t r = count; r > prologue; r -= 1)
+    {
+        rows[r + 1] = rows[r - 1];
+        rows[r + 1].offset = rows[r + 1].offset < boundary ? boundary : rows[r + 1].offset;
+    }
+    rows[prologue] = (EmissionFrameRow){ .offset = boundary, .value = rdx, .reg = 1, .kind = EMISSION_FRAME_OFFSET };
+    rows[prologue + 1] = (EmissionFrameRow){ .offset = boundary, .value = rdx - 8, .reg = 0, .kind = EMISSION_FRAME_OFFSET };
+    count += 2;
+    // The epilogue's release, its first record: its pops, rbp's and the ret follow.
+    const uint32_t released = code->count - (pushes + 1 + 1);
+    count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = released, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+    count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = released, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+    for (uint32_t t = 0; t < code->tail_count; t += 1)
+    {
+        const uint32_t jump = code->tail_records[t];
+        if (emitted_handed(code->records, jump))
+        {
+            // rax's pop's end and rdx's: the jump less the mov, rbp's pop, the other pops and rdx's pop, then one more.
+            const uint32_t rdx_popped = jump - 1 - 1 - pushes;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped - 1, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+        }
+        else
+        {
+            // A musttail call's (#148), whose release steps over their slots as the epilogue's does: its end, the jump
+            // less rbp's pop and the other pops.
+            const uint32_t release_end = jump - 1 - pushes;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+        }
+    }
+    return count;
+}
+
+// A probed reservation's loop without a frame pointer (#177, tier0_emit_probed_reservation): its CFA in r11 from the end
+// of r11's subtraction to the loop's bound, which no record of the loop changes, and back in rsp at the loop's exit,
+// where rsp equals it, as Tier 1's frame events have it (tier1_frame_emit.c). The fixed shape's rows (`rows`, `count` of
+// them, in order) then take the two at their places, before the reservation's own, with the pushes' before them; the
+// emission resolves such rows into a row program. Returns the rows' count.
+static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count, uint32_t room)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
+    uint32_t result = count;
+    if (loop && count + 2 <= room)
+    {
+        // The records: the pushes, then r11's mov and its subtraction (the bound), the loop's three and its jne (the exit).
+        const uint32_t bound = pushes + 2;
+        const uint32_t exit = pushes + BUSTER_TIER0_PROBE_LOOP_RECORDS;
+        const int32_t cfa = 8 + 8 * (int32_t)pushes + (int32_t)pages;
+        uint32_t at = 0;
+        while (at < count && rows[at].offset < bound)
+        {
+            at += 1;
+        }
+        memmove(rows + at + 2, rows + at, (count - at) * sizeof(EmissionFrameRow));
+        rows[at] = (EmissionFrameRow){ .offset = bound, .value = cfa, .reg = (uint16_t)emission_x86_registers[X86_REGISTER_R11], .kind = EMISSION_FRAME_CFA };
+        rows[at + 1] = (EmissionFrameRow){ .offset = exit, .value = cfa, .reg = BUSTER_EMISSION_X86_RSP, .kind = EMISSION_FRAME_CFA };
+        result = count + 2;
+    }
+    return loop && count + 2 > room ? UINT32_MAX : result;
 }
 
 // Tier 0's code as the emission takes it: its records, columns, references and labels as they are; with `sources` its
@@ -191,8 +289,15 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
             result.frame_status = !read ? EMITTED_FRAME_UNDESCRIBED : !emitted_cfa_fits(boundaries.saved, boundaries.frame_size) ? EMITTED_FRAME_LIMIT :
                                                                                                                                    EMITTED_FRAME_DESCRIBED;
         }
-        const uint32_t count = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
+        const uint32_t fixed = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
+        // A probed reservation's loop's rows (#177), a frame without a frame pointer's, and an eh_return function's, one
+        // with: never both.
+        uint32_t count = fixed <= room ? emitted_tier0_probe_rows(code, rows, fixed, (uint32_t)room) : fixed;
         result.frame_status = count <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
+        const bool eh = result.frame_status == EMITTED_FRAME_DESCRIBED && code->frame_eh_return;
+        result.frame_status = !eh || (count + 4 + 2 * (uint64_t)code->tail_count <= room && count >= 3 + (uint32_t)__builtin_popcount(code->frame_saved)) ? result.frame_status :
+                                                                                                                                                        EMITTED_FRAME_UNDESCRIBED;
+        count = eh && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_eh_rows(code, rows, count) : count;
         for (uint32_t i = 0; result.frame_status == EMITTED_FRAME_DESCRIBED && i < count; i += 1)
         {
             events[i] = (EmissionFrameEvent){
@@ -454,6 +559,17 @@ static bool emitted_exit(const X86Instruction* record, bool branch)
     const uint32_t form = record->form;
     return form == X86_FORM_RET || form == X86_FORM_UD2 || form == X86_FORM_INT3 || (!branch && form == (X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP)) ||
            (form == X86_FORM_JMP_RM64 && emitted_direct(record) && record->rm == X86_REGISTER_R11);
+}
+
+// Whether record i is __builtin_eh_return's jump to its handler (#148, tier0_emit_tail's): through r11 right after rsp's
+// mov from rcx, the handler's stack, which no rule describes (nor does LLVM's CFI of its EH_RETURN's ret). The verifier
+// checks the rules up to the mov, and not at the jump.
+static bool emitted_handed(const X86Instruction* records, uint32_t i)
+{
+    const X86Instruction* jump = &records[i];
+    const X86Instruction* setting = i != 0 ? &records[i - 1] : 0;
+    return setting != 0 && jump->form == X86_FORM_JMP_RM64 && emitted_direct(jump) && jump->rm == X86_REGISTER_R11 && setting->form == X86_FORM_MOV_RM64_R64 &&
+           emitted_direct(setting) && setting->reg == X86_REGISTER_RCX && setting->rm == X86_REGISTER_RSP;
 }
 
 // An indirect jump within the function (a computed goto's, a jump table's): it may go to any of its labels.
@@ -855,7 +971,7 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
             break;
         }
         state = leaders[i] != UINT32_MAX ? states[leaders[i]] : state;
-        if (state.reached && !emitted_holds(&rules, &state))
+        if (state.reached && !emitted_handed(code->records, i) && !emitted_holds(&rules, &state))
         {
             const EmittedVerdict failed = { .error = state.unproven ? EMITTED_VERIFY_UNPROVEN : EMITTED_VERIFY_REFUTED,
                                             .record = i,

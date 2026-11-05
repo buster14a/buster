@@ -220,7 +220,8 @@ struct ObjectUnits
     // The units' inclusive prefix sums of their costs (atoms' bytes, and fixups and symbols at a record's bytes each), by
     // which object_write_units cuts them into parts.
     uint64_t* cost_prefix;
-    // lane_parts_by_cost's boundaries, which the lanes share: BUSTER_LANE_MAX_PARTS + 1 entries.
+    // lane_parts_by_cost's boundaries, which the lanes share: one more than the most parts it cuts the units into for a
+    // group of any size, which is no more than the units and BUSTER_LANE_MAX_PARTS (two entries for one unit, as -c's).
     uint64_t* part_boundaries;
     // Each atom's section in its object, among object_build's sections of atoms (numbered from 0 in the order it makes
     // them, which is their order in the object), and its offset there. object_build writes its own unit's.
@@ -498,7 +499,11 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
     const uint64_t length = arena->length;
     // 64 bits, for the sizes worked out from it.
     const uint64_t unit_count = count;
-    bool prepared = true;
+    bool prepared = link_groups_valid(link);
+    for (uint32_t g = 1; prepared && g < link->groups.count; g += 1)
+    {
+        prepared = link->groups.data[g].unit < unit_count;
+    }
     for (AtomId atom = 1; prepared && atom < atoms->count; atom += 1)
     {
         prepared = atoms->unit[atom] < unit_count;
@@ -524,6 +529,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         .count = count,
     };
     const uint64_t keys = unit_count * BUSTER_LINK_CLASS_COUNT;
+    const uint64_t parts = unit_count < BUSTER_LANE_MAX_PARTS ? unit_count : BUSTER_LANE_MAX_PARTS;
     if (prepared)
     {
         result.atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, atoms->count);
@@ -536,7 +542,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         result.unit_abi = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, unit_count);
         result.atom_name = BUSTER_ARENA_PUSH_ARRAY(arena, NameId, atoms->count);
         result.cost_prefix = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, unit_count);
-        result.part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
+        result.part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, parts + 1);
         result.atom_section = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count);
         result.atom_offset = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
         prepared = result.atoms != 0 && result.atom_begin != 0 && result.symbols != 0 && result.symbol_begin != 0 && result.symbol_info != 0 &&
@@ -567,6 +573,12 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
                 commons[atom] = atom != 0 ? 1 : commons[atom];
             }
         }
+    }
+    // A COMMON atom has no section in this object, so it cannot supply an STT_SECTION group signature.
+    for (uint32_t g = 1; prepared && commons != 0 && g < link->groups.count; g += 1)
+    {
+        const AtomId atom = link->groups.data[g].signature_atom;
+        prepared = atom == 0 || commons[atom] == 0;
     }
     if (prepared)
     {
@@ -726,6 +738,19 @@ struct ObjectSection
     uint32_t symbol;
     uint32_t name;
     const ObjectAtomSection* explicit_section;
+    uint32_t group;
+};
+
+// Per-object group layout, indexed by the producer's group id. Other units' entries remain zero. A count/place/fill
+// over the sections produces the membership words without rescanning the atoms for each group.
+typedef struct ObjectGroup ObjectGroup;
+struct ObjectGroup
+{
+    SymbolId signature;
+    uint32_t index;
+    uint32_t symbol;
+    uint32_t members;
+    uint32_t written;
 };
 
 // What object_build counts and places for one object.
@@ -746,6 +771,10 @@ struct ObjectBuilder
     // object ELFOSABI_GNU.
     ObjectSection* sections;
     uint32_t section_count;
+    ObjectGroup* groups;
+    uint32_t group_count;
+    uint32_t synthetic_count;
+    uint64_t synthetic_base;
     bool retained;
     uint64_t fixup_count;
     // What the unit's fixups refer to: the lane's ObjectSymbols, this object's stamp there, and the undefined symbols in
@@ -838,7 +867,7 @@ static bool object_sections_equal(const ObjectAtomSection* a, const ObjectAtomSe
 // hash of their names: a unit has few named sections, and this pass runs only for units with descriptors. Returns false
 // for want of scratch memory.
 static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, const AtomId* unit_atoms, uint32_t begin, uint32_t end, AtomId* order,
-                               uint32_t* firsts, const ObjectAtomSection** descriptors, uint32_t* groups, Arena* scratch)
+                               uint32_t* firsts, const ObjectAtomSection** descriptors, uint32_t* section_groups, uint32_t* groups, Arena* scratch)
 {
     const ObjectAtomSection* table = builder->options.atom_sections;
     const uint32_t count = end - begin;
@@ -858,22 +887,33 @@ static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, cons
         memset(sizes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         uint32_t found = 1;
         descriptors[0] = 0;
+        section_groups[0] = 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
-            const ObjectAtomSection* descriptor = &table[unit_atoms[begin + i]];
+            const AtomId atom = unit_atoms[begin + i];
+            const ObjectAtomSection* descriptor = table != 0 ? &table[atom] : 0;
+            descriptor = descriptor != 0 && !object_section_is_default(descriptor, class) ? descriptor : 0;
+            const uint32_t membership = builder->link->groups.count != 0 ? builder->link->groups.atom_groups[atom] : 0;
             uint32_t g = 0;
-            if (!object_section_is_default(descriptor, class))
+            if (descriptor != 0 || membership != 0)
             {
-                const uint64_t hash = link_hash((const uint8_t*)descriptor->name.pointer, descriptor->name.length) ^ descriptor->flags ^
-                                      ((uint64_t)descriptor->type << 32);
+                const uint64_t hash = (descriptor != 0 ? link_hash((const uint8_t*)descriptor->name.pointer, descriptor->name.length) ^ descriptor->flags ^
+                                       ((uint64_t)descriptor->type << 32) : 0) ^ ((uint64_t)membership * UINT64_C(0x9e3779b97f4a7c15));
                 uint64_t slot = hash & (capacity - 1);
-                while (slots[slot] != 0 && !object_sections_equal(descriptors[slots[slot]], descriptor))
+                while (slots[slot] != 0)
                 {
+                    const uint32_t candidate = slots[slot];
+                    const ObjectAtomSection* other = descriptors[candidate];
+                    if (section_groups[candidate] == membership && (descriptor == other || (descriptor != 0 && other != 0 && object_sections_equal(other, descriptor))))
+                    {
+                        break;
+                    }
                     slot = (slot + 1) & (capacity - 1);
                 }
                 if (slots[slot] == 0)
                 {
                     descriptors[found] = descriptor;
+                    section_groups[found] = membership;
                     slots[slot] = found;
                     found += 1;
                 }
@@ -912,11 +952,12 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
     const uint64_t key = (uint64_t)builder->unit * BUSTER_LINK_CLASS_COUNT;
     const uint32_t unit_begin = units->atom_begin[key];
     const uint32_t unit_count = units->atom_begin[key + BUSTER_LINK_CLASS_COUNT] - unit_begin;
-    const bool described = builder->options.atom_sections != 0;
+    const bool described = builder->options.atom_sections != 0 || builder->link->groups.count != 0;
     AtomId* order = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, AtomId, (uint64_t)unit_count + 1) : 0;
     uint32_t* firsts = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)unit_count + 2) : 0;
     const ObjectAtomSection** descriptors = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, const ObjectAtomSection*, (uint64_t)unit_count + 1) : 0;
-    bool memory = !described || (order != 0 && firsts != 0 && descriptors != 0);
+    uint32_t* section_groups = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)unit_count + 1) : 0;
+    bool memory = !described || (order != 0 && firsts != 0 && descriptors != 0 && section_groups != 0);
     bool result = memory;
     builder->atoms = described ? order : units->atoms + unit_begin;
     for (uint8_t class = 1; result && class < BUSTER_LINK_CLASS_COUNT; class += 1)
@@ -924,13 +965,16 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
         const uint32_t begin = units->atom_begin[key + class] - unit_begin;
         const uint32_t end = units->atom_begin[key + class + 1] - unit_begin;
         uint32_t groups = 1;
-        for (uint32_t i = begin; result && described && i < end; i += 1)
+        for (uint32_t i = begin; result && builder->options.atom_sections != 0 && i < end; i += 1)
         {
-            result = object_section_valid(&builder->options.atom_sections[units->atoms[unit_begin + i]], class);
+            const AtomId atom = units->atoms[unit_begin + i];
+            const ObjectAtomSection* descriptor = &builder->options.atom_sections[atom];
+            const bool grouped = builder->link->groups.count != 0 && builder->link->groups.atom_groups[atom] != 0;
+            result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || grouped);
         }
         if (result && described)
         {
-            memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, &groups, scratch);
+            memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, section_groups, &groups, scratch);
             result = memory;
         }
         for (uint32_t g = 0; result && g < groups; g += 1)
@@ -939,6 +983,7 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
             const uint32_t group_begin = described ? firsts[g] : begin;
             const uint32_t group_end = described ? firsts[g + 1] : end;
             const ObjectAtomSection* explicit = described ? descriptors[g] : 0;
+            const uint32_t membership = described ? section_groups[g] : 0;
             const bool apart = explicit == 0 && builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT;
             builder->retained |= explicit != 0 && (explicit->flags & SHF_GNU_RETAIN) != 0;
             for (uint32_t first = group_begin; result && first < group_end; first = apart ? first + 1 : group_end)
@@ -950,6 +995,7 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
                     .class = class,
                     .alignment = 1,
                     .explicit_section = explicit,
+                    .group = membership,
                 };
                 uint64_t offset = 0;
                 for (uint32_t i = section->atom_begin; result && i < section->atom_end; i += 1)
@@ -972,6 +1018,49 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
     if (!result)
     {
         builder->error = memory ? OBJECT_ERROR_RANGE : OBJECT_ERROR_FULL;
+    }
+    return result;
+}
+
+// Section groups precede every member in the section table. Relocations are members as well, even for unallocated
+// debug sections. Only this unit's groups receive indices and synthetic signature symbols.
+static bool object_count_groups(ObjectBuilder* builder, Arena* scratch)
+{
+    const LinkGroups groups = builder->link->groups;
+    bool result = true;
+    if (groups.count != 0)
+    {
+        builder->groups = BUSTER_ARENA_PUSH_ARRAY(scratch, ObjectGroup, groups.count);
+        result = builder->groups != 0;
+        if (!result)
+        {
+            builder->error = OBJECT_ERROR_FULL;
+        }
+        else
+        {
+            memset(builder->groups, 0, groups.count * sizeof(ObjectGroup));
+            for (uint32_t s = 0; s < builder->section_count; s += 1)
+            {
+                const ObjectSection* section = &builder->sections[s];
+                if (section->group != 0)
+                {
+                    builder->groups[section->group].members += 1 + (section->fixup_count != 0);
+                }
+            }
+            for (uint32_t g = 1; result && g < groups.count; g += 1)
+            {
+                if (groups.data[g].unit == builder->unit)
+                {
+                    result = builder->groups[g].members != 0;
+                    builder->groups[g].index = ++builder->group_count;
+                    builder->groups[g].signature = groups.data[g].signature;
+                }
+            }
+            if (!result)
+            {
+                builder->error = OBJECT_ERROR_RANGE;
+            }
+        }
     }
     return result;
 }
@@ -1000,8 +1089,9 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
     // Room for every fixup to refer to a different undefined symbol; and the object's stamp, after a clear once the
     // stamps have wrapped around.
     const uint64_t declared_count = builder->options.declared_symbol_count;
-    builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, builder->fixup_count + declared_count);
-    bool result = (builder->undefined != 0 || builder->fixup_count + declared_count == 0) && builder->symbols->count == symbols->count &&
+    const uint64_t undefined_capacity = builder->fixup_count + declared_count + builder->group_count;
+    builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, undefined_capacity);
+    bool result = (builder->undefined != 0 || undefined_capacity == 0) && builder->symbols->count == symbols->count &&
                   (builder->options.temporary_symbols == 0 || builder->local_count == 0 || builder->local_places != 0);
     builder->error = result ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     builder->symbols->stamp += 1;
@@ -1104,6 +1194,45 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
             undefined[undefined_count] = target;
             undefined_count += 1;
             names += symbol_name_bytes[target];
+        }
+    }
+    // GNU as substitutes a group-local signature if the original is absent from the symbol table, including a
+    // temporary .L definition elided by normal relocation lowering. Otherwise retain the original symbol; an
+    // undefined signature is a use even without relocations. Count synthetic names before compacting local places.
+    for (uint32_t g = 1; result && g < link->groups.count; g += 1)
+    {
+        const LinkGroup group = link->groups.data[g];
+        if (group.unit == builder->unit)
+        {
+            if (group.signature_atom != 0)
+            {
+                ObjectSection* section = &sections[units->atom_section[group.signature_atom]];
+                const ObjectAtomSection* descriptor = section->explicit_section;
+                const char* section_name = descriptor != 0 ? descriptor->name.pointer : object_class_sections[section->class].name;
+                const uint64_t section_length = descriptor != 0 ? descriptor->name.length : strlen(section_name);
+                result = !(descriptor == 0 && builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT) &&
+                         section_length == link->names.length[group.name] && memcmp(section_name, link->names.bytes[group.name], section_length) == 0;
+                section->symbol = 1;
+                continue;
+            }
+            const SymbolId target = group.signature;
+            const uint64_t info = target != 0 ? symbol_info[target] : 0;
+            const uint32_t code = (uint32_t)info;
+            const bool defined = target != 0 && info >> 32 == unit;
+            const bool elided = defined && (code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL &&
+                                builder->local_places != 0 && builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE] == 0;
+            if (target == 0 || elided)
+            {
+                builder->groups[g].signature = 0;
+                builder->synthetic_count += 1;
+                names += (uint64_t)link->names.length[group.name] + 1;
+            }
+            else if (!defined && (entries[target] & ~(uint64_t)UINT32_MAX) != stamp)
+            {
+                entries[target] = stamp | BUSTER_OBJECT_SYMBOL_UNDEFINED | (uint32_t)undefined_count;
+                undefined[undefined_count++] = target;
+                names += symbol_name_bytes[target];
+            }
         }
     }
     builder->undefined_count = undefined_count;
@@ -1416,9 +1545,9 @@ static uint64_t object_section_name_bytes(const ObjectBuilder* builder, const Ob
 static bool object_place(ObjectBuilder* builder, Arena* scratch)
 {
     bool result = true;
-    uint64_t index = 1;
+    uint64_t index = 1 + (uint64_t)builder->group_count;
     uint64_t symbol = 2;
-    uint64_t name = 1;
+    uint64_t name = 1 + (builder->group_count != 0 ? sizeof(".group") : 0);
     for (uint32_t s = 0; s < builder->section_count; s += 1)
     {
         ObjectSection* section = &builder->sections[s];
@@ -1465,7 +1594,8 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
     builder->section_names_size = name;
     builder->section_symbol_count = symbol - 2;
     builder->local_base = symbol;
-    builder->global_base = builder->local_base + builder->local_count;
+    builder->synthetic_base = builder->local_base + builder->local_count;
+    builder->global_base = builder->synthetic_base + builder->synthetic_count;
     builder->undefined_base = builder->global_base + builder->global_count;
     builder->symbol_count = builder->undefined_base + builder->undefined_count;
     result = result && index + 5 < UINT32_MAX && name < UINT32_MAX && builder->names_size < UINT32_MAX && builder->symbol_count < UINT32_MAX;
@@ -1484,6 +1614,44 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
             .sh_size = builder->header_count >= SHN_LORESERVE ? builder->header_count : 0,
             .sh_link = builder->section_names_index >= SHN_LORESERVE ? builder->section_names_index : 0,
         };
+        uint64_t synthetic = builder->synthetic_base;
+        for (uint32_t g = 1; g < builder->link->groups.count; g += 1)
+        {
+            ObjectGroup* placed = &builder->groups[g];
+            if (placed->index != 0)
+            {
+                const SymbolId signature = placed->signature;
+                const AtomId signature_atom = builder->link->groups.data[g].signature_atom;
+                uint64_t symbol = synthetic;
+                if (signature_atom != 0)
+                {
+                    symbol = builder->sections[builder->units->atom_section[signature_atom]].symbol;
+                }
+                else if (signature == 0)
+                {
+                    synthetic += 1;
+                }
+                else
+                {
+                    const uint64_t info = builder->units->symbol_info[signature];
+                    const uint32_t code = info >> 32 == builder->unit ? (uint32_t)info : (uint32_t)builder->symbols->entries[signature];
+                    const uint32_t kind = code & BUSTER_OBJECT_SYMBOL_KIND;
+                    const uint32_t place = code & BUSTER_OBJECT_SYMBOL_PLACE;
+                    symbol = kind == BUSTER_OBJECT_SYMBOL_LOCAL ? builder->local_base + (builder->local_places != 0 ? builder->local_places[place] : place) :
+                             kind == BUSTER_OBJECT_SYMBOL_GLOBAL ? builder->global_base + place : builder->undefined_base + place;
+                }
+                placed->symbol = (uint32_t)symbol;
+                headers[placed->index] = (Elf64_Shdr){
+                    .sh_name = 1,
+                    .sh_type = SHT_GROUP,
+                    .sh_size = ((uint64_t)placed->members + 1) * sizeof(uint32_t),
+                    .sh_link = builder->symbol_table_index,
+                    .sh_info = placed->symbol,
+                    .sh_addralign = 4,
+                    .sh_entsize = sizeof(uint32_t),
+                };
+            }
+        }
         for (uint32_t s = 0; s < builder->section_count; s += 1)
         {
             const ObjectSection* section = &builder->sections[s];
@@ -1492,7 +1660,7 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
             headers[section->index] = (Elf64_Shdr){
                 .sh_name = section->name,
                 .sh_type = explicit != 0 ? explicit->type : format->type,
-                .sh_flags = explicit != 0 ? explicit->flags : format->flags,
+                .sh_flags = (explicit != 0 ? explicit->flags : format->flags) | (section->group != 0 ? SHF_GROUP : 0),
                 .sh_size = section->size,
                 .sh_addralign = section->alignment,
                 .sh_entsize = explicit != 0 ? explicit->entry_size : format->entry_size,
@@ -1502,7 +1670,7 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
                 headers[section->relocation_index] = (Elf64_Shdr){
                     .sh_name = section->name - (uint32_t)BUSTER_OBJECT_RELA_PREFIX_BYTES,
                     .sh_type = SHT_RELA,
-                    .sh_flags = SHF_INFO_LINK,
+                    .sh_flags = SHF_INFO_LINK | (section->group != 0 ? SHF_GROUP : 0),
                     .sh_size = section->fixup_count * sizeof(Elf64_Rela),
                     .sh_link = builder->symbol_table_index,
                     .sh_info = section->index,
@@ -1903,6 +2071,10 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
     uint64_t unnamed = 0;
     for (uint32_t i = begin[0]; i < begin[2]; i += 1)
     {
+        if (i == begin[1])
+        {
+            entry = entries + builder->global_base;
+        }
         if (i < begin[1] && builder->local_places != 0 && builder->local_places[i - begin[0]] == UINT32_MAX)
         {
             continue;
@@ -1944,6 +2116,27 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         }
         entry += 1;
     }
+    for (uint32_t g = 1; g < link->groups.count; g += 1)
+    {
+        const LinkGroup group = link->groups.data[g];
+        const ObjectGroup placed = builder->groups[g];
+        if (placed.index != 0 && placed.signature == 0 && group.signature_atom == 0)
+        {
+            entries[placed.symbol] = (Elf64_Sym){
+                .st_name = (uint32_t)name,
+                .st_info = ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
+                .st_shndx = object_symbol_section_index(placed.index),
+            };
+            if (extended != 0 && placed.index >= SHN_LORESERVE)
+            {
+                extended[placed.symbol] = placed.index;
+            }
+            const uint64_t length = (uint64_t)link->names.length[group.name] + 1;
+            object_copy_name(names + name, link->names.bytes[group.name], length);
+            name += length;
+        }
+    }
+    entry = entries + builder->undefined_base;
     // The undefined symbols: no type but TLS (or each its own, and its size, ObjectOptions.undefined_types), with their
     // binding and visibility.
     const SymbolId* undefined = builder->undefined;
@@ -1968,6 +2161,35 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
             name += name_bytes_with_nul;
         }
         entry += 1;
+    }
+}
+
+static void object_fill_groups(ObjectBuilder* builder, uint8_t* bytes)
+{
+    const LinkGroups groups = builder->link->groups;
+    for (uint32_t g = 1; g < groups.count; g += 1)
+    {
+        ObjectGroup* group = &builder->groups[g];
+        if (group->index != 0)
+        {
+            uint32_t* words = (uint32_t*)(bytes + builder->headers[group->index].sh_offset);
+            words[0] = groups.data[g].flags;
+            group->written = 1;
+        }
+    }
+    for (uint32_t s = 0; s < builder->section_count; s += 1)
+    {
+        const ObjectSection* section = &builder->sections[s];
+        if (section->group != 0)
+        {
+            ObjectGroup* group = &builder->groups[section->group];
+            uint32_t* words = (uint32_t*)(bytes + builder->headers[group->index].sh_offset);
+            words[group->written++] = section->index;
+            if (section->relocation_index != 0)
+            {
+                words[group->written++] = section->relocation_index;
+            }
+        }
     }
 }
 
@@ -2002,6 +2224,11 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
     uint8_t* names = bytes + builder->headers[builder->section_names_index].sh_offset;
     uint64_t name = 1;
     names[0] = 0;
+    if (builder->group_count != 0)
+    {
+        memcpy(names + name, ".group", sizeof(".group"));
+        name += sizeof(".group");
+    }
     for (uint32_t s = 0; s < builder->section_count; s += 1)
     {
         const ObjectSection* section = &builder->sections[s];
@@ -2106,6 +2333,7 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
         builder.error = built ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     }
     built = built && object_count_sections(&builder, scratch.arena);
+    built = built && object_count_groups(&builder, scratch.arena);
     built = built && object_count_symbols(&builder, scratch.arena);
     built = built && object_count_debug(&builder);
     built = built && object_place(&builder, scratch.arena);
@@ -2129,6 +2357,7 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
             }
         }
         memset(bytes + end, 0, builder.headers_offset - end);
+        object_fill_groups(&builder, bytes);
         object_fill_sections(&builder, bytes);
         object_fill_relocations(&builder, bytes);
         if (builder.debug != 0)

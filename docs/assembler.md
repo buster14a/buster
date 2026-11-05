@@ -205,7 +205,7 @@ EVEX promotions and the others) stay out on every target. Other unsupported
 syntax is diagnosed: rounding/SAE, explicit pseudo-prefixes (`{vex}`, `{load}`),
 far branches, 16/32-bit execution modes and 32-bit addresses (but a string
 instruction's, below), other segment registers (but a string instruction's
-source's), section groups, relocation modifiers other than `@PLT`,
+source's), relocation modifiers other than `@PLT`,
 `@GOTPCREL`, `@GOTPCRELX` and the TLS models' (below), debug directives other
 than the compiler's `.file` and `.loc` (the line table, below), `.uleb128` and `.sleb128` data, and
 macro-assembler directives. An unsupported form never reaches the trusted
@@ -288,7 +288,7 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
@@ -296,15 +296,33 @@ Directives:
 | Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file` and `.loc`, which make GNU as's line table (below); LLVM's `.prefalign` is accepted but adds no alignment |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
 
-Each section keeps its own name, properties, alignment, layout and atom, including
+Each section is identified by its name and group, and keeps its own properties,
+alignment, layout and atom, including
 `.text.*`, `.data.*`, `.rodata.*`, `.bss.*` and mergeable string sections.
 Redeclarations must preserve its properties; zero-fill sections accept only zero
-fill. Section groups, subsections, strings of characters wider than 4 bytes and
+fill. Subsections, strings of characters wider than 4 bytes and
 additional ELF section types are diagnosed. Strings of 2- and 4-byte characters
 (GCC's wide literals, `.rodata.str4.4,"aMS",@progbits,4`) are read-only data
 atoms, as the importer classes them, whose sections keep their merge flags and
 entry sizes (#1115). Exported absolute symbols and forward constants are
 diagnosed; the shared object writer currently lacks the former's unit ownership.
+
+The `G` flag takes a group signature after the section type (and after the entry
+size for `M`): `.section .debug_macro,"G",@progbits,signature,comdat`. The
+optional `comdat` selects duplicate elimination; without it the group has zero
+selection flags. A signature may be an unquoted name or a quoted nonempty name.
+Sections with the same name in different groups, and an ungrouped section of
+that name, remain distinct. Reopening one preserves its group and attributes;
+`.pushsection`, `.popsection` and `.previous` retain the full section identity.
+The same path handles executable `"axG"`, mergeable `"aMSG"` and TLS zero-fill
+groups. A uniquely named section can itself be a group signature; its section
+symbol is used. Attributed section signatures, other linkage spellings and changes
+to an existing group's flags are diagnosed. Bare section-name expressions
+are diagnosed once multiple section identities have that name: GNU as versions
+2.46 and 2.47 resolve those references differently. Binding, visibility, type
+and size directives naming a section are diagnosed before or after its
+declaration: the object writer does not yet preserve these section-symbol
+attributes.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its
@@ -554,6 +572,26 @@ section, so the writer need not reconstruct grouping. A zero-initialized
 `ObjectOptions` retains the compiler writer's existing grouping and symbols.
 The writer checks table counts, section types and merge entry sizes before
 emitting bytes, then compacts temporary locals only after seeing every fixup.
+
+Section groups use optional, producer-owned `Link.groups`: group records with
+a name, signature symbol, unit and selection flags, plus an AtomId-indexed
+membership table. Both tables include a zero sentinel; the membership table
+covers every atom, and every group's atoms belong to its unit. They share the
+result arena's lifetime. With no groups the fields stay zero and the ordinary
+writer path allocates no group tables. The writer validates this metadata,
+counts members and relocation members, then places all `SHT_GROUP` sections
+before their members. Each member and its relocation section has `SHF_GROUP`.
+The group's `sh_link` names the symbol table and `sh_info` names its signature.
+
+A group-only signature is a local NOTYPE symbol in the `.group` section. A
+section-name signature uses that section's local STT_SECTION symbol. An ordinary
+global, referenced undefined or defined symbol retains its identity.
+As GNU as does, an unused weak signature, or a temporary local definition that
+normal symbol lowering elides, instead receives the synthetic group-local
+signature. A temporary definition needed by a relocation remains its original
+symbol. Group names and membership are compared semantically by the GNU oracle,
+not by numeric section indices, so duplicate section names cannot hide a
+relocation targeting the wrong group.
 
 `assembler_cfi.c` retains ordered directives as events attached to fragment IDs.
 `asm_cfi_emit` consumes final fragment positions after branch relaxation,
@@ -1170,10 +1208,10 @@ named failure here rather than one a user meets. The programs are original
 
 GCC and Clang (Clang with `-fno-integrated-as`, as in the corpus above) compile
 each at `-O0`, `-O2`, `-O2 -fPIC`, `-O3 -march=x86-64-v4`, `-O0` and `-O2`
-with `-g`, and `-O2 -g -fno-asynchronous-unwind-tables` (whose CFI is
+with `-g`, `-O2 -g3`, and `-O2 -g -fno-asynchronous-unwind-tables` (whose CFI is
 `.debug_frame`), in AT&T and Intel syntax, with `-fcf-protection=none` and
-`-fcommon`: 140 sources. Every variant names its `-march` (`x86-64` but for
-`-O3`), its debug information (`-g0` or `-g`) and `-fPIE` or `-fPIC`: a
+`-fcommon`: 160 sources. Every variant names its `-march` (`x86-64` but for
+`-O3`), its debug information (`-g0`, `-g` or `-g3`) and `-fPIE` or `-fPIC`: a
 compiler's defaults may be others (Ubuntu 26.04's GCC 15 writes AVX's
 instructions at `-O2` without one). Each source must
 assemble by both paths into the same object, by the `assemble` command too (with
@@ -1212,3 +1250,14 @@ Syntax and encoding rules are checked against the
 [CFI](https://sourceware.org/binutils/docs/as/CFI-directives.html) descriptions.
 The compiler-output corpus establishes its stated boundary; it does not imply
 support for every instruction, assembler extension or CFI augmentation.
+
+### Section-group regression coverage (#1268)
+
+`assembler_groups_test.c` checks scalar/vector identity, group headers and
+signature bindings, duplicate `.debug_macro` sections, group relocation
+membership, mergeable strings, TLS zero-fill, empty sections and malformed
+group metadata. Ninety-six same-name groups exercise hash-table growth and
+reopening. With `--cross-check`, GNU as supplies the independent object oracle;
+two different COMDAT implementations with associated data and relocations are
+linked and executed in both input orders. The program corpus's `-g3` variant
+exercises GCC's real macro-information groups in both assembly syntaxes.

@@ -588,7 +588,10 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
         snprintf(result->detail, sizeof(result->detail), "the vector path, and the scalar path with the ids in another order, write different executables");
         valid = false;
     }
-    else if (valid && !compiled && !c_testsuite_same(log, scalar_log))
+    // Only ordinary refusals promise comparable diagnostics. If either process was killed or timed out, preserve
+    // that failure's detail instead of reporting different (possibly partial) logs.
+    else if (valid && !compiled && c_testsuite_refused(status, timed_out) && c_testsuite_refused(scalar_status, scalar_timed_out) &&
+             !c_testsuite_same(log, scalar_log))
     {
         snprintf(result->detail, sizeof(result->detail), "the vector path, and the scalar path with the ids in another order, give different diagnostics");
         valid = false;
@@ -968,7 +971,7 @@ static pid_t c_testsuite_wait_scenario(pid_t child, int* status)
 // time, in one path or both, which must fail, not be unsupported (#377's review); with --cross-check where -c's
 // refusals are killed, which must fail whether or not the direct path compiled the test; and with --cross-check where
 // -c's object defines a function that clang -O0 -c's doesn't, which must fail though its program passes. 00003's program, and in the
-// fourth scenario its compiles, must be killed at their one-second timeouts, long before they would end.
+// fourth scenario its compiles, must be killed at their five-second timeouts, long before they would end.
 static int c_testsuite_self_test(CTestsuite* suite)
 {
     // The harness's processes must run, each scenario's own: no oracle run comes from the cache (oracle_cache.c).
@@ -1037,12 +1040,15 @@ static int c_testsuite_self_test(CTestsuite* suite)
     }
     snprintf(suite->compiler, sizeof(suite->compiler), "%s/stand-in.sh", base);
     valid = valid && c_testsuite_write(suite->compiler, c_testsuite_stand_in, 0755);
-    suite->timeout = 1;
-    suite->compile_timeout = 1;
+    // These six scenarios run concurrently, alongside other correctness tests in hosted CI. A one-second watchdog
+    // can kill healthy shell and compiler children that have simply been descheduled. Five seconds still bounds
+    // the intentional 30-second hangs, without mistaking hosted scheduler contention for a harness failure.
+    suite->timeout = 5;
+    suite->compile_timeout = 5;
     uint32_t failures = valid ? 0 : 1;
     // The scenarios run at once, each in a child process of its own, since each changes the process's directory,
-    // environment and pidfd switch: most of each one's time is its programs' and compiles' one-second timeouts, so in
-    // turn they took about 7 s and at once about 2. A child's exit status is whether its scenario came out as expected;
+    // environment and pidfd switch: most of each one's time is its programs' and compiles' five-second timeouts, so
+    // concurrency keeps the suite bounded. A child's exit status is whether its scenario came out as expected;
     // the parent waits for them in the scenarios' order.
     pid_t children[sizeof(scenarios) / sizeof(scenarios[0])];
     fflush(stdout);
@@ -1052,6 +1058,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
         children[scenario] = valid ? fork() : -1;
         if (children[scenario] == 0)
         {
+            // Every scenario uses the same watchdog, including the one invoking cc, readelf and clang.
             // The suite's results are shared with the workers that write them (a MAP_SHARED mapping), and so with the
             // other scenarios' processes: each scenario's go in a mapping of its own.
             CTestsuiteResult* results = mmap(0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);

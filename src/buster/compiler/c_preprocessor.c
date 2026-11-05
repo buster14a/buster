@@ -359,6 +359,8 @@ struct PPOptions
     // fatal error and stops publication; -Wno-fatal-errors restores the ordinary error budget.
     bool fatal_errors;
     bool suppress_warnings;
+    // The default-on negative-to-unsigned #if warning has no individual Clang warning group.
+    bool negative_conversion_error;
     bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
@@ -1533,10 +1535,13 @@ struct Preprocessor
     // The predefines' file data (clang's <built-in> buffer), whose __STDC macros clang reports as builtin when they are
     // redefined or undefined (pp_language_defined); BUSTER_PP_NONE before it is read.
     uint32_t predefines_data;
+    // __DATE__'s and __TIME__'s text, empty until the first expansion of either without SOURCE_DATE_EPOCH (pp_unit_time);
+    // and the unit's time they give, in seconds.
     char date[16];
     char time[16];
     char timestamp[32]; // __TIMESTAMP__'s with SOURCE_DATE_EPOCH (`has_epoch`); else each file's modification time.
     bool has_epoch;
+    int64_t unit_seconds;
     // The builtin __FLT_EVAL_METHOD__'s value (predefines_text).
     uint32_t flt_eval_method;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
@@ -3836,34 +3841,68 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // them all (docs/c-preprocessor.md, "Files").
 #define BUSTER_FILE_CACHE_READ_LIMIT (16u << 10)
 
+// The capacity shift of a cache's arrays (arena_capacity_shift), for the larger of its records and paths.
+static uint32_t file_cache_shift(void)
+{
+    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
+    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
+    return arena_capacity_shift(records > paths ? records : paths);
+}
+
+// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in FileCache.arrays' order: the
+// records, their identity slots, the paths and their slots.
+static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t sizes[4])
+{
+    counts[0] = BUSTER_PP_MAX_FILES >> shift;
+    counts[1] = 2ull * (BUSTER_PP_MAX_FILES >> shift);
+    counts[2] = BUSTER_FILE_CACHE_MAX_PATHS >> shift;
+    counts[3] = 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> shift);
+    sizes[0] = sizeof(PPFileData);
+    sizes[1] = sizeof(uint32_t);
+    sizes[2] = sizeof(FileCachePath);
+    sizes[3] = sizeof(uint32_t);
+}
+
+// Starts a cache whose bytes are all zero, with its four arrays at `arrays` (file_cache_array_shape's, at `shift`, zero
+// too, or a null among them if they couldn't be reserved), and reserves its paths' bytes. The arrays are the caller's to
+// release: file_cache_initialize's own arenas, or a unit's tables (pp_initialize_once, #652), which hold the cache itself
+// too and so need neither its 120 KB written zero nor four arenas of their own.
+static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare prepare, uint32_t shift, void* const arrays[4])
+{
+    cache->prepare = prepare;
+    cache->table = table;
+    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
+    cache->capacity_shift = shift;
+    const bool reserved = arrays[0] != 0 && arrays[1] != 0 && arrays[2] != 0 && arrays[3] != 0;
+    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
+    cache->records = arrays[0];
+    cache->identity_slots = arrays[1];
+    cache->paths = arrays[2];
+    cache->path_slots = arrays[3];
+    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    return reserved && cache->path_arena.base != 0;
+}
+
 // Reserves a cache's memory, for files prepared as `prepare` says and refined with `table`. Returns false if it can't be
 // reserved (file_cache_release then releases what was).
 static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, InternTable* table, PPPrepare prepare)
 {
     *cache = (FileCache){ 0 };
-    cache->prepare = prepare;
-    cache->table = table;
-    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
-    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
-    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
-    cache->capacity_shift = arena_capacity_shift(records > paths ? records : paths);
+    const uint32_t shift = file_cache_shift();
+    uint64_t counts[4];
+    uint64_t sizes[4];
+    file_cache_array_shape(shift, counts, sizes);
     // Reserved in turn until one can't be (file_cache_release releases those that were).
-    const uint64_t sizes[] = { (uint64_t)(BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(PPFileData) + 64, 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(uint32_t) + 64,
-                               (uint64_t)(BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(FileCachePath) + 64, 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(uint32_t) + 64 };
+    void* arrays[4] = { 0 };
     bool reserved = true;
     for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
     {
-        cache->arrays[i] = arena_reserve(sizes[i]);
-        reserved = cache->arrays[i].base != 0;
+        cache->arrays[i] = arena_reserve(counts[i] * sizes[i] + 64);
+        arrays[i] = cache->arrays[i].base != 0 ? arena_push_array(&cache->arrays[i], counts[i], sizes[i], 64) : 0;
+        reserved = arrays[i] != 0;
     }
-    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
-    cache->records = arena_push_array(&cache->arrays[0], (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(PPFileData), 64);
-    cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(uint32_t), 64);
-    cache->paths = arena_push_array(&cache->arrays[2], (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(FileCachePath), 64);
-    cache->path_slots = arena_push_array(&cache->arrays[3], 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(uint32_t), 64);
-    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
-    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
-    return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
+    return file_cache_start(cache, table, prepare, shift, arrays);
 }
 
 // Unmaps the records' files, and the files of paths whose probe mapped one that no record took, and releases the
@@ -11794,6 +11833,28 @@ static bool pp_calendar(Preprocessor* pp, int64_t seconds, bool utc, uint32_t lo
     return result;
 }
 
+// __DATE__'s and __TIME__'s text for a validated calendar: "Jan  1 2000" and "00:00:00".
+static void pp_format_date_time(Preprocessor* pp, const struct tm* calendar)
+{
+    static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar->tm_mon], calendar->tm_mday, calendar->tm_year + 1900);
+    snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar->tm_hour, calendar->tm_min, calendar->tm_sec);
+}
+
+// __DATE__'s and __TIME__'s text, made from the unit's time in local time at the first expansion of either that needs
+// it (pp_initialize_time). False, with a fatal diagnostic at `where`, if the time can't be converted.
+static bool pp_unit_time(Preprocessor* pp, uint32_t where)
+{
+    struct tm calendar;
+    const bool made = pp->date[0] != 0;
+    const bool result = made || pp_calendar(pp, pp->unit_seconds, false, where, "current time", &calendar);
+    if (result && !made)
+    {
+        pp_format_date_time(pp, &calendar);
+    }
+    return result;
+}
+
 // __TIMESTAMP__'s text for a validated calendar: "Sat Jan  1 00:00:00 2000" (C locale).
 static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* calendar)
 {
@@ -11918,10 +11979,16 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             pp_emit(pp, pp_number_token(pp, pp->flt_eval_method, flags));
             break;
         case PP_BUILTIN_DATE:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
+            if (pp_unit_time(pp, where))
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->date, (uint32_t)strlen(pp->date), flags));
+            }
             break;
         case PP_BUILTIN_TIME:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
+            if (pp_unit_time(pp, where))
+            {
+                pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
+            }
             break;
         case PP_BUILTIN_TIMESTAMP:
         {
@@ -14971,6 +15038,8 @@ static uint32_t pp_binary_operator(uint8_t kind)
     return result;
 }
 
+#include "c_preprocessor_literal.c"
+
 // Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
 // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
 static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
@@ -15063,9 +15132,7 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     valid &= digits || radix == 8;
     if (!valid)
     {
-        const bool floating = memchr(spelling, '.', length) != 0 || (radix != 16 && (memchr(spelling, 'e', length) != 0 || memchr(spelling, 'E', length) != 0));
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, floating ? "floating point literal in preprocessor expression" : "invalid integer constant '%.*s' in preprocessor expression",
-                    (int)length, (const char*)spelling);
+        pp_diagnose_integer(pp, spelling, length, location);
     }
     else if (overflow)
     {
@@ -15484,8 +15551,18 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     return !error;
 }
 
+// The place and enclosing liveness of an operator. Reductions restore this state before another operator is
+// read, so &&, || and both arms of ?: suppress evaluation warnings without skipping syntax or losing signedness.
+typedef struct PPExpressionContext PPExpressionContext;
+struct PPExpressionContext
+{
+    uint32_t location;
+    uint32_t origin;
+    bool live;
+};
+
 // Applies an operator to the values on top of the stack (two for a binary one, three for ?:, which is COLON here).
-static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location)
+static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location, PPExpressionContext context)
 {
     bool result = true;
     const bool unary = operator == PP_OPERATOR_PLUS || operator == PP_OPERATOR_MINUS || operator == PP_OPERATOR_NOT || operator == PP_OPERATOR_COMPLEMENT;
@@ -15524,6 +15601,28 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
         PPValue r = { .is_unsigned = is_unsigned, .division_by_zero = a.division_by_zero || b.division_by_zero };
         const int64_t sa = (int64_t)a.bits;
         const int64_t sb = (int64_t)b.bits;
+        // Shifts, logical operators and comma do not apply the usual arithmetic conversions. ?: keeps its
+        // common unsigned type above, but clang does not warn for the conversion of its selected arm itself.
+        const bool converts = operator != PP_OPERATOR_SHIFT_LEFT && operator != PP_OPERATOR_SHIFT_RIGHT &&
+                              operator != PP_OPERATOR_LOGICAL_AND && operator != PP_OPERATOR_LOGICAL_OR && operator != PP_OPERATOR_COMMA;
+        if (context.live && is_unsigned && converts && ((!a.is_unsigned && sa < 0) || (!b.is_unsigned && sb < 0)))
+        {
+            const uint32_t saved_origin = pp->diagnostic_origin;
+            pp->diagnostic_origin = context.origin;
+            // A promoted warning must still obey -w and system-header suppression before it becomes an error.
+            const bool promoted = pp->options.negative_conversion_error && !pp->options.suppress_warnings &&
+                                  pp_diagnostic_warning_visible(pp, context.location, context.origin);
+            const PPSeverity severity = promoted ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+            if (!a.is_unsigned && sa < 0)
+            {
+                pp_diagnose(pp, severity, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
+            }
+            if (!b.is_unsigned && sb < 0)
+            {
+                pp_diagnose(pp, severity, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
+            }
+            pp->diagnostic_origin = saved_origin;
+        }
         switch (operator)
         {
             case PP_OPERATOR_MULTIPLY: r.bits = a.bits * b.bits; break;
@@ -15602,10 +15701,12 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
     const uint32_t saved_origin = pp->diagnostic_origin;
     PPValue values[BUSTER_PP_EXPRESSION_DEPTH];
     uint8_t operators[BUSTER_PP_EXPRESSION_DEPTH];
+    PPExpressionContext contexts[BUSTER_PP_EXPRESSION_DEPTH];
     uint32_t value_count = 0;
     uint32_t operator_count = 0;
     bool valid = true;
     bool expect_operand = true;
+    bool live = true;
     for (uint32_t i = begin; valid && i < end; i += 1)
     {
         const uint8_t kind = tokens->kinds[i];
@@ -15621,11 +15722,13 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             if (kind == C_TOKEN_PLUS || kind == C_TOKEN_MINUS || kind == C_TOKEN_EXCLAIM || kind == C_TOKEN_TILDE)
             {
                 operators[operator_count] = kind == C_TOKEN_PLUS ? PP_OPERATOR_PLUS : kind == C_TOKEN_MINUS ? PP_OPERATOR_MINUS : kind == C_TOKEN_EXCLAIM ? PP_OPERATOR_NOT : PP_OPERATOR_COMPLEMENT;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_L_PAREN)
             {
                 operators[operator_count] = PP_OPERATOR_PAREN;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_NUMERIC_CONSTANT || kind == BUSTER_PP_KIND_INTEGER)
@@ -15692,14 +15795,19 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_PAREN)
             {
                 operator_count -= 1;
-                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                live = contexts[operator_count].live;
+                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
             }
             if (valid && operator_count == 0)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "unbalanced ')' in preprocessor expression");
                 valid = false;
             }
-            operator_count -= valid;
+            if (valid)
+            {
+                live = contexts[operator_count - 1].live;
+                operator_count -= 1;
+            }
         }
         else
         {
@@ -15722,7 +15830,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                         break;
                     }
                     operator_count -= 1;
-                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                    live = contexts[operator_count].live;
+                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                 }
                 // clang parses a #if line from ?:'s precedence on, so a comma is only an operator inside parentheses or
                 // between a '?' and its ':' (`#if 1, 2` is an error, `#if (1, 2)` isn't). Comma binds loosest, so the
@@ -15739,7 +15848,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_QUESTION && operators[operator_count - 1] != PP_OPERATOR_PAREN)
                     {
                         operator_count -= 1;
-                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                        live = contexts[operator_count].live;
+                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                     }
                     if (valid && (operator_count == 0 || operators[operator_count - 1] != PP_OPERATOR_QUESTION))
                     {
@@ -15749,12 +15859,22 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     if (valid)
                     {
                         operators[operator_count - 1] = PP_OPERATOR_COLON;
+                        live = contexts[operator_count - 1].live && value_count >= 2 && values[value_count - 2].bits == 0;
                     }
                 }
                 else if (valid)
                 {
                     operators[operator_count] = (uint8_t)operator;
+                    contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                     operator_count += 1;
+                    if (operator == PP_OPERATOR_LOGICAL_AND || operator == PP_OPERATOR_QUESTION)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits != 0;
+                    }
+                    else if (operator == PP_OPERATOR_LOGICAL_OR)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits == 0;
+                    }
                 }
                 expect_operand = true;
             }
@@ -15776,7 +15896,7 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
         }
         else
         {
-            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location);
+            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location, contexts[operator_count]);
         }
     }
     if (valid && value_count != 1)
@@ -17038,16 +17158,20 @@ static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, ui
 // refuses by name (docs/c-builtins-integration.md's "Checked, refused in code"), that clang makes a builtin of the unit by its
 // language modes and whose required target features hold there, as clang answers (pp_builtin_language,
 // pp_builtin_features). Every __builtin_ library builtin is one of all of clang's languages without features, and a plain
-// one is a builtin where pp_library_builtin says so.
+// one is a builtin where pp_library_builtin says so. The answer is 1, but __builtin_operator_new's and
+// __builtin_operator_delete's: 201802 in every language, as clang's EvaluateHasBuiltin answers them, the date of the change
+// that let them call any usual allocation and deallocation function, which libc++ asks about.
 static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     const CBuiltinSourceScope* scope = cbuiltin_source_scope(name, length);
     const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) && pp_builtin_language(options, cbuiltin_languages(name, length));
     const bool intrinsic =
         cbuiltin_source_intrinsic(name, length) && pp_builtin_language(options, scope->languages) && pp_builtin_features(options, scope->features);
-    const uint32_t result =
+    const uint32_t answer =
         pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, options->language.standard) | catalog |
         intrinsic | cbuiltin_fortify_source(name, length) | cbuiltin_library_source(name, length) | pp_library_builtin(options, name, length);
+    const CBuiltinId id = catalog ? cbuiltin_resolve((const char*)name, length) : CBUILTIN_NONE;
+    const uint32_t result = answer != 0 && (id == CBUILTIN_OPERATOR_NEW || id == CBUILTIN_OPERATOR_DELETE) ? 201802 : answer;
     return result;
 }
 
@@ -17916,15 +18040,17 @@ static bool pp_initialize_time(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't read the current time for predefined macros");
         }
     }
+    // SOURCE_DATE_EPOCH's calendar, in UTC, here, where its refusals are reported. The current time's, in local time,
+    // waits for the first __DATE__ or __TIME__ (pp_unit_time, #652): it reads the time zone's file, 7 system calls of
+    // every unit's start, which few units expand either of.
     struct tm calendar;
-    result = result && pp_calendar(pp, seconds, epoch != 0, 0, epoch != 0 ? "SOURCE_DATE_EPOCH" : "current time", &calendar);
-    if (result)
+    pp->unit_seconds = seconds;
+    result = result && (epoch == 0 || pp_calendar(pp, seconds, true, 0, "SOURCE_DATE_EPOCH", &calendar));
+    if (result && epoch != 0)
     {
-        static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-        snprintf(pp->date, sizeof(pp->date), "%s %2d %04d", months[calendar.tm_mon], calendar.tm_mday, calendar.tm_year + 1900);
-        snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
+        pp_format_date_time(pp, &calendar);
         pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
-        pp->has_epoch = epoch != 0;
+        pp->has_epoch = true;
     }
     return result;
 }
@@ -18017,8 +18143,18 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_tokens_plan(&plan, &pp->arguments, BUSTER_PP_MAX_STACK_TOKENS >> shift);
     pp_tokens_plan(&plan, &pp->captures, BUSTER_PP_MAX_STACK_TOKENS >> shift);
     pp_tokens_plan(&plan, &pp->expansions, BUSTER_PP_MAX_STACK_TOKENS >> shift);
-    // 131 KB, most of it the lanes' arenas, that file_cache_initialize writes whole.
+    // The unit's own file cache, 120 KB, most of it the lanes' arenas, and its four arrays (file_cache_start): zero as
+    // tables, so that a small unit neither writes 30 pages of it nor reserves four arenas for a page of each (#652).
     pp_table(&plan, (void**)&pp->cache, options->files == 0, sizeof(FileCache));
+    const uint32_t cache_shift = file_cache_shift();
+    uint64_t cache_counts[4];
+    uint64_t cache_sizes[4];
+    void* cache_arrays[4];
+    file_cache_array_shape(cache_shift, cache_counts, cache_sizes);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache_arrays); i += 1)
+    {
+        pp_table(&plan, &cache_arrays[i], options->files == 0 ? cache_counts[i] : 0, cache_sizes[i]);
+    }
     if (result && !plan.full)
     {
         pp->arrays[0] = arena_reserve_tables(plan.tables, plan.count);
@@ -18054,7 +18190,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     if (options->files == 0)
     {
         pp->owns_cache = result;
-        result = result && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
+        result = result && file_cache_start(pp->cache, table, pp_prepare_config(pp), cache_shift, cache_arrays);
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
              pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
@@ -18469,6 +18605,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
         memcpy(replay->time, pp->time, sizeof(pp->time));
         memcpy(replay->timestamp, pp->timestamp, sizeof(pp->timestamp));
         replay->has_epoch = pp->has_epoch;
+        replay->unit_seconds = pp->unit_seconds;
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
@@ -21315,6 +21452,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     options->dependencies.only = dependency_modes != 0 && (dependency_modes & 12u) == 0;
     options->dependencies.include_system = (dependency_modes & 3u) != 0 ? (dependency_modes & 2u) == 0 : (dependency_modes & 8u) == 0;
     options->suppress_warnings |= (dependency_modes & 3u) != 0;
+    options->negative_conversion_error = warning_errors;
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;

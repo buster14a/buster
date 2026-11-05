@@ -1,0 +1,31 @@
+function (v4i32, v8i32, v16i32) -> v16i32 {
+b0:
+  %0 = param.v4i32 0
+  %1 = param.v8i32 1
+  %2 = param.v16i32 2
+  %3 = add.v16i8 %0, %0
+  %4 = sub.v8i16 %3, %0
+  %5 = mul.v2i64 %4, %3
+  %6 = shl.v8i16 %5, %4
+  %7 = lshr.v4i32 %6, %5
+  %8 = ashr.v2i64 %7, %6
+  %9 = fadd.v4f32 %8, %0
+  %10 = fsub.v2f64 %9, %0
+  %11 = vcmp.m16 %10, %3 ult lanes=i8
+  %12 = vselect.v16i8 %11, %10, %9
+  %13 = vcmp.m8 %12, %12 ne lanes=f32
+  %14 = vselect.v4f32 %13, %12, %0
+  %15 = fmul.v8f32 %1, %1
+  %16 = fdiv.v4f64 %15, %1
+  %17 = vcmp.m32 %16, %1 gt lanes=i8
+  %18 = vselect.v32i8 %17, %16, %1
+  %19 = add.v32i16 %2, %2
+  %20 = mul.v16i32 %19, %2
+  %21 = vcmp.m64 %20, %19 uge lanes=i8
+  %22 = vselect.v64i8 %21, %20, %19
+  %23 = vcmp.m8 %22, %2 le lanes=f64
+  %24 = vselect.v8f64 %23, %22, %2
+  %25 = fadd.v16f32 %24, %2
+  %26 = vcmp.m8 %18, %18 eq lanes=i64
+  %27 = ret.void %25
+}

@@ -1477,6 +1477,87 @@ preprocessing latency and 6.4–6.7% lower tiny object latency. SQLite is a
 neutral control. Those timings apply to the recorded revisions, not a later
 integration; its exact-head correctness and CI validation remain separate.
 
+### The start's fixed work, part 3
+
+What a compile still did at its start on the 9700X after #1237 and #1279
+(main `483e5f70`: an empty file's `-fsyntax-only` took 0.59 ms, 373 page
+faults and 60% of its cycles in the kernel), and what this part takes out:
+
+- **The parser's tables** (`parse_tables_initialize`, 17 KB, 4.8% of the
+  empty file's cycles) are baked with the backend's ("Baked tables", above),
+  in the frontend unit, their home (`BUSTER_BAKED_FRONTEND`).
+- **`RLIMIT_AS` once.** Without a pool every reservation read the limit, 30
+  `getrlimit` calls; a compile's commands read it once (`arena_limits_fix`,
+  `docs/arena-memory.md`).
+- **The emission lanes off the stack.** `CheckProgramLanes`, 98 KB of every
+  lane's arenas, was zeroed on the driver's stack for every command: 24
+  pages, a page fault each. The driver's is in `.bss` now, and an emission's
+  release reads only the lanes it used (`arenas_used`).
+- **A compile outside `main_command`'s frame.** The driver unit's
+  `main_command` inlines the tests' commands, 140 KB of locals, and a compile
+  ran below it, touching whichever of its pages the inlining placed its
+  spills in; it runs from `main_driver` now (`main_source_command`).
+- **No libm.** Loading `libm.so.6` took 24 µs and 12 faults of a process's
+  start, for six exact operations the compiler now has itself
+  (`host_math.h`); its tests reach libm through `dlopen` (`test_libm.c`), or
+  in a static link that file's table, and the link takes libm only as needed.
+- **The local calendar at the first `__DATE__` or `__TIME__`.** Its first
+  conversion read the time zone's file, 7 system calls of every unit's start.
+
+Against main with main again as the floor, over four placements of the
+checker unit's code (record `small-unit-start-652-2026-11-05` in
+buster-performance):
+
+| input | wall | user cycles | minor faults |
+| --- | --- | --- | --- |
+| empty `-fsyntax-only` | −8.77% | −17.21% | 390 → 353 |
+| empty `-E -P` | −4.91% | −5.80% | 296 → 286 |
+| `tiny.c`'s `-c` | −7.12% | −11.19% | 462 → 427 |
+| `sqlite3.c`'s `-fsyntax-only` | −0.01% (floor +0.10%) | −0.00% | |
+
+What remained, measured there: the dynamic loader, which the same objects
+linked `-static` don't pay (8% to 12% less task-clock), and each arena a small
+unit touches, about 1.7 µs at its start for a separate reservation (its
+`mmap`, first commit and page tables) against 0.36 µs as one of an arena of
+tables.
+
+### A static link
+
+The executable is now linked statically wherever nothing needs the loader
+(`docs/commands/build.md`: every build but the sanitizers' PIEs, fuzzing and
+`BUSTER_HOST_RUNTIME`'s). A static glibc executable's `dlsym(RTLD_DEFAULT,
+...)` finds nothing, and a `dlopen`ed library brings its own C library, whose
+state (`errno`, the environment, the heap and stdio's files) is its own: the
+natives the interpreter's programs call (`test-ssa-source`, `interpret-ir
+--bind`) and the libm oracles of the tests come from a table of the host
+functions they name (`test_libm.c`), which links them in, and from nothing
+else. The stack canary's check reads the compiler's objects, since libc.a
+defines and calls `__stack_chk_fail` itself. The start doesn't register the
+executable's 634 KB of `.eh_frame` with libgcc's unwinder, which `crtbeginT.o`
+does where the unwinder is linked (glibc's `pthread_exit` needs it): libgcc 13
+and later sort every FDE at that registration, which doubled the user
+instructions of an empty file's `-fsyntax-only` (1.74 million against the
+dynamic executable's 0.80 million on the 9700X) and made a cold start slower
+than the dynamic one. The link wraps the registration into a function that does
+nothing, and libgcc finds the frames through `_dl_find_object`, as a dynamic
+executable's does.
+
+### Strings in their objects' order
+
+A static build's `auto` linker is lld, at `-O0` (`cmake/BusterSettings.cmake`).
+lld and mold merge every object's identical strings and lay the pool out in
+their hashes' order, so a compile's comparisons of its options and commands
+against their names (about 930 `strcmp` calls in an empty file's
+`-fsyntax-only`) read pages all over the pool: 55 of that compile's 319 faults
+were in mold's string pool. At `-O0` lld keeps each object's strings where the
+object has them, and the same compile faulted 28 pages of read-only data where
+mold's link of the same objects faulted 67, and 280 in all. From a cold start
+on the 9700X it took 13.8% less time than mold's link, `-E -P` 11.0%, a
+one-line `-c` 7.3%, a `-c` of a file that includes `stdio.h` 6.2%, and
+`sqlite3.c`'s `-fsyntax-only` the same. The strings that several objects repeat
+take 1.8 MB more of the executable. A first argument that starts with `-` also
+goes to the source commands at once, past the units' chains of command names.
+
 ## How it is measured
 
 **The stage clock.** `--time-stages` (`c_check_clock.c`) makes the C driver
@@ -1839,8 +1920,10 @@ The build's post-link step has each executable it links write itself with the ba
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
 and their marked copies, the x86 semantics' tables, Tier 1's selection state
 tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
-are), and the checker unit's copies of Tier 0's tables, the Zen 5 cost model's
-tables and the unwind templates, with their initialized flags, all in a section of their own
+are), the checker unit's copies of Tier 0's tables, the Zen 5 cost model's
+tables and the unwind templates, and the frontend unit's copies of the
+parser's tables (#652, `parse_tables_initialize`, 17 KB, which every compile
+built before its parse), with their initialized flags, all in a section of their own
 (`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
 with them built, at their fixed addresses, and reads the pages it touches from
 the page cache, shared with every other process.

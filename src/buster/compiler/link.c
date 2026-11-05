@@ -484,6 +484,32 @@ struct LinkPriorities
     uint32_t capacity;
 };
 
+// Optional immutable section groups, published after the producer has built its atoms and symbols. Group 0 and
+// atom_groups[0] are null. Every other group belongs to one unit, and its atoms share its COMDAT selection. An absent
+// signature symbol (signature == 0 and signature_atom == 0) asks the object writer for a local NOTYPE symbol in
+// the group's own section. Otherwise signature is an ordinary Link symbol, or signature_atom identifies the section
+// whose STT_SECTION symbol is the signature. At most one of the two can be nonzero.
+#define BUSTER_LINK_GROUP_COMDAT 1u
+
+typedef struct LinkGroup LinkGroup;
+struct LinkGroup
+{
+    NameId name;
+    SymbolId signature;
+    AtomId signature_atom;
+    uint32_t unit;
+    uint32_t flags;
+};
+
+typedef struct LinkGroups LinkGroups;
+struct LinkGroups
+{
+    const LinkGroup* data;
+    const uint32_t* atom_groups;
+    uint32_t count;
+    uint32_t atom_count;
+};
+
 typedef struct Link Link;
 struct Link
 {
@@ -492,6 +518,7 @@ struct Link
     LinkSymbols symbols;
     LinkFixups fixups;
     LinkPriorities priorities;
+    LinkGroups groups;
     // Where link_add_name copies names' bytes.
     Arena* name_arena;
     // The first failure, or LINK_ERROR_NONE.
@@ -1400,11 +1427,52 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
            (!shared || reaches_shared);
 }
 
+// Group metadata is sparse and optional: the common producer pays no allocation or atom pass. The writer checks
+// the unit count and nonempty membership after partitioning; here every referenced id and unit must already agree.
+static bool link_groups_valid(const Link* link)
+{
+    const LinkGroups groups = link->groups;
+    bool valid = groups.count == 0 ? groups.data == 0 && groups.atom_groups == 0 && groups.atom_count == 0 :
+                 groups.count > 1 && groups.data != 0 && groups.atom_groups != 0 && groups.atom_count == link->atoms.count;
+    if (valid && groups.count != 0)
+    {
+        valid = groups.atom_groups[0] == 0 && groups.data[0].name == 0 && groups.data[0].signature == 0 && groups.data[0].signature_atom == 0 && groups.data[0].unit == 0 && groups.data[0].flags == 0;
+    }
+    for (uint32_t g = 1; valid && g < groups.count; g += 1)
+    {
+        const LinkGroup group = groups.data[g];
+        valid = group.name != 0 && group.name < link->names.count && group.signature < link->symbols.count && group.signature_atom < link->atoms.count &&
+                (group.signature == 0 || group.signature_atom == 0) && (group.flags & ~BUSTER_LINK_GROUP_COMDAT) == 0 &&
+                (group.signature_atom == 0 || link->atoms.unit[group.signature_atom] == group.unit);
+        if (valid)
+        {
+            valid = link->names.length[group.name] != 0;
+        }
+        if (valid && group.signature != 0)
+        {
+            const SymbolId signature = group.signature;
+            const AtomId atom = link->symbols.atom[signature];
+            const NameId name = link->symbols.name[signature];
+            valid = name != 0 && name < link->names.count && atom < link->atoms.count &&
+                    link->names.length[name] == link->names.length[group.name] &&
+                    memcmp(link->names.bytes[name], link->names.bytes[group.name], link->names.length[name]) == 0 &&
+                    (atom == 0 || link->atoms.unit[atom] == group.unit) &&
+                    (link->symbols.flags[signature] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_COMMON;
+        }
+    }
+    for (AtomId atom = 1; valid && groups.count != 0 && atom < link->atoms.count; atom += 1)
+    {
+        const uint32_t group = groups.atom_groups[atom];
+        valid = group < groups.count && (group == 0 || link->atoms.unit[atom] == groups.data[group].unit);
+    }
+    return valid;
+}
+
 static LinkError link_check(Link* link)
 {
     const LinkSymbols* symbols = &link->symbols;
     const LinkAtoms* atoms = &link->atoms;
-    LinkError result = LINK_ERROR_NONE;
+    LinkError result = link_groups_valid(link) ? LINK_ERROR_NONE : LINK_ERROR_RECORD;
     for (SymbolId symbol = 1; result == LINK_ERROR_NONE && symbol < symbols->count; symbol += 1)
     {
         const uint8_t source = symbols->source[symbol];

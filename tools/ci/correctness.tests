@@ -71,12 +71,15 @@ unset CPATH C_INCLUDE_PATH
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
 # and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
 # lanes that don't start.
+# #153: changed IDs in the poisoned/debug output comparisons, canonical fatal-prefix diagnostics at 1/2/3/8 lanes
+# through both paths, and the sequential multi-input -E command's text and diagnostics against standalone bytes.
 # Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
 "$BUSTER_COMPILER" test-check-units
 == Test mixed-tier single- and multi-file determinism [8 CPUs]
 # #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
 # Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
-# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# execution, with changed IDs for both single- and multi-file commands. Multi-file repeats also poison the arenas.
+# The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
 # eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
@@ -93,15 +96,15 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
 # The declared subset must pass.
 "$BUSTER_COMPILER" test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
-== Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
+== Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
 # status and record checked.
-"$BUSTER_COMPILER" test-ssa-source --self-test
-== Promote and run random C programs of structured and unstructured control flow [3 CPUs]
+"$BUSTER_COMPILER" test-ssa-source --typed --self-test
+== Promote and run random C programs of structured and unstructured control flow [4 CPUs]
 # #134: programs whose functions have gotos into and out of loops, switches whose cases fall through and breaks and
 # continues at depth, each built by clang -O0 and run for its output, then checked as c-testsuite's programs are.
-"$BUSTER_COMPILER" test-ssa-source --generate 48 --clang clang
+"$BUSTER_COMPILER" test-ssa-source --typed --generate 48 --clang clang
 == Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
 # #141: the same programs' generator at a seed of its own, the IR with its blocks' lifetime markers, at whose starts
 # promotion makes a block's locals undefined; each block's own locals are assigned and read under one condition, and
@@ -111,12 +114,15 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
 # tokens. -target and its triple (clang's default) go to both.
 "$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-== Promote c-testsuite's programs to SSA and run them in the IR's three forms [2 CPUs]
+== Run c-testsuite's typed streams and the IR's three forms [4 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
 # ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
 # in its three forms at once (all locals in memory, and each path's SSA), which must agree with each other and with
 # the program's expected output.
-"$BUSTER_COMPILER" test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+"$BUSTER_COMPILER" test-ssa-source --typed $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+== Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
+"$BUSTER_COMPILER" test-ssa-source --typed tests/interpreter/source.c
+"$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 "$BUSTER_COMPILER" test-unwind --cross-check
 == Test the preprocessor's cases against clang (part 1 of 4)
@@ -199,9 +205,20 @@ mapfile -d '' -t flags < "$flags_file"
 mapfile -d '' -t sources < "$sources_file"
 test "${#flags[@]}" -gt 0
 test "${#sources[@]}" -gt 0
+# #1423: host-only detector and frame controls don't belong to a semantic request. Keep -fsanitize= and -fPIE,
+# which affect source feature queries and predefines, and every other build argument. The compiler running this
+# check is still instrumented; these exact exclusions don't admit unsupported options to the driver.
+check_flags=()
+for flag in "${flags[@]}"; do
+    case "$flag" in
+        -fsanitize-address-use-after-scope|-fsanitize-address-use-after-return=always|-fsanitize-memory-track-origins=2|\
+        -fno-sanitize-recover=all|-fno-sanitize-trap=all|-fno-omit-frame-pointer|-fno-optimize-sibling-calls) ;;
+        *) check_flags+=("$flag") ;;
+    esac
+done
 for unit in "${sources[@]}"; do
     [[ "${unit##*/}" == main_unit_* ]] && continue
-    "$BUSTER_COMPILER" -fsyntax-only "${flags[@]}" "$unit"
+    "$BUSTER_COMPILER" -fsyntax-only "${check_flags[@]}" "$unit"
 done
 rm "$flags_file" "$sources_file"
 == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
@@ -356,9 +373,9 @@ corpus=$BUSTER_CORPUS
 musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-tier1-cfg-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 # #179: #732's SIMD functions, which the SSA promoter refuses, allocated as lowered, their vcmp masks in the opmask class,
-# and the _k* builtins' functions of masks alone, which it promotes, allocated as any other; and #141's machine rows' row
-# calls.
-"$BUSTER_COMPILER" test-tier1-cfg-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c
+# and the _k* builtins' functions of masks alone, which it promotes, allocated as any other; #141's machine rows' row
+# calls; and #1280's SSE carriers, f32 and f64 values in and out of rows.
+"$BUSTER_COMPILER" test-tier1-cfg-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c
 "$BUSTER_COMPILER" test-tier1-cfg-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 "$BUSTER_COMPILER" test-tier1-cfg-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
@@ -367,7 +384,7 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-ir
 "$BUSTER_COMPILER" test-ir-simd
 "$BUSTER_COMPILER" test-ir-lowering
-"$BUSTER_COMPILER" test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c
+"$BUSTER_COMPILER" test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c
 "$BUSTER_COMPILER" test-ir-source --dataflow-self-test
 "$BUSTER_COMPILER" test-ir-parse
 "$BUSTER_COMPILER" test-ir-reduce
@@ -376,6 +393,11 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-interpreter-native
 "$BUSTER_COMPILER" test-interpreter-link
 "$BUSTER_COMPILER" test-ir-interpreter
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen, or in a
+# static executable in test_libm.c's table.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
+# And one of the C library's, which a static executable's table names too.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=getpid tests/ir/libm-call.ir
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
@@ -403,8 +425,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-checker-asm
 == Test c-testsuite's harness
 # The self-test checks the harness's timeouts, relative paths (as the programs' heading gives them) and
-# cross-check rules with a stand-in compiler, in a directory of its own: about 7 s, most of it waiting out
-# the timeouts, so it runs apart from the programs, on one CPU rather than their four.
+# cross-check rules with a stand-in compiler, in a directory of its own. Six scenarios run concurrently with
+# five-second watchdogs (the stand-in's deliberate hangs are 30 s); most of the time is waiting, not CPU use.
 "$BUSTER_COMPILER" test-c-testsuite --self-test
 == Test the C lexer without digraphs and // comments, as c89
 "$BUSTER_COMPILER" test-lexer --no-digraphs --no-line-comments
@@ -490,6 +512,22 @@ corpus=$BUSTER_CORPUS
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Test the scalar and AVX-512 assembly frontends
 "$BUSTER_COMPILER" test-assembler --cross-check
+== Assemble a .s and a .S file that -c comes before
+# #652: a first argument that starts with '-' goes to the source commands at once, past the units' chains of command
+# names, but for the assembler's -c of a .s or .S file (main_assembly_source). Each assembles, the .S preprocessed, and
+# a program linked from them returns what their functions do.
+directory=$(mktemp -d)
+printf '.text\n.globl plain\nplain:\n\tmovl $5, %%eax\n\tret\n' > "$directory/plain.s"
+printf '#define VALUE 7\n.text\n.globl preprocessed\npreprocessed:\n\tmovl $VALUE, %%eax\n\tret\n' > "$directory/preprocessed.S"
+printf 'int plain(void);\nint preprocessed(void);\nint main(void) { return plain() * 10 + preprocessed(); }\n' > "$directory/main.c"
+"$BUSTER_COMPILER" -c "$directory/plain.s" -o "$directory/plain.o"
+"$BUSTER_COMPILER" -c "$directory/preprocessed.S" -o "$directory/preprocessed.o"
+"$BUSTER_COMPILER" -c "$directory/main.c" -o "$directory/main.o"
+clang "$directory/main.o" "$directory/plain.o" "$directory/preprocessed.o" -o "$directory/program"
+status=0
+"$directory/program" || status=$?
+test "$status" -eq 57
+rm -r "$directory"
 == Test generated-code ISA selection and native records
 "$BUSTER_COMPILER" test-x86-target-selection
 == Test binding
@@ -611,6 +649,65 @@ if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$d
     --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
 grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
 rm -rf "$errors" "$directory"
+== Measure the frames and keep the frame pointer on request
+# #177: measure-frames reads each function's frame from an object's code, and -fno-omit-frame-pointer keeps one in every
+# function, by Tier 0 and by Tier 1, a leaf among them, which -momit-leaf-frame-pointer leaves out; without the option
+# neither tier keeps one. The depth follows the control flow (#1415's review): an early return's epilogue takes nothing
+# from the deeper path after it (168 bytes, where the instructions' address order would say 128), a jump table's target
+# takes its indirect jump's depth (assumed), and two paths that join at different depths are unresolved and left out of
+# the comparison. rbp's depth is each path's too: two arms that set it at different depths, each with its own `leave`,
+# make an 80-byte frame, resolved. A command without files prints its usage and fails.
+directory=$(mktemp -d)
+printf 'int g(char*);\nint f(int x) { char b[4096]; b[x & 4095] = 1; return g(b); }\nint leaf(int x) { return x + 1; }\n' > "$directory/f.c"
+"$BUSTER_COMPILER" -c -o "$directory/t0.o" "$directory/f.c"
+"$BUSTER_COMPILER" -c -fno-omit-frame-pointer -o "$directory/t0fp.o" "$directory/f.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -o "$directory/t1fp.o" "$directory/f.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -momit-leaf-frame-pointer -o "$directory/t1leaf.o" "$directory/f.c"
+"$BUSTER_COMPILER" measure-frames --functions t0="$directory/t0.o" t0fp="$directory/t0fp.o" t1fp="$directory/t1fp.o" t1leaf="$directory/t1leaf.o" > "$directory/frames.txt"
+grep -q "$(printf '^frame\tt0\tleaf\t0\t0\t0\t0\tresolved$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt0fp\tleaf\t8\t0\t1\t0\tresolved$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt1fp\tleaf\t8\t0\t1\t0\tresolved$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt1leaf\tleaf\t0\t0\t0\t0\tresolved$')" "$directory/frames.txt"
+awk -F'\t' '$1 == "frame" && $3 == "f" && $4 > 4096 && ($2 == "t0") == ($6 == 0) && $8 == "resolved" { found += 1 } END { exit found != 4 }' "$directory/frames.txt"
+grep -q "$(printf '^frames\tt1leaf\tfunctions=2\tbytes=[0-9]*\tassumed=0\tunresolved=0\tpartial=0\t')" "$directory/frames.txt"
+printf '%s\n' '    .text' '    .globl early' '    .type early, @function' 'early:' '    push %rbp' '    sub $32, %rsp' '    test %edi, %edi' '    je 1f' \
+    '    add $32, %rsp' '    pop %rbp' '    ret' '1:' '    sub $128, %rsp' '    add $160, %rsp' '    pop %rbp' '    ret' '    .size early, .-early' \
+    '    .globl table' '    .type table, @function' 'table:' '    push %rbx' '    sub $16, %rsp' '    lea 2f(%rip), %rax' '    jmp *%rax' '    int3' '2:' \
+    '    sub $64, %rsp' '    add $80, %rsp' '    pop %rbx' '    ret' '    .size table, .-table' '    .globl conflict' '    .type conflict, @function' \
+    'conflict:' '    test %edi, %edi' '    je 3f' '    push %rbx' '3:' '    ret' '    .size conflict, .-conflict' '    .globl tail' '    .type tail, @function' \
+    'tail:' '    push %rbx' '    test %edi, %edi' '    je 4f' '    pop %rbx' '    jmp elsewhere' '4:' '    sub $16, %rsp' '    add $16, %rsp' '    pop %rbx' '    ret' \
+    '    .size tail, .-tail' '    .globl padded' '    .type padded, @function' 'padded:' '    push %rbx' '    test %edi, %edi' '    je 5f' '    jmp 6f' '    nop' \
+    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' \
+    '    .globl split' '    .type split, @function' 'split:' '    test %edi, %edi' '    je 8f' '    push %rbp' '    mov %rsp, %rbp' '    sub $32, %rsp' '    leave' \
+    '    ret' '8:' '    push %rbx' '    push %rbp' '    mov %rsp, %rbp' '    sub $64, %rsp' '    leave' '    pop %rbx' '    ret' '    .size split, .-split' > "$directory/paths.s"
+"$BUSTER_COMPILER" -c -o "$directory/paths.o" "$directory/paths.s"
+"$BUSTER_COMPILER" measure-frames --functions paths="$directory/paths.o" > "$directory/paths.txt"
+grep -q "$(printf '^frame\tpaths\tearly\t168\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frame\tpaths\ttable\t88\t0\t0\t0\tassumed$')" "$directory/paths.txt"
+grep -q "$(printf '^frame\tpaths\tconflict\t[0-9]*\t0\t0\t0\tunresolved$')" "$directory/paths.txt"
+# A tail call's jump, whose displacement an object leaves to its relocation, leaves the function: no edge to the next
+# instruction, whose depth the other path gives.
+grep -q "$(printf '^frame\tpaths\ttail\t24\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+# An indirect tail call gives the code no edge reaches its depth, but not the nop that pads a loop's head after a jump.
+grep -q "$(printf '^frame\tpaths\tpadded\t8\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+# Each arm sets rbp at its own depth (8 and 16) and its `leave` goes back to it: the deeper arm's 80 bytes, resolved.
+grep -q "$(printf '^frame\tpaths\tsplit\t80\t0\t1\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frames\tpaths\tfunctions=6\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=5\texcluded=1\t')" "$directory/paths.txt"
+if "$BUSTER_COMPILER" measure-frames > /dev/null 2> "$directory/errors"; then exit 1; fi
+grep -q '^usage: compiler measure-frames' "$directory/errors"
+rm -rf "$directory"
+== Dispatch Tier 1's vector code measurement and refuse its incomplete commands
+# #1283's measure-tier1-rows runs on the 9700X only where `tier1_programs` changes, so its dispatch is checked here, on
+# every run, without timing anything: a command without --clang must print its usage and fail, and one whose --base isn't
+# there must fail that build, after this compiler's Tier 0 builds (compiled for x86-64-v4 on any host, never run).
+errors=$(mktemp)
+directory=$(mktemp -d)
+if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-rows --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 --clang clang --base "$directory/none" --march x86-64-v4 --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q "^measure-tier1-rows: Tier 0's builds built$" "$errors"
+grep -q "^measure-tier1-rows: --tier1 (base)'s builds FAILED$" "$errors"
+rm -rf "$errors" "$directory"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
@@ -657,3 +754,9 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-bindings
 == Test the partial Zen 5 model and instruction harness
 "$BUSTER_COMPILER" test-x86-zen5
+== Test Tier 1 integer truth round trips against native and instruction-shape oracles
+# #1218: the subject must compile at Tier 1 with no fallback, by both host paths. Clang builds the independent
+# execution oracle; objdump checks all branch-only fixtures for one comparison and no setcc materialization.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
+./build/test-driver-tier1-truth "$BUSTER_COMPILER" "$(command -v clang)"

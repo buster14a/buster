@@ -470,6 +470,16 @@ static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower
         classes[i] = shape == 0 ? (i % 2 == 1 ? BUSTER_TYPED_CLASS_F64 : i % 6 == 0 ? BUSTER_TYPED_CLASS_I64 : i % 6 == 2 ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64)
                                : shape == 1 ? (i < 10 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_I64) : (i < 10 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64);
     }
+    // Keep the Clang value oracle separate from the uninstrumented generated entry points: they do not publish
+    // MemorySanitizer's call shadows. The two live cursors still advance one argument at a time below.
+    uint64_t reference[BUSTER_CBUILTIN_VA_TEST_ARGUMENTS] = { 0 };
+    va_list reference_oracle;
+    va_copy(reference_oracle, generated);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        cbuiltin_va_lower_test_oracle(reference_oracle, classes[i], &reference[i]);
+    }
+    va_end(reference_oracle);
     AbiVaList copied;
     // Generated stores do not update MSan shadow; a nonmatching fill still exposes missing field writes.
     memset(&copied, 0xa5, sizeof(copied));
@@ -480,16 +490,16 @@ static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower
     memcpy(&original, generated, sizeof(original));
     for (uint32_t i = 0; i < count; i += 1)
     {
-        uint64_t expected = 0;
-        cbuiltin_va_lower_test_oracle(copy_oracle, classes[i], &expected);
-        cbuiltin_va_lower_test_read(tally, native, path, classes[i], &copied, expected, shape * 100 + i);
+        uint64_t cursor_value = 0;
+        cbuiltin_va_lower_test_oracle(copy_oracle, classes[i], &cursor_value);
+        cbuiltin_va_lower_test_read(tally, native, path, classes[i], &copied, reference[i], shape * 100 + i);
         cbuiltin_va_lower_test_expect(tally, cbuiltin_va_lower_test_same_list(&copied, copy_oracle) && cbuiltin_va_lower_test_same_list(&original, generated), "copy advances independently", shape * 100 + i);
     }
     for (uint32_t i = 0; i < count; i += 1)
     {
-        uint64_t expected = 0;
-        cbuiltin_va_lower_test_oracle(oracle, classes[i], &expected);
-        cbuiltin_va_lower_test_read(tally, native, path, classes[i], generated, expected, shape * 100 + i);
+        uint64_t cursor_value = 0;
+        cbuiltin_va_lower_test_oracle(oracle, classes[i], &cursor_value);
+        cbuiltin_va_lower_test_read(tally, native, path, classes[i], generated, reference[i], shape * 100 + i);
         cbuiltin_va_lower_test_expect(tally, cbuiltin_va_lower_test_same_list(generated, oracle), "Clang cursor updates", shape * 100 + i);
     }
     uint64_t (*end)(void*) = (uint64_t (*)(void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_END].bytes;
@@ -567,7 +577,8 @@ static void cbuiltin_va_lower_test_shape_oracle(va_list oracle, uint32_t shape, 
     else if (shape == 9)
     {
         const CBuiltinVaTestHigh value = va_arg(oracle, CBuiltinVaTestHigh);
-        memcpy(bytes, &value, sizeof(value));
+        // The unnamed first eightbyte is padding, not a value to copy into the comparison oracle.
+        memcpy(bytes + 8, &value.b, sizeof(value.b));
     }
     else if (shape == 10)
     {
