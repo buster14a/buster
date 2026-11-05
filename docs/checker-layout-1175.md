@@ -3,7 +3,7 @@
 The compiler change is already merged in [#1225](https://github.com/buster14a/buster/pull/1225).
 The remaining acceptance is measured taken branches and cycles over placements on the 9700X.
 Run that fixed historical comparison once through the existing
-[Tailscale access and shared host lock](commands/benchpress.md), then preserve and review its
+[Tailscale access and shared host lock](https://github.com/buster14a/buster/blob/main/docs/commands/benchpress.md), then preserve and review its
 results. It does not need a dedicated Actions workflow, scheduled run, PR check or merge gate.
 Ordinary correctness, sanitizer, fuzz and native CI continue under their existing policy.
 
