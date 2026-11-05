@@ -10514,6 +10514,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             writer->vectors = true;
         }
     }
+    else if (check_lower_bool_vector(types, result) && check_builtin_vector_elementwise(builtin))
+    {
+        check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
+    }
     else if ((check_lower_transport_type(types, result) ||
               (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && check_lower_transport_type(types, stream->argument_conversions[first + 1].type))) &&
              (check_builtin_vector_elementwise(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP) &&

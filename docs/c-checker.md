@@ -2666,6 +2666,15 @@ What the lowering covers past scalars (#145's programs):
     the same address/value handoff. These expansions, ordered floating sums
     and floating reduction trees are bounded to 1,024 elements and preserve
     the ordinary rows' element-type and target-feature refusals.
+  - boolean elementwise builtins use packed bit operations at scalar and
+    register-sized widths: max and saturating add are OR; min, pdep, pext
+    and clmul are AND; saturating subtract is `a & ~b`; popcount and
+    bitreverse keep the operand. One-bit funnel shifts have a count modulo
+    one and keep their left or right input, respectively, while evaluating
+    all three arguments once. Tiny stores preserve neighboring bytes, and
+    result padding bits are cleared. Boolean clzg and ctzg retain a named
+    refusal because Clang 23.1.4 emits an invalid scalar-to-vector `trunc`
+    for them and crashes or produces incorrect code.
   - byte funnel shifts of 16-byte vectors use XOP's VPSHLB with signed byte
     counts, masking the original counts modulo eight. Their two halves are
     shifted separately and combined with VPOR; splitting the complementary

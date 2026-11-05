@@ -572,8 +572,8 @@ static void check_lower_transport_bools(CheckLowerWriter* writer, uint32_t node,
 
 // An operator on transport vectors (#137), whose result is written into a frame object of its type: a vector of bool's
 // (check_lower_transport_bools), one of 1 or 2 bytes' an element at a time (check_lower_transport_elements), a wider
-// one's a piece at a time (check_lower_transport_pieces). Their logical operators and conditions are refused as the
-// ordinary vectors' are, but a vector of bool's !, which is its ~.
+// one's a piece at a time (check_lower_transport_pieces). Logical operators and vector conditions use
+// check_lower_vector_logical; a vector of bool's ! is its ~ and uses the packed-bit path here too.
 static __attribute__((noinline)) void check_lower_transport_operation(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -1073,6 +1073,110 @@ static __attribute__((noinline)) void check_lower_vector_logical(CheckLowerWrite
             }
         }
         writer->vectors = true;
+    }
+}
+
+// Integer elementwise builtins on <N x i1> are operations on packed bits: unsigned saturation is OR or A & ~B,
+// popcount and bitreverse are identities, and a one-bit funnel shift has a zero modulo-one count (left A, right B).
+// Process a register's bits together instead of unpacking lanes. Every argument is evaluated once, including the
+// unused arguments of a funnel shift, and the result's padding is cleared as for ordinary boolean-vector operators.
+// Clang 23's elementwise CLZG/CTZG of bools emit an invalid scalar-to-vector truncation, so retain a named refusal.
+static __attribute__((noinline)) void check_lower_transport_boolean_builtin(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeId result = check_stream_type(stream, node);
+    const uint32_t first = graph->argument_offsets[node];
+    const uint32_t bytes = (uint32_t)type_size(types, type_conversion_operand(types, result));
+    CheckLowerTransportBits bits = { .op = CHECK_OP_COUNT };
+    bool valid = arguments >= 1 && arguments <= 3 && arguments <= graph->argument_counts[node];
+    switch (builtin)
+    {
+        case CBUILTIN_ELEMENTWISE_MAX: case CBUILTIN_ELEMENTWISE_ADD_SAT: bits.op = CHECK_OP_BIT_OR; break;
+        case CBUILTIN_ELEMENTWISE_MIN: case CBUILTIN_ELEMENTWISE_CLMUL:
+        case CBUILTIN_ELEMENTWISE_PDEP: case CBUILTIN_ELEMENTWISE_PEXT: bits.op = CHECK_OP_BIT_AND; break;
+        case CBUILTIN_ELEMENTWISE_SUB_SAT: bits.op = CHECK_OP_BIT_AND; bits.not_b = true; break;
+        case CBUILTIN_ELEMENTWISE_POPCOUNT: case CBUILTIN_ELEMENTWISE_BITREVERSE:
+        case CBUILTIN_ELEMENTWISE_FSHL: case CBUILTIN_ELEMENTWISE_FSHR: break;
+        default: valid = false; break;
+    }
+    if (builtin == CBUILTIN_ELEMENTWISE_CLZG || builtin == CBUILTIN_ELEMENTWISE_CTZG)
+    {
+        check_lower_unsupported(writer, "elementwise leading/trailing zero counts of boolean vectors, which clang 23 miscompiles");
+    }
+    else if (!valid)
+    {
+        check_lower_unsupported(writer, "elementwise builtins of boolean vectors");
+    }
+    else
+    {
+        const uint32_t operands = bits.op == CHECK_OP_COUNT ? 1 : 2;
+        const uint32_t operand_start = builtin == CBUILTIN_ELEMENTWISE_FSHR ? 1 : 0;
+        const uint32_t width = check_lower_transport_width(writer);
+        const uint32_t piece = bytes < width ? bytes : width;
+        const bool vector = bytes > 8;
+        const uint8_t stored = vector ? BUSTER_TYPED_CLASS_VECTOR : bytes == 1 ? BUSTER_TYPED_CLASS_U8 : bytes == 2 ? BUSTER_TYPED_CLASS_U16 :
+                                                                                    bytes == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+        const uint8_t computed = bytes <= 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+        uint32_t sources[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t a = 0; a < arguments; a += 1)
+        {
+            sources[a] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        }
+        uint32_t combine = BUSTER_CHECK_NONE;
+        uint32_t negate = BUSTER_CHECK_NONE;
+        if (vector)
+        {
+            const CheckVectorElement element = { .bytes = 1 };
+            Tier0Operation row;
+            if (operands == 2)
+            {
+                combine = check_lower_transport_row(writer, bits.op, element, piece, 0, &row);
+            }
+            if (bits.not_a || bits.not_b)
+            {
+                negate = check_lower_transport_row(writer, CHECK_OP_BIT_NOT, element, piece, 0, &row);
+            }
+        }
+        const uint32_t object = check_lower_transport_result(writer, result);
+        check_lower_transport_clear(writer, result, object);
+        for (uint32_t p = bytes / piece; p-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const uint32_t offset = p * piece;
+            check_lower_instruction(writer, BUSTER_TYPED_SET, stored, vector ? piece : 0);
+            if (!vector && stored != computed)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
+            }
+            if (operands == 2)
+            {
+                check_lower_instruction(writer, vector ? BUSTER_TYPED_X86 : check_lower_binary((CheckOp)bits.op),
+                                         vector ? BUSTER_TYPED_CLASS_VECTOR : computed, vector ? combine : 0);
+            }
+            for (uint32_t a = operands; a-- > 0;)
+            {
+                if (a == 0 ? bits.not_a : bits.not_b)
+                {
+                    check_lower_instruction(writer, vector ? BUSTER_TYPED_X86 : BUSTER_TYPED_NOT, vector ? BUSTER_TYPED_CLASS_VECTOR : computed, vector ? negate : 0);
+                }
+                if (!vector && stored != computed)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computed, 0);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored, vector ? piece : 0);
+                check_lower_transport_at(writer, sources[a + operand_start], offset);
+            }
+            check_lower_element_address(writer, object, offset);
+        }
+        for (uint32_t a = arguments; a-- > 0;)
+        {
+            const TypeId type = stream->argument_conversions[first + a].type;
+            check_lower_vector_logical_source(writer, type, sources[a]);
+            check_lower_operand(writer, node, a + 3, false, type);
+        }
+        writer->vectors |= vector;
     }
 }
 

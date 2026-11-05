@@ -150,6 +150,27 @@ static const char check_test_vector_logical[] =
     "#endif\n"
     "return (int)h;}\n";
 
+// Packed one-bit builtins use the same scalar/byte/vector algebra at tiny, padded and multi-register widths. Check
+// every defined lane, independent guards around a one-byte result, and evaluation of a funnel's unused operands.
+static const char check_test_vector_boolean_builtins[] =
+    "#define CASE(N) static unsigned bits##N(unsigned h,int n){typedef _Bool V __attribute__((ext_vector_type(N)));V a,b,c;"
+    "fill(&a,sizeof a,n);fill(&b,sizeof b,n+1);fill(&c,sizeof c,n+2);V r[]={"
+    "__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,b),__builtin_elementwise_add_sat(a,b),__builtin_elementwise_sub_sat(a,b),"
+    "__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),"
+    "__builtin_elementwise_fshl(a,b,c),__builtin_elementwise_fshr(a,b,c),__builtin_elementwise_pdep(a,b),__builtin_elementwise_pext(a,b),"
+    "__builtin_elementwise_clmul(a,b)};"
+    "for(unsigned j=0;j<sizeof r/sizeof r[0];j++)for(unsigned i=0;i<N;i++)h=(h^(unsigned)r[j][i])*16777619u;return h;}\n"
+    "CASE(1)CASE(3)CASE(8)CASE(12)CASE(32)CASE(64)CASE(65)CASE(128)CASE(1024)\n"
+    "int tested(int n){unsigned h=2166136261u;h=bits1(h,n);h=bits3(h,n+1);h=bits8(h,n+2);h=bits12(h,n+3);h=bits32(h,n+4);"
+    "h=bits64(h,n+5);h=bits65(h,n+6);h=bits128(h,n+7);h=bits1024(h,n+8);"
+    "typedef _Bool B3 __attribute__((ext_vector_type(3)));struct __attribute__((packed)) guard{unsigned char pre;B3 value;unsigned char post;};"
+    "struct guard guarded={0x5a,{1,0,1},0xc7};B3 b={0,1,(_Bool)(n&1)};guarded.value=__builtin_elementwise_add_sat(guarded.value,b);"
+    "FOLD(guarded.pre);FOLD(guarded.post);for(int i=0;i<3;i++)h=(h^(unsigned)guarded.value[i])*16777619u;"
+    "unsigned calls[3]={0};B3 once=__builtin_elementwise_fshl((calls[0]++,guarded.value),(calls[1]++,b),(calls[2]++,b));"
+    "FOLD(calls);for(int i=0;i<3;i++)h=(h^(unsigned)once[i])*16777619u;"
+    "once=__builtin_elementwise_fshr((calls[0]++,guarded.value),(calls[1]++,b),(calls[2]++,b));"
+    "FOLD(calls);for(int i=0;i<3;i++)h=(h^(unsigned)once[i])*16777619u;return (int)h;}\n";
+
 // The programs run where the host has the target's features and saves their state (x86_target_native, CPUID and
 // XCR0, whatever ISA the host build selected); elsewhere they are compiled and linked, as clang's builds are, and not
 // run.
@@ -243,6 +264,10 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
         {
             "vector-logical-and-conditions",
             check_test_vector_logical,
+        },
+        {
+            "vector-boolean-builtins",
+            check_test_vector_boolean_builtins,
         },
         {
             // The lowering's room for an element-wise reduction (check_lower_transport_room), in a unit with nothing
@@ -510,6 +535,18 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             1,
         },
         {
+            "vector-of-bool-leading-zero-count",
+            "typedef _Bool V __attribute__((ext_vector_type(8)));void tested(V*p,V*q){*p=__builtin_elementwise_clzg(*p,*q);}",
+            "elementwise leading/trailing zero counts of boolean vectors, which clang 23 miscompiles",
+            0,
+        },
+        {
+            "vector-of-bool-trailing-zero-count",
+            "typedef _Bool V __attribute__((ext_vector_type(8)));void tested(V*p){*p=__builtin_elementwise_ctzg(*p);}",
+            "elementwise leading/trailing zero counts of boolean vectors, which clang 23 miscompiles",
+            0,
+        },
+        {
             "vector-divide-integers-past-64-bytes",
             "typedef int w32 __attribute__((vector_size(128)));int tested(int n){w32 a={n},b={2};a=a/b;return a[0];}",
             "vector division of integers",
@@ -670,6 +707,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         },
         { "baseline-transport-compute", check_test_vector_transport },
         { "baseline-logical-and-conditions", check_test_vector_logical },
+        { "baseline-boolean-builtins", check_test_vector_boolean_builtins },
         { "baseline-transport-builtins",
           "typedef unsigned char B1 __attribute__((vector_size(1)));typedef unsigned char B2 __attribute__((vector_size(2)));"
           "typedef short H1 __attribute__((vector_size(2)));typedef unsigned char B128 __attribute__((vector_size(128)));"
