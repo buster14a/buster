@@ -172,6 +172,12 @@ static InterpreterResult interpreter_source_run(const IrSourceFile* files, uint3
         }
         for (SymbolId s = 1; ready && s < link->symbols.count; s += 1)
         {
+            if (unit->resolved[s] != 0 && unit->addresses[s] == 0 && unit->data[s] == 0 &&
+                (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK)
+            {
+                // An unresolved weak address is a valid null value, with no readable allocation or callable target.
+                bindings[binding_count++] = (InterpreterBinding){ .symbol = offsets[u] + s };
+            }
             const bool function = (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
             uint32_t selected = UINT32_MAX;
             for (uint32_t f = 0; function && f < body; f += 1)

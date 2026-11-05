@@ -1291,10 +1291,8 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        // Validate the dispatch domain before classifying effects; vectors have no two-word payload, an indirect
-        // jump (#133) goes to a label's address, which an
-        // interpreted function has no code at, and a machine operation (#136), a frame's address (#148) and a tail call
-        // (#147), whose return address and caller's frame an interpreted function hasn't, have no model here.
+        // Validate the dispatch domain before classifying effects. Machine rows, frame addresses and tail-call
+        // intrinsics have no model here. Indirect jumps use this function's label tokens, without executing code bytes.
         if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_X86 ||
             kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class > BUSTER_TYPED_CLASS_U128 && class != BUSTER_TYPED_CLASS_MASK))
         {
