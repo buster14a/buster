@@ -2797,8 +2797,11 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // registers its arguments take (tier1_emit_call). A call with ABI records (#789) passes each argument where its
         // record says: its aggregates' bytes in registers or in its stack slots, and its aggregate result's into the frame
         // object its into operand is the address of, as parts or through the hidden pointer (tier1_emit_call).
+        // A chained indirect variadic call (#148) isn't one (#1411's review): its callee would wait in rax
+        // (tier1_select_callee_register), which its al then overwrites; the typed stream's adapter refuses it too (ir_lower).
+        const bool clobbered = function->op[node] == IR_CALL_INDIRECT && call.variadic && tier1_select_call_chained(function, &call);
         supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_call_arity(&call) && tier1_select_call_result(function->type[node]) &&
-                    tier1_select_call_abi(function, node, &call);
+                    tier1_select_call_abi(function, node, &call) && !clobbered;
         // The aggregates' parts in registers wait in the red zone's staging slots, a 64-byte one in zmm16 and on instead
         // (tier1_select_argument_slots).
         uint32_t staged = 0;
