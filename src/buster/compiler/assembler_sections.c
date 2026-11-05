@@ -40,8 +40,8 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
         }
         parser->section_slots[slot] = id;
     }
-    // Grouped sections may repeat a name. Keep the most recently created identity for section-name expressions;
-    // reopening an old section does not change this mapping. Ordinary assembly pays no extra table allocation.
+    // Grouped sections may repeat a name. Record the ambiguity for section-name expressions. Ordinary assembly
+    // pays no extra table allocation.
     if (parser->result.error == 0 && parser->group_count != 0)
     {
         const bool rebuild = parser->section_name_slots == 0 || parser->section_name_mask != parser->section_mask;
@@ -69,6 +69,8 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
                 const String8 old = parser->sections[parser->section_name_slots[slot]].object.name;
                 if (old.length == name.length && memcmp(old.pointer, name.pointer, name.length) == 0)
                 {
+                    parser->sections[parser->section_name_slots[slot]].name_ambiguous = true;
+                    parser->sections[i].name_ambiguous = true;
                     break;
                 }
                 slot = (slot + 1) & parser->section_name_mask;

@@ -244,6 +244,7 @@ struct AsmSection
     ObjectAtomSection object;
     uint32_t group;
     uint32_t name_symbol;
+    bool name_ambiguous;
     uint32_t size;
     AtomId atom;
     uint8_t class;
@@ -1325,8 +1326,12 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                         uint32_t symbol = 0;
                         if (section != 0)
                         {
-                            // A section name denotes the last-created namesake at this expression, even if another
-                            // group is selected later. Use a separate symbol for each identity before that can change.
+                            // GNU as versions disagree on which same-name section a bare section name denotes.
+                            // Do not silently pick a different relocation target than the assembler in use.
+                            if (parser->sections[section].name_ambiguous)
+                            {
+                                asm_fail(parser, token.start, "ambiguous section name in expression");
+                            }
                             symbol = parser->sections[section].name_symbol;
                             if (symbol == 0 && parser->symbol_count >= parser->capacity)
                             {

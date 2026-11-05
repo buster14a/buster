@@ -174,9 +174,8 @@ static void asm_test_group_link(AsmTest* test, const char* directory)
     unlink(program);
 }
 
-// Check names and declaration order independently: a reference may precede the first declaration, and creating a
-// new namesake changes subsequent references while reopening an existing identity does not. Keep GNU as's target
-// comparison, which distinguishes sections by both name and group, as the oracle for every variant.
+// Check names and declaration order independently. A reference may precede the first declaration, but GNU as
+// versions disagree after another same-name section is created, so those bare references must be refused.
 static void asm_test_group_section_names(AsmTest* test, const char* directory, bool cross_check)
 {
     static const char* const names[] = {"plain_name", ".dotted_name"};
@@ -197,8 +196,9 @@ static void asm_test_group_section_names(AsmTest* test, const char* directory, b
             asm_test_check(test, fits, "section-name matrix fits", 0);
             if (fits)
             {
-                asm_test_pair(test, (String8){.pointer = source, .length = (uint64_t)length}, 1, X86_ARCH_BASELINE);
-                if (cross_check)
+                const bool accepted = f == 3;
+                asm_test_pair(test, (String8){.pointer = source, .length = (uint64_t)length}, accepted, X86_ARCH_BASELINE);
+                if (cross_check && accepted)
                 {
                     asm_test_oracle(test, source, directory, X86_ARCH_BASELINE);
                 }
@@ -210,22 +210,12 @@ static void asm_test_group_section_names(AsmTest* test, const char* directory, b
 static void asm_test_groups(AsmTest* test, const char* directory, bool cross_check)
 {
     asm_test_group_section_names(test, directory, cross_check);
-    // GNU as binds each section-name expression to the last-created namesake, not the current group.
-    static const char section_names[] =
-        ".long .debug_macro\n.long plain\n.long early\n.long .early\n"
-        ".section early,\"\",@progbits\n.long early\n"
-        ".section .early,\"\",@progbits\n.long .early\n"
-        ".section unreferenced,\"\",@progbits\n.long unreferenced\n"
-        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n.long early\n.long .early\n.long unreferenced\n"
-        ".section .debug_macro,\"G\",@progbits,second,comdat\n.long .debug_macro\n"
-        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
-        ".section plain,\"G\",@progbits,first,comdat\n.long plain\n"
-        ".section plain,\"G\",@progbits,second,comdat\n.long plain\n"
-        ".section plain,\"G\",@progbits,first,comdat\n.long plain\n";
-    asm_test_pair(test, (String8){.pointer = (char*)section_names, .length = sizeof(section_names) - 1}, 1, X86_ARCH_BASELINE);
+    // One grouped section with a unique name is unambiguous, including a reference before its declaration.
+    static const char unique_name[] = ".long plain\n.section plain,\"G\",@progbits,g,comdat\n.long plain\n";
+    asm_test_pair(test, (String8){.pointer = (char*)unique_name, .length = sizeof(unique_name) - 1}, 1, X86_ARCH_BASELINE);
     if (cross_check)
     {
-        asm_test_oracle(test, section_names, directory, X86_ARCH_BASELINE);
+        asm_test_oracle(test, unique_name, directory, X86_ARCH_BASELINE);
     }
     // Explicit flags must retain the conventional array entry sizes. In particular,
     // the file-scope assembly path relies on accepting these before refusing their kind.
