@@ -5,38 +5,33 @@ on:
 permissions:
   contents: read
 jobs:
-  declaration-debug:
+  combined-correctness:
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       BUSTER_HOST_ARCH: x86-64
+      BUSTER_ORACLE_CACHE: check
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 280fa88a10e4f1c309cd596041e296d0a558ff8b
+          ref: 6946ecfed627f0b2dd6f435d75de39ed2c33eaeb
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Build debug compiler
-        run: ./build.sh --config Debug --jobs 4
-      - name: Locate null declaration failure
-        shell: bash
-        run: |
-          if ! command -v gdb; then sudo apt-get update && sudo apt-get install -y gdb; fi
-          cat > "$RUNNER_TEMP/empty.c" <<'EOF'
-          __attribute__((unused));
-          EOF
-          cat > "$RUNNER_TEMP/empty.gdb" <<'EOF'
-          set pagination off
-          break check_input_report if message == CHECK_INPUT_DECLARATION
-          commands
-          silent
-          printf "GENERIC DECLARATION ERROR token=%u\n", token
-          bt 6
-          p reader->specifier_free_standing
-          p reader->specifier_owner
-          continue
-          end
-          run
-          EOF
-          gdb --batch -x "$RUNNER_TEMP/empty.gdb" --args build/compiler -std=gnu17 -fsyntax-only -fno-caret-diagnostics "$RUNNER_TEMP/empty.c"
+      - name: Build combined revision
+        run: ./build.sh --config Release --jobs 4
+      - name: Check parser
+        if: success() || failure()
+        run: build/compiler test-parser
+      - name: Check types
+        if: success() || failure()
+        run: build/compiler test-types
+      - name: Check binding and input paths
+        if: success() || failure()
+        run: build/compiler test-checker --part 1/4
+      - name: Check complete driver diagnostics and emission
+        if: success() || failure()
+        run: build/compiler test-checker-driver
+      - name: Check translation units
+        if: success() || failure()
+        run: build/compiler test-check-units
