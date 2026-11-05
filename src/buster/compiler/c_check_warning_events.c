@@ -376,7 +376,9 @@ static __attribute__((unused)) bool check_warning_append(CheckWarningBuffer* buf
 {
     bool valid = buffer != NULL && buffer->arena != NULL && event != NULL && event->id < CHECK_WARNING_ID_COUNT &&
                  event->kind < CHECK_WARNING_EVENT_KIND_COUNT && event->token != UINT32_MAX &&
-                 (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
+                 (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | BUSTER_CHECK_WARNING_SYMBOL_PRAGMA)) == 0 &&
+                 ((event->flags & BUSTER_CHECK_WARNING_SYMBOL_PRAGMA) == 0 || event->kind == CHECK_WARNING_EVENT_PRAGMA) &&
+                 event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
                  ((event->completion_kind == CHECK_WARNING_COMPLETE_TU_END) == (event->completion == UINT32_MAX)) &&
                  buffer->count <= buffer->capacity && (buffer->count == 0 || buffer->events != NULL) &&
                  buffer->note_count <= buffer->note_capacity && (buffer->note_count == 0 || buffer->notes != NULL) &&
