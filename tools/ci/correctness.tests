@@ -509,6 +509,22 @@ corpus=$BUSTER_CORPUS
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Test the scalar and AVX-512 assembly frontends
 "$BUSTER_COMPILER" test-assembler --cross-check
+== Assemble a .s and a .S file that -c comes before
+# #652: a first argument that starts with '-' goes to the source commands at once, past the units' chains of command
+# names, but for the assembler's -c of a .s or .S file (main_assembly_source). Each assembles, the .S preprocessed, and
+# a program linked from them returns what their functions do.
+directory=$(mktemp -d)
+printf '.text\n.globl plain\nplain:\n\tmovl $5, %%eax\n\tret\n' > "$directory/plain.s"
+printf '#define VALUE 7\n.text\n.globl preprocessed\npreprocessed:\n\tmovl $VALUE, %%eax\n\tret\n' > "$directory/preprocessed.S"
+printf 'int plain(void);\nint preprocessed(void);\nint main(void) { return plain() * 10 + preprocessed(); }\n' > "$directory/main.c"
+"$BUSTER_COMPILER" -c "$directory/plain.s" -o "$directory/plain.o"
+"$BUSTER_COMPILER" -c "$directory/preprocessed.S" -o "$directory/preprocessed.o"
+"$BUSTER_COMPILER" -c "$directory/main.c" -o "$directory/main.o"
+clang "$directory/main.o" "$directory/plain.o" "$directory/preprocessed.o" -o "$directory/program"
+status=0
+"$directory/program" || status=$?
+test "$status" -eq 57
+rm -r "$directory"
 == Test generated-code ISA selection and native records
 "$BUSTER_COMPILER" test-x86-target-selection
 == Test binding

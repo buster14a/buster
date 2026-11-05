@@ -647,16 +647,18 @@ static void check_configurations(void)
         }
     }
     pass("BUSTER_BAKE reruns the post-link step alone, both ways");
-    char* lld[] = { "sh", "-c", "command -v ld.lld", 0 };
-    if (run("/dev/null", 0, lld) == 0)
+    // GNU ld, which auto never takes by its path (a static build's is lld, then mold, then clang's default): another
+    // linker than auto's, whichever of them this runner has.
+    char* bfd[] = { "sh", "-c", "command -v ld.bfd", 0 };
+    if (run("/dev/null", 0, bfd) == 0)
     {
-        const char* const linker[] = { "BUSTER_LINKER=lld", 0 };
+        const char* const linker[] = { "BUSTER_LINKER=bfd", 0 };
         snapshot(&before);
         BUILD_ENV(linker, "build");
         ran_since(&before, names, sizeof(names));
         if (strcmp(names, "compiler compiler.link ") != 0)
         {
-            fail("BUSTER_LINKER=lld ran %s", names);
+            fail("BUSTER_LINKER=bfd ran %s", names);
         }
         BUILD("build");
         pass("BUSTER_LINKER relinks alone");
