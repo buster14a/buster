@@ -2710,6 +2710,25 @@ static TypeId check_input_ns_constant_string(CheckInputReader* reader)
     return reader->output->graph.ns_constant_string;
 }
 
+// The object of the unit's own declaration of __CFConstantStringClassReference (#148, CheckGraph.cfstring_class), the
+// class its constant CFStrings point to, as clang's code takes the unit's global of that name: a file-scope object's of
+// external linkage, its first declaration's. Read once, in a unit with a CFString call, after its declarations.
+static void check_input_cfstring_class(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    static const char spelling[] = "__CFConstantStringClassReference";
+    const uint32_t name = intern_find(reader->pp->table, (const uint8_t*)spelling, (uint32_t)(sizeof(spelling) - 1));
+    uint32_t object = 0;
+    for (uint32_t t = 0; name != 0 && object == 0 && t < parser->tokens.count; t += 1)
+    {
+        const bool declares = parser->tokens.names[t] == name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_OBJECT &&
+                              check_input_linkage(input->declaration_bits, t) == 2 && check_sparse_get(input->declaration_bodies, t) >= input->token_count;
+        object = declares ? input->objects[t] : 0;
+    }
+    reader->output->graph.cfstring_class = object;
+}
+
 #include "c_check_declspec.c"
 
 // The report of specifiers from `first` to `end` that don't combine: clang's error, its place and its message, if it
@@ -9490,6 +9509,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                         const uint32_t end = check_constant_punctuation(parser, begin, token, PARSE_KIND_COMMA);
                         CheckBuiltinCall* evidence = &graph->builtin_calls[graph->builtin_count++];
                         *evidence = (CheckBuiltinCall){ .node = node };
+                        const bool cfstring = reader->builtins[token] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || reader->builtins[token] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING;
+                        evidence->cfstring_name = cfstring && keyword < token ? keyword : 0;
                         if (op == CHECK_OP_BUILTIN_VECTOR)
                         {
                             check_input_shuffle_evidence(reader, keyword, token, count, evidence);
@@ -10765,6 +10786,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_fallthrough_placements(&reader);
             }
             check_input_diagnostic_recover(&reader, resolved);
+            if (input->graph.ns_constant_string != 0 && !input->resource)
+            {
+                check_input_cfstring_class(&reader);
+            }
             if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
             {
                 check_input_deprecated_uses(&reader);
