@@ -735,3 +735,9 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-bindings
 == Test the partial Zen 5 model and instruction harness
 "$BUSTER_COMPILER" test-x86-zen5
+== Test Tier 1 integer truth round trips against native and instruction-shape oracles
+# #1218: the subject must compile at Tier 1 with no fallback, by both host paths. Clang builds the independent
+# execution oracle; objdump checks all branch-only fixtures for one comparison and no setcc materialization.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
+./build/test-driver-tier1-truth "$BUSTER_COMPILER" "$(command -v clang)"
