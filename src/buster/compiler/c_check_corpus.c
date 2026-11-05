@@ -698,6 +698,7 @@ static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
 static bool check_corpus_deferred_fail_merge;
+static bool check_corpus_deferred_fail_expressions;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_late_first;
@@ -838,6 +839,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     *path->deferred = (CheckDeferred){
                         .every_lane = check_corpus_deferred_every_lane,
                         .fail_after_replay = check_corpus_deferred_fail_merge,
+                        .fail_after_expressions = check_corpus_deferred_fail_expressions,
                         .hold_lanes = check_corpus_deferred_hold_lanes,
                         .late_first = check_corpus_deferred_late_first,
                         .scalar_merge = check_corpus_deferred_scalar_merge,
@@ -2521,6 +2523,11 @@ struct CheckCorpusOutcome
     bool deferred_claiming;
     uint32_t deferred_claimed;
     uint64_t deferred_copies;
+    uint64_t deferred_expression_parts;
+    uint64_t deferred_expression_parallel_tokens;
+    uint64_t deferred_expression_serial_tokens;
+    uint64_t deferred_expression_worker_mask;
+    bool deferred_expression_retry;
     uint64_t deferred_lanes_ns;
     uint64_t deferred_dispatch_ns;
     uint64_t deferred_wake_ns;
@@ -2598,6 +2605,11 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_claiming = outcome->deferred && paths[2].deferred->claiming;
     outcome->deferred_claimed = outcome->deferred ? paths[2].deferred->claimed : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
+    outcome->deferred_expression_parts = outcome->deferred ? paths[2].deferred->expression_parts : 0;
+    outcome->deferred_expression_parallel_tokens = outcome->deferred ? paths[2].deferred->expression_parallel_tokens : 0;
+    outcome->deferred_expression_serial_tokens = outcome->deferred ? paths[2].deferred->expression_serial_tokens : 0;
+    outcome->deferred_expression_worker_mask = outcome->deferred ? paths[2].deferred->expression_worker_mask : 0;
+    outcome->deferred_expression_retry = outcome->deferred && paths[2].deferred->expression_retry;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;
     outcome->deferred_dispatch_ns = outcome->deferred ? paths[2].deferred->dispatch_ns : 0;
     outcome->deferred_wake_ns = outcome->deferred ? paths[2].deferred->wake_ns : 0;
