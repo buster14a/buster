@@ -588,7 +588,10 @@ or such a sequence's definition phase, other than their own value's definition
 latter beside the opmask and xmm registers' rows). Every caller-saved register
 used to have a row in every function that called, used or not: in `sqlite3GetInt32`,
 64 of its 104 bytes. The tests check that the rows are exactly the registers the
-records store to (`tier1_emit_test_general_rows_used`).
+records store to (`tier1_emit_test_general_rows_used`). On the 9700X, Tier 1's
+frames went from 1.49× clang -O2's to 0.89× on `sqlite3.c`, and from 1.45× to
+0.89× on Lua, against Tier 0's 1.27× and 1.21× ([the
+record](https://github.com/buster14a/buster-performance/pull/260)).
 
 Where the allocation puts it in a callee-saved register,
 the prologue saves that register once instead (`tier1_emit_cfg_callee`). `rbp`
