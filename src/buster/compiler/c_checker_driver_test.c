@@ -6,6 +6,7 @@
 // --executable also tests the production command's default C route, independently of its explicit check command.
 
 #include "c_driver_compatibility_test.c"
+#include "c_driver_mixed_test.c"
 
 typedef struct CheckDriverFixture CheckDriverFixture;
 struct CheckDriverFixture
@@ -4061,7 +4062,8 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     check_test_expect(test, parallel_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
                       "an explicit driver command takes precedence over -E");
     free(text);
-    char* const end_options[] = { compiler, "--", "-E", source, NULL };
+    // Force C for this extensionless name: automatic classification treats unknown suffixes as linker inputs.
+    char* const end_options[] = { compiler, "-x", "c", "--", "-E", source, NULL };
     text = NULL;
     const int end_status = check_test_driver_spawn(end_options, &text);
     check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "can't read '-E'") != NULL &&
@@ -8316,6 +8318,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_expect(&test, driver_compatibility_tests(executable, clang) == 0, "CC dependency, stdin, probe and link-mode compatibility");
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_expect(&test, driver_mixed_tests(executable, clang) == 0, "mixed C, assembly, object and archive driver");
             }
             if (!lazy && check_test_driver_takes())
             {
