@@ -4,7 +4,7 @@
 // .github/workflows/9700x.yml's `evidence` and `record` jobs and its 9700X job's window step, and
 // .github/workflows/nightly-backfill.yml's coordinator (tools/ci/nightly.sh is the API and git glue around it).
 //
-//   nightly window --now EPOCH --bound SECONDS [--override REASON]   04:00-07:00 Europe/Madrid admission
+//   nightly window --now EPOCH --bound SECONDS [--override REASON]   02:00-08:00 Europe/Madrid admission
 //   nightly window-times --now EPOCH                                  the cycle's date, window start and deadline
 //   nightly hosted --commit SHA [--exclude RUN] < FACTS               reusable plain-row hosted qualification
 //   nightly record --output FILE                                      a run's coverage record, from the environment
@@ -72,9 +72,12 @@
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"
-// The window, in Europe/Madrid local time: hardware work starts at or after 04:00 and ends by 07:00.
-#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4
-#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7
+// The window, in Europe/Madrid local time: hardware work starts at or after 02:00 and ends by 08:00 (the owner's choice
+// on 2026-11-05, widened from 04:00-07:00). Spain changes its clocks at 02:00 local time, so the window opens at the
+// first instant the local time reaches 02:00 (nightly_madrid_first): 03:00 CEST when the clocks go forward, the first
+// 02:00 when they go back.
+#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2
+#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8
 // A cycle's snapshot is pinned no earlier than this hour of the evening before its window, Europe/Madrid local time
 // whatever the clocks do that night, so that the coordinator's earlier schedules, there for GitHub's hours-late
 // scheduled starts, pin nothing hours ahead.
@@ -423,8 +426,8 @@ static bool nightly_madrid(int64_t utc, NightlyLocal* local)
     return valid;
 }
 
-// The instant of a Madrid local date and time, which must exist (04:00 and 07:00 always do: Spain changes its clocks at
-// 02:00 and 03:00); day may overflow the month, as mktime normalizes it. False when the zone isn't Madrid's.
+// The instant of a Madrid local date and time, which must exist (00:00, 08:00, 12:00 and 22:00 always do: Spain changes
+// its clocks at 02:00 and 03:00); day may overflow the month, as mktime normalizes it. False when the zone isn't Madrid's.
 static bool nightly_madrid_instant(int year, int month, int day, int hour, int64_t* instant)
 {
     struct tm parts = {
@@ -438,6 +441,26 @@ static bool nightly_madrid_instant(int year, int month, int day, int hour, int64
     NightlyLocal check;
     *instant = (int64_t)result;
     return result != (time_t)-1 && nightly_madrid(*instant, &check) && check.hour == hour && check.minute == 0;
+}
+
+// The first instant of a Madrid local date whose local time is at or after hour:00, which exists every day: hour:00 itself
+// on an ordinary day, the hour after the gap when the clocks go forward, and the first of the two when they go back. The
+// date's midnight always exists, and its clock changes fall within an hour of hour:00, so a minute's scan of the three
+// hours around it finds it.
+static bool nightly_madrid_first(int year, int month, int day, int hour, int64_t* instant)
+{
+    int64_t midnight = 0;
+    NightlyLocal date;
+    bool valid = nightly_madrid_instant(year, month, day, 0, &midnight) && nightly_madrid(midnight, &date);
+    bool found = false;
+    for (int64_t t = midnight + (int64_t)(hour - 1) * 3600; valid && !found && t <= midnight + (int64_t)(hour + 1) * 3600; t += 60)
+    {
+        NightlyLocal local;
+        valid = nightly_madrid(t, &local);
+        found = valid && local.year == date.year && local.month == date.month && local.day == date.day && local.hour >= hour;
+        *instant = found ? t : *instant;
+    }
+    return valid && found;
 }
 
 typedef struct NightlyWindow NightlyWindow;
@@ -455,7 +478,7 @@ struct NightlyWindow
     const char* reason;
 };
 
-// Whether work that may take `bound` seconds can start at `now` and end by the cycle's 07:00.
+// Whether work that may take `bound` seconds can start at `now` and end by the cycle's 08:00.
 static NightlyWindow nightly_window(int64_t now, int64_t bound)
 {
     NightlyWindow window = { 0 };
@@ -467,13 +490,13 @@ static NightlyWindow nightly_window(int64_t now, int64_t bound)
         window.valid = nightly_madrid_instant(window.local.year, window.local.month, window.local.day + 1, 12, &tomorrow) && nightly_madrid(tomorrow, &cycle);
     }
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day - 1, BUSTER_NIGHTLY_PIN_HOUR, &window.pin);
-    window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_START_HOUR, &window.start);
+    window.valid = window.valid && nightly_madrid_first(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_START_HOUR, &window.start);
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_END_HOUR, &window.deadline);
     if (window.valid)
     {
         snprintf(window.cycle, sizeof(window.cycle), "%04d-%02d-%02d", cycle.year, cycle.month, cycle.day);
         window.open = now >= window.start && now < window.deadline && now + bound <= window.deadline;
-        window.reason = now < window.start ? "before 04:00 Europe/Madrid" : now >= window.deadline ? "at or after 07:00 Europe/Madrid" : !window.open ? "too late to finish by 07:00 Europe/Madrid" : "inside 04:00-07:00 Europe/Madrid";
+        window.reason = now < window.start ? "before 02:00 Europe/Madrid" : now >= window.deadline ? "at or after 08:00 Europe/Madrid" : !window.open ? "too late to finish by 08:00 Europe/Madrid" : "inside 02:00-08:00 Europe/Madrid";
     }
     else
     {
@@ -1723,12 +1746,12 @@ struct NightlyPlanInput
     int64_t lease;
     int64_t backlog_bound;
     int64_t snapshot_bound;
-    // A manual run's reason to admit hardware outside 04:00-07:00 Europe/Madrid (sanitized), or empty.
+    // A manual run's reason to admit hardware outside 02:00-08:00 Europe/Madrid (sanitized), or empty.
     const char* override;
     // First-parent states of the last fortnight before the epoch: out of scope, reported.
     uint32_t earlier;
     // The prepare job's steps: hosted preparations alone, never a hardware admission, which is the window job's, so that
-    // a step at or after 04:00 (or under an override) can't dispatch one the window job doesn't know of.
+    // a step at or after 02:00 (or under an override) can't dispatch one the window job doesn't know of.
     bool prepare_only;
 };
 
@@ -2017,10 +2040,10 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
 
     const char* phase = input->now < cycle->window.start ? "before the window" : input->now < cycle->window.deadline ? "inside the window" : "after the window";
     fprintf(report, "## Nightly main measurements: cycle %s\n\n", cycle->date);
-    fprintf(report, "Mode: **%s**. Europe/Madrid time %02d:%02d %s, %s (04:00 to 07:00).\n\n", input->run ? "run" : "dry run (nothing dispatched)", cycle->window.local.hour, cycle->window.local.minute, cycle->window.local.zone, phase);
+    fprintf(report, "Mode: **%s**. Europe/Madrid time %02d:%02d %s, %s (02:00 to 08:00).\n\n", input->run ? "run" : "dry run (nothing dispatched)", cycle->window.local.hour, cycle->window.local.minute, cycle->window.local.zone, phase);
     if (input->run && input->override != NULL && input->override[0] != 0)
     {
-        fprintf(report, "**Override**: hardware is admitted outside 04:00 to 07:00 Europe/Madrid, for: %s.\n\n", input->override);
+        fprintf(report, "**Override**: hardware is admitted outside 02:00 to 08:00 Europe/Madrid, for: %s.\n\n", input->override);
     }
     fprintf(report, "Snapshot: `%s`%s, the newest of %lld first-parent states in scope, from `%.12s`, the epoch: the main commit that added the nightly worker.", states->items[scope].sha, cycle->pinned_now ? ", pinned now" : ", pinned earlier this cycle", (long long)scope + 1, states->items[0].sha);
     fprintf(report, " The %u first-parent states of the last fortnight before it are out of scope: their workflow can't run as a nightly worker, and their coverage is what their pushes and the old daily run measured.\n", input->earlier);
@@ -2107,7 +2130,9 @@ static bool nightly_fits(const NightlyPlanInput* input, const NightlyCycleState*
 // would-cancel, prune or would-prune, alert), then exactly one `wait` or `done` line; the report to `report`. Before
 // the window it prepares (the snapshot's daily hosted run, the hosted rows of the states without them); inside it, it
 // admits one hardware run at a time: the snapshot's comprehensive run while it fits, then the oldest ready state,
-// keeping room for the snapshot while its hosted qualification is in flight. Nothing waits for a slot past 07:00.
+// keeping room for the snapshot while its hosted qualification is in flight. Nothing waits for a slot past 08:00, and
+// a step with a hardware run in flight ends the job once no backlog run could follow it before 08:00: the window job
+// then fits GitHub's six hours, and the run in flight ends by 08:00 under its own bound.
 static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* report)
 {
     NightlyCycleState cycle = {
@@ -2216,6 +2241,11 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             verdict = "prepared; the window job admits hardware";
             done = true;
         }
+        else if (inside && cycle.admit_in_flight && !nightly_fits(input, &cycle, now, input->backlog_bound))
+        {
+            verdict = "a hardware run is in flight, and no more hardware work fits before 08:00";
+            done = true;
+        }
         else if (inside && cycle.admit_in_flight)
         {
             verdict = "a hardware run is in flight";
@@ -2262,7 +2292,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             {
                 if (target >= 0)
                 {
-                    cycle.substitute_reason = "the comprehensive run no longer fits before 07:00";
+                    cycle.substitute_reason = "the comprehensive run no longer fits before 08:00";
                     cycle.substitute = -1;
                     snapshot_pending = false;
                 }
@@ -2293,7 +2323,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 }
                 else
                 {
-                    verdict = next >= 0 || preparing || waiting ? "no more hardware work fits before 07:00" : "no admissible work remains";
+                    verdict = next >= 0 || preparing || waiting ? "no more hardware work fits before 08:00" : "no admissible work remains";
                     done = true;
                 }
             }
@@ -2379,39 +2409,42 @@ static void nightly_test_window(NightlyTest* test)
         disagreements += nightly_madrid(t + 1799, &local) ? local.offset != nightly_eu_offset(t + 1799) : 1;
     }
     nightly_expect(test, disagreements == 0, "Europe/Madrid follows the EU rule from 2026 to 2030");
-    // Summer: 04:00 CEST is 02:00 UTC; winter: 04:00 CET is 03:00 UTC.
-    const int64_t summer = 1784080800;
-    nightly_expect(test, nightly_window(summer, 0).open, "04:00 CEST (02:00 UTC, 2026-07-15) is inside");
-    nightly_expect(test, !nightly_window(summer - 60, 0).open, "03:59 CEST is before the window");
-    nightly_expect(test, nightly_window(summer + 3 * 3600 - 1, 0).open, "06:59:59 CEST is inside with no bound");
-    nightly_expect(test, nightly_window(summer + 3 * 3600 - 1, 1).open && !nightly_window(summer + 3 * 3600 - 1, 2).open, "06:59:59 CEST has one second left");
-    nightly_expect(test, !nightly_window(summer + 3 * 3600, 0).open, "07:00 CEST is after the window");
-    const int64_t winter = 1768446000;
-    nightly_expect(test, nightly_window(winter, 0).open, "04:00 CET (03:00 UTC, 2026-01-15) is inside");
-    nightly_expect(test, !nightly_window(winter - 3600, 0).open, "02:00 UTC in winter is 03:00 CET, before the window");
-    // The days the clocks change, at 01:00 UTC: the window's hours are local ones either side.
-    nightly_expect(test, nightly_window(1774749600, 0).open && !nightly_window(1774749600 - 60, 0).open, "2026-03-29: 04:00 CEST is 02:00 UTC");
-    nightly_expect(test, nightly_window(1792897200, 0).open && !nightly_window(1792897200 - 60, 0).open, "2026-10-25: 04:00 CET is 03:00 UTC");
-    nightly_expect(test, nightly_test_madrid(2026, 3, 29, 4, 0) == 1774749600 && nightly_test_madrid(2026, 10, 25, 4, 0) == 1792897200, "local 04:00 on the change days");
+    // Summer: 02:00 CEST is 00:00 UTC; winter: 02:00 CET is 01:00 UTC.
+    const int64_t summer = 1784073600;
+    nightly_expect(test, nightly_window(summer, 0).open, "02:00 CEST (00:00 UTC, 2026-07-15) is inside");
+    nightly_expect(test, !nightly_window(summer - 60, 0).open, "01:59 CEST is before the window");
+    nightly_expect(test, nightly_window(summer + 6 * 3600 - 1, 0).open, "07:59:59 CEST is inside with no bound");
+    nightly_expect(test, nightly_window(summer + 6 * 3600 - 1, 1).open && !nightly_window(summer + 6 * 3600 - 1, 2).open, "07:59:59 CEST has one second left");
+    nightly_expect(test, !nightly_window(summer + 6 * 3600, 0).open, "08:00 CEST is after the window");
+    const int64_t winter = 1768438800;
+    nightly_expect(test, nightly_window(winter, 0).open, "02:00 CET (01:00 UTC, 2026-01-15) is inside");
+    nightly_expect(test, !nightly_window(winter - 3600, 0).open, "00:00 UTC in winter is 01:00 CET, before the window");
+    // The nights the clocks change at 01:00 UTC, at 02:00 local time: when they go forward (2026-03-29), 02:00 doesn't
+    // exist and the window opens at 03:00 CEST; when they go back (2026-10-25), it opens at the first of the two
+    // 02:00s, 02:00 CEST, and the second, 02:00 CET, is inside. Six hours, five and seven.
+    nightly_expect(test, nightly_window(1774746000, 0).open && !nightly_window(1774746000 - 60, 0).open, "2026-03-29: the window opens at 03:00 CEST, 01:00 UTC; 01:59 CET is before it");
+    nightly_expect(test, nightly_window(1774746000, 0).start == 1774746000 && nightly_window(1774746000, 0).deadline == nightly_test_madrid(2026, 3, 29, 8, 0) && nightly_window(1774746000, 0).deadline - 1774746000 == 5 * 3600, "2026-03-29: five hours, to 08:00 CEST");
+    nightly_expect(test, nightly_window(1792886400, 0).open && !nightly_window(1792886400 - 60, 0).open, "2026-10-25: the window opens at the first 02:00, 02:00 CEST, 00:00 UTC; 01:59 CEST is before it");
+    nightly_expect(test, nightly_window(1792886400 + 3600, 0).open && nightly_window(1792886400, 0).deadline - 1792886400 == 7 * 3600, "2026-10-25: the second 02:00, 02:00 CET, is inside; seven hours, to 08:00 CET");
     // A run whose bound doesn't fit is refused: a late or delayed start, and a lock wait that crossed the deadline.
-    const int64_t morning = nightly_test_madrid(2026, 11, 4, 6, 30);
-    nightly_expect(test, nightly_window(morning, 25 * 60).open, "06:30 with 25 minutes ends by 07:00");
-    nightly_expect(test, !nightly_window(morning + 10 * 60, 25 * 60).open, "06:40 with 25 minutes doesn't");
+    const int64_t morning = nightly_test_madrid(2026, 11, 4, 7, 30);
+    nightly_expect(test, nightly_window(morning, 25 * 60).open, "07:30 with 25 minutes ends by 08:00");
+    nightly_expect(test, !nightly_window(morning + 10 * 60, 25 * 60).open, "07:40 with 25 minutes doesn't");
     nightly_expect(test, !nightly_window(nightly_test_madrid(2026, 11, 4, 9, 23), 0).open, "a scheduled run delayed to 09:23 is refused");
     // The cycle: from noon, the next night's; before noon, this morning's.
     NightlyWindow evening = nightly_window(nightly_test_madrid(2026, 11, 3, 22, 7), 0);
-    nightly_expect(test, evening.valid && strcmp(evening.cycle, "2026-11-04") == 0 && evening.start == nightly_test_madrid(2026, 11, 4, 4, 0), "22:07 prepares for the next morning");
-    NightlyWindow after = nightly_window(nightly_test_madrid(2026, 11, 4, 7, 17), 0);
-    nightly_expect(test, after.valid && strcmp(after.cycle, "2026-11-04") == 0 && !after.open && after.deadline < nightly_test_madrid(2026, 11, 4, 7, 17), "07:17 reports the morning's cycle");
+    nightly_expect(test, evening.valid && strcmp(evening.cycle, "2026-11-04") == 0 && evening.start == nightly_test_madrid(2026, 11, 4, 2, 0), "22:07 prepares for the next morning");
+    NightlyWindow after = nightly_window(nightly_test_madrid(2026, 11, 4, 8, 17), 0);
+    nightly_expect(test, after.valid && strcmp(after.cycle, "2026-11-04") == 0 && !after.open && after.deadline < nightly_test_madrid(2026, 11, 4, 8, 17), "08:17 reports the morning's cycle");
     NightlyWindow year_end = nightly_window(nightly_test_madrid(2026, 12, 31, 23, 0), 0);
     nightly_expect(test, year_end.valid && strcmp(year_end.cycle, "2027-01-01") == 0, "the cycle rolls over the year");
-    // The pin is the evening before at 22:00 local time, whatever the clocks do that night: 6 hours before the window
-    // on an ordinary night, 5 when the clocks go forward, 7 when they go back.
-    nightly_expect(test, evening.pin == nightly_test_madrid(2026, 11, 3, 22, 0) && evening.start - evening.pin == 6 * 3600, "an ordinary night pins from 22:00, 6 hours ahead");
+    // The pin is the evening before at 22:00 local time, whatever the clocks do that night: 4 hours before the window
+    // every night, since the window opens after the clocks change (03:00 CEST, or the first 02:00).
+    nightly_expect(test, evening.pin == nightly_test_madrid(2026, 11, 3, 22, 0) && evening.start - evening.pin == 4 * 3600, "an ordinary night pins from 22:00, 4 hours ahead");
     NightlyWindow spring = nightly_window(nightly_test_madrid(2027, 3, 27, 21, 30), 0);
-    nightly_expect(test, spring.valid && strcmp(spring.cycle, "2027-03-28") == 0 && spring.pin == nightly_test_madrid(2027, 3, 27, 22, 0) && spring.start - spring.pin == 5 * 3600, "2027-03-27 pins from 22:00 CET, 5 hours before 04:00 CEST");
+    nightly_expect(test, spring.valid && strcmp(spring.cycle, "2027-03-28") == 0 && spring.pin == nightly_test_madrid(2027, 3, 27, 22, 0) && spring.start - spring.pin == 4 * 3600, "2027-03-27 pins from 22:00 CET, 4 hours before 03:00 CEST");
     NightlyWindow autumn = nightly_window(nightly_test_madrid(2026, 10, 24, 22, 7), 0);
-    nightly_expect(test, autumn.valid && strcmp(autumn.cycle, "2026-10-25") == 0 && autumn.pin == nightly_test_madrid(2026, 10, 24, 22, 0) && autumn.start - autumn.pin == 7 * 3600, "2026-10-24 pins from 22:00 CEST, 7 hours before 04:00 CET");
+    nightly_expect(test, autumn.valid && strcmp(autumn.cycle, "2026-10-25") == 0 && autumn.pin == nightly_test_madrid(2026, 10, 24, 22, 0) && autumn.start - autumn.pin == 4 * 3600, "2026-10-24 pins from 22:00 CEST, 4 hours before the first 02:00");
     NightlyWindow month_start = nightly_window(nightly_test_madrid(2026, 11, 30, 23, 0), 0);
     nightly_expect(test, month_start.valid && strcmp(month_start.cycle, "2026-12-01") == 0 && month_start.pin == nightly_test_madrid(2026, 11, 30, 22, 0), "a cycle on the first of a month pins from the last day's 22:00");
 }
@@ -3139,7 +3172,7 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_expect(test, nightly_has(scenario, line), "the snapshot's daily hosted run is prepared first");
     snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t20261104.900.2.defer\t%s\n", scenario->states.items[0].sha, scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 3, "the oldest states' hosted rows are prepared, three at a time");
-    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 04:00");
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 02:00");
     nightly_scenario_free(scenario);
 
     // The earlier schedules' steps, there for hours-late scheduled starts: before 22:00 the cycle pins and dispatches
@@ -3186,6 +3219,10 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_flying(scenario, 300, "snapshot", "admit", 5, "20261104.900.1.admit", opening);
     nightly_scenario_plan(scenario, opening + 60);
     nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "wait\ta hardware run is in flight"), "one hardware run at a time");
+    // Once no backlog run could follow the one in flight before 08:00, the job ends instead of waiting (GitHub's six
+    // hours for the window job); the run in flight ends by 08:00 under its own bound.
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 40));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\ta hardware run is in flight, and no more hardware work fits before 08:00"), "a run in flight with no room after it ends the job");
     // A lost lease is cancelled.
     nightly_scenario_plan(scenario, opening + 7300);
     nightly_expect(test, nightly_has(scenario, "cancel\t300\tlease-expired"), "an admitted run past its lease is cancelled");
@@ -3199,12 +3236,12 @@ static void nightly_test_plan(NightlyTest* test)
     snprintf(line, sizeof(line), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[1].sha);
     nightly_expect(test, nightly_has(scenario, line), "a blocked state doesn't starve the next; a later completion doesn't skip an earlier gap");
     nightly_expect(test, strstr(scenario->report, "| blocked-hosted | 1 |") != NULL && strstr(scenario->report, "| complete | 2 |") != NULL, "the report counts blocks and completions");
-    // Late: nothing fits before 07:00.
-    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 6, 50));
-    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tno more hardware work fits before 07:00"), "nothing is admitted that can't finish by 07:00");
+    // Late: nothing fits before 08:00.
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 50));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tno more hardware work fits before 08:00"), "nothing is admitted that can't finish by 08:00");
     // After the window: report alone.
-    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 17));
-    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tthe window has closed"), "after 07:00 nothing is dispatched");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 8, 17));
+    nightly_expect(test, nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tthe window has closed"), "after 08:00 nothing is dispatched");
     // A dry run dispatches nothing.
     scenario->dry_run = true;
     nightly_scenario_plan(scenario, opening + 1800);
@@ -3377,7 +3414,7 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_row(scenario, 100, 0, NIGHTLY_PURPOSE_PUSH, "", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_PLAIN, NIGHTLY_OUTCOME_COMPLETE);
     nightly_scenario_cycle(scenario, "2026-11-04", 3);
     nightly_scenario_flying(scenario, 400, "snapshot", "defer", 3, "20261104.900.1.defer", opening - 600);
-    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 6, 20));
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 7, 20));
     nightly_expect(test, nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "wait\tthe snapshot's hosted qualification is in flight"), "a backlog run doesn't take the waiting snapshot's room");
     nightly_scenario_plan(scenario, opening);
     snprintf(line, sizeof(line), "dispatch\tbacklog\tadmit\t%s\t", scenario->states.items[0].sha);

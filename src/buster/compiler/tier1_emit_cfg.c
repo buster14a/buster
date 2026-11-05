@@ -1324,7 +1324,7 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER && tier1_emit_cfg_vector_location(location))
     {
         source = (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
-        form = tier1_select_class_forms(emitted->prepared.sizes[value], emitted->prepared.vex)->store;
+        form = tier1_select_class_forms(emitted->prepared.sizes[value], tier1_emit_encoding(&emitted->prepared))->store;
     }
     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
     {
@@ -1609,10 +1609,10 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         const bool vector = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_VECTOR;
         const bool from_vector = from - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
         const bool to_vector = to - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
-        const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, emitted->prepared.vex);
+        const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, tier1_emit_encoding(&emitted->prepared));
         if (vector && from_vector && to_vector)
         {
-            records[record_count++] = tier1_select_class_move((uint8_t)(to & 15), (uint8_t)(from & 15), width, emitted->prepared.vex);
+            records[record_count++] = tier1_select_class_move((uint8_t)(to & 15), (uint8_t)(from & 15), width, tier1_emit_encoding(&emitted->prepared));
         }
         else if (vector && from_vector && tier1_emit_cfg_slot(emitted, to, &offset))
         {
@@ -1987,7 +1987,7 @@ static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function,
             error = tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
         }
     }
-    const X86Instruction load = { .form = tier1_select_class_forms(width, holes->vex)->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
+    const X86Instruction load = { .form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
     error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
@@ -2307,6 +2307,8 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     // A target without AVX512VL (#1281) has no EVEX move of an xmm or a ymm register, and one without AVX512F no register
     // past xmm15 at all; one with AVX512F but not VL (Knights Landing's) has zmm16 and on and EVEX's 512-bit moves.
     const bool vex = emitted->prepared.vex;
+    // Its moves' encoding: a legacy SSE target's 16-byte vectors move by movaps (#141's SSE targets).
+    const uint32_t encoding = tier1_emit_encoding(&emitted->prepared);
     bool narrow = false;
     for (uint32_t j = 0; error == TIER1_EMIT_OK && j <= row->operand_count; j += 1)
     {
@@ -2532,7 +2534,7 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
             // parameter's or a call result's, whose upper lanes the convention leaves undefined), which every vector
             // field reads past, so it never stays in its own register. Both by VEX forms at a target without AVX512VL.
             records[count] = row->operand_bytes[j] < 16 ? tier1_select_carrier_move(reg, own, row->operand_bytes[j], vex) :
-                                                          tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j], vex)->move, reg, own);
+                                                          tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j], encoding)->move, reg, own);
             count += moved;
             moves += moved;
         }
@@ -2615,7 +2617,7 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         moves += 1;
         const uint8_t vector_destination = (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
         records[count++] = tier0_class_vector(result_class) && row->result_bytes < 16 ? tier1_select_carrier_move(vector_destination, result_register, row->result_bytes, vex) :
-                           tier0_class_vector(result_class)   ? tier1_select_register_record(tier1_select_vector_forms(row->result_bytes, vex)->move, vector_destination, result_register) :
+                           tier0_class_vector(result_class)   ? tier1_select_register_record(tier1_select_vector_forms(row->result_bytes, encoding)->move, vector_destination, result_register) :
                            tier0_class_floating(result_class) ? tier1_emit_cfg_row_float_move(vector_destination, result_register) :
                            tier0_class_mask(result_class)     ? tier1_select_register_record(tier1_select_mask_forms(row->result_bytes)->move, (uint8_t)(destination - BUSTER_TIER1_EMIT_MASK_LOCATION), result_register) :
                                                                 tier1_select_move(tier0_class_bytes(result_class) == 8 ? 8 : 4, destination, result_register);
@@ -2792,6 +2794,7 @@ static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const 
     holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(&emitted->frame) : holes.scale;
     holes.vex = emitted->prepared.vex;
     holes.avx2 = emitted->prepared.avx2;
+    holes.sse = emitted->prepared.sse;
     return holes;
 }
 
@@ -3363,7 +3366,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                                 .reg = (uint8_t)x,
                                 .rm = (uint8_t)emitted->frame.base_register,
                                 .mode = BUSTER_X86_MEMORY_BASE,
-                                .form = emitted->prepared.vector_bytes != 0 ? (pass == 0 ? tier1_select_class_forms(emitted->prepared.vector_bytes, emitted->prepared.vex)->store : tier1_select_class_forms(emitted->prepared.vector_bytes, emitted->prepared.vex)->load) :
+                                .form = emitted->prepared.vector_bytes != 0 ? (pass == 0 ? tier1_select_class_forms(emitted->prepared.vector_bytes, tier1_emit_encoding(&emitted->prepared))->store : tier1_select_class_forms(emitted->prepared.vector_bytes, tier1_emit_encoding(&emitted->prepared))->load) :
                                         pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
                             };
                             error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
@@ -3726,6 +3729,8 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     // VEX ones, and machine rows their roles below xmm16.
     emitted->prepared.vex = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_X_XM128);
     emitted->prepared.avx2 = x86_target_form_allowed(allowed_forms, X86_FORM_VPCMPEQD_Y_Y_YM256);
+    // A target without AVX (#141's SSE targets) allows no VEX move of an xmm register.
+    emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
     Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
     if (error == TIER1_EMIT_OK)

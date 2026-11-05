@@ -15,7 +15,10 @@
 // displacement is a relocation's (a tail call's, which reads as a jump to the next instruction before it is linked)
 // leaves the function. Each push and `sub rsp, imm`
 // (or `lea rsp, [rsp - imm]`) adds, each pop and `add rsp, imm` takes back, and `mov rsp, rbp` (or `lea rsp, [rbp +
-// imm]`, or `leave`) goes back to the depth `mov rbp, rsp` set rbp at. The frame is the most a depth reaches, so a
+// imm]`, or `leave`) goes back to the depth `mov rbp, rsp` set rbp at on that path (#1415's review: rbp's depth is each
+// instruction's too, along the edges, so two paths may set it at different depths; where they join with different ones,
+// or one set it and the other didn't, rbp is no depth there, and only a move of rsp back from it is unresolved; `leave`
+// and `pop rbp` give rbp back). The frame is the most a depth reaches, so a
 // prologue after an early return (as clang's shrink-wrapping places it) counts, and an early return's epilogue takes
 // nothing from another path's frame. A dynamic allocation (`sub rsp, reg`) and the moves of rsp that restore one count
 // nothing; a realignment (`and rsp, -imm`) is its alignment apart; whether the function sets a frame pointer (`mov rbp,
@@ -27,7 +30,7 @@
 //   an indirect jump leaves; without an indirect jump, such code is unreachable (padding, or after a call that doesn't
 //   return) and counts nothing;
 // - unresolved: two predecessors leave different depths, a path pops past its return address, or it moves rsp back to an
-//   rbp it never set. Its frame is the most it found.
+//   rbp it never set, or that paths joined with at different depths. Its frame is the most it found.
 // A function whose code doesn't decode whole is also partial, its frame what decoded. With --functions, a line per
 // function:
 //
@@ -42,8 +45,10 @@
 #include <elf.h>
 
 #define BUSTER_FRAME_MEASURE_FILES 8
-// No depth yet: an instruction no path has reached.
+// No depth yet: an instruction no path has reached, or an rbp no `mov rbp, rsp` set.
 #define BUSTER_FRAME_MEASURE_UNSET INT64_MIN
+// An rbp that paths joined with at different depths (or set on one and not the other): no depth.
+#define BUSTER_FRAME_MEASURE_CONFLICT (INT64_MIN + 1)
 
 typedef enum FrameMeasureState
 {
@@ -78,8 +83,9 @@ struct FrameMeasureFile
     uint32_t count;
 };
 
-// The depth after one instruction from `depth` before it (the file's comment). *rbp is the depth `mov rbp, rsp` set
-// rbp at (UNSET before), *unresolved set where rsp goes back to an unset rbp or rbp is set at two depths.
+// The depth after one instruction from `depth` before it (the file's comment). *rbp is the depth `mov rbp, rsp` set rbp
+// at on this path, before the instruction and after it (UNSET where none did, CONFLICT where joined paths disagree);
+// *unresolved set where rsp goes back to an rbp of no depth.
 static int64_t frame_measure_step(const X86Instruction* instruction, int64_t depth, int64_t* rbp, bool* unresolved, FrameMeasureFunction* function)
 {
     const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
@@ -98,21 +104,24 @@ static int64_t frame_measure_step(const X86Instruction* instruction, int64_t dep
     // memory's and the flags'.
     const bool push = form == X86_FORM_PUSH_R64 || form == X86_FORM_PUSH_IMM8 || form == X86_FORM_PUSH_IMM32 || form == X86_FORM_PUSH_RM64 || form == X86_FORM_PUSHFQ;
     const bool pop = form == X86_FORM_POP_R64 || form == X86_FORM_POPFQ;
+    // `pop rbp` and `leave` give rbp back to the caller's: no depth of this frame after them.
+    const bool restore_rbp = (form == X86_FORM_POP_R64 && instruction->rm == X86_REGISTER_RBP) || form == X86_FORM_LEAVE;
     int64_t result = depth;
     result += push ? 8 : pop ? -8 : 0;
     result += sub ? instruction->immediate : add ? -(int64_t)instruction->immediate : lea && instruction->rm == X86_REGISTER_RSP ? -(int64_t)instruction->displacement : 0;
     if (set_rbp)
     {
-        *unresolved |= *rbp != BUSTER_FRAME_MEASURE_UNSET && *rbp != depth;
         *rbp = depth;
         function->pointer = true;
     }
     if (from_rbp)
     {
         // leave is `mov rsp, rbp` then `pop rbp`; `lea rsp, [rbp + imm]` is rbp's depth less imm.
-        *unresolved |= *rbp == BUSTER_FRAME_MEASURE_UNSET;
-        result = *rbp == BUSTER_FRAME_MEASURE_UNSET ? depth : form == X86_FORM_LEAVE ? *rbp - 8 : lea ? *rbp - instruction->displacement : *rbp;
+        const bool known = *rbp != BUSTER_FRAME_MEASURE_UNSET && *rbp != BUSTER_FRAME_MEASURE_CONFLICT;
+        *unresolved |= !known;
+        result = !known ? depth : form == X86_FORM_LEAVE ? *rbp - 8 : lea ? *rbp - instruction->displacement : *rbp;
     }
+    *rbp = restore_rbp ? BUSTER_FRAME_MEASURE_UNSET : *rbp;
     const uint32_t realignment = align ? (uint32_t)-(int64_t)instruction->immediate : 0;
     function->alignment = realignment > function->alignment ? realignment : function->alignment;
     return result;
@@ -133,22 +142,28 @@ static uint32_t frame_measure_find(const X86Decoded* decoded, uint32_t count, in
     return low < count && (int64_t)decoded[low].offset == offset ? low : count;
 }
 
-// The depth `depth` given to instruction `s` (below `count`), which work's `pending` entries list until they are
-// stepped: where it already has another, the function is unresolved and the deeper one goes on.
-static void frame_measure_reach(int64_t* depths, uint32_t* work, uint32_t* pending, uint32_t s, uint32_t count, int64_t depth, bool* unresolved)
+// The depth `depth` and rbp's `rbp` given to instruction `s` (below `count`), which work's `pending` entries list until
+// they are stepped: where it already has another depth, the function is unresolved and the deeper one goes on; where it
+// already has another rbp, rbp is CONFLICT there, and goes on once more.
+static void frame_measure_reach(int64_t* depths, int64_t* rbps, uint32_t* work, uint32_t* pending, uint32_t s, uint32_t count, int64_t depth, int64_t rbp,
+                                bool* unresolved)
 {
     if (s < count && depths[s] == BUSTER_FRAME_MEASURE_UNSET)
     {
         depths[s] = depth;
+        rbps[s] = rbp;
         work[*pending] = s;
         *pending += 1;
     }
-    else if (s < count && depths[s] != depth)
+    else if (s < count)
     {
-        *unresolved = true;
-        if (depth > depths[s])
+        *unresolved |= depths[s] != depth;
+        const bool deeper = depth > depths[s];
+        const bool conflict = rbps[s] != rbp && rbps[s] != BUSTER_FRAME_MEASURE_CONFLICT;
+        depths[s] = deeper ? depth : depths[s];
+        rbps[s] = conflict ? BUSTER_FRAME_MEASURE_CONFLICT : rbps[s];
+        if (deeper || conflict)
         {
-            depths[s] = depth;
             work[*pending] = s;
             *pending += 1;
         }
@@ -182,10 +197,11 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
     const uint64_t mark = scratch->length;
     X86Decoded* decoded = BUSTER_ARENA_PUSH_ARRAY(scratch, X86Decoded, size + 1);
     int64_t* depths = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, size + 1);
-    // The work list: each step takes one entry and gives at most two, and the steps stop past 2 * size + 2, so it never
-    // holds more than 2 * size + 4 (a seed's among them).
+    int64_t* rbps = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, size + 1);
+    // The work list: each step takes one entry and gives at most two, and the steps stop past 3 * size + 3, so it never
+    // holds more than 3 * size + 5 (a seed's among them).
     uint32_t* work = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 4 * size + 8);
-    const bool ready = decoded != NULL && depths != NULL && work != NULL;
+    const bool ready = decoded != NULL && depths != NULL && rbps != NULL && work != NULL;
     uint32_t count = 0;
     uint64_t consumed = 0;
     bool decoding = ready;
@@ -206,23 +222,25 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
         depths[i] = BUSTER_FRAME_MEASURE_UNSET;
     }
     int64_t most = 0;
-    int64_t rbp = BUSTER_FRAME_MEASURE_UNSET;
-    // The deepest depth an indirect jump leaves, which code no edge reaches takes.
+    // The deepest depth an indirect jump leaves, which code no edge reaches takes, and rbp's there (CONFLICT where two
+    // indirect jumps leave different ones).
     int64_t indirect = BUSTER_FRAME_MEASURE_UNSET;
+    int64_t indirect_rbp = BUSTER_FRAME_MEASURE_UNSET;
     bool unresolved = false;
     bool assumed = false;
     uint32_t pending = 0;
     uint32_t steps = 0;
-    frame_measure_reach(depths, work, &pending, 0, count, 0, &unresolved);
+    frame_measure_reach(depths, rbps, work, &pending, 0, count, 0, BUSTER_FRAME_MEASURE_UNSET, &unresolved);
     uint32_t unreached = 0;
-    // A depth only rises, and a function is unresolved once one does, so the steps are bounded; past twice the edges, the
-    // work stops, unresolved.
-    while (pending != 0 && steps <= 2 * size + 2)
+    // A depth only rises, and a function is unresolved once one does, and an rbp changes at most once more, to CONFLICT,
+    // so the steps are bounded; past three times the instructions' bytes, the work stops, unresolved.
+    while (pending != 0 && steps <= 3 * size + 3)
     {
         pending -= 1;
         steps += 1;
         const uint32_t i = work[pending];
         const X86Instruction* instruction = &decoded[i].instruction;
+        int64_t rbp = rbps[i];
         const int64_t after = frame_measure_step(instruction, depths[i], &rbp, &unresolved, &result);
         unresolved |= after < 0;
         most = after > most ? after : most;
@@ -233,14 +251,17 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
         const bool on = control != BUSTER_X86_CONTROL_JUMP && control != BUSTER_X86_CONTROL_RETURN && control != BUSTER_X86_CONTROL_TRAP;
         if (control == BUSTER_X86_CONTROL_JUMP && !relative)
         {
+            const bool first = indirect == BUSTER_FRAME_MEASURE_UNSET;
+            indirect_rbp = first || indirect_rbp == rbp ? rbp : BUSTER_FRAME_MEASURE_CONFLICT;
             indirect = after > indirect ? after : indirect;
         }
         // A target outside the function (a tail call's) is no edge of it, nor a relocated displacement's.
         const int64_t goal = (int64_t)decoded[i].offset + decoded[i].length + instruction->displacement;
         const uint64_t field = start + decoded[i].offset + decoded[i].length - x86_form_descriptions[form].relative_bytes;
         const bool external = relative && frame_measure_relocated(relocations, relocation_count, field);
-        frame_measure_reach(depths, work, &pending, transfer && relative && !external ? frame_measure_find(decoded, count, goal) : count, count, after, &unresolved);
-        frame_measure_reach(depths, work, &pending, on ? i + 1 : count, count, after, &unresolved);
+        frame_measure_reach(depths, rbps, work, &pending, transfer && relative && !external ? frame_measure_find(decoded, count, goal) : count, count, after, rbp,
+                            &unresolved);
+        frame_measure_reach(depths, rbps, work, &pending, on ? i + 1 : count, count, after, rbp, &unresolved);
         // Once every path is done, code no edge reached takes an indirect jump's depth, a run at a time; padding (nops,
         // `xchg ax, ax` the 2-byte one among them, and traps, as after an unconditional jump to align a loop's head)
         // takes none, whatever it falls into.
@@ -252,7 +273,7 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
             const bool padding = (effects->kinds >> 4) == BUSTER_X86_CONTROL_TRAP || effects->operation == X86_OPERATION_NOP || xchg_nop;
             if (depths[unreached] == BUSTER_FRAME_MEASURE_UNSET && !padding)
             {
-                frame_measure_reach(depths, work, &pending, unreached, count, indirect, &unresolved);
+                frame_measure_reach(depths, rbps, work, &pending, unreached, count, indirect, indirect_rbp, &unresolved);
                 assumed = true;
             }
             unreached += 1;

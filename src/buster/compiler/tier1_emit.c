@@ -182,6 +182,9 @@ struct Tier1EmitPrepared
     // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
     // (Tier1SelectHoles.avx2).
     bool avx2;
+    // The target has no AVX (#141's SSE targets: the x86-64 baseline and x86-64-v2; `vex` is set too): its 16-byte
+    // vectors move, spill and compute by legacy SSE's forms (Tier1SelectHoles.sse, BUSTER_TIER1_ENCODING_SSE).
+    bool sse;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other
@@ -191,6 +194,12 @@ struct Tier1EmitPrepared
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
 };
+
+// The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
+static uint32_t tier1_emit_encoding(const Tier1EmitPrepared* prepared)
+{
+    return prepared->sse ? BUSTER_TIER1_ENCODING_SSE : prepared->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX;
+}
 
 // A machine row's placement as the CFG consumer claims it (#1284, tier1_emit_cfg_row): each of its roles' register, by
 // role, and the registers its records name by number renamed (k's at k). Untrusted: the code's certificate places the
@@ -672,7 +681,7 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     const bool mask = class == BUSTER_TIER1_ALLOCATE_MASK;
     const bool vector = class == BUSTER_TIER1_ALLOCATE_VECTOR;
     const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
-    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, prepared->vex);
+    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, tier1_emit_encoding(prepared));
     const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],
@@ -1056,14 +1065,18 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     // The register arguments into their registers, each where its place says (tier1_select_next_place, #141): the
     // integers and pointers into the general argument registers, and an indirect call's callee, its effective use after
-    // the arguments, into R10, which no argument takes, as one parallel move through the scratch register; the floating
+    // the arguments, into R10, which no argument takes but a static chain, as one parallel move through the scratch
+    // register; the floating
     // values into xmm0 to xmm7, as another through the vector class's. A move doesn't overwrite a source before it is
     // read. The arguments past their classes' registers are the CFG consumer's, which stores them first
     // (tier1_emit_cfg_stack_argument): `argument_registers` holds a location for the others alone (a general register's
     // number, or an xmm register's BUSTER_TIER1_EMIT_VECTOR_LOCATION + n), and the callee's at the arguments' count.
+    // A static chain (#148) is a general argument in r10, and its indirect call's callee goes to rax instead
+    // (tier1_select_callee_register).
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
-    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 1];
-    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 1];
+    const uint8_t callee = tier1_select_callee_register(function, call);
+    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
+    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
     uint32_t vector_sources[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t vector_destinations[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t general = 0;
@@ -1130,7 +1143,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     if (indirect)
     {
         sources[general] = argument_registers[call->argument_count];
-        destinations[general] = X86_REGISTER_R10;
+        destinations[general] = callee;
         general += 1;
     }
     const Tier1ParallelMoves moves = {
@@ -1224,7 +1237,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     if (error == TIER1_EMIT_OK && indirect)
     {
-        error = tier1_emit_append(buffer, (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = X86_REGISTER_R10 }) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append(buffer, (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = callee }) ? error : TIER1_EMIT_MEMORY;
     }
     else if (error == TIER1_EMIT_OK)
     {

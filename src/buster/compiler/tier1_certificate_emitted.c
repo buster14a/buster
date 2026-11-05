@@ -1229,7 +1229,8 @@ static bool tier1_cert_emitted_wholes(Tier1CertEmittedBuild* build, uint32_t nod
 
 // A call's expected sequence (tier1_emit_call's, for a call without aggregates or stack arguments): a variadic call's
 // al, the call, and its result into its register, extended to its canonical form; its register arguments read in their
-// ABI registers, an indirect call's callee in r10.
+// ABI registers (a static chain's in r10, #148), an indirect call's callee in r10, or with a chain in rax
+// (tier1_select_callee_register).
 static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node, uint32_t destination, Tier1CertEmittedKernel* kernel)
 {
     const IrFunction* function = build->plan->function;
@@ -1282,7 +1283,7 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     if (valid && indirect)
     {
         const uint32_t value = emitted->node_values[build->plan->effective_use_values[offset + call->argument_count]];
-        valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(kernel, value, tier1_cert_emitted_register(build, value, X86_REGISTER_R10));
+        valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(kernel, value, tier1_cert_emitted_register(build, value, tier1_select_callee_register(function, call)));
     }
     const uint32_t vector_count = abi != 0 ? abi->call.vector_registers : vectors;
     kernel->outgoing = tier1_select_call_stack_bytes(function, call);
@@ -1294,7 +1295,7 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     }
     if (valid && indirect)
     {
-        kernel->records[kernel->count++] = (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = X86_REGISTER_R10 };
+        kernel->records[kernel->count++] = (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = tier1_select_callee_register(function, call) };
     }
     else if (valid)
     {
@@ -2523,7 +2524,7 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         const X86Instruction move = emitted->code.records[r];
         const uint8_t destination = move.reg;
         const X86Instruction expected = row->result_bytes < 16 ? tier1_select_carrier_move(destination, result_reg, row->result_bytes, emitted->prepared.vex)
-                                                               : tier1_select_register_record(tier1_select_vector_forms(row->result_bytes, emitted->prepared.vex)->move, destination, result_reg);
+                                                               : tier1_select_register_record(tier1_select_vector_forms(row->result_bytes, tier1_emit_encoding(&emitted->prepared))->move, destination, result_reg);
         const uint32_t location = destination < 32 ? tier1_cert_emitted_vector(build, destination, tier1_cert_emitted_width(emitted, value)) : BUSTER_CERT_NONE;
         if (location != BUSTER_CERT_NONE && tier1_cert_emitted_exactly(move, expected))
         {

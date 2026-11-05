@@ -37,8 +37,8 @@ different code.
 For every available lane count from one through eight, it requires:
 
 - Complete object/executable byte equality against that path's reference, and
-  identical aggregate Tier 1 reports. Single-source repeats perturb identifier
-  IDs; multi-source repeats poison the reusable arenas.
+  identical aggregate Tier 1 reports. Every repeat perturbs identifier IDs;
+  multi-source repeats also poison the reusable arenas.
 - A successful compiler exit and a report with both Tier 1 and Tier 0
   functions. A regression that refuses the fixture or silently compiles
   everything at Tier 0 is not a passing test, and neither is one where Tier 1

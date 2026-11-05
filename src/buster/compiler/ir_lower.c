@@ -666,6 +666,15 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_constant(I
     return ir_typed_emit(sink, IR_VCONST, type, constant, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 }
 
+// A vector operation's lanes (#141's element types) onto instruction `id`, its flags, which start zeroed (I32's).
+static __attribute__((always_inline)) inline void ir_typed_lanes(IrTypedSink* sink, uint32_t id, IrSimdLane lane)
+{
+    if (sink->output != 0)
+    {
+        sink->output->flags[id] = (uint8_t)lane;
+    }
+}
+
 static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
     static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
@@ -676,21 +685,32 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         [IR_SIMD_OR] = IR_OR,
         [IR_SIMD_XOR] = IR_XOR,
         [IR_SIMD_NOT] = IR_NOT,
+        [IR_SIMD_SHL] = IR_SHL,
+        [IR_SIMD_LSHR] = IR_LSHR,
+        [IR_SIMD_ASHR] = IR_ASHR,
+        [IR_SIMD_FADD] = IR_FADD,
+        [IR_SIMD_FSUB] = IR_FSUB,
+        [IR_SIMD_FMUL] = IR_FMUL,
+        [IR_SIMD_FDIV] = IR_FDIV,
     };
     uint32_t value = BUSTER_IR_NONE;
     if (operation->expand_mask)
     {
-        const IrType mask_type = type == IR_V16I32 ? IR_M16 : IR_M8;
+        // The comparison's mask, a bit per lane, and -1 or 0 in each lane by it, at the same lanes' width.
+        const IrType mask_type = (IrType)ir_lane_mask(type, operation->lane);
         const uint32_t mask = ir_typed_emit(sink, IR_VCMP, mask_type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
         const uint64_t zero[8] = {0};
         const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
         const uint32_t active = ir_typed_vector_constant(sink, type, ones);
         const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
+        ir_typed_lanes(sink, value, operation->lane);
     }
     else
     {
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_lanes(sink, value, operation->lane);
     }
     return value;
 }
@@ -1082,10 +1102,11 @@ static bool ir_typed_own_records(const Tier0Function* input)
     return own;
 }
 
-// Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes), whose
-// call then has ABI records (ir_typed_aggregate_call): once a function, so that no call reads its arguments' locations
-// where none is. The vector path tests the kinds of 8 locations a load (AbiLocation's byte 6, IGNORE 0); its scalar twin
-// one at a time, which must agree.
+// Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes) or a
+// static chain in r10 (#148, __builtin_call_with_static_chain's), whose call then has ABI records (ir_typed_aggregate_call):
+// once a function, so that no call reads its arguments' locations where none is. The vector path tests the kinds of 8
+// locations a load (AbiLocation's byte 6, IGNORE 0), and their kinds with their first registers (bytes 6 and 4) for
+// REGISTERS in r10; its scalar twin one at a time, which must agree.
 static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 {
     (void)vector;
@@ -1099,14 +1120,18 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
             const uint32_t lanes = count - first < 8 ? count - first : 8;
             const __mmask8 active = (__mmask8)((1u << lanes) - 1);
             const __m512i locations = _mm512_maskz_loadu_epi64(active, input->argument_locations + first);
-            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0);
+            const __m512i chain = _mm512_set1_epi64((int64_t)((uint64_t)BUSTER_ABI_LOCATION_REGISTERS << 48 | (uint64_t)BUSTER_ABI_R10 << 32));
+            const __m512i kind_register = _mm512_and_si512(locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff00ff00000000)));
+            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0) ||
+                      (_mm512_mask_cmpeq_epi64_mask(active, kind_register, chain) != 0);
         }
     }
     else
     {
         for (uint32_t a = 0; !ignored && a < count; a += 1)
         {
-            ignored = input->argument_locations[a].kind == BUSTER_ABI_LOCATION_IGNORE;
+            const AbiLocation location = input->argument_locations[a];
+            ignored = location.kind == BUSTER_ABI_LOCATION_IGNORE || (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
         }
     }
     return ignored;
@@ -1114,15 +1139,18 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 
 // Whether call `call` passes or returns an aggregate by value (Tier0Function.argument_sizes, call_result_objects): its
 // IR call then has ABI records. So does one that passes an aggregate the convention ignores (#141: an empty struct, of
-// no bytes), which a call without records would place by its type, in a register of its own; only a function with one
-// (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
+// no bytes), which a call without records would place by its type, in a register of its own, and one that passes a
+// static chain in r10 (#148), which a call without records would place in the next argument register; only a function
+// with one (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
 static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
-        aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || (ignored && input->argument_locations[argument].kind == BUSTER_ABI_LOCATION_IGNORE);
+        const AbiLocation location = ignored ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || location.kind == BUSTER_ABI_LOCATION_IGNORE ||
+                     (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
     }
     return aggregate;
 }
@@ -1305,6 +1333,15 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] >= symbol_count)
         {
             check.error = IR_ERROR_OPERAND;
+            check.instruction = i;
+        }
+        else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] == 0 && input->call_variadic[value] != 0 && input->call_argument_counts[value] != 0 &&
+                 input->argument_locations[input->call_first[value]].kind == BUSTER_ABI_LOCATION_REGISTERS &&
+                 input->argument_locations[input->call_first[value]].registers[0] == BUSTER_ABI_R10)
+        {
+            // An indirect variadic call with a static chain (#148): its chain takes r10, the moves' scratch r11 and its al
+            // rax, which Tier 1 calls through otherwise (tier1_select_callee_register); Tier 1 falls back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
         else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)

@@ -71,12 +71,15 @@ unset CPATH C_INCLUDE_PATH
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
 # and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
 # lanes that don't start.
+# #153: changed IDs in the poisoned/debug output comparisons, canonical fatal-prefix diagnostics at 1/2/3/8 lanes
+# through both paths, and the sequential multi-input -E command's text and diagnostics against standalone bytes.
 # Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
 "$BUSTER_COMPILER" test-check-units
 == Test mixed-tier single- and multi-file determinism [8 CPUs]
 # #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
 # Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
-# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# execution, with changed IDs for both single- and multi-file commands. Multi-file repeats also poison the arenas.
+# The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
 # eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
@@ -199,9 +202,20 @@ mapfile -d '' -t flags < "$flags_file"
 mapfile -d '' -t sources < "$sources_file"
 test "${#flags[@]}" -gt 0
 test "${#sources[@]}" -gt 0
+# #1423: host-only detector and frame controls don't belong to a semantic request. Keep -fsanitize= and -fPIE,
+# which affect source feature queries and predefines, and every other build argument. The compiler running this
+# check is still instrumented; these exact exclusions don't admit unsupported options to the driver.
+check_flags=()
+for flag in "${flags[@]}"; do
+    case "$flag" in
+        -fsanitize-address-use-after-scope|-fsanitize-address-use-after-return=always|-fsanitize-memory-track-origins=2|\
+        -fno-sanitize-recover=all|-fno-sanitize-trap=all|-fno-omit-frame-pointer|-fno-optimize-sibling-calls) ;;
+        *) check_flags+=("$flag") ;;
+    esac
+done
 for unit in "${sources[@]}"; do
     [[ "${unit##*/}" == main_unit_* ]] && continue
-    "$BUSTER_COMPILER" -fsyntax-only "${flags[@]}" "$unit"
+    "$BUSTER_COMPILER" -fsyntax-only "${check_flags[@]}" "$unit"
 done
 rm "$flags_file" "$sources_file"
 == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
@@ -376,6 +390,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-interpreter-native
 "$BUSTER_COMPILER" test-interpreter-link
 "$BUSTER_COMPILER" test-ir-interpreter
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
@@ -617,7 +633,8 @@ rm -rf "$errors" "$directory"
 # neither tier keeps one. The depth follows the control flow (#1415's review): an early return's epilogue takes nothing
 # from the deeper path after it (168 bytes, where the instructions' address order would say 128), a jump table's target
 # takes its indirect jump's depth (assumed), and two paths that join at different depths are unresolved and left out of
-# the comparison. A command without files prints its usage and fails.
+# the comparison. rbp's depth is each path's too: two arms that set it at different depths, each with its own `leave`,
+# make an 80-byte frame, resolved. A command without files prints its usage and fails.
 directory=$(mktemp -d)
 printf 'int g(char*);\nint f(int x) { char b[4096]; b[x & 4095] = 1; return g(b); }\nint leaf(int x) { return x + 1; }\n' > "$directory/f.c"
 "$BUSTER_COMPILER" -c -o "$directory/t0.o" "$directory/f.c"
@@ -638,7 +655,9 @@ printf '%s\n' '    .text' '    .globl early' '    .type early, @function' 'early
     'conflict:' '    test %edi, %edi' '    je 3f' '    push %rbx' '3:' '    ret' '    .size conflict, .-conflict' '    .globl tail' '    .type tail, @function' \
     'tail:' '    push %rbx' '    test %edi, %edi' '    je 4f' '    pop %rbx' '    jmp elsewhere' '4:' '    sub $16, %rsp' '    add $16, %rsp' '    pop %rbx' '    ret' \
     '    .size tail, .-tail' '    .globl padded' '    .type padded, @function' 'padded:' '    push %rbx' '    test %edi, %edi' '    je 5f' '    jmp 6f' '    nop' \
-    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' > "$directory/paths.s"
+    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' \
+    '    .globl split' '    .type split, @function' 'split:' '    test %edi, %edi' '    je 8f' '    push %rbp' '    mov %rsp, %rbp' '    sub $32, %rsp' '    leave' \
+    '    ret' '8:' '    push %rbx' '    push %rbp' '    mov %rsp, %rbp' '    sub $64, %rsp' '    leave' '    pop %rbx' '    ret' '    .size split, .-split' > "$directory/paths.s"
 "$BUSTER_COMPILER" -c -o "$directory/paths.o" "$directory/paths.s"
 "$BUSTER_COMPILER" measure-frames --functions paths="$directory/paths.o" > "$directory/paths.txt"
 grep -q "$(printf '^frame\tpaths\tearly\t168\t0\t0\t0\tresolved$')" "$directory/paths.txt"
@@ -649,7 +668,9 @@ grep -q "$(printf '^frame\tpaths\tconflict\t[0-9]*\t0\t0\t0\tunresolved$')" "$di
 grep -q "$(printf '^frame\tpaths\ttail\t24\t0\t0\t0\tresolved$')" "$directory/paths.txt"
 # An indirect tail call gives the code no edge reaches its depth, but not the nop that pads a loop's head after a jump.
 grep -q "$(printf '^frame\tpaths\tpadded\t8\t0\t0\t0\tresolved$')" "$directory/paths.txt"
-grep -q "$(printf '^frames\tpaths\tfunctions=5\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=4\texcluded=1\t')" "$directory/paths.txt"
+# Each arm sets rbp at its own depth (8 and 16) and its `leave` goes back to it: the deeper arm's 80 bytes, resolved.
+grep -q "$(printf '^frame\tpaths\tsplit\t80\t0\t1\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frames\tpaths\tfunctions=6\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=5\texcluded=1\t')" "$directory/paths.txt"
 if "$BUSTER_COMPILER" measure-frames > /dev/null 2> "$directory/errors"; then exit 1; fi
 grep -q '^usage: compiler measure-frames' "$directory/errors"
 rm -rf "$directory"
