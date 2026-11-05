@@ -2889,10 +2889,16 @@ static void check_test_program_return_marks(CheckTest* test)
             const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
                                        .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
             CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
-            CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+            // Lifetime flags 0 and 1 must not visit the unrelated expression nodes with those indices.
+            CheckControl entries[] = {
+                { .kind = CHECK_CONTROL_LIFETIME, .node = 0 },
+                { .kind = CHECK_CONTROL_LIFETIME, .node = 1 },
+                { .kind = CHECK_CONTROL_RETURN, .node = 0 },
+                { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE },
+            };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, marks, stack, NULL, true);
+            check_program_return_flow(&writer, &body, marks, stack, NULL, true, true);
             const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
             bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
                         marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);

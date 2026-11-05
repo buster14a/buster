@@ -69,6 +69,15 @@ directives carry bounded syntax diagnostics, and an unmatched pop rejects the
 unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
 units allocate no visibility history or object column.
 
+`__private_extern__` declarations use extern linkage and hidden ELF visibility.
+Uninitialized declarations warn under `-Wprivate-extern` with the suggested
+`visibility("hidden")` attribute as an attached note; initialized variables
+and function definitions retain hidden visibility without that warning. The
+warning group, `-Werror`, source pragmas and suppression apply to the note
+with its primary. Later declarations preserve the linked entity's visibility.
+The visibility driver fixtures compare the resulting defined and undefined
+symbols against Clang's ELF output.
+
 Before C23, a direct call of an undeclared identifier creates the compatibility
 declaration `extern int name()` in that block's source scope (#623). Repeated
 calls in the same scope share it; later prototypes use the ordinary linked
@@ -1968,11 +1977,14 @@ What the lowering covers past scalars (#145's programs):
   also checks emitted unreachable statement tails, which retain the existing
   implicit-return safeguard. A second walk selects constant conditions for
   `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
-  suppression. Return warnings currently cover aggregate bodies without
-  statement-expression regions, assembly, reachable call or semantic-query
-  expressions, or nonconstant enum selectors. Calls, queries and enum switches
-  retain conservative handling until their noreturn, context-sensitive constant
-  and exhaustive-enumerator facts are available to the control graph. Constant
+  suppression. Return warnings cover aggregate and scalar bodies; hosted
+  `main` keeps its implicit zero return. Ordinary direct calls can return,
+  and declared `noreturn` calls and terminating builtins end their source
+  paths through unconditional cast, conversion and condition wrappers.
+  A terminating path beside a fall-off path selects Clang's "in all control
+  paths" wording. Statement-expression regions, assembly, indirect calls,
+  conditionally evaluated terminal calls, semantic queries and nonconstant
+  enum selectors retain conservative handling. Constant
   switch dispatch follows converted side-effect-free source selector
   values and signed case ranges only in the warning walk; the Tier 0 walk
   retains every dispatch edge. Source/native tests cover register and hidden
@@ -3800,7 +3812,13 @@ return it. `-Wempty-body` leaves an `if` that has an
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled.
+functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
+independent `-Winvalid-noreturn` fall-off warning. Explicit returns in a
+`noreturn` function warn at the return token even in dead source; reachable
+fall-off warns at the closing brace. Repeated qualifiers, storage classes and
+function specifiers carry `-Wduplicate-decl-specifier` at the repeated token,
+including pointer and parameter qualifiers. These warnings use the common
+command-line and source pragma policy.
 
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
@@ -6186,10 +6204,9 @@ arguments against the function. The checker now gives these as clang does.
     of the wrong type is one error, where clang goes on to "unsupported
     machine mode" where both apply. A string argument with escapes names the
     piece of target's string from its spelling.
-  - A function definition's attribute whose argument count is wrong
-    (`regparm`, `pcs`) is the count's error alone: clang's parser's
-    `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
-    made (nor `-Wreturn-type` but for a function returning an aggregate).
+  - Function definitions retain the GNU suffix's `-Wgcc-compat` warning
+    before a type attribute's argument error (`regparm`, `pcs`), even when
+    argument processing prevents the declarator from completing.
   - `annotate`'s arguments after its string must be constant expressions,
     clang's error with its evaluator's notes otherwise; they are taken here.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker
@@ -6197,9 +6214,7 @@ arguments against the function. The checker now gives these as clang does.
     stops at "requested alignment is not a power of 2", where clang goes on
     to the second declaration's errors); a unit's later parse errors are
     printed. A pragma that clang's recovery skips (`GCC visibility push`) is
-    still applied. `-Wduplicate-decl-specifier` (`inline inline;`) isn't
-    made, and `__private_extern__` is refused by name, with or without a
-    declarator.
+    still applied.
   - A function type's attribute's warnings come in clang's order
     (`check_input_attribute_type_warnings`) but for three places. A parameter's
     attributes' warnings, which clang gives as it reads the parameter list,

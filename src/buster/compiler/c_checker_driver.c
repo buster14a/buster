@@ -866,15 +866,27 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
             // The body's analysis boundary: the queued diagnostics' boundary is the `}` lookahead, and the
             // return warning's RETURN phase keeps it after them, before the uninit SEMANTICs.
             const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
-            const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
+            const CheckWarningEvent event = { .id = CHECK_WARNING_ID_INVALID_NORETURN, .kind = CHECK_WARNING_EVENT_NORETURN_FALLS,
+                                               .token = token, .source = BUSTER_CHECK_WARNING_NO_SOURCE };
+            const CheckWarningSeverity severity = body->return_warning == 3 ? check_driver_warning_severity(pp, program->input, &event) :
+                check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
             if (severity != CHECK_WARNING_IGNORE && (uint64_t)publication * 4 + PP_DIAGNOSTIC_RETURN < first_error)
             {
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN,
-                                   "non-void function does not return a value%s [%s-Wreturn-type]",
-                                   body->return_warning == 2 ? " in all control paths" : "",
-                                   check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
+                if (body->return_warning == 3)
+                {
+                    pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN,
+                                             "function declared 'noreturn' should not return [%s-Winvalid-noreturn]",
+                                             check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
+                }
+                else
+                {
+                    pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN,
+                                             "non-void function does not return a value%s [%s-Wreturn-type]",
+                                             body->return_warning == 2 ? " in all control paths" : "",
+                                             check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
+                }
             }
         }
     }
@@ -4175,6 +4187,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .initializer_reference_count = data.reference_count,
                         .scalar = scalar,
                         .return_warnings = !quiet && return_warning,
+                        .noreturn_warnings = !quiet,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                         .asm_helpers = lanes != NULL && lanes->tier1,

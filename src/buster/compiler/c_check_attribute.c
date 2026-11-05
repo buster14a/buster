@@ -2240,28 +2240,32 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
 // clang's parser's -Wgcc-compat warning for a function definition (#147, Parser::ParseFunctionDefinition): each GNU
 // attribute after its declarator (`attributes`, the declarator's own) whose attribute GCC knows, at its name, named as
 // written, "GCC does not allow 'X' attribute in this position on a function definition".
+static void check_input_attribute_gcc_one(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const CheckInputFactRow* fact = attribute->standard || attribute->keyword ? NULL :
+                                    check_input_fact_row((String8){ "", 0 }, check_input_attribute_name(reader, attribute->name), false, false);
+    if (fact != NULL && (fact->flags & BUSTER_CHECK_FACT_GCC) != 0)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_GCC_COMPAT,
+            .kind = CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
+            .token = attribute->name_token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            // The parser's, before Sema's diagnostics of the same attribute (published at the token before it).
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = attribute->name_token != 0 ? attribute->name_token - 1 : 0,
+            .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 static void check_input_attribute_gcc_position(CheckInputReader* reader, const CheckInputAttributes* attributes)
 {
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
-        const CheckInputAttribute* attribute = attributes->records + i;
-        const CheckInputFactRow* fact = attribute->standard || attribute->keyword ? NULL :
-                                        check_input_fact_row((String8){ "", 0 }, check_input_attribute_name(reader, attribute->name), false, false);
-        if (fact != NULL && (fact->flags & BUSTER_CHECK_FACT_GCC) != 0)
-        {
-            const CheckWarningEvent event =
-            {
-                .id = CHECK_WARNING_ID_GCC_COMPAT,
-                .kind = CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
-                .token = attribute->name_token,
-                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                // The parser's, before Sema's diagnostics of the same attribute (published at the token before it).
-                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = attribute->name_token != 0 ? attribute->name_token - 1 : 0,
-                .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
-            };
-            check_input_warning_event(reader, &event, NULL, 0);
-        }
+        check_input_attribute_gcc_one(reader, attributes->records + i);
     }
 }
 
@@ -2733,7 +2737,7 @@ static bool check_input_attribute_in_type_name(const Parser* parser, uint32_t fi
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard,
-                                            uint32_t place)
+                                            uint32_t place, bool definition)
 {
     const Parser* parser = reader->parser;
     uint32_t i = *cursor;
@@ -2764,6 +2768,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     if (valid)
     {
         attribute.name = parser->tokens.names[i++];
+        // The parser recognizes a definition's suffix before Sema processes its attributes. Keep its warning even
+        // when a type attribute's arguments (for example regparm or pcs) prevent the declarator from completing.
+        if (definition)
+        {
+            check_input_attribute_gcc_one(reader, &attribute);
+        }
         const String8 name = check_input_attribute_name(reader, attribute.name);
         const CheckInputAttributeRule* rule = 0;
         for (uint32_t r = 0; namespace_known && r < BUSTER_ARRAY_LENGTH(check_input_attribute_rules) && rule == 0; r += 1)
@@ -3185,6 +3195,14 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             valid &= close > open + 1 && close < end && parser->tokens.kinds[open + 1] == (standard ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_PAREN);
             const uint32_t list_end = valid ? parser->tree.parents[open + 1] : end;
             valid &= list_end + 1 == close;
+            uint32_t after = close + 1;
+            const bool suffix = valid && !standard && parser->tree.roles[open] == PARSE_ROLE_OPEN_ATTRIBUTE;
+            while (suffix && after < end && check_input_attribute_starts(parser, after, end))
+            {
+                const uint32_t next_open = parser->tokens.kinds[after] == PARSE_KIND_L_SQUARE ? after : after + 1;
+                after = next_open < end ? check_input_attribute_after_group(parser, next_open, end) : end + 1;
+            }
+            const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
             if (valid && place == BUSTER_CHECK_PLACE_QUALIFIERS)
             {
@@ -3204,7 +3222,7 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 }
                 else
                 {
-                    valid = check_input_attribute_read_item(reader, attributes, &i, list_end, standard, place);
+                    valid = check_input_attribute_read_item(reader, attributes, &i, list_end, standard, place, definition);
                 }
             }
             i = valid ? close + 1 : i;
@@ -3243,6 +3261,18 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                 attribute.value = call;
                 attributes->calling_convention = attributes->calling_convention == CHECK_CALL_DEFAULT && call != CHECK_CALL_IGNORED_X86_32 ? call :
                                                  attributes->calling_convention;
+            }
+            else if (name == C_NAME_NORETURN)
+            {
+                bool duplicate = false;
+                for (uint32_t a = 0; !duplicate && a < attributes->count; a += 1)
+                {
+                    duplicate = attributes->records[a].kind == CHECK_ATTRIBUTE_NORETURN && attributes->records[a].keyword;
+                }
+                if (duplicate)
+                {
+                    check_input_duplicate_specifier(reader, first, C_NAME_NORETURN);
+                }
             }
             valid = valid && check_input_attribute_append(reader, attributes, attribute);
         }

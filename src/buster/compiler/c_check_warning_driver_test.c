@@ -19,6 +19,154 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "duplicate qualifiers and declaration specifiers",
+        .source = "const const int a;\nvolatile volatile int b;\n_Atomic _Atomic int c;\nextern extern int d;\n"
+                  "static static int e;\ntypedef typedef int T;\nunsigned unsigned int f;\n",
+        .warnings = 7,
+    },
+    {
+        .name = "duplicate function specifiers",
+        .source = "inline inline void f(void){}\n_Noreturn _Noreturn void g(void){for(;;){}}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate parameter and pointer qualifiers",
+        .source = "int f(const const int x,int *volatile volatile p){return x+*p;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "duplicate declaration specifier group disabled",
+        .source = "const const int value;\n",
+        .options = { "-Wno-duplicate-decl-specifier" },
+    },
+    {
+        .name = "duplicate declaration specifier source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wduplicate-decl-specifier\"\nconst const int value;\n",
+    },
+    {
+        .name = "noreturn fall off",
+        .source = "_Noreturn void f(void){}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn explicit return",
+        .source = "_Noreturn void f(void){return;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn valued return",
+        .source = "__attribute__((noreturn)) int f(void){return 1;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn dead explicit return",
+        .source = "_Noreturn void f(void){if(0)return;for(;;){}}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn ordinary call can return",
+        .source = "void g(void);_Noreturn void f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn call ends the path",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+    },
+    {
+        .name = "noreturn partial terminal path",
+        .source = "_Noreturn void g(void);_Noreturn void f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn trap ends the path",
+        .source = "_Noreturn void f(void){__builtin_trap();}\n",
+    },
+    {
+        .name = "noreturn cast terminal path",
+        .source = "_Noreturn int g(void);_Noreturn void f(void){(void)g();}\n",
+    },
+    {
+        .name = "noreturn partial cast terminal path",
+        .source = "_Noreturn int g(void);_Noreturn void f(int x){if(x)(void)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn partial trap path",
+        .source = "_Noreturn void f(int x){if(x)__builtin_trap();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn independent of return type warning policy",
+        .source = "_Noreturn void f(void){}\n",
+        .options = { "-Wno-return-type" },
+        .warnings = 1,
+    },
+    {
+        .name = "noreturn group disabled",
+        .source = "_Noreturn void f(void){return;}\n",
+        .options = { "-Wno-invalid-noreturn" },
+    },
+    {
+        .name = "noreturn source policy",
+        .source = "#pragma clang diagnostic ignored \"-Winvalid-noreturn\"\n_Noreturn void f(void){}\n",
+    },
+    {
+        .name = "scalar return fall off after ordinary call",
+        .source = "void g(void);int f(void){g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return partial terminal path",
+        .source = "_Noreturn void g(void);int f(int x){if(x)g();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "scalar return terminal call",
+        .source = "_Noreturn int g(void);int f(void){(void)g();}\n",
+    },
+    {
+        .name = "scalar return partial trap path",
+        .source = "int f(int x){if(x)__builtin_trap();}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "private extern declarations",
+        .source = "__private_extern__ int x;\n__private_extern__ int f(void);\nvoid g(void){__private_extern__ int y;}\n",
+        .warnings = 3,
+        .notes = 3,
+    },
+    {
+        .name = "private extern definitions",
+        .source = "__private_extern__ int x=7;\n__private_extern__ int f(void){return x;}\n",
+    },
+    {
+        .name = "private extern redeclarations",
+        .source = "__private_extern__ int x;int x;\nint y;__private_extern__ int y;\n__private_extern__ int z;int z=3;\n",
+        .warnings = 3,
+        .notes = 3,
+    },
+    {
+        .name = "private extern multiple declarators",
+        .source = "__private_extern__ int x,y=2,z;\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "private extern duplicate specifier",
+        .source = "__private_extern__ __private_extern__ int x;\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        .name = "private extern group disabled",
+        .source = "__private_extern__ int x;\n",
+        .options = { "-Wno-private-extern" },
+    },
+    {
+        .name = "private extern source policy",
+        .source = "#pragma clang diagnostic ignored \"-Wprivate-extern\"\n__private_extern__ int x;\n",
+    },
+    {
         .name = "nonliteral integer zero pointer conversion",
         .source = "int*p=1-1;\n",
         .warnings = 1,
