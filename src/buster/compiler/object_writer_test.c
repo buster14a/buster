@@ -3132,8 +3132,23 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
             {
                 const uint64_t theirs_count = b != 0 ? b->sh_size / sizeof(Elf64_Rela) : 0;
                 const uint64_t ours_count = a->sh_size / sizeof(Elf64_Rela);
-                snprintf(error, error_size, "%s's relocations aren't GNU as's: %llu against %llu, or relocation %llu differs", name, (unsigned long long)ours_count,
-                         (unsigned long long)theirs_count, (unsigned long long)(r == 0 ? 0 : r - 1));
+                if (b != 0 && ours_count == theirs_count && r != 0)
+                {
+                    const ObjectTestTarget actual = object_test_target(ours, &ours_relocations[r - 1]);
+                    const ObjectTestTarget expected = object_test_target(theirs, &theirs_relocations[r - 1]);
+                    const char* source_group = object_test_section_group(ours, a->sh_info);
+                    snprintf(error, error_size, "%s[%s] relocation %llu: %llu/%u %s[%s]+%lld; GNU %llu/%u %s[%s]+%lld", name,
+                             source_group != 0 ? source_group : "-", (unsigned long long)(r - 1),
+                             (unsigned long long)ours_relocations[r - 1].r_offset, (unsigned)ELF64_R_TYPE(ours_relocations[r - 1].r_info),
+                             actual.section != 0 ? actual.section : "undefined", actual.group != 0 ? actual.group : "-", (long long)actual.addend,
+                             (unsigned long long)theirs_relocations[r - 1].r_offset, (unsigned)ELF64_R_TYPE(theirs_relocations[r - 1].r_info),
+                             expected.section != 0 ? expected.section : "undefined", expected.group != 0 ? expected.group : "-", (long long)expected.addend);
+                }
+                else
+                {
+                    snprintf(error, error_size, "%s's relocations aren't GNU as's: %llu against %llu, or relocation %llu differs", name, (unsigned long long)ours_count,
+                             (unsigned long long)theirs_count, (unsigned long long)(r == 0 ? 0 : r - 1));
+                }
             }
             relocation_sections += 1;
         }
