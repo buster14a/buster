@@ -6244,8 +6244,9 @@ arguments against the function. The checker now gives these as clang does.
   This lookup follows the first token's parent chain once, retaining a
   subscript base's location without repeatedly scanning nested prefixes.
   Checked subscripts also consult the existing operand type and value category:
-  an implicit lvalue or array conversion reports the base's beginning, while
-  a value such as `p++` keeps its own operator location. The pointer operand
+  an implicit lvalue or array conversion reports the base's beginning, as does
+  the value conversion of a materialized record's member (`get().pointer`).
+  A value such as `p++` keeps its own operator location. The pointer operand
   supplies that location in reversed subscripts such as `0[p]` too.
   Initializer conversion diagnostics follow the actual selected member or
   array element, including nested designators, union alternatives, atomic

@@ -31,8 +31,9 @@ The GNU `noderef` source-type shadows, expression and initializer diagnostics an
 `c_check_noderef_driver_test.c` fixtures (#1447) are original project material
 under the default terms. Clang 23.1.4 is the behavioral oracle. Its
 [attribute reference](https://clang.llvm.org/docs/AttributeReference.html#noderef)
-and published `clang/lib/Sema/SemaType.cpp`, `SemaExpr.cpp`, `SemaInit.cpp` and
-`clang/include/clang/AST/Expr.h` documentation were consulted for the placement,
+and published `clang/lib/Sema/SemaType.cpp`, `SemaExpr.cpp`, `SemaExprMember.cpp`,
+`SemaInit.cpp` and `clang/include/clang/AST/Expr.h` at LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5` were consulted for the placement,
 type-sugar, conversion and source-location contracts on November 5, 2026; no
 implementation or upstream test fixture is imported.
 

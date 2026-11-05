@@ -48,9 +48,11 @@ static uint32_t check_input_expression_location(const Parser* parser, uint32_t f
 }
 
 // A checked subscript uses its pointer operand after the default lvalue/array conversion. Clang's implicit cast
-// reports that operand's beginning, while a value such as p++ or get().pointer keeps its own expression location.
-// Use the existing checked categories to distinguish them, including the reversed spelling 0[p]. An enclosing
-// written group keeps its own location. At most one root walk, one backwards opener search and one operand walk
+// reports that operand's beginning, while a value such as p++ keeps its own expression location. Clang materializes
+// a record rvalue before selecting its field, whose implicit value conversion also starts at the record's beginning;
+// the checker represents that field as an rvalue. Use the existing categories and member operation to distinguish
+// them, including the reversed spelling 0[p]. An enclosing written group keeps its own location.
+// At most one root walk, one backwards opener search and one operand walk
 // visit the source span; deep subscripts never rescan their prefixes or allocate source-depth storage.
 static uint32_t check_warning_expression_location(const Parser* parser, const TypeTable* types, const CheckStream* stream,
                                                   uint32_t node, uint32_t first, uint32_t end)
@@ -82,7 +84,8 @@ static uint32_t check_warning_expression_location(const Parser* parser, const Ty
                 }
             }
             const uint8_t kind = type_kind(types, type_strip_aligned(types, check_stream_type(stream, base)));
-            if (check_stream_category(stream, base) == CHECK_LVALUE || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ATOMIC)
+            if (check_stream_category(stream, base) == CHECK_LVALUE || graph->ops[base] == CHECK_OP_MEMBER ||
+                type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ATOMIC)
             {
                 result = begin;
             }
