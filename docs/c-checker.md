@@ -6218,8 +6218,9 @@ arguments against the function. The checker now gives these as clang does.
   arithmetic, assignments, comma and conditional expressions, then gives
   `-Wnoderef` for dereferences, subscripts and arrow accesses. A pointer or array
   identifier's warning names it and notes its declaration; an atomic operand
-  uses the generic expression warning. Dereferences and subscripts that select
-  array values compute addresses without a warning. `sizeof`, `alignof`, `typeof`
+  uses the generic expression warning. Unary dereferences that select array
+  values compute addresses without a warning; subscripts retain their annotation
+  check. `sizeof`, `alignof`, `typeof`
   and generic controlling expressions suppress the warning. Taking an address
   cancels its lvalue's dereference, including array-member address computations,
   while loading an intermediate pointer member still warns. Implicit pointer

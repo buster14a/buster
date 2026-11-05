@@ -211,8 +211,9 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         {
             const uint32_t operand = op == CHECK_OP_SUBSCRIPT && !check_noderef_graph_pointer(reader->types, types[0]) ? 1 : 0;
             const uint8_t result = type_kind(reader->types, type_strip_aligned(reader->types, check_stream_type(stream, node)));
-            // A dereference or subscript that selects an array only computes its address.
-            accesses[node] = (op == CHECK_OP_ARROW || !type_kind_is_array(result)) &&
+            // Clang suppresses unary dereference of an array result; its subscript path still diagnoses an
+            // annotation on that array type (for example, int (__attribute__((noderef)) *p)[3]; p[0]).
+            accesses[node] = (op != CHECK_OP_DEREFERENCE || !type_kind_is_array(result)) &&
                              check_noderef_graph_marked(reader, types[operand], values[operand]);
         }
         else if (op == CHECK_OP_ADDRESS && operands[0] < node)
