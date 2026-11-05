@@ -1708,11 +1708,12 @@ static int main_driver(int argc, char** argv)
     // dispatch, including -E and parse commands that need no worker lease themselves.
     bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
     int result = guardian >= 0 ? guardian : 0;
-    // An option first (-E, -fsyntax-only, -c, ...) is a source command's (#652): no unit's command starts with '-' (the
-    // two that do, --fuzz and the guardian's, are main's and the guardian's above), so it skips the units' chains of
-    // strcmp against every command's name, which were most of an empty file's 930 strcmp calls and touched pages of
-    // .rodata.str1.1 and .text that a compile needs nothing else of.
-    if (!found && argc >= 2 && argv[1][0] == '-')
+    // An option first (-E, -fsyntax-only, -c, ...) is a source command's (#652), but for the assembler unit's -c of a .s
+    // or .S file (main_assembly_source): no unit's command name starts with '-' (the two that do, --fuzz and the
+    // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
+    // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
+    // compile needs nothing else of.
+    if (!found && argc >= 2 && argv[1][0] == '-' && !main_assembly_source(argc - 1, argv + 1))
     {
         result = main_source_command(argc, argv);
         found = true;
