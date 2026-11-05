@@ -159,9 +159,13 @@ static uint32_t emitted_insert_row(EmissionFrameRow* rows, uint32_t count, Emiss
 // emitted_tier0_frame_room's more): after the prologue's rows (rbp's three and one per push), at the boundary after rax's
 // push, as LLVM's CSR_64EHRet frame's CFI has them for libgcc's uw_install_context to write; a later row before that
 // boundary, a tail's remembered state at its row before, moves to it. Their rules are restored where their slots are
-// released: after the epilogue's release, which steps over them, and after each __builtin_eh_return's pops of them (its
-// tail's, Tier0Code.tail_records: the release, rax's pop and rdx's, the other pops, rbp's, rsp's mov and the jump).
+// released: after the epilogue's release, which steps over them, after each __builtin_eh_return's pops of them (its
+// tail's, Tier0Code.tail_records: the release, rax's pop and rdx's, the other pops, rbp's, rsp's mov and the jump), and
+// after each musttail call's release, which steps over them as the epilogue's does (#148: a tail whose jump isn't
+// emitted_handed's).
 // Returns the rows' count.
+static bool emitted_handed(const X86Instruction* records, uint32_t i);
+
 static uint32_t emitted_tier0_eh_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
 {
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
@@ -183,10 +187,22 @@ static uint32_t emitted_tier0_eh_rows(const Tier0Code* code, EmissionFrameRow* r
     count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = released, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
     for (uint32_t t = 0; t < code->tail_count; t += 1)
     {
-        // rax's pop's end and rdx's: the jump less the mov, rbp's pop, the other pops and rdx's pop, then one more.
-        const uint32_t rdx_popped = code->tail_records[t] - 1 - 1 - pushes;
-        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped - 1, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
-        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+        const uint32_t jump = code->tail_records[t];
+        if (emitted_handed(code->records, jump))
+        {
+            // rax's pop's end and rdx's: the jump less the mov, rbp's pop, the other pops and rdx's pop, then one more.
+            const uint32_t rdx_popped = jump - 1 - 1 - pushes;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped - 1, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = rdx_popped, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+        }
+        else
+        {
+            // A musttail call's (#148), whose release steps over their slots as the epilogue's does: its end, the jump
+            // less rbp's pop and the other pops.
+            const uint32_t release_end = jump - 1 - pushes;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+        }
     }
     return count;
 }
