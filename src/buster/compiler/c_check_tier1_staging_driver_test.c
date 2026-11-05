@@ -7,6 +7,9 @@
 // adds outgoing stack storage. A dynamic caller checks the stable frame base and an indirect caller the callee's move.
 // Both target policies, both host paths and both rematerialization choices must select every function under --verify.
 // The dynamic caller alone remains outside the emitted-code certificate's scope.
+// Its allocation sizes are multiples of 32: clang 23 rounds alloca to only 16 bytes even when a stack-passed vector
+// needs 32-byte call alignment (the separate stack-vectors fixture documents and checks odd sizes against the ABI).
+// This differential fixture keeps clang's reference aligned while still moving rsp around the overflow staging area.
 
 static const char check_test_tier1_staging_header[] =
     "#include <stdio.h>\n"
@@ -51,7 +54,7 @@ static const char check_test_tier1_staging_source[] =
     "    for (int i = 0; i < 9; i += 1) for (int j = 0; j < 8; j += 1) p[i][j] = i * 100 + j * 7 - 50;\n"
     "    for (int k = 0; k < 3; k += 1)\n"
     "    {\n"
-    "        printf(\"%lu %lu %lu %lu %lu %lu %lu\\n\", a_four(p, k), a_five(p, k), a_eight(p, k), a_nine(p, k), a_mixed(p, k), a_dynamic(p, 17 + k * 13), a_indirect(p, b_five));\n"
+    "        printf(\"%lu %lu %lu %lu %lu %lu %lu\\n\", a_four(p, k), a_five(p, k), a_eight(p, k), a_nine(p, k), a_mixed(p, k), a_dynamic(p, 32 + k * 32), a_indirect(p, b_five));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
