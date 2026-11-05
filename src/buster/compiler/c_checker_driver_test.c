@@ -4874,6 +4874,12 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             }
             uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
                              warnings[token].flags : 0;
+            const uint32_t pointer_flags = flags & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
+            if (pointer_flags != 0 && check_driver_pointer_arguments(parser, pp, input, stream, types, &spell, token, pointer_flags,
+                warnings[token].enabled, parser->tokens.sources[token], PP_DIAGNOSTIC_SEMANTIC, scratch))
+            {
+                flags &= ~pointer_flags;
+            }
             while (!pp->fatal && flags != 0)
             {
                 const uint32_t warning = flags & (0u - flags);

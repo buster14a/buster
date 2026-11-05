@@ -152,6 +152,108 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "direct call qualifier warnings retain named and unnamed parameter notes",
+        .source = "void f(int *,int *b);void g(const int *p){f(p,p);}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "direct call parameter note uses the visible redeclaration",
+        .source = "void f(int *first);void f(int *second);void g(const int *p){f(p);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "empty-list redeclaration retains the visible prototype parameter",
+        .source = "void f(int *first);void f();void g(const int *p){f(p);}\n",
+        .options = { "-Wno-deprecated-non-prototype" },
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "closed-block prototype supplies no parameter note to an unprototyped call",
+        .source = "void earlier(void){void f(int *hidden);}void f();void g(const int *p){f(p);}\n",
+        .options = { "-Wno-deprecated-non-prototype" },
+    },
+    {
+        .name = "function pointer variable call has no parameter declaration note",
+        .source = "void (*f)(int *parameter);void g(const int *p){f(p);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "function pointer typedef and parameter calls have no declaration notes",
+        .source = "typedef void (*F)(int *parameter);F f;void g(const int *p){f(p);}\n"
+                  "void h(void (*callback)(int *parameter),const int *p){callback(p);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "dereferenced and cast callees have no parameter declaration notes",
+        .source = "void f(int *parameter);void g(const int *p){(*f)(p);((void(*)(int *))f)(p);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "pointer argument warning is located at the expression beginning",
+        .source = "void f(int *parameter);void g(const int *p){f(p+1);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "nested pointer qualifier wording includes the parameter note",
+        .source = "void f(int **parameter);void g(const int **p){f(p);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pointer call macro expansion precedes its parameter note",
+        .source = "#define F f\n#define P p\nvoid f(int *parameter);void g(const int *p){F(P);}\n",
+        .warnings = 1,
+        .notes = 2,
+    },
+    {
+        .name = "mixed pointer conversion groups follow argument order",
+        .source = "void f(int *a,int *b);void g(const int *p,unsigned int *q){f(q,p);f(p,q);}\n",
+        .warnings = 4,
+        .notes = 4,
+    },
+    {
+        .name = "plain char signedness overrides an array qualifier discard",
+        .source = "void f(char *p);void g(void){const unsigned char a[2]={1,2};f(a);}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pointer parameter notes skip intervening scalar and callback parameters",
+        .source = "void f(int *,int count,void callback(int *),int *last);\n"
+                  "void g(const int *p){f(p,0,0,p);}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "pointer parameter type spelling belongs to its own specifiers",
+        .source = "typedef int *P;void f(P first,int *second);void g(const int *p){f(p,p);}\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "pointer call qualifiers and signedness obey independent group policy",
+        .source = "void f(int *a,int *b);void g(const int *p,unsigned int *q){f(p,q);}\n",
+        .options = { "-Wno-incompatible-pointer-types-discards-qualifiers" },
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pointer call warning promotion retains its parameter note",
+        .source = "#pragma clang diagnostic error \"-Wincompatible-pointer-types-discards-qualifiers\"\n"
+                  "void f(int *parameter);void g(const int *p){f(p);}\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "nested pointer initialization assignment and return wording",
+        .source = "void f(const int **p,int **q){int **r=p;q=p;(void)r;}\nint **g(const int **p){return p;}\n",
+        .warnings = 3,
+    },
+    {
         .name = "nonconstant file initializer",
         .source = "int a;\nint b=a;\n",
         .errors = 1,

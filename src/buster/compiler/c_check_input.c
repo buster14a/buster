@@ -671,7 +671,7 @@ struct CheckInput
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
     // The pool of the sparse columns below (c_check_sparse.c, #628): initializer_nodes, initializer_begins,
-    // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next,
+    // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next, parameter_sources,
     // control_owners, label_targets, case_ranges and string_ids, which few tokens have an entry in, and of the wide
     // `attributes` above. In the arena, so that a lane's copy of the CheckInput writes the same pool (c_check_deferred.c).
     CheckSparsePool* sparse_pool;
@@ -709,10 +709,14 @@ struct CheckInput
     uint8_t* constant_warning_ignored;
     CheckSparseColumn body_declarations;
     CheckSparseColumn declaration_bodies;
-    // At a body opening: its first named parameter token. At a parameter name: its zero-based ordinal in the full
-    // parameter list, including unnamed parameters. These token roles are disjoint; no additional column is needed.
+    // At a body opening: its first named parameter token. At a parameter name or retained unnamed parameter's
+    // insertion token: its zero-based ordinal in the full list. These roles are disjoint.
     CheckSparseColumn parameters;
     CheckSparseColumn parameter_next;
+    // A function declaration's first pointer parameter source, then the next source at each link. Named parameters
+    // use their names; unnamed ones use their declarators' insertion tokens. Notes follow this sparse list in argument
+    // order. Only the completed declared function owns a root, never its nested callback declarators.
+    CheckSparseColumn parameter_sources;
     CheckSparseColumn control_owners;
     CheckSparseColumn label_targets;
     // Resolved &&label expressions, counted by check_input_controls; zero lets check_program omit its address table.
@@ -5428,6 +5432,30 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
                                        type_kind(reader->types, type_return(reader->types, run->result)) == BUSTER_TYPE_KIND_VOID ? own->lifetimebound - 1 : BUSTER_CHECK_NONE;
     const bool captured = own == NULL || check_input_capture_names(reader, own);
     const TypeId result = complete && captured ? run->result : 0;
+    if (result != 0 && own != NULL && !own->identifier_list && run->name != BUSTER_CHECK_NONE &&
+        type_kind(reader->types, result) == BUSTER_TYPE_KIND_FUNCTION)
+    {
+        uint32_t named = own->names;
+        uint32_t previous = run->name;
+        uint32_t ordinal = 0;
+        for (uint32_t parameter = own->parameter_first; parameter != BUSTER_CHECK_NONE; parameter = run->parameters[parameter].next)
+        {
+            const CheckDeclaratorParameter* item = run->parameters + parameter;
+            const uint32_t source = item->missing_name != BUSTER_CHECK_NONE ? item->missing_name : named;
+            if (item->missing_name == BUSTER_CHECK_NONE && named != BUSTER_CHECK_NONE)
+            {
+                named = check_sparse_get(reader->parameter_next, named);
+            }
+            if (source < reader->parser->tokens.count && check_action_kind(reader->types, item->type) == BUSTER_TYPE_KIND_POINTER)
+            {
+                check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, previous, source);
+                check_sparse_set(reader->output->sparse_pool, reader->parameters, source, ordinal);
+                previous = source;
+            }
+            ordinal += 1;
+        }
+        check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, previous, BUSTER_CHECK_NONE);
+    }
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
     {
@@ -7521,6 +7549,14 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
+                // A visible prototype survives a C17 empty-list redeclaration in its composite type. Its note
+                // sources survive with it; a hidden linked declaration below contributes no visible prototype.
+                if (kind == C_BINDING_FUNCTION &&
+                    (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0)
+                {
+                    check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, token,
+                                     check_sparse_get(reader->output->parameter_sources, previous));
+                }
                 reader->declared_types[token] = composite;
             }
         }
@@ -10654,7 +10690,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // The columns few tokens have an entry in, sparse (c_check_sparse.c, #628): their directories, which a fresh arena
     // holds zero, and their blocks' pool, of which they take as many pages as their entries' blocks. The deferred reader's
     // lanes write them at once.
-    CheckSparseColumn sparse_columns[12] = { 0 };
+    CheckSparseColumn sparse_columns[13] = { 0 };
     valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), &input->attributes, 1, count, output_zero, deferred != 0);
     input->initializer_nodes = sparse_columns[0];
     input->initializer_begins = sparse_columns[1];
@@ -10668,6 +10704,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->label_targets = sparse_columns[9];
     input->case_ranges = sparse_columns[10];
     input->string_ids = sparse_columns[11];
+    input->parameter_sources = sparse_columns[12];
     if (valid && deferred_tokens != 0)
     {
         uint8_t* retained = arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1);
