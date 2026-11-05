@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  pragma-oracle:
+  selectany-object-oracle:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -14,25 +14,9 @@ jobs:
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Probe Linux pragma diagnostics, effects and selectany aliases
+      - name: Inspect selectany group signatures and relocation membership
         shell: bash
         run: |
-          set +e
-          ulimit -c 0
           mkdir -p build/issue1447-oracle
-          for mode in linux microsoft; do
-            flags=()
-            if [ "$mode" = microsoft ]; then flags=(-fms-extensions); fi
-            for case in {1..48}; do
-              if [ "$mode" = microsoft ] && { { [ "$case" -gt 25 ] && [ "$case" -lt 33 ]; } || { [ "$case" -gt 36 ] && [ "$case" -lt 45 ]; }; }; then continue; fi
-              stem="build/issue1447-oracle/$mode-$case"
-              echo "PRAGMA mode=$mode CASE=$case"
-              clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics "${flags[@]}" -DCASE="$case" -S -emit-llvm tools/issue1447-pragmas.c -o "$stem.ll" > "$stem.log" 2>&1
-              echo "compile status=$?"
-              cat "$stem.log"
-              if [ -f "$stem.ll" ]; then
-                grep -E '^@|^define|fadd|fmul|fdiv|constrained|module.flags|fp-contract|reassociate|reciprocal' "$stem.ll" || true
-              fi
-            done
-          done
-          exit 0
+          clang -std=gnu17 -O0 -fcommon -c tools/issue1447-selectany-object.c -o build/issue1447-oracle/first.o
+          readelf -g -W -S -s build/issue1447-oracle/first.o
