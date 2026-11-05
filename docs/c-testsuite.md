@@ -71,7 +71,7 @@ the harness can't run. `--compiler PATH` tests another compiler executable with
 the same options, and `--keep` keeps the work directory (under `$TMPDIR` or
 `/tmp`), which a failure keeps anyway.
 
-`--self-test` (about 2 s) runs the harness on three tests of its own with a
+`--self-test` (about 10 s) runs the harness on three tests of its own with a
 stand-in compiler, a shell script, in six scenarios at once, each in a process
 of its own with its own results' mapping (a scenario whose process doesn't
 start or end fails): from a DIR and a `$TMPDIR`
@@ -84,7 +84,7 @@ each of which must fail; with `--cross-check` where `-c`'s refusals are
 then killed, which must fail whether or not the direct path compiled the test;
 and with `--cross-check` where `-c` writes a real object (`cc`'s) that defines a
 function more than `clang -O0 -c`'s, which must fail though its program passes.
-The stand-in's third program, which sleeps 30 s, must be killed at a one-second
+The stand-in's third program, which sleeps 30 s, must be killed at a five-second
 timeout, and so must its compiles where they sleep.
 
 The harness is test tooling outside the compile path and has no vector path.
@@ -118,7 +118,7 @@ links libm by name, the direct path taking `-l` libraries as GCC's driver does
 
 The 9700X job fetches the commit in a step of its own and runs the self-test
 and the subset among its tests at once, as two commands (#522): the self-test
-on one CPU, since most of its 2 s waits out its timeouts, and the subset with
+on one CPU, since its concurrent scenarios spend most of their time waiting out bounded five-second timeouts, and the subset with
 `--cross-check` on four, `--jobs "$BUSTER_PARALLEL_CPUS"` (a worker per CPU of
 its heading's).
 

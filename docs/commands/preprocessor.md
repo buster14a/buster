@@ -268,8 +268,16 @@ features:
   headers that define some of their macros or ask them for parts and clang's
   headers they don't supply (`<immintrin.h>` and others), buster's last and
   first: clang with them, searched as `--buster-headers` searches
-  (`-Wsystem-headers`), must warn about nothing in the headers and expand every
-  macro as clang's own headers do, and our preprocessor must give its tokens,
+  (`-Wsystem-headers`), must add no header warnings beyond clang's own-header
+  run of the same unit/options and expand every macro as clang's own headers
+  do. Warning subtraction matches the complete file, line, column, message and
+  warning group, preserving duplicate counts; reference-only warnings may
+  disappear. Include stacks and notes are not warning identities. Both runs
+  must succeed, and the unit's own diagnostics still compare independently.
+  `c_preprocessor_header_diagnostics_test.c` checks inherited, removed, new and
+  duplicate warnings and rejected runs with synthetic system headers in C89
+  and GNU17, hosted and freestanding, without depending on the host libc's
+  warnings. Our preprocessor must still give clang's tokens,
   with no warnings from the headers; `-nobuiltininc` and `-nostdinc` must
   leave out buster's headers and clang's after them alike; a quoted name
   beside one of clang's headers must come from buster's when buster's has it;

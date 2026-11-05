@@ -10131,6 +10131,15 @@ static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static void check_input_warning_policy(CheckInput* input, const PPOptions* options);
 
+// The target's facts a reading's table carries, which every phase after the reader reads from the table too: plain char's
+// signedness, and whether the target inlines 16-byte atomics (cx16), which the lock-free queries read. check_input_run
+// sets them on the table it reads with, and #113's deferred reader on the caller's, into which it merges (#1403's review).
+static void check_input_target_table(TypeTable* types, const Preprocessor* pp)
+{
+    types->char_unsigned = pp->options.predefines.char_unsigned;
+    types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
+}
+
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
                             CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
@@ -10150,10 +10159,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_function_system = pp->options.implicit_function_system,
                          .fatal_errors = pp->options.fatal_errors };
     check_input_warning_policy(input, &pp->options);
-    // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
-    // inlines 16-byte atomics (cx16), which the lock-free queries read.
-    types->char_unsigned = pp->options.predefines.char_unsigned;
-    types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
+    check_input_target_table(types, pp);
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     const char* const vararg_spellings[] =

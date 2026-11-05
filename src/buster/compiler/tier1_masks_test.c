@@ -433,7 +433,8 @@ static void tier1_masks_test_gather_model(const uint8_t* input, uint64_t count, 
 // 192, as the host's vfmulcph computes them (its own rounding, NaNs and denormals), where the host has AVX512-FP16: the
 // encoder's records of a load of each, the product and its store, run from a page of their own, so that the test's own
 // code needs no AVX512-FP16 (this compiler's build of it, the self-host's, takes no intrinsics of it at x86-64).
-static void tier1_masks_test_complex_model(const uint8_t* input, uint64_t count, uint8_t* output)
+// JIT instructions have no Clang function-type prefix, so UBSan's indirect-call check must not read before the page.
+static __attribute__((no_sanitize("function"))) void tier1_masks_test_complex_model(const uint8_t* input, uint64_t count, uint8_t* output)
 {
     (void)count;
     memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);

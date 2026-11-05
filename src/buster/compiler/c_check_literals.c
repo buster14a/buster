@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fenv.h>
+#include "host_math.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -284,22 +285,22 @@ static long double check_literal_half(const char* spelling, char** end)
     if (isfinite(nearest) && nearest != 0)
     {
         // Steps of _Float16's precision at this magnitude: 2^-10 of its binade, and 2^-24 below the normals.
-        const int binade = ilogb(nearest) > -14 ? ilogb(nearest) : -14;
-        const double scaled = ldexp(nearest, 10 - binade);
+        const int binade = host_ilogb(nearest) > -14 ? host_ilogb(nearest) : -14;
+        const double scaled = host_ldexp(nearest, 10 - binade);
         const uint64_t steps = (uint64_t)scaled;
         const double fraction = scaled - (double)steps;
         bool up = fraction > 0.5 || (fraction == 0.5 && (steps & 1) != 0);
         if (fraction == 0.5)
         {
-            const int mode = fegetround();
-            fesetround(FE_DOWNWARD);
+            const int mode = host_fegetround();
+            host_fesetround(FE_DOWNWARD);
             const double below = strtod(spelling, 0);
-            fesetround(FE_UPWARD);
+            host_fesetround(FE_UPWARD);
             const double above = strtod(spelling, 0);
-            fesetround(mode);
+            host_fesetround(mode);
             up = below != nearest ? false : above != nearest ? true : up;
         }
-        result = ldexp((double)(steps + up), binade - 10);
+        result = host_ldexp((double)(steps + up), binade - 10);
         result = result > 65504.0 ? INFINITY : result;
     }
     return result;

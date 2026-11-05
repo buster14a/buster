@@ -39,7 +39,7 @@ requirements. [Command index](README.md).
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
   optimization macros, not the tier; Tier 0 is the default), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
-  option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
+  option, `check_driver_id_order`, for each unit of a multi-file command too), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or
@@ -60,7 +60,13 @@ requirements. [Command index](README.md).
   they started, `lane_session_settle`), and kept parked until the process exits;
   the jobserver's slots are taken per wide region, never at the start, an
   emission short of its lanes taking more as other recipes give theirs back
-  (#673), and lanes that can't start leave the command on one. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
+  (#673), and lanes that can't start leave the command on one. The checker reads
+  a unit in source order; `--deferred-bodies` reads its function bodies apart on
+  those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
+  its bodies' tokens pay for four lanes or more (two with `--lanes N`), with
+  source order's result, and `--no-deferred-bodies` undoes it: the [lanes
+  guide](../../docs/function-lanes.md)'s "The checker's bodies on lanes" has why
+  it is off by default. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
   `-g`, its DWARF units' functions'). With several source files (#152,
   `c_checker_units.c`, the [translation units guide](../../docs/translation-units.md))
   the units compile on lanes instead, one unit a lane at a time, with lanes

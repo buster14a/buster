@@ -56,6 +56,13 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "declared-builtins-in-bodies", "void _mm_sfence(void);void _mm_pause(void);void _mm_lfence(void);unsigned _mm_getcsr(void);\n"
       "int f(int n){_mm_sfence();_mm_pause();return n+(int)(_mm_getcsr()&1);}\nint g(int n){_mm_sfence();return n*2;}\n"
       "int h(int n){_mm_lfence();_mm_pause();return n-1;}\nint k(int n){_mm_sfence();_mm_sfence();return f(n)+g(n)+h(n);}\n", true },
+    // __builtin_dump_struct's type names (#148): records completed in bodies that lanes read, with typedefs their members'
+    // declarations spell, whose dumps' lines are planned from the merged records' bodies (CheckGraph.tag_completions)
+    // and the declarators in them.
+    { "dump-struct-records-in-bodies", "typedef unsigned int u32;int printf(const char*,...);\n"
+      "int f(int n){typedef struct{u32 w;}W;struct L{u32 u;W w;struct{int q;}in;}l={1,{2},{n}};__builtin_dump_struct(&l,printf);"
+      "__builtin_dump_struct(&l.in,printf);return n;}\n"
+      "int g(int n){struct{struct{u32 k;}in;}r={{(u32)n}};__builtin_dump_struct(&r.in,printf);return f(n)+1;}\n", true },
     { "kr-promoted-parameters", "int f(a,b) char a; float b; {return a+(int)b;}\nint g(void){return f(258,3.5); }\n", true },
     { "kr-parenthesized-atomic-parameters", "int f(a,b)_Atomic(short) a;_Atomic(float) b;{return a+(int)b;}\n"
       "int g(void){return f(65539,3.5);}\n", true },

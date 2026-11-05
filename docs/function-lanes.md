@@ -13,6 +13,9 @@ one lane per core of the CPUs the process may run on (#905, below), and runs as
 many as the bodies' tokens pay for (below). External worker ownership further bounds this count
 (#673). `--lanes N` forces that many profitable-work candidates, up to the
 body count, within the explicit worker cap and GNU make's available slots.
+The checker reads the unit in source order before the emission, which
+`--deferred-bodies` puts on the same lanes: "The checker's bodies on lanes",
+below, has why that is off by default.
 
 ## Build-system worker ownership (#673)
 
@@ -430,6 +433,109 @@ thread's start, outside the driver's session), its writer's columns and its
 arenas' first pages, which its share of the bodies must pay for; and the lane
 that takes the largest body takes at least as long as it. #113's deferred reader sizes its lanes the same way
 ([docs/c-deferred-bodies.md](c-deferred-bodies.md)).
+
+## The checker's bodies on lanes
+
+#151's last question was whether the bodies' parsing and checking go on lanes too, decided by the
+measured serial share. The answer is **not by default**. The driver can read a unit's function
+bodies apart with #113's deferred reader ([c-deferred-bodies.md](c-deferred-bodies.md)), with
+`--deferred-bodies` (`check_input_deferred_compile`). On the 9700X that takes 2.4% off `sqlite3.c`'s
+compile on 8 lanes, for 12.8% more user cycles, because 90% of the reading stays serial.
+
+### How it runs
+
+- **Rounds.** The reader's two parts on lanes, the bodies' walks and its merge's pass, run as
+  rounds of the command's flow (`CheckDeferredFlow`, kinds `BUSTER_CHECK_DEFERRED_ROUND_BODIES` and
+  `_PASS`), on the session's lanes. The other lanes run them from the emission's follow loop
+  (`check_program_emit_follow`, `check_deferred_follow`). A session refuses `lane_run`'s threads,
+  which the reader started before.
+- **The grant.** Before the top level's walk, the reader counts the bodies' tokens and asks the
+  driver for the lanes its rule plans (`check_driver_deferred_grant`). The driver gives no more than
+  the session asks for and started, and no more than the jobserver's spare tokens. It takes those
+  without waiting, under a lease of their own, and the reader gives them back after the merge's
+  pass.
+- **Source order.** These units read in source order, before the reader reserves or zeroes
+  anything:
+  - a unit whose bodies take fewer than `BUSTER_CHECK_DEFERRED_COMPILE_LANES` (4) lanes, or two
+    with `--lanes N` (below);
+  - a unit with a `#pragma clang section` line, which the merge doesn't take
+    (`check_deferred_sections`);
+  - a prefix, a repair and `-flazy-system-headers`' selection;
+  - `--scalar`, which keeps the reader's twin;
+  - each unit of several source files.
+
+  A unit the merge refuses after its walk goes to source order, as `check_input_deferred` sends it.
+- **The report.** `--time-stages` gives the bodies' lanes and why a unit went to source order
+  (`time-check deferred-lanes` and `deferred-merged`).
+
+The result is source order's at every lane count: `test-check-lanes` compares the driver's
+objects, executables and failing programs' diagnostics with source order's.
+
+### The measurements
+
+[The record](https://github.com/buster14a/buster-performance/tree/d8ec07c3bd1eb4ba2bd60281738a56f739be6265/docs/measurements/deferred-driver-151-2026-11-05)
+measures #1403's first head, `4452efbc`, against main `483e5f70` on the 9700X, on CPUs 0–7, where
+the driver's default is 8 lanes. The workload is `-c` of the frozen `sqlite3.c`, with the 9700X job's
+options and `-w`: with warnings on, #1049's common warnings add 48 ms of serial work (#1340), which
+dilutes every difference here. The whole process, medians of 21 runs:
+
+| | source order | deferred bodies |
+| --- | ---: | ---: |
+| wall, `-w` | 108.24 ms | 105.66 ms (−2.4%) |
+| user cycles, `-w` | 623.8 M | 703.7 M (+12.8%) |
+| minor faults, `-w` | 8,552 | 23,577 |
+| peak resident set, `-w` | 325 MB | 357 MB |
+| wall, with warnings | 158.88 ms | 157.17 ms (−1.1%) |
+
+`check-input` by `--lanes N`, medians of 11 runs, in ms:
+
+| Lanes | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| source order | 56.66 | 56.87 | 56.73 | 56.69 | 56.94 | 56.89 | 56.75 |
+| deferred bodies | 59.71 | 56.58 | 55.41 | 54.53 | 54.18 | 53.95 | 53.77 |
+
+Two lanes are slower than source order and three break even, hence the rule's four.
+`benchmark-checker-deferred` splits the reading on 8 lanes into the following, in ns/token
+(source order's reading is 74.03):
+
+| part | ns/token |
+| --- | ---: |
+| the top level's walk | 22.57 |
+| the lanes' span | 5.65 |
+| the merge (its pass on the lanes: 0.99) | 2.35 |
+| `check_input_run`'s phases after the merge | 37.29 |
+| the whole reading | 68.21 |
+
+The lanes take a tenth of it. Without the option the driver's time is main's: −0.54% wall over 11
+runs. The compiler's own `main.c` reads in source order for its `#pragma clang section` lines, at
+the same time, and a small unit's bodies take one lane.
+
+### The decision
+
+**Checking bodies on lanes, as #113's reader does it, stays off by default.** It moves only the
+bodies' walks, which are a tenth of the reading. On 8 lanes it buys 2.6 ms of a 108 ms compile, and
+in a build that runs a compile per core, its 12.8% more cycles take cores the other compiles would
+use. `--deferred-bodies` keeps it available, with source order's result, for the work that would
+change that.
+
+**The serial share is where the compile's time is.** On 8 lanes with deferred bodies, about 9 ms of
+the 104.6 ms that `--time-stages` counts runs on lanes: the emission's 4.6, the bodies' walks
+(about 4) and the merge's pass (0.7). The other 91% is serial:
+
+| serial part | ms |
+| --- | ---: |
+| the reading's top level's walk | about 16 |
+| the reading's phases after the merge, the expressions' walk the largest | about 27 |
+| preprocessing | 10.1 |
+| `check-expressions` | 10.1 |
+| `check-program` | 10.1 |
+| the parse | 7.4 |
+
+The bodies' checking goes on lanes when the phases after the merge do. They are per-body work, as
+the walks are, and on lane 0 they are the largest part left. #1404 takes that on.
+
+**Body parsing stays serial.** The parse is 7.4 ms, 7% of the `-w` compile. The reader's walks read
+each body's parse, so parsing on lanes would pay only after the checking.
 
 ## Tests and measurements
 

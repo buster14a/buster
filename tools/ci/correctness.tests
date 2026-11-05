@@ -71,12 +71,15 @@ unset CPATH C_INCLUDE_PATH
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
 # and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
 # lanes that don't start.
+# #153: changed IDs in the poisoned/debug output comparisons, canonical fatal-prefix diagnostics at 1/2/3/8 lanes
+# through both paths, and the sequential multi-input -E command's text and diagnostics against standalone bytes.
 # Its children take up to eight lanes; the heading is the parallel runner's scheduling budget, not an affinity mask.
 "$BUSTER_COMPILER" test-check-units
 == Test mixed-tier single- and multi-file determinism [8 CPUs]
 # #149/#153: compare each host path with its own one-lane bytes at every available count through eight.
 # Require actual command-team and mixed-tier receipts, fresh outputs, usable -c objects, and independently checked
-# execution. The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
+# execution, with changed IDs for both single- and multi-file commands. Multi-file repeats also poison the arenas.
+# The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
 # eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
@@ -199,9 +202,20 @@ mapfile -d '' -t flags < "$flags_file"
 mapfile -d '' -t sources < "$sources_file"
 test "${#flags[@]}" -gt 0
 test "${#sources[@]}" -gt 0
+# #1423: host-only detector and frame controls don't belong to a semantic request. Keep -fsanitize= and -fPIE,
+# which affect source feature queries and predefines, and every other build argument. The compiler running this
+# check is still instrumented; these exact exclusions don't admit unsupported options to the driver.
+check_flags=()
+for flag in "${flags[@]}"; do
+    case "$flag" in
+        -fsanitize-address-use-after-scope|-fsanitize-address-use-after-return=always|-fsanitize-memory-track-origins=2|\
+        -fno-sanitize-recover=all|-fno-sanitize-trap=all|-fno-omit-frame-pointer|-fno-optimize-sibling-calls) ;;
+        *) check_flags+=("$flag") ;;
+    esac
+done
 for unit in "${sources[@]}"; do
     [[ "${unit##*/}" == main_unit_* ]] && continue
-    "$BUSTER_COMPILER" -fsyntax-only "${flags[@]}" "$unit"
+    "$BUSTER_COMPILER" -fsyntax-only "${check_flags[@]}" "$unit"
 done
 rm "$flags_file" "$sources_file"
 == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
@@ -376,6 +390,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-interpreter-native
 "$BUSTER_COMPILER" test-interpreter-link
 "$BUSTER_COMPILER" test-ir-interpreter
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
@@ -403,8 +419,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-checker-asm
 == Test c-testsuite's harness
 # The self-test checks the harness's timeouts, relative paths (as the programs' heading gives them) and
-# cross-check rules with a stand-in compiler, in a directory of its own: about 7 s, most of it waiting out
-# the timeouts, so it runs apart from the programs, on one CPU rather than their four.
+# cross-check rules with a stand-in compiler, in a directory of its own. Six scenarios run concurrently with
+# five-second watchdogs (the stand-in's deliberate hangs are 30 s); most of the time is waiting, not CPU use.
 "$BUSTER_COMPILER" test-c-testsuite --self-test
 == Test the C lexer without digraphs and // comments, as c89
 "$BUSTER_COMPILER" test-lexer --no-digraphs --no-line-comments

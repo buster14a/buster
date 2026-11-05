@@ -386,6 +386,11 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: dump_struct of a missing context", .source = "int pf(void* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf);\n}\n", .rejected = true },
         { .name = "generic: dump_struct of a wrong context", .source = "int pf(int* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s, long* l)\n{\n__builtin_dump_struct(s, pf, l);\n}\n", .rejected = true },
         { .name = "generic: dump_struct of an int format", .source = "int pf(void* ctx, int f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf, s);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a _BitInt bit-field", .source = "int printf(const char*, ...);\nstruct S { _BitInt(12) b : 9; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a nested __int128 bit-field", .source = "int printf(const char*, ...);\nstruct S { struct { __int128 w : 70; } in; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        // The bit-field after more sibling records than the walk's 64 levels of nesting (#1405's review).
+        { .name = "generic: dump_struct of a bit-field after 65 sibling records", .source = "int printf(const char*, ...);\nstruct S { struct { int x; } f0; struct { int x; } f1; struct { int x; } f2; struct { int x; } f3; struct { int x; } f4; struct { int x; } f5; struct { int x; } f6; struct { int x; } f7; struct { int x; } f8; struct { int x; } f9; struct { int x; } f10; struct { int x; } f11; struct { int x; } f12; struct { int x; } f13; struct { int x; } f14; struct { int x; } f15; struct { int x; } f16; struct { int x; } f17; struct { int x; } f18; struct { int x; } f19; struct { int x; } f20; struct { int x; } f21; struct { int x; } f22; struct { int x; } f23; struct { int x; } f24; struct { int x; } f25; struct { int x; } f26; struct { int x; } f27; struct { int x; } f28; struct { int x; } f29; struct { int x; } f30; struct { int x; } f31; struct { int x; } f32; struct { int x; } f33; struct { int x; } f34; struct { int x; } f35; struct { int x; } f36; struct { int x; } f37; struct { int x; } f38; struct { int x; } f39; struct { int x; } f40; struct { int x; } f41; struct { int x; } f42; struct { int x; } f43; struct { int x; } f44; struct { int x; } f45; struct { int x; } f46; struct { int x; } f47; struct { int x; } f48; struct { int x; } f49; struct { int x; } f50; struct { int x; } f51; struct { int x; } f52; struct { int x; } f53; struct { int x; } f54; struct { int x; } f55; struct { int x; } f56; struct { int x; } f57; struct { int x; } f58; struct { int x; } f59; struct { int x; } f60; struct { int x; } f61; struct { int x; } f62; struct { int x; } f63; struct { int x; } f64; "
+          "struct { _BitInt(12) bad : 9; } last; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, printf);\n}\n", .rejected = true },
         { .name = "generic: dump_struct's value", .source = "int printf(const char*, ...);\nstruct S { int a; };\nint f(struct S* s)\n{\nreturn __builtin_dump_struct(s, printf);\n}\n", .rejected = true },
         // clang's counted_by family (#148): on flexible array members and pointers, wherever written, its count a member
         // declared before it (an enclosing record's through an anonymous one); __builtin_counted_by_ref a pointer to it,
@@ -849,6 +854,65 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "__builtin_os_log_format(buffer, \"%d %d %d %d %d\", a, c, d, e, u); bytes(__builtin_os_log_format_buffer_size(\"%d %d %d %d %d\", a, c, d, e, u));\n"
         "return (int)(h ^ (h >> 32)); }\n",
         "generic-os-log-order", clang);
+    // __builtin_os_log_format's data evaluated once an item (#148, as clang's emitBuiltinOSLogFormat evaluates each item's
+    // expression): data taken again after a side effect ran, and an item's call made again; and a __float128's 16 bytes
+    // and a 2-byte vector's, read as they are evaluated.
+    check_test_program_source(test,
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "static unsigned char buffer[512]; static int made;\n"
+        "static int next(int v) { made++; return v + made; }\n"
+        "static void bytes(unsigned long n) { for (unsigned long i = 0; i < n; i++) mix(buffer[i]); }\n"
+        "typedef char V2 __attribute__((vector_size(2)));\n"
+        "int tested(int n) { h = (unsigned)n; int g = n;\n"
+        "__builtin_os_log_format(buffer, \"%1$d %2$d %1$d\", g, next(n)); bytes(__builtin_os_log_format_buffer_size(\"%1$d %2$d %1$d\", 1, 2));\n"
+        "__builtin_os_log_format(buffer, \"%1$d %2$d %1$d\", made, next(n)); bytes(__builtin_os_log_format_buffer_size(\"%1$d %2$d %1$d\", 1, 2));\n"
+        "__builtin_os_log_format(buffer, \"%1$d %1$d %1$d\", next(n)); bytes(__builtin_os_log_format_buffer_size(\"%1$d %1$d %1$d\", 1)); mix(made);\n"
+        "__float128 q = (__float128)n / 3; V2 v = { (char)n, (char)-n };\n"
+        "__builtin_os_log_format(buffer, \"%f %d %2$d %1$f\", q, v); bytes(__builtin_os_log_format_buffer_size(\"%f %d %2$d %1$f\", q, v));\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-os-log-reevaluated", clang);
+    // __builtin_dump_struct (#148): clang's calls of the printer, a line each, hashed by a printer that reads each format's
+    // operands as its conversions say (a pointer as its offset from the record): the record's name, each field's type
+    // name as its declaration spells it (typedefs kept, an unnamed record's "struct (unnamed)"), its name, a bit-field's
+    // width, and its value promoted (bool, the character types, the integers, size_t's %zu, an enum's underlying type,
+    // the floating types, strings of at most 32 characters, pointers) or its address (an array, an __int128, a complex);
+    // nested records' fields deeper, anonymous members' flattened, unnamed bit-fields skipped; the printer and the rest
+    // of the arguments evaluated again for each call (a call through a pointer, the rest's side effects), the record
+    // once; a union's dump, a nested record's and a typedef'd unnamed record's.
+    check_test_program_source(test,
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "static const char* base;\n"
+        "static int pr(int tag, const char* f, ...) { __builtin_va_list ap; __builtin_va_start(ap, f); mix((unsigned)tag);\n"
+        "for (const char* p = f; *p; p++) { mix((unsigned char)*p); if (*p != '%') continue; p++;\n"
+        "while (*p == '.' || (*p >= '0' && *p <= '9')) { mix((unsigned char)*p); p++; }\n"
+        "int l = 0, L = 0; while (*p == 'h' || *p == 'l' || *p == 'z' || *p == 'j' || *p == 't' || *p == 'L') { l += *p == 'l' || *p == 'z' || *p == 'j' || *p == 't'; L |= *p == 'L'; mix((unsigned char)*p); p++; }\n"
+        "mix((unsigned char)*p);\n"
+        "if (*p == 's') { const char* s = __builtin_va_arg(ap, const char*); for (int i = 0; s && s[i] && i < 32; i++) mix((unsigned char)s[i]); }\n"
+        "else if (*p == 'p') { const char* q = __builtin_va_arg(ap, const char*); mix(q ? (unsigned long long)(q - base) : 7777); }\n"
+        "else if (*p == 'f' && L) { long double d = __builtin_va_arg(ap, long double); mix((unsigned long long)(long long)(d * 1000)); }\n"
+        "else if (*p == 'f') { double d = __builtin_va_arg(ap, double); mix((unsigned long long)(long long)(d * 1000)); }\n"
+        "else if (l) mix((unsigned long long)__builtin_va_arg(ap, long)); else mix((unsigned long long)__builtin_va_arg(ap, int)); }\n"
+        "__builtin_va_end(ap); return 0; }\n"
+        "typedef unsigned long size_t; typedef signed char i8; typedef struct { int q; short r; } Anon; enum Color { RED, GREEN }; enum Neg { MINUS = -1 };\n"
+        "struct In { int x; long y; };\n"
+        "struct S { _Bool b; char c; i8 sc; unsigned char uc; short s; unsigned short us; int i; unsigned u; long l; unsigned long long ull;\n"
+        "float f; double d; long double ld; const char* str; char* mstr; void* vp; int* np; int arr[2]; size_t z; enum Color col; enum Neg ng;\n"
+        "struct In in; Anon an; int bf : 3; unsigned ubf : 5; int : 4; _Bool bb : 1; long long lbf : 40; enum Color cbf : 2;\n"
+        "struct { int ia; union { int ib; float fc; }; }; struct { int named_in; } named; union U { int ux; char uy; } un; __int128 w; _Complex double cd; };\n"
+        "static int calls; static int next(void) { return calls++; }\n"
+        "int tested(int n) { h = (unsigned)n; calls = 0; struct S s = { 0 }; base = (const char*)&s;\n"
+        "s.b = n & 1; s.c = (char)-n; s.sc = (i8)(n - 100); s.uc = (unsigned char)(200 + n); s.s = (short)(-300 * n); s.us = (unsigned short)(65000 + n);\n"
+        "s.i = -7 * n; s.u = 4000000000u + (unsigned)n; s.l = -8L * n; s.ull = 11ULL << n; s.f = 1.5f * n; s.d = -2.25 * n; s.ld = 3.125L * n;\n"
+        "s.str = \"hello\"; s.mstr = \"a string longer than thirty-two characters for sure\"; s.vp = &s.i; s.z = (size_t)n * 3; s.col = GREEN; s.ng = MINUS;\n"
+        "s.in.x = n; s.in.y = -n; s.an.q = 3; s.an.r = (short)n; s.bf = -2; s.ubf = (unsigned)n & 31; s.bb = 1; s.lbf = -12345678901LL * n; s.cbf = GREEN;\n"
+        "s.ia = 13; s.ib = n; s.named.named_in = 15; s.un.ux = 0x41 + n;\n"
+        "__builtin_dump_struct(&s, pr, n);\n"
+        "int (*volatile through)(int, const char*, ...) = pr; __builtin_dump_struct(&s.in, through, next());\n"
+        "Anon a = { n, 6 }; __builtin_dump_struct(&a, pr, next() * 10);\n"
+        "union U u = { n }; __builtin_dump_struct(&u, pr, 3);\n"
+        "__builtin_dump_struct(&s.named, pr, 4); mix((unsigned)calls);\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-dump-struct", clang);
     // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
     // evaluated once, as the call's.
     check_test_program_source(test,
