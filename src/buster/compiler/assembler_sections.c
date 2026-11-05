@@ -40,6 +40,63 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
         }
         parser->section_slots[slot] = id;
     }
+    // Grouped sections may repeat a name. Keep the most recently created identity for section-name expressions;
+    // reopening an old section does not change this mapping. Ordinary assembly pays no extra table allocation.
+    if (parser->result.error == 0 && parser->group_count != 0)
+    {
+        const bool rebuild = parser->section_name_slots == 0 || parser->section_name_mask != parser->section_mask;
+        if (rebuild)
+        {
+            parser->section_name_mask = parser->section_mask;
+            parser->section_name_slots = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, (uint64_t)parser->section_mask + 1);
+            if (parser->section_name_slots == 0)
+            {
+                asm_fail(parser, 0, "arena exhausted indexing section names");
+            }
+            else
+            {
+                memset(parser->section_name_slots, 0, ((uint64_t)parser->section_mask + 1) * sizeof(uint32_t));
+            }
+        }
+        const uint32_t begin = rebuild ? 1 : id;
+        const uint32_t end = rebuild ? parser->section_count : id + 1;
+        for (uint32_t i = begin; parser->result.error == 0 && i < end; i += 1)
+        {
+            const String8 name = parser->sections[i].object.name;
+            uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->section_name_mask;
+            while (parser->section_name_slots[slot] != 0)
+            {
+                const String8 old = parser->sections[parser->section_name_slots[slot]].object.name;
+                if (old.length == name.length && memcmp(old.pointer, name.pointer, name.length) == 0)
+                {
+                    break;
+                }
+                slot = (slot + 1) & parser->section_name_mask;
+            }
+            parser->section_name_slots[slot] = i;
+        }
+    }
+}
+
+static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name)
+{
+    uint32_t result = 0;
+    if (parser->section_name_slots != 0)
+    {
+        uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->section_name_mask;
+        result = parser->section_name_slots[slot];
+        while (result != 0)
+        {
+            const String8 old = parser->sections[result].object.name;
+            if (old.length == name.length && memcmp(old.pointer, name.pointer, name.length) == 0)
+            {
+                break;
+            }
+            slot = (slot + 1) & parser->section_name_mask;
+            result = parser->section_name_slots[slot];
+        }
+    }
+    return result;
 }
 
 static void asm_sections_initialize(AsmParser* parser)

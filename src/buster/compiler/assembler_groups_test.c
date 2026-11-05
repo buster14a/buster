@@ -176,10 +176,25 @@ static void asm_test_group_link(AsmTest* test, const char* directory)
 
 static void asm_test_groups(AsmTest* test, const char* directory, bool cross_check)
 {
+    // GNU as binds each section-name expression to the last-created namesake, not the current group.
+    static const char section_names[] =
+        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n"
+        ".section .debug_macro,\"G\",@progbits,second,comdat\n.long .debug_macro\n"
+        ".section .debug_macro,\"G\",@progbits,first,comdat\n.long .debug_macro\n";
+    asm_test_pair(test, (String8){.pointer = (char*)section_names, .length = sizeof(section_names) - 1}, 1, X86_ARCH_BASELINE);
+    if (cross_check)
+    {
+        asm_test_oracle(test, section_names, directory, X86_ARCH_BASELINE);
+    }
     // Explicit flags must retain the conventional array entry sizes. In particular,
     // the file-scope assembly path relies on accepting these before refusing their kind.
     static const char arrays[] = ".section .init_array,\"aw\"\n.quad 0\n.section .fini_array,\"aw\"\n.quad 0\n";
-    asm_test_pair(test, (String8){.pointer = (char*)arrays, .length = sizeof(arrays) - 1}, 1, X86_ARCH_BASELINE);
+    test->scalar.length = 0;
+    test->vector.length = 0;
+    const String8 array_source = {.pointer = (char*)arrays, .length = sizeof(arrays) - 1};
+    const AsmResult scalar_arrays = asm_assemble(array_source, test->index, (AsmOptions){0}, &test->scalar);
+    const AsmResult vector_arrays = asm_assemble(array_source, test->index, (AsmOptions){.vectorized = true}, &test->vector);
+    asm_test_check(test, scalar_arrays.error == 0 && vector_arrays.error == 0, "ordinary array section flags retain their entry size", vector_arrays.error);
     asm_test_group_metadata(test);
     asm_test_pair(test, (String8){.pointer = (char*)asm_test_group_signatures, .length = sizeof(asm_test_group_signatures) - 1}, 1, X86_ARCH_BASELINE);
     static const char* const rejected[] = {

@@ -243,6 +243,7 @@ struct AsmSection
 {
     ObjectAtomSection object;
     uint32_t group;
+    uint32_t name_symbol;
     uint32_t size;
     AtomId atom;
     uint8_t class;
@@ -367,6 +368,8 @@ struct AsmParser
     AsmSection* sections;
     uint32_t* section_slots;
     uint32_t section_mask;
+    uint32_t* section_name_slots;
+    uint32_t section_name_mask;
     uint32_t section_count;
     uint32_t section_capacity;
     uint32_t group_count;
@@ -870,6 +873,7 @@ static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
 }
 
 static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group);
+static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name);
 static void asm_line_instruction(AsmParser* parser, uint32_t location);
 
 static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
@@ -1286,7 +1290,29 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                         {
                             asm_fail(parser, token.start, "expected address register");
                         }
-                        const uint32_t symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
+                        const uint32_t section = text.length > 1 && text.pointer[0] == '.' ? asm_find_latest_section(parser, text) : 0;
+                        uint32_t symbol = 0;
+                        if (section != 0 && parser->sections[section].group != 0)
+                        {
+                            // A section name denotes the last-created namesake at this expression, even if another
+                            // group is selected later. Use a separate symbol for each identity before that can change.
+                            symbol = parser->sections[section].name_symbol;
+                            if (symbol == 0 && parser->symbol_count >= parser->capacity)
+                            {
+                                asm_fail(parser, token.start, "symbol capacity exhausted");
+                            }
+                            else if (symbol == 0)
+                            {
+                                symbol = parser->symbol_count++;
+                                parser->sections[section].name_symbol = symbol;
+                                parser->symbols[symbol] = (AsmSymbol){.name = text, .location = token.start, .section_index = section,
+                                                                      .section_start = true, .internal = true};
+                            }
+                        }
+                        else
+                        {
+                            symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
+                        }
                         parser->symbols[symbol].referenced = true;
                         if (parser->at < end && parser->tokens[parser->at].kind == '@')
                         {
