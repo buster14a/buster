@@ -596,7 +596,8 @@ The decoding:
   cover, is left uncertified (`TIER1_CERT_EMITTED_VECTOR`).
 - **By-value aggregates** (#789, #1284). A parameter's copy at entry, from its
   registers and incoming slots (a SPLIT location's, a STACK one's high or low
-  eightbyte alone); a call's argument copies into staging slots below rsp,
+  eightbyte alone); a call's argument copies into staging slots below rsp or
+  the reserved frame object when they exceed the red zone's capacity (#1450),
   zmm16 and on for 64-byte parts, stack slots or the outgoing area whole; its
   parts' loads, the hidden pointer's `lea`, the result parts' stores; and the
   function's own result, staged then loaded or copied through the hidden
