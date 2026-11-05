@@ -347,10 +347,11 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
         {
             memcpy(spelling, original->names.bytes[name], original->names.length[name]);
             spelling[original->names.length[name]] = 0;
-            // The process's own libraries, then libm, which the compiler's link doesn't take (#652, test_libm), then libgcc.
+            // The process's own libraries, then libm, which the compiler's link doesn't take (#652, test_libm), then libgcc;
+            // in a static executable test_libm's table alone, as libgcc_s.so.1 would bring a second C library.
             address = dlsym(RTLD_DEFAULT, spelling);
             address = address != 0 ? address : test_libm(spelling);
-            if (address == 0)
+            if (address == 0 && !BUSTER_HOST_STATIC_EXECUTABLE)
             {
                 gcc_s = gcc_s != 0 ? gcc_s : dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_LOCAL);
                 address = gcc_s != 0 ? dlsym(gcc_s, spelling) : 0;

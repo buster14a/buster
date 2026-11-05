@@ -1499,8 +1499,8 @@ faults and 60% of its cycles in the kernel), and what this part takes out:
   spills in; it runs from `main_driver` now (`main_source_command`).
 - **No libm.** Loading `libm.so.6` took 24 µs and 12 faults of a process's
   start, for six exact operations the compiler now has itself
-  (`host_math.h`); its tests reach libm through `dlopen` (`test_libm.c`) and
-  the link takes libm only as needed.
+  (`host_math.h`); its tests reach libm through `dlopen` (`test_libm.c`), or
+  in a static link that file's table, and the link takes libm only as needed.
 - **The local calendar at the first `__DATE__` or `__TIME__`.** Its first
   conversion read the time zone's file, 7 system calls of every unit's start.
 
@@ -1527,10 +1527,11 @@ The executable is now linked statically wherever nothing needs the loader
 (`docs/commands/build.md`: every build but the sanitizers' PIEs, fuzzing and
 `BUSTER_HOST_RUNTIME`'s). A static glibc executable's `dlsym(RTLD_DEFAULT,
 ...)` finds nothing, and a `dlopen`ed library brings its own C library, whose
-`errno` its functions set: the natives the interpreter's programs call
-(`test-ssa-source`, `interpret-ir --bind`) and the libm oracles of the tests
-come from a table of the host functions they name (`test_libm.c`), which links
-them in. The stack canary's check reads the compiler's objects, since libc.a
+state (`errno`, the environment, the heap and stdio's files) is its own: the
+natives the interpreter's programs call (`test-ssa-source`, `interpret-ir
+--bind`) and the libm oracles of the tests come from a table of the host
+functions they name (`test_libm.c`), which links them in, and from nothing
+else. The stack canary's check reads the compiler's objects, since libc.a
 defines and calls `__stack_chk_fail` itself. The start doesn't register the
 executable's 634 KB of `.eh_frame` with libgcc's unwinder, which `crtbeginT.o`
 does where the unwinder is linked (glibc's `pthread_exit` needs it): libgcc 13

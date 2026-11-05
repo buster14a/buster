@@ -6,16 +6,15 @@
 // (#652). The compiler's link takes libm only where something still references it (host_math.h has the compiler's own
 // operations), and with BUSTER_HOST_STATIC links statically, where dlsym(RTLD_DEFAULT) finds nothing:
 //   - linked dynamically, from libm.so.6 loaded on the first lookup, whose dependencies (libc.so.6) dlsym searches
-//     too. The process has one libm, this one or the one its link took, so its objects (signgam) are those its
-//     functions set;
-//   - linked statically, from the table below first, which links in each function and object it names, the C
-//     library's that c-testsuite's programs and the generated ones call, those with the C library's process-wide state
-//     (the heap, stdio, the environment, errno, the random numbers, strtok, the exit handlers, the signals, the locale
-//     and the time zone) and libm's that the tests compare with, so that they are this process's own: setenv through
-//     it changes what the process's getenv reads (test-interpreter-native). Any other name comes from libm.so.6 and
-//     the C library it brings, loaded as a linked-dynamically executable loads it: a second C library, whose state is
-//     its own, which still binds every name the dynamic executable bound (interpret-ir's --bind contract); a function
-//     whose state the process shares belongs in the table.
+//     too. The process has one libm and one C library, this one or the ones its link took, so a name binds to the
+//     functions and objects whose state (signgam, errno, the heap, stdio's files) is the process's own;
+//   - linked statically, from the table below alone, which links in each function and object it names: the C library's
+//     that c-testsuite's programs, the generated ones and tests/ir call, its functions with the process-wide state
+//     they share (the heap, stdio and the files it makes, the environment, errno, the random numbers, strtok, the exit
+//     handlers, the signals, the locale and the time zone), and libm's that the tests compare with. Any other name
+//     binds to nothing: a libm.so.6 loaded into a static executable brings a second C library, whose state is its own,
+//     so that its tmpfile's FILE would be another C library's to this one's fwrite and fclose, and its errno another
+//     variable. A name the interpreter's programs need there goes in the table.
 #ifndef BUSTER_TEST_LIBM_INCLUDED
 #define BUSTER_TEST_LIBM_INCLUDED
 
@@ -32,6 +31,7 @@
 #include <string.h>
 
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+#include <errno.h>
 #include <fenv.h>
 #include <locale.h>
 #include <math.h>
@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 extern char** environ;
 
@@ -104,7 +105,7 @@ static TestHostSymbol test_host_symbols[] = {
     BUSTER_TEST_HOST_SYMBOL(stderr),
     // The C library's process-wide state beyond the heap and stdio above, which a second C library would keep apart:
     // the environment, errno, the random numbers, strtok's position, the exit handlers, the signals, the locale and the
-    // time zone. The fallback below serves the functions without such state.
+    // time zone.
     BUSTER_TEST_HOST_SYMBOL(getenv),
     BUSTER_TEST_HOST_SYMBOL(setenv),
     BUSTER_TEST_HOST_SYMBOL(unsetenv),
@@ -141,6 +142,15 @@ static TestHostSymbol test_host_symbols[] = {
     BUSTER_TEST_HOST_SYMBOL(scanf),
     BUSTER_TEST_HOST_SYMBOL(fscanf),
     BUSTER_TEST_HOST_SYMBOL(sscanf),
+    // The files stdio makes, which only this C library's functions may read, write and close.
+    BUSTER_TEST_HOST_SYMBOL(tmpfile),
+    BUSTER_TEST_HOST_SYMBOL(fdopen),
+    BUSTER_TEST_HOST_SYMBOL(freopen),
+    BUSTER_TEST_HOST_SYMBOL(fmemopen),
+    BUSTER_TEST_HOST_SYMBOL(open_memstream),
+    BUSTER_TEST_HOST_SYMBOL(fileno),
+    // The process's identity, which tools/ci/correctness.tests binds.
+    BUSTER_TEST_HOST_SYMBOL(getpid),
     // libm's: the programs' (00174.c's sin), the math helpers' oracles (c_builtin_math_helpers_test.c), host_math.h's
     // oracles and the other tests'.
     BUSTER_TEST_HOST_SYMBOL(sin),
@@ -181,7 +191,8 @@ static TestHostSymbol test_host_symbols[] = {
 #undef BUSTER_TEST_HOST_SYMBOL
 #endif
 
-// The address of `name`, a function or object of libm or the C library, or null if it can't be found.
+// The address of `name`, a function or object of libm or the C library, or null if it can't be found: in a static
+// executable, if the table doesn't name it.
 static __attribute__((unused)) void* test_libm(const char* name)
 {
     void* result = NULL;
@@ -190,13 +201,14 @@ static __attribute__((unused)) void* test_libm(const char* name)
     {
         result = strcmp(test_host_symbols[i].name, name) == 0 ? test_host_symbols[i].address : NULL;
     }
-#endif
+#else
     static void* library = NULL;
-    if (result == NULL && library == NULL)
+    if (library == NULL)
     {
         library = dlopen("libm.so.6", RTLD_NOW | RTLD_LOCAL);
     }
-    result = result == NULL && library != NULL ? dlsym(library, name) : result;
+    result = library != NULL ? dlsym(library, name) : NULL;
+#endif
     return result;
 }
 

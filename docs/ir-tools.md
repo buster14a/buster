@@ -65,8 +65,10 @@ bits of the result are the process exit status, leaving stdout for the program.
 `--print` parses and prints the canonical representation without execution.
 
 `--bind ID=HOST_SYMBOL` explicitly resolves a native function in the host process,
-for example `--bind 100=printf`. Native IDs must differ from the file's function
-IDs. `malloc`, `calloc`, `realloc` and `free` bindings carry allocation bookkeeping.
+for example `--bind 100=printf`. A statically linked compiler (`BUSTER_HOST_STATIC`)
+binds only the names `test_libm.c`'s table gives, whose functions share the
+process's C library state; any other name fails with an error naming it. Native
+IDs must differ from the file's function IDs. `malloc`, `calloc`, `realloc` and `free` bindings carry allocation bookkeeping.
 These commands run trusted test programs in the current process, like other
 native execution tests; memory diagnostics are an oracle aid, not isolation.
 
