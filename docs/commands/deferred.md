@@ -39,13 +39,16 @@ stay ordered. Graph purity and summary records are built with each part.
 Any post-merge error or allocation failure discards the partial result and
 repeats the complete source-order reader, preserving its diagnostic recovery.
 The driver's lane lease lasts through these rounds and is returned once.
+It is returned when the final expression round joins, before ordered graph
+publication and serial finishing. A reading that uses the original expression
+walk returns it before that walk; the outer cleanup covers earlier errors.
 Warning interval summaries are private to each lane; token-local warning-count
 changes are reduced during publication. Expression numbering and per-action
 timing requests retain the original complete-unit expression walk.
 
 `--time-stages` reports `deferred-expression-parts`,
 `deferred-expression-parallel-tokens`, `deferred-expression-serial-tokens`,
-`deferred-expression-retry` and the planning, lane-round, ordered-work and
+`deferred-expression-workers`, `deferred-expression-retry` and the planning, lane-round, ordered-work and
 publication times. `expressions` remains elapsed wall time; the detailed
 `expressions.work.*` fields sum work across lanes, rather than elapsed time.
 
@@ -104,6 +107,8 @@ fixture must merge alike with the twins (`CheckDeferred.scalar_merge`).
 Post-merge fixtures require actual parallel expression work, including builtins,
 local initializers and 15/16/17-leaf boundaries. An injected failure after the
 expression round must reproduce the complete source-order result.
+A delayed-caller fixture also checks the completed parts' lane identities,
+requiring real expression execution on the caller and at least one other lane.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units

@@ -771,6 +771,9 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
             __atomic_store_n(&deferred->others_took, 0, __ATOMIC_RELEASE);
         }
         valid = valid && check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_EXPRESSIONS, lanes, check_deferred_expression_lane, &run);
+        // No later phase runs a lane round. Return spare workers before ordered roots, graph publication and
+        // serial finishing; the outer cleanup remains the once-only guard for every earlier exit.
+        check_deferred_give_back(deferred);
         const uint64_t publish_start = __rdtsc();
         // Workers changed token-local warning facts without updating the caller's shared interval summaries.
         reader->warning_index_ready = false;
@@ -810,6 +813,7 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
                 continue;
             }
             deferred->expression_parallel_tokens += part->end - part->begin;
+            deferred->expression_worker_mask |= UINT64_C(1) << part->lane;
             part->base = input->graph.count;
             valid = part->valid && check_deferred_expression_append(reader, part, !deferred->scalar_merge);
             input->constant_warning_count += part->constant_warnings;
@@ -864,7 +868,6 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
         memcpy(input->expression_acted, acted, sizeof(acted));
         memcpy(input->expression_left, left, sizeof(left));
         deferred->expression_parts = n;
-        deferred->expression_lanes = lanes;
         valid &= !deferred->fail_after_expressions;
         deferred->expression_retry = !valid;
         input->resource |= !valid;

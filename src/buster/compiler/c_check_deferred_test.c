@@ -1408,6 +1408,23 @@ static int run_checker_deferred_tests(int count, char** arguments)
         }
         if (valid && strcmp(name, "postmerge-independent-expressions") == 0)
         {
+            // With lane 0 delayed until the other lanes take parts, an all-eligible forest must execute on a
+            // nonzero lane as well as its reserved caller part. Count completed work, rather than eligibility.
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_late_first = true;
+            CheckCorpusOutcome parallel;
+            check_corpus_measure(path, &options, false, true, &parallel);
+            check_corpus_deferred_late_first = false;
+            const uint64_t workers = parallel.deferred_expression_worker_mask;
+            const bool executed = BUSTER_SCALAR_PATH(false) ? workers == 0 : (workers & 1) != 0 && (workers & ~UINT64_C(1)) != 0;
+            const bool shared = parallel.prepared && parallel.equal && parallel.deferred_equal && parallel.deferred &&
+                                !parallel.deferred_expression_retry && executed;
+            checks += 1;
+            failures += !shared;
+            if (!shared)
+            {
+                fprintf(stderr, "test-checker-deferred: the delayed expression caller did not share successful work with another lane\n");
+            }
             check_corpus_deferred_lanes = 8;
             check_corpus_deferred_fail_expressions = true;
             CheckCorpusOutcome outcome;

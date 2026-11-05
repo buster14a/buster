@@ -2526,6 +2526,7 @@ struct CheckCorpusOutcome
     uint64_t deferred_expression_parts;
     uint64_t deferred_expression_parallel_tokens;
     uint64_t deferred_expression_serial_tokens;
+    uint64_t deferred_expression_worker_mask;
     bool deferred_expression_retry;
     uint64_t deferred_lanes_ns;
     uint64_t deferred_dispatch_ns;
@@ -2607,6 +2608,7 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_expression_parts = outcome->deferred ? paths[2].deferred->expression_parts : 0;
     outcome->deferred_expression_parallel_tokens = outcome->deferred ? paths[2].deferred->expression_parallel_tokens : 0;
     outcome->deferred_expression_serial_tokens = outcome->deferred ? paths[2].deferred->expression_serial_tokens : 0;
+    outcome->deferred_expression_worker_mask = outcome->deferred ? paths[2].deferred->expression_worker_mask : 0;
     outcome->deferred_expression_retry = outcome->deferred && paths[2].deferred->expression_retry;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;
     outcome->deferred_dispatch_ns = outcome->deferred ? paths[2].deferred->dispatch_ns : 0;

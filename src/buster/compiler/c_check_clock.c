@@ -242,6 +242,7 @@ struct CheckClock
     uint64_t deferred_expression_parts;
     uint64_t deferred_expression_parallel_tokens;
     uint64_t deferred_expression_serial_tokens;
+    uint64_t deferred_expression_worker_mask;
     bool deferred_expression_retry;
     uint64_t deferred_expression_ticks[4];
     const char* deferred_reason;
@@ -422,6 +423,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-check\tdeferred-expression-parts\t%" PRIu64 "\n", stage_clock->deferred_expression_parts);
         fprintf(stream, "time-check\tdeferred-expression-parallel-tokens\t%" PRIu64 "\n", stage_clock->deferred_expression_parallel_tokens);
         fprintf(stream, "time-check\tdeferred-expression-serial-tokens\t%" PRIu64 "\n", stage_clock->deferred_expression_serial_tokens);
+        fprintf(stream, "time-check\tdeferred-expression-workers\t%u\n", (uint32_t)__builtin_popcountll(stage_clock->deferred_expression_worker_mask));
         fprintf(stream, "time-check\tdeferred-expression-retry\t%s\n", stage_clock->deferred_expression_retry ? "yes" : "no");
         const char* const phases[] = { "plan", "round", "serial", "publish" };
         for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(phases); p += 1)

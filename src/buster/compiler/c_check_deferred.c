@@ -83,7 +83,7 @@
 // A caller whose lanes are a command's flow (the C driver's, #151): the reader's lanes are rounds of `flow`
 // (lane_flow_round_begin) rather than lane_run's, whose other lanes run them from the flow's follow loop. `grant` gives the
 // lanes the bodies may take of the `wanted` the rule plans (the session's that started and the worker budget's), before
-// the top level's walk; `give_back` returns them after the post-merge phases, or as the unit goes to source order.
+// the top level's walk; `give_back` returns them after the final post-merge round, or as the unit goes to source order.
 // The driver's reading takes a grant of one lane for source order's.
 typedef struct CheckDeferredFlow CheckDeferredFlow;
 struct CheckDeferredFlow
@@ -321,7 +321,7 @@ struct CheckDeferred
     uint64_t expression_parts;
     uint64_t expression_parallel_tokens;
     uint64_t expression_serial_tokens;
-    uint64_t expression_lanes;
+    uint64_t expression_worker_mask;
     uint64_t expression_ticks[4];
     bool expression_retry;
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
@@ -2501,7 +2501,7 @@ static bool check_deferred_shared(const CheckDeferred* deferred)
     return deferred->planned > 1 && deferred->large;
 }
 
-// The lanes a caller's flow granted (CheckDeferredFlow), given back once: after the post-merge phases, or as the unit
+// The lanes a caller's flow granted (CheckDeferredFlow), given back once: after the final post-merge round, or as the unit
 // goes to source order. The outer reading owns the successful path's cleanup.
 static void check_deferred_give_back(CheckDeferred* deferred)
 {
@@ -2817,7 +2817,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     const uint32_t least = every_lane ? 2 : BUSTER_CHECK_DEFERRED_COMPILE_LANES;
     const bool sections = valid && compile && ruled >= least && check_deferred_sections(parser, pp);
     // In a caller's flow, as many of the planned lanes as it grants (CheckDeferredFlow), taken before the top level's walk,
-    // whose bodies' rule is this one; they are given back after the post-merge phases, or on a source-order retry.
+    // whose bodies' rule is this one; they are given back after the final post-merge round, or on a source-order retry.
     const bool leased = valid && flow != 0 && ruled > 1 && (!compile || (ruled >= least && !sections));
     const uint32_t granted = leased ? flow->grant(flow->context, ruled) : lanes;
     const uint32_t reading = granted == 0 ? 1 : granted < lanes ? granted : lanes;

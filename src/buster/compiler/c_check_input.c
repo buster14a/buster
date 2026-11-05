@@ -9659,6 +9659,7 @@ static void check_input_expression_visit(CheckInputReader* reader, uint32_t toke
 // (check_input_expression_classes), and acts at most of them by their classes, testing the sparse columns only of tokens
 // their classes say have an entry.
 static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader* reader);
+static void check_deferred_give_back(CheckDeferred* deferred);
 
 static void check_input_expressions(CheckInputReader* reader)
 {
@@ -9671,6 +9672,10 @@ static void check_input_expressions(CheckInputReader* reader)
     reader->output->expression_visits = parser->options.scalar ? parser->tokens.count : acts;
     if (parser->options.scalar)
     {
+        if (reader->deferred != NULL)
+        {
+            check_deferred_give_back(reader->deferred);
+        }
         for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
         {
             const uint32_t token = reader->postorder[order];
@@ -9682,6 +9687,10 @@ static void check_input_expressions(CheckInputReader* reader)
     {
         if (reader->deferred == NULL || !check_deferred_expressions(reader->deferred, reader))
         {
+            if (reader->deferred != NULL)
+            {
+                check_deferred_give_back(reader->deferred);
+            }
             check_input_expressions_coded(reader);
         }
     }
