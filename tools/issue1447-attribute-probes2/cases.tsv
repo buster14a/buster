@@ -1,0 +1,18 @@
+target_escape.c	
+target_tab.c	
+noderef_integer.c	-Wnoderef
+noderef_use.c	-Wnoderef
+noderef_before_base.c	-Wnoderef
+noderef_pointer_star.c	-Wnoderef
+noderef_assign.c	-Wnoderef
+thread_long.c	-Wthread-safety-attributes
+thread_char.c	-Wthread-safety-attributes
+thread_capability_logic.c	-Wthread-safety-attributes
+selectany_extern.c	
+selectany_local_extern.c	
+format_kind_undeclared.c	
+format_first_undeclared.c	
+annotate_repeated_nonconstant.c	
+annotate_binary_nonconstant.c	
+annotate_address.c	
+clang_first_error.c	
