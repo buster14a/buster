@@ -551,11 +551,13 @@ at and past the width, of zero, and of the control's bytes alone), and
 
 ### Machine rows (#141)
 
-The typed stream compiles C's vector operators on elements other than 32-bit
-integers, and every vector builtin, as X86 rows (`Tier0Operation`, #717): records
-whose registers are Tier 0's roles. The IR has no operation per element type or
-per builtin (its type masks hold 32 types and its opcode tables 64 opcodes, and
-the builtins number in the hundreds), so such a row is the IR's machine row, which
+The typed stream compiles C's vector operators and every vector builtin as X86
+rows (`Tier0Operation`, #717): records whose registers are Tier 0's roles. The
+operators' arithmetic, shifts and comparisons at every element type are the IR's
+own operations of their lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes"); the IR
+has no operation per builtin (its opcode tables hold 64 opcodes, and the builtins
+number in the hundreds), nor for a splat of a scalar or a shuffle, so any other
+such row is the IR's machine row, which
 a row call runs: an `IR_CALL` whose descriptor names the row (`IrCall.row`, 1 plus
 its index in `IrFunction.rows`) in place of a callee, its symbol `a` 0. Its
 arguments are the row's operands in order and its result the row's, of the types

@@ -1058,7 +1058,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             {
                 // High mask bits outside the vector's lanes do not select a lane. An entirely inactive input may
                 // remain undefined, just as the unchosen input of scalar select may remain undefined.
-                const uint64_t lanes = (UINT64_C(1) << (ir_type_bits[type] / 32)) - 1;
+                const uint32_t count = ir_lane_count(type, function->flags[i]);
+                const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
                 operands = 1 | ((av.low & lanes) != 0 ? 2 : 0) | ((av.low & lanes) != lanes ? 4 : 0);
             }
             else if (op == IR_COPY || op == IR_BITCAST)

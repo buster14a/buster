@@ -151,10 +151,105 @@ static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
     arena_pop_to(output, mark);
 }
 
+// A vector operation's lanes (#141's element types, its flags): each shape accepted and its neighbours refused, by both
+// verifiers. Two vector parameters of `type` (v4i32, v8i32 or v16i32), then the operation under test on them, of
+// `result` with flags `lane` and predicate `c` (vcmp's), and a ret.
+typedef struct IrTestLaneCase IrTestLaneCase;
+struct IrTestLaneCase
+{
+    uint8_t op;
+    uint8_t type;
+    uint8_t result;
+    uint8_t lane;
+    uint32_t c;
+    // A shift's count of an i32 rather than a vector (`scalar_count`), and a vselect's mask (`mask`, else its result's).
+    bool scalar_count;
+    uint8_t mask;
+    bool valid;
+    const char* message;
+};
+
+static void ir_test_simd_lanes(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrTestLaneCase cases[] = {
+        { IR_ADD, IR_V4I32, IR_V4I32, IR_SIMD_LANE_I8, BUSTER_IR_NONE, false, 0, true, "add.v16i8 is refused" },
+        { IR_SUB, IR_V16I32, IR_V16I32, IR_SIMD_LANE_I16, BUSTER_IR_NONE, false, 0, true, "sub.v32i16 is refused" },
+        { IR_MUL, IR_V8I32, IR_V8I32, IR_SIMD_LANE_I64, BUSTER_IR_NONE, false, 0, true, "mul.v4i64 is refused" },
+        { IR_SHL, IR_V4I32, IR_V4I32, IR_SIMD_LANE_I16, BUSTER_IR_NONE, false, 0, true, "shl.v8i16 by a vector of counts is refused" },
+        { IR_ASHR, IR_V16I32, IR_V16I32, IR_SIMD_LANE_I32, BUSTER_IR_NONE, false, 0, true, "ashr.v16i32 by a vector of counts is refused" },
+        { IR_FADD, IR_V4I32, IR_V4I32, IR_SIMD_LANE_F32, BUSTER_IR_NONE, false, 0, true, "fadd.v4f32 is refused" },
+        { IR_FDIV, IR_V16I32, IR_V16I32, IR_SIMD_LANE_F64, BUSTER_IR_NONE, false, 0, true, "fdiv.v8f64 is refused" },
+        { IR_VCMP, IR_V4I32, IR_M16, IR_SIMD_LANE_I8, IR_ULT, false, 0, true, "a comparison of 16 bytes into m16 is refused" },
+        { IR_VCMP, IR_V16I32, IR_M64, IR_SIMD_LANE_I8, IR_EQ, false, 0, true, "a comparison of 64 bytes into m64 is refused" },
+        { IR_VCMP, IR_V8I32, IR_M8, IR_SIMD_LANE_F64, IR_GE, false, 0, true, "a comparison of 4 doubles into m8 is refused" },
+        { IR_VSELECT, IR_V8I32, IR_V8I32, IR_SIMD_LANE_I16, BUSTER_IR_NONE, false, IR_M16, true, "a selection of 16 words by m16 is refused" },
+        { IR_FADD, IR_V4I32, IR_V4I32, IR_SIMD_LANE_I32, BUSTER_IR_NONE, false, 0, false, "fadd of a vector's default integer lanes is accepted" },
+        { IR_ADD, IR_V4I32, IR_V4I32, IR_SIMD_LANE_F32, BUSTER_IR_NONE, false, 0, false, "an integer add of floating lanes is accepted" },
+        { IR_ADD, IR_V4I32, IR_V4I32, IR_SIMD_LANE_COUNT, BUSTER_IR_NONE, false, 0, false, "lanes past the last kind are accepted" },
+        { IR_XOR, IR_V4I32, IR_V4I32, IR_SIMD_LANE_I8, BUSTER_IR_NONE, false, 0, false, "a bitwise operation's lanes are accepted" },
+        { IR_SHL, IR_V4I32, IR_V4I32, IR_SIMD_LANE_I16, BUSTER_IR_NONE, true, 0, false, "a vector's shift by a scalar count is accepted" },
+        { IR_VCMP, IR_V4I32, IR_M8, IR_SIMD_LANE_I8, IR_EQ, false, 0, false, "a comparison of 16 bytes into m8 is accepted" },
+        { IR_VCMP, IR_V4I32, IR_M8, IR_SIMD_LANE_F32, IR_ULT, false, 0, false, "an unsigned comparison of floats is accepted" },
+        { IR_VSELECT, IR_V4I32, IR_V4I32, IR_SIMD_LANE_I8, BUSTER_IR_NONE, false, IR_M8, false, "a selection of 16 bytes by m8 is accepted" },
+    };
+    for (uint32_t k = 0; k < sizeof(cases) / sizeof(*cases); k += 1)
+    {
+        const IrTestLaneCase lane = cases[k];
+        const uint64_t mark = output->length;
+        IrFunction function = { 0 };
+        const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .parameter_count = 3 };
+        if (ir_create(output, &sizes, &function) == IR_OK)
+        {
+            const uint8_t mask = lane.mask != 0 ? lane.mask : (uint8_t)ir_lane_mask(lane.result, lane.lane);
+            function.parameter_types[0] = lane.type;
+            function.parameter_types[1] = lane.scalar_count ? IR_I32 : lane.type;
+            function.parameter_types[2] = mask != IR_VOID ? mask : IR_M8;
+            function.result_type = IR_VOID;
+            function.block_offsets[1] = 5;
+            ir_test_instruction(&function, 0, IR_PARAM, lane.type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_PARAM, (IrType)function.parameter_types[1], 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, IR_PARAM, (IrType)function.parameter_types[2], 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            if (lane.op == IR_VSELECT)
+            {
+                ir_test_instruction(&function, 3, IR_VSELECT, (IrType)lane.result, 2, 0, 0);
+            }
+            else
+            {
+                ir_test_instruction(&function, 3, (IrOp)lane.op, (IrType)lane.result, 0, 1, lane.op == IR_VCMP ? lane.c : BUSTER_IR_NONE);
+            }
+            function.flags[3] = lane.lane;
+            ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_pair(test, &function, scratch, NULL, lane.valid, lane.message);
+        }
+        else
+        {
+            ir_test_expect(test, false, "a lanes fixture allocates");
+        }
+        arena_pop_to(output, mark);
+    }
+    // A scalar's arithmetic names no lanes: an i32 add of flags I8 is refused.
+    const uint64_t mark = output->length;
+    IrFunction scalar = { 0 };
+    const IrSizes sizes = { .instruction_count = 3, .block_count = 1, .parameter_count = 1 };
+    if (ir_create(output, &sizes, &scalar) == IR_OK)
+    {
+        scalar.parameter_types[0] = IR_I32;
+        scalar.result_type = IR_VOID;
+        scalar.block_offsets[1] = 3;
+        ir_test_instruction(&scalar, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&scalar, 1, IR_ADD, IR_I32, 0, 0, BUSTER_IR_NONE);
+        scalar.flags[1] = IR_SIMD_LANE_I8;
+        ir_test_instruction(&scalar, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_pair(test, &scalar, scratch, NULL, false, "a scalar add's lanes are accepted");
+    }
+    arena_pop_to(output, mark);
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
     ir_test_simd_bitcasts(test, output, scratch);
     ir_test_simd_rows(test, output, scratch);
+    ir_test_simd_lanes(test, output, scratch);
     const uint64_t mark = output->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {

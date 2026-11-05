@@ -40,8 +40,35 @@ typedef enum IrSimdOperation
     IR_SIMD_SELECT,
     IR_SIMD_LOAD,
     IR_SIMD_STORE,
+    // Shifts of each lane by the other operand's same lane (#141's element types), unsigned counts: a left or logical
+    // right shift by the lane's bits or more is 0, an arithmetic one every bit the sign, as vpsllv, vpsrlv and vpsrav
+    // compute them.
+    IR_SIMD_SHL,
+    IR_SIMD_LSHR,
+    IR_SIMD_ASHR,
+    // IEEE arithmetic of floating lanes (#141's element types), at the default rounding, as the x86's packed forms: a
+    // NaN operand's quieted NaN, the first's where both are NaNs (x86's rule), and the default NaN of an invalid one.
+    IR_SIMD_FADD,
+    IR_SIMD_FSUB,
+    IR_SIMD_FMUL,
+    IR_SIMD_FDIV,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
+
+// A vector's lanes (#141's element types): what an operation reads its operands' bits as. A vector shape is a container
+// of 128, 256 or 512 bits whatever its elements, as the typed stream's VECTOR class is bytes alone, and each operation on
+// it says its lanes, as WebAssembly's v128 operations do: 32-bit integers (the default, the shapes' names'), 8-, 16- and
+// 64-bit ones, or floats and doubles. A copy, the bitwise operations, a constant and memory read none (I32).
+typedef enum IrSimdLane
+{
+    IR_SIMD_LANE_I32,
+    IR_SIMD_LANE_I8,
+    IR_SIMD_LANE_I16,
+    IR_SIMD_LANE_I64,
+    IR_SIMD_LANE_F32,
+    IR_SIMD_LANE_F64,
+    IR_SIMD_LANE_COUNT,
+} IrSimdLane;
 
 typedef enum IrSimdPredicate
 {
@@ -71,6 +98,7 @@ struct IrSimdAction
     IrSimdShape result;
     IrSimdShape operands[3];
     IrSimdPredicate predicate;
+    IrSimdLane lane;
     bool volatile_memory;
 };
 
@@ -97,11 +125,51 @@ static bool ir_simd_vector(IrSimdShape shape)
     return result;
 }
 
-static IrSimdShape ir_simd_mask_shape(IrSimdShape shape)
+// A lane's bits.
+static uint32_t ir_simd_lane_bits(IrSimdLane lane)
 {
-    const IrSimdShape result = shape == IR_SIMD_V4I32 || shape == IR_SIMD_V8I32 ? IR_SIMD_M8 :
-                              shape == IR_SIMD_V16I32 ? IR_SIMD_M16 : IR_SIMD_NONE;
+    static const uint8_t bits[IR_SIMD_LANE_COUNT] = { 32, 8, 16, 64, 32, 64 };
+    const uint32_t result = (uint32_t)lane < IR_SIMD_LANE_COUNT ? bits[lane] : 0;
     return result;
+}
+
+static bool ir_simd_lane_floating(IrSimdLane lane)
+{
+    const bool result = lane == IR_SIMD_LANE_F32 || lane == IR_SIMD_LANE_F64;
+    return result;
+}
+
+// The mask of a comparison of a vector's lanes, a bit per lane: m8 for 8 lanes or fewer, else m16, m32 or m64.
+static IrSimdShape ir_simd_lane_mask(IrSimdShape shape, IrSimdLane lane)
+{
+    const uint32_t bits = ir_simd_lane_bits(lane);
+    const uint32_t lanes = ir_simd_vector(shape) && bits != 0 ? ir_simd_bits(shape) / bits : 0;
+    const IrSimdShape result = lanes == 0 ? IR_SIMD_NONE : lanes <= 8 ? IR_SIMD_M8 : lanes == 16 ? IR_SIMD_M16 : lanes == 32 ? IR_SIMD_M32 : IR_SIMD_M64;
+    return result;
+}
+
+// Whether `operation` reads its operands as `lane`: the integer arithmetic and shifts integer lanes, the floating
+// arithmetic floating ones, a comparison and a selection any, and every other operation none but the default.
+static bool ir_simd_lane_valid(IrSimdOperation operation, IrSimdLane lane)
+{
+    bool valid = (uint32_t)lane < IR_SIMD_LANE_COUNT;
+    switch (operation)
+    {
+        case IR_SIMD_ADD:
+        case IR_SIMD_SUB:
+        case IR_SIMD_MUL:
+        case IR_SIMD_SHL:
+        case IR_SIMD_LSHR:
+        case IR_SIMD_ASHR: valid = valid && !ir_simd_lane_floating(lane); break;
+        case IR_SIMD_FADD:
+        case IR_SIMD_FSUB:
+        case IR_SIMD_FMUL:
+        case IR_SIMD_FDIV: valid = valid && ir_simd_lane_floating(lane); break;
+        case IR_SIMD_COMPARE:
+        case IR_SIMD_SELECT: break;
+        default: valid = valid && lane == IR_SIMD_LANE_I32; break;
+    }
+    return valid;
 }
 
 // The shape has no signedness: signed and unsigned comparisons are distinct predicates. Mask bit n governs
@@ -120,8 +188,12 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         const IrSimdShape b = action->operands[1];
         const IrSimdShape c = action->operands[2];
         const IrSimdShape type = action->result;
+        const IrSimdLane lane = action->lane;
         valid = action->operation == IR_SIMD_COMPARE || action->predicate == IR_SIMD_EQ;
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
+        valid = valid && ir_simd_lane_valid(action->operation, lane);
+        // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
+        valid = valid && (!ir_simd_lane_floating(lane) || action->operation != IR_SIMD_COMPARE || action->predicate <= IR_SIMD_GE);
         switch (action->operation)
         {
             case IR_SIMD_CONSTANT:
@@ -130,12 +202,19 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_NOT: valid = valid && type != IR_SIMD_NONE && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
             case IR_SIMD_ADD:
             case IR_SIMD_SUB:
-            case IR_SIMD_MUL: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE; break;
+            case IR_SIMD_MUL:
+            case IR_SIMD_SHL:
+            case IR_SIMD_LSHR:
+            case IR_SIMD_ASHR:
+            case IR_SIMD_FADD:
+            case IR_SIMD_FSUB:
+            case IR_SIMD_FMUL:
+            case IR_SIMD_FDIV: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE; break;
             case IR_SIMD_AND:
             case IR_SIMD_OR:
             case IR_SIMD_XOR: valid = valid && type != IR_SIMD_NONE && a == type && b == type && c == IR_SIMD_NONE; break;
-            case IR_SIMD_COMPARE: valid = valid && ir_simd_vector(a) && a == b && c == IR_SIMD_NONE && type == ir_simd_mask_shape(a); break;
-            case IR_SIMD_SELECT: valid = valid && ir_simd_vector(type) && a == ir_simd_mask_shape(type) && b == type && c == type; break;
+            case IR_SIMD_COMPARE: valid = valid && ir_simd_vector(a) && a == b && c == IR_SIMD_NONE && type == ir_simd_lane_mask(a, lane); break;
+            case IR_SIMD_SELECT: valid = valid && ir_simd_vector(type) && a == ir_simd_lane_mask(type, lane) && b == type && c == type; break;
             case IR_SIMD_STORE: valid = valid && type == IR_SIMD_NONE && a != IR_SIMD_NONE && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
             default: valid = false; break;
         }
@@ -160,16 +239,28 @@ static inline __attribute__((always_inline)) bool ir_simd_value_valid(const IrSi
     return valid;
 }
 
-static uint32_t ir_simd_lane(const IrSimdValue* value, uint32_t lane)
+// Lane `lane` of `bits` bits (8, 16, 32 or 64), zero-extended.
+static uint64_t ir_simd_lane_read(const IrSimdValue* value, uint32_t bits, uint32_t lane)
 {
-    const uint32_t result = (uint32_t)(value->words[lane / 2] >> ((lane % 2) * 32));
+    const uint32_t first = lane * bits;
+    const uint64_t word = value->words[first / 64] >> (first % 64);
+    const uint64_t result = bits == 64 ? word : word & ((UINT64_C(1) << bits) - 1);
     return result;
 }
 
-static bool ir_simd_compare(uint32_t a, uint32_t b, IrSimdPredicate predicate)
+static void ir_simd_lane_write(IrSimdValue* value, uint32_t bits, uint32_t lane, uint64_t lane_value)
 {
-    const uint32_t signed_a = a ^ UINT32_C(0x80000000);
-    const uint32_t signed_b = b ^ UINT32_C(0x80000000);
+    const uint32_t first = lane * bits;
+    const uint64_t mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    value->words[first / 64] = (value->words[first / 64] & ~(mask << (first % 64))) | ((lane_value & mask) << (first % 64));
+}
+
+// A lane's integer comparison at `bits` bits, its operands zero-extended: signed ones by their sign bits flipped.
+static bool ir_simd_compare_bits(uint64_t a, uint64_t b, uint32_t bits, IrSimdPredicate predicate)
+{
+    const uint64_t sign = UINT64_C(1) << (bits - 1);
+    const uint64_t signed_a = a ^ sign;
+    const uint64_t signed_b = b ^ sign;
     bool result = false;
     switch (predicate)
     {
@@ -186,6 +277,111 @@ static bool ir_simd_compare(uint32_t a, uint32_t b, IrSimdPredicate predicate)
         default: break;
     }
     return result;
+}
+
+// A floating lane's bits as a double, and back: a float's or a double's (`bits` 32 or 64). A float widens exactly,
+// its NaN payload kept in the top of the double's (ir_simd_float_bits narrows it back).
+static double ir_simd_float_value(uint64_t lane, uint32_t bits)
+{
+    double result = 0;
+    if (bits == 32)
+    {
+        float single = 0;
+        const uint32_t word = (uint32_t)lane;
+        memcpy(&single, &word, sizeof(single));
+        result = single;
+    }
+    else
+    {
+        memcpy(&result, &lane, sizeof(result));
+    }
+    return result;
+}
+
+static bool ir_simd_float_nan(uint64_t lane, uint32_t bits)
+{
+    const uint64_t exponent = bits == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    const uint64_t fraction = bits == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
+    return (lane & exponent) == exponent && (lane & fraction) != 0;
+}
+
+// A floating lane's arithmetic as x86's packed forms compute it at the default MXCSR: a NaN operand's quieted bits, the
+// first's where both are NaNs; else the operation in the lane's precision (a float's in float, rounded once), whose
+// invalid results are the host's default NaN, x86's, since the compiler runs on x86-64 alone.
+static uint64_t ir_simd_float_operation(IrSimdOperation operation, uint64_t a, uint64_t b, uint32_t bits)
+{
+    const uint64_t quiet = bits == 32 ? UINT64_C(0x00400000) : UINT64_C(0x0008000000000000);
+    uint64_t result = 0;
+    if (ir_simd_float_nan(a, bits))
+    {
+        result = a | quiet;
+    }
+    else if (ir_simd_float_nan(b, bits))
+    {
+        result = b | quiet;
+    }
+    else if (bits == 32)
+    {
+        const float x = (float)ir_simd_float_value(a, 32);
+        const float y = (float)ir_simd_float_value(b, 32);
+        const float z = operation == IR_SIMD_FADD ? x + y : operation == IR_SIMD_FSUB ? x - y : operation == IR_SIMD_FMUL ? x * y : x / y;
+        uint32_t word = 0;
+        memcpy(&word, &z, sizeof(word));
+        result = word;
+    }
+    else
+    {
+        const double x = ir_simd_float_value(a, 64);
+        const double y = ir_simd_float_value(b, 64);
+        const double z = operation == IR_SIMD_FADD ? x + y : operation == IR_SIMD_FSUB ? x - y : operation == IR_SIMD_FMUL ? x * y : x / y;
+        memcpy(&result, &z, sizeof(result));
+    }
+    return result;
+}
+
+// A floating lane's comparison as C's operators compare (clang's fcmp oeq, une, olt, ole, ogt and oge): false for a NaN
+// operand but !='s, true.
+static bool ir_simd_float_compare(uint64_t a, uint64_t b, uint32_t bits, IrSimdPredicate predicate)
+{
+    const double x = ir_simd_float_value(a, bits);
+    const double y = ir_simd_float_value(b, bits);
+    const bool unordered = ir_simd_float_nan(a, bits) || ir_simd_float_nan(b, bits);
+    bool result = false;
+    switch (predicate)
+    {
+        case IR_SIMD_EQ: result = !unordered && x == y; break;
+        case IR_SIMD_NE: result = unordered || x != y; break;
+        case IR_SIMD_LT: result = !unordered && x < y; break;
+        case IR_SIMD_LE: result = !unordered && x <= y; break;
+        case IR_SIMD_GT: result = !unordered && x > y; break;
+        case IR_SIMD_GE: result = !unordered && x >= y; break;
+        default: break;
+    }
+    return result;
+}
+
+// An integer lane's arithmetic at `bits` bits, its operands and result zero-extended: a shift's count is the other
+// lane's whole value, unsigned.
+static uint64_t ir_simd_integer_operation(IrSimdOperation operation, uint64_t a, uint64_t b, uint32_t bits)
+{
+    const uint64_t mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    const uint64_t sign = UINT64_C(1) << (bits - 1);
+    uint64_t result = 0;
+    switch (operation)
+    {
+        case IR_SIMD_ADD: result = a + b; break;
+        case IR_SIMD_SUB: result = a - b; break;
+        case IR_SIMD_MUL: result = a * b; break;
+        case IR_SIMD_SHL: result = b >= bits ? 0 : a << b; break;
+        case IR_SIMD_LSHR: result = b >= bits ? 0 : a >> b; break;
+        case IR_SIMD_ASHR:
+        {
+            const uint64_t fill = (a & sign) != 0 ? mask : 0;
+            result = b >= bits ? fill : (a >> b) | (fill & ~(mask >> b));
+        } break;
+        default: break;
+    }
+    return result & mask;
 }
 
 // Success commits one complete result/effect. Failure changes neither output nor memory/counters. Inputs may
@@ -248,24 +444,39 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
     else if (valid)
     {
         const bool mask = !ir_simd_vector(action->result) && action->operation != IR_SIMD_COMPARE;
-        const uint32_t lanes = mask ? 1 : ir_simd_bits(action->operation == IR_SIMD_COMPARE ? action->operands[0] : action->result) / 32;
-        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        // A mask's operations take its bits whole; a vector's, a lane at a time at the action's lanes (the bitwise
+        // operations, the copy and a selection's I32 lanes are the same bits whatever the elements).
+        const uint32_t lane_bits = mask ? 64 : ir_simd_lane_bits(action->lane);
+        const uint32_t lanes = mask ? 1 : ir_simd_bits(action->operation == IR_SIMD_COMPARE ? action->operands[0] : action->result) / lane_bits;
+        const bool floating = ir_simd_lane_floating(action->lane);
+        for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
         {
-            const uint64_t a = mask ? values[0]->words[0] : ir_simd_lane(values[0], lane);
-            const uint64_t b = action->operands[1] != IR_SIMD_NONE ? (mask ? values[1]->words[0] : ir_simd_lane(values[1], lane)) : 0;
+            const uint64_t a = mask ? values[0]->words[0] : ir_simd_lane_read(values[0], lane_bits, lane);
+            const uint64_t b = action->operands[1] != IR_SIMD_NONE ? (mask ? values[1]->words[0] : ir_simd_lane_read(values[1], lane_bits, lane)) : 0;
             uint64_t value = 0;
             switch (action->operation)
             {
                 case IR_SIMD_COPY: value = a; break;
-                case IR_SIMD_ADD: value = (uint32_t)(a + b); break;
-                case IR_SIMD_SUB: value = (uint32_t)(a - b); break;
-                case IR_SIMD_MUL: value = (uint32_t)(a * b); break;
+                case IR_SIMD_ADD:
+                case IR_SIMD_SUB:
+                case IR_SIMD_MUL:
+                case IR_SIMD_SHL:
+                case IR_SIMD_LSHR:
+                case IR_SIMD_ASHR: value = ir_simd_integer_operation(action->operation, a, b, lane_bits); break;
+                case IR_SIMD_FADD:
+                case IR_SIMD_FSUB:
+                case IR_SIMD_FMUL:
+                case IR_SIMD_FDIV: value = ir_simd_float_operation(action->operation, a, b, lane_bits); break;
                 case IR_SIMD_AND: value = a & b; break;
                 case IR_SIMD_OR: value = a | b; break;
                 case IR_SIMD_XOR: value = a ^ b; break;
                 case IR_SIMD_NOT: value = ~a; break;
-                case IR_SIMD_COMPARE: staged.words[0] |= (uint64_t)ir_simd_compare((uint32_t)a, (uint32_t)b, action->predicate) << lane; break;
-                case IR_SIMD_SELECT: value = ir_simd_lane(values[(values[0]->words[0] & (UINT64_C(1) << lane)) != 0 ? 1 : 2], lane); break;
+                case IR_SIMD_COMPARE:
+                {
+                    const bool set = floating ? ir_simd_float_compare(a, b, lane_bits, action->predicate) : ir_simd_compare_bits(a, b, lane_bits, action->predicate);
+                    staged.words[0] |= (uint64_t)set << lane;
+                } break;
+                case IR_SIMD_SELECT: value = ir_simd_lane_read(values[(values[0]->words[0] & (UINT64_C(1) << lane)) != 0 ? 1 : 2], lane_bits, lane); break;
                 default: valid = false; break;
             }
             if (mask)
@@ -274,7 +485,7 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
             }
             else if (action->operation != IR_SIMD_COMPARE)
             {
-                staged.words[lane / 2] |= (uint64_t)(uint32_t)value << ((lane % 2) * 32);
+                ir_simd_lane_write(&staged, lane_bits, lane, value);
             }
         }
     }

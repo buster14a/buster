@@ -2977,6 +2977,121 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     unlink(header);
 }
 
+// The lanes' fixture (#141's element types), for x86-64-v4: C's operators on vectors of 8-, 16- and 64-bit integers
+// (signed and unsigned), floats and doubles at 16, 32 and 64 bytes, which the IR computes as its own operations of their
+// lanes rather than machine rows (ir_simd_typed_operation): additions, subtractions, products (but bytes', which x86
+// hasn't), shifts by each lane's count, the floating arithmetic, and every comparison, whose results come back as -1 or
+// 0 lanes and are hashed apart from the arithmetic. Each floating operation is a statement of its own, so that clang
+// -O0 contracts none into an FMA (-ffp-contract=on). The other unit (clang -O2's) fills the operands and hashes the
+// results.
+static const char check_test_tier1_lanes_header[] =
+    "#include <stdio.h>\n"
+    "#include <stdint.h>\n"
+    "#include <string.h>\n"
+    "#define L_INTEGERS(X) X(i8x16, int8_t, 16, 0) X(u8x32, uint8_t, 32, 0) X(i8x64, int8_t, 64, 0) X(i16x8, int16_t, 16, 15) X(u16x16, uint16_t, 32, 15) \\\n"
+    "    X(i16x32, int16_t, 64, 15) X(u32x4, uint32_t, 16, 31) X(i32x16, int32_t, 64, 31) X(i64x2, int64_t, 16, 63) X(u64x4, uint64_t, 32, 63) X(i64x8, int64_t, 64, 63)\n"
+    "#define L_FLOATS(X) X(f32x4, float, int32_t, 16) X(f32x8, float, int32_t, 32) X(f32x16, float, int32_t, 64) X(f64x2, double, int64_t, 16) \\\n"
+    "    X(f64x4, double, int64_t, 32) X(f64x8, double, int64_t, 64)\n"
+    "#define L_INTEGER_TYPE(n, t, w, k) typedef t n __attribute__((vector_size(w)));\n"
+    "#define L_FLOAT_TYPE(n, t, i, w) typedef t n __attribute__((vector_size(w))); typedef i n##_mask __attribute__((vector_size(w)));\n"
+    "L_INTEGERS(L_INTEGER_TYPE)\n"
+    "L_FLOATS(L_FLOAT_TYPE)\n"
+    "#define L_INTEGER_DECLARE(n, t, w, k) n l_##n(n x, n y);\n"
+    "#define L_FLOAT_DECLARE(n, t, i, w) n l_##n(n x, n y, n##_mask* compares);\n"
+    "L_INTEGERS(L_INTEGER_DECLARE)\n"
+    "L_FLOATS(L_FLOAT_DECLARE)\n";
+
+static const char check_test_tier1_lanes_source[] =
+    "#include \"tier1-lanes.h\"\n"
+    "#define L_INTEGER(n, t, w, k) n l_##n(n a, n b)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n d = a - b;\\\n"
+    "    n r = s ^ d;\\\n"
+    "    r = r + ((n)(a < b) & s);\\\n"
+    "    r = r - ((n)(a <= b) | d);\\\n"
+    "    r = r ^ (n)(a > b);\\\n"
+    "    r = r + (n)(a >= b);\\\n"
+    "    r = r - ((n)(a == b) & d);\\\n"
+    "    r = r ^ ((n)(a != s) | b);\\\n"
+    "    if (k != 0)\\\n"
+    "    {\\\n"
+    "        n c = b & k;\\\n"
+    "        r = r + a * b;\\\n"
+    "        r = r ^ (a << c);\\\n"
+    "        r = r - (s >> c);\\\n"
+    "    }\\\n"
+    "    return r;\\\n"
+    "}\n"
+    "#define L_FLOAT(n, t, i, w) n l_##n(n a, n b, n##_mask* compares)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n p = s * a;\\\n"
+    "    n d = p - b;\\\n"
+    "    n q = d / (b + 3);\\\n"
+    "    n##_mask m = (a < b) + (a <= b);\\\n"
+    "    m = m - (a > b) + (a >= b);\\\n"
+    "    m = m + (a == b) - (q != s);\\\n"
+    "    *compares = m;\\\n"
+    "    return q;\\\n"
+    "}\n"
+    "L_INTEGERS(L_INTEGER)\n"
+    "L_FLOATS(L_FLOAT)\n";
+
+static const char check_test_tier1_lanes_other_source[] =
+    "#include \"tier1-lanes.h\"\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* q = p; for (unsigned i = 0; i < n; i++) { hash ^= q[i]; hash *= 1099511628211ull; } }\n"
+    "static uint32_t seed = 12345;\n"
+    "static uint32_t next(void) { seed = seed * 1103515245u + 12345u; return seed >> 8; }\n"
+    "static void fill(unsigned char* p, unsigned n) { for (unsigned i = 0; i < n; i++) p[i] = (unsigned char)next(); }\n"
+    "#define L_INTEGER_RUN(n, t, w, k) { n a; n c; fill((unsigned char*)&a, w); fill((unsigned char*)&c, w); if (round % 4 == 0) c = a; n r = l_##n(a, c); mix(&r, w); }\n"
+    "#define L_FLOAT_RUN(n, t, i, w) { n a; n c; for (unsigned e = 0; e < w / sizeof(t); e++) { a[e] = (t)((int)(next() % 4001) - 2000) / 16; c[e] = (t)((int)(next() % 4001) - 2000) / 16; } \\\n"
+    "    if (round % 4 == 1) c = a; n##_mask m; n r = l_##n(a, c, &m); mix(&r, w); mix(&m, w); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (unsigned round = 0; round < 64; round++)\n"
+    "    {\n"
+    "        L_INTEGERS(L_INTEGER_RUN)\n"
+    "        L_FLOATS(L_FLOAT_RUN)\n"
+    "        printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64-v4, run where the host has every feature of it; then the unit by --tier1 -c, by each path with
+// and without rematerialization, has 14 machine rows alone, its splats of a scalar (8 shift counts' masks, 6 floating
+// `b + 3`), which the IR has no operation for: every operator on the lanes is the IR's own.
+static void check_test_driver_tier1_lanes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-lanes", "lanes'", check_test_tier1_lanes_header, check_test_tier1_lanes_source,
+                                  check_test_tier1_lanes_other_source, "-march=x86-64-v4", host, 0);
+    char header[512];
+    char unit[512];
+    char object[512];
+    snprintf(header, sizeof(header), "%s/tier1-lanes.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-lanes-rows.c", directory);
+    snprintf(object, sizeof(object), "%s/tier1-lanes-rows.o", directory);
+    const bool written = parse_test_write(header, check_test_tier1_lanes_header, strlen(check_test_tier1_lanes_header)) &&
+                         parse_test_write(unit, check_test_tier1_lanes_source, strlen(check_test_tier1_lanes_source));
+    check_test_expect(test, written, "the lanes' unit is written for its rows' count");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
+        char message[256];
+        snprintf(message, sizeof(message), "the lanes' unit is the IR's own operations, its splats' 14 machine rows alone (path %u, rematerialize %u: %llu rows)", run & 1,
+                 (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows);
+        check_test_expect(test, compiled && build.machine_rows == 14, message);
+        unlink(object);
+    }
+    unlink(unit);
+    unlink(header);
+}
+
 // The VEX fixture (#1281): x86-64-v3's AVX2 and F16C builtins and the vector operators, at a target without AVX-512,
 // whose vectors Tier 1 moves, spills and computes by VEX forms in xmm0 to xmm15 alone and whose machine rows' roles it
 // places below 16: the 32-bit integers' operators (the IR's own operations by their VEX forms) and their comparisons,

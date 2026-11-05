@@ -834,6 +834,7 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
 | `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
 | `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
 
@@ -865,7 +866,7 @@ are:
 | `SPLAT` | `mov r11d, imm32`, `vmovd x, r11d`, then `vpshufd x, x, 0` (16 bytes) or `vpbroadcastd y, x` (32 bytes) |
 | `CONSTANT`, loads, stores, spills, reloads, call saves | `vmovdqu` at the width |
 | `COPY`, edge moves | `vmovdqa` of a ymm register (`movaps` for 16 bytes) |
-| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor` |
+| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor`, and at other lanes AVX's and AVX2's (`tier1_select_lane_forms`' VEX column: no 16-bit shift and no 64-bit arithmetic right shift, which VEX hasn't) |
 
 At a target with AVX but not AVX2 (Sandy Bridge's, `Tier1EmitPrepared.avx2`
 from the allow-list's `vpcmpeqd` of a ymm register), a ymm register's integer

@@ -690,6 +690,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/labels.ir",
                 "tests/ir/aggregates.ir",
                 "tests/ir/vector-mask.ir",
+                "tests/ir/vector-lanes.ir",
                 "tests/ir/empty.ir",
                 "tests/ir/tier0-add.ir",
                 "tests/ir/hello.ir",

@@ -666,6 +666,15 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_constant(I
     return ir_typed_emit(sink, IR_VCONST, type, constant, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 }
 
+// A vector operation's lanes (#141's element types) onto instruction `id`, its flags, which start zeroed (I32's).
+static __attribute__((always_inline)) inline void ir_typed_lanes(IrTypedSink* sink, uint32_t id, IrSimdLane lane)
+{
+    if (sink->output != 0)
+    {
+        sink->output->flags[id] = (uint8_t)lane;
+    }
+}
+
 static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
     static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
@@ -676,21 +685,32 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         [IR_SIMD_OR] = IR_OR,
         [IR_SIMD_XOR] = IR_XOR,
         [IR_SIMD_NOT] = IR_NOT,
+        [IR_SIMD_SHL] = IR_SHL,
+        [IR_SIMD_LSHR] = IR_LSHR,
+        [IR_SIMD_ASHR] = IR_ASHR,
+        [IR_SIMD_FADD] = IR_FADD,
+        [IR_SIMD_FSUB] = IR_FSUB,
+        [IR_SIMD_FMUL] = IR_FMUL,
+        [IR_SIMD_FDIV] = IR_FDIV,
     };
     uint32_t value = BUSTER_IR_NONE;
     if (operation->expand_mask)
     {
-        const IrType mask_type = type == IR_V16I32 ? IR_M16 : IR_M8;
+        // The comparison's mask, a bit per lane, and -1 or 0 in each lane by it, at the same lanes' width.
+        const IrType mask_type = (IrType)ir_lane_mask(type, operation->lane);
         const uint32_t mask = ir_typed_emit(sink, IR_VCMP, mask_type, operands[0], operands[1], operation->predicate, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
         const uint64_t zero[8] = {0};
         const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
         const uint32_t active = ir_typed_vector_constant(sink, type, ones);
         const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
+        ir_typed_lanes(sink, value, operation->lane);
     }
     else
     {
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_lanes(sink, value, operation->lane);
     }
     return value;
 }
