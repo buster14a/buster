@@ -25,6 +25,7 @@ cat > "$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURES/calls.log"
+printf '%s %s\n' "${GH_TOKEN:-workflow-token}" "$*" >> "$FIXTURES/tokens.log"
 if [ "$1" = workflow ]; then
     exit 0
 fi
@@ -73,7 +74,7 @@ case "$method $endpoint" in
         # $FIXTURES/refuse-SHA: the workflow token may not create that commit's branch, as GitHub refused some on
         # 2026-11-05.
         sha=${fields##* sha=}
-        if [ -f "$FIXTURES/refuse-${sha%% *}" ]; then
+        if [ -f "$FIXTURES/refuse-${sha%% *}" ] && [ "${GH_TOKEN:-}" != branch-token ]; then
             printf '{"message":"Resource not accessible by integration","status":"403"}\n'
             printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
             exit 1
@@ -663,6 +664,17 @@ test "$(grep -c "^api repos/buster14a/buster/git/ref/heads/nightly/$epoch " "$fi
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9665\.3\.defer$" 'the next state is prepared in its place'
 expect_no_match "$fixtures/calls.log" '^sleep ' 'at once'
 rm -f "$fixtures/ref-$epoch.json" "$fixtures"/count-*
+# With the nightly-ledger environment's branch token, the branches are made and deleted with it, and a state the
+# workflow token was refused is dispatched; every other call keeps the workflow's token.
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=branch-token GITHUB_RUN_ID=9668 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=1 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/branch-token" prepare run
+expect_match "$fixtures/tokens.log" "^branch-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'the branch token makes the branches'
+expect_no_match "$fixtures/tokens.log" '^branch-token (workflow|api repos|api --paginate|api -X POST repos/buster14a/buster/actions)' 'and nothing else'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'so the state the workflow token was refused is dispatched'
+expect_no_match "$work/coordinate.log" "Nightly branch::" 'without a warning'
+rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
 # A branch another step made meanwhile (the POST fails, the branch is then there at the commit) is used as it is.
 printf '{"object":{"sha":"%s"}}\n' "$epoch" > "$fixtures/ref-$epoch.json.2"
 : > "$fixtures/refuse-$epoch"

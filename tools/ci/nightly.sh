@@ -377,12 +377,25 @@ harvest()
 # 2026-11-05 for merges whose pull request's head lacked main's workflow changes), or the branch exists and points
 # elsewhere (until a person fixes it, never dispatched). 1 for anything else (a timeout, a 429 or 5xx, a failed
 # lookup), which a later step asks for again.
+# The nightly/SHA branches' writes (create, delete). With the nightly-ledger environment's BUSTER_NIGHTLY_BRANCH_TOKEN
+# (contents and workflows write on this repository alone, docs/ci.md), GitHub doesn't refuse the merges the workflow
+# token may not have; without it, the workflow token, and those states are skipped. Nothing else uses that token:
+# dispatches, cancellations and reads stay the workflow's.
+branch_api()
+{
+    if [ -n "${NIGHTLY_BRANCH_TOKEN:-}" ]; then
+        GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "$@"
+    else
+        "$gh" api "$@"
+    fi
+}
+
 ensure_branch()
 {
     local commit=$1 found answer result=0
     found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
     if [ -z "$found" ]; then
-        if ! answer=$("$gh" api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" 2>&1); then
+        if ! answer=$(branch_api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" 2>&1); then
             # Made meanwhile (a 422 for a branch another step created): there now, at the commit, is success.
             found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
             if [ "$found" = "$commit" ]; then
@@ -585,7 +598,7 @@ coordinate()
                     "$gh" api -X POST "repos/$repository/actions/runs/${action[1]}/cancel" > /dev/null || true
                     ;;
                 prune)
-                    "$gh" api -X DELETE "repos/$repository/git/refs/heads/nightly/${action[1]}" > /dev/null || true
+                    branch_api -X DELETE "repos/$repository/git/refs/heads/nightly/${action[1]}" > /dev/null || true
                     ;;
                 alert)
                     printf '::warning title=Nightly backlog::%s\n' "${action[1]}"

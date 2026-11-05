@@ -137,6 +137,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_OVERRIDE: ${{ inputs.override }}
           NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          # Creates and deletes the nightly/SHA branches alone, when the environment has it (docs/ci.md, "Refused branches").
+          NIGHTLY_BRANCH_TOKEN: ${{ secrets.BUSTER_NIGHTLY_BRANCH_TOKEN }}
           MODE: ${{ (github.event_name == 'schedule' && vars.BUSTER_NIGHTLY == 'on') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'run') }}
         run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode "$([ "$MODE" = true ] && echo run || echo dry-run)"
       - name: Keep the ledger and the report
@@ -172,6 +174,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_OVERRIDE: ${{ inputs.override }}
           NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          # Creates and deletes the nightly/SHA branches alone, when the environment has it (docs/ci.md, "Refused branches").
+          NIGHTLY_BRANCH_TOKEN: ${{ secrets.BUSTER_NIGHTLY_BRANCH_TOKEN }}
           # The snapshot the prepare job pinned, should its ledger not reach this job.
           NIGHTLY_SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
           # Its dispatches the runs may not show yet: without them this job plans nothing.

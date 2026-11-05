@@ -415,8 +415,14 @@ branch that already points at another commit is never dispatched; it is an
 error, and the state is skipped for the job as a refused one is, since it stays
 wrong until a person fixes it. The report counts
 and names the skipped states, with an alert. A refused snapshot is replaced by
-the newest eligible earlier state, as an ineligible one is. Measuring the refused states needs another way to make their
-branches, which is the owner's decision.
+the newest eligible earlier state, as an ineligible one is. With the `nightly-ledger` environment's `BUSTER_NIGHTLY_BRANCH_TOKEN`, the
+coordinator creates and deletes the `nightly/SHA` branches with it instead. That
+token is a fine-grained token with only `Contents: Read and write` and
+`Workflows: Read and write` on this repository. Dispatches, cancellations
+and reads keep the workflow's token. Without the secret, or once it expires, the
+refused states are skipped as above. Branches created with it trigger workflows,
+unlike the workflow token's, but every workflow's `push` trigger is limited to
+`main`.
 
 **Time.** The tz database's Europe/Madrid is checked at three points:
 
