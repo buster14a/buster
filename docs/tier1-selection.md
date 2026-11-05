@@ -359,6 +359,9 @@ a folded signed load through an intermediate integer promotion.
 A single-use ordinary load followed by sign extension becomes one exact-width
 `movsx`/`movsxd` load, under the existing memory-order and address-fold rules.
 Volatile and atomic accesses retain their separate access.
+An exact-width store can read the original value of a single-use truncation:
+the memory instruction itself discards the unwanted upper bits, preserving
+the same address, byte count and observable access.
 
 The bounds occupy two scratch bytes per node and the storage certificate one.
 The independent range seeds are classified in 32-node SIMD batches with masked

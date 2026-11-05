@@ -2483,6 +2483,8 @@ static void tier1_select_test_narrow_memory(Tier1SelectTest* test)
                     if (planned == TIER1_SELECT_OK)
                     {
                         const bool extending_load = sign && function.flags[6] == 0;
+                        tier1_select_test_expect(test, plan.covered[3] && plan.patterns[4].values[2] == 1,
+                                                 "an exact-width store reads the original value without materializing its truncation");
                         tier1_select_test_expect(test, plan.patterns[4].width == bytes && plan.patterns[extending_load ? 7 : 6].width == bytes && plan.covered[2] && plan.covered[5] &&
                                                          !plan.covered[4] && (plan.covered[6] != 0) == extending_load && !plan.covered[7],
                                                  "folded address and signed extension retain the exact memory width and access");

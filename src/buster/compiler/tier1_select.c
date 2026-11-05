@@ -4099,6 +4099,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[2] = store ? b : BUSTER_IR_NONE;
         base.width = (uint8_t)tier1_select_memory_width(store ? function->type[b] : type);
         base.intrinsic_cost = 1;
+        // A store already discards the upper bits. Materializing a single-use truncation first would clear bits the
+        // exact-width memory instruction never reads; keep the access (including volatile/atomic flags) at this node.
+        if (store && function->op[b] == IR_TRUNC && tier1_select_tree_child(forest, node, b))
+        {
+            base.values[2] = function->a[b];
+            tier1_select_fold(forest, node, b, &base);
+        }
         Tier1SelectPattern folded = base;
         const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
         // Through a frame object the folded address stands alone, as above.
