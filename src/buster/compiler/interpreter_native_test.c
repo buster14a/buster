@@ -4,7 +4,6 @@
 // Independent C callees and the host libc exercise the interpreter's native boundary. The mixed variadic fixture
 // reads its own va_list, including both register classes, overflow slots, and aligned i128/long-double arguments.
 
-#include <fenv.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -121,7 +120,8 @@ static __attribute__((noinline)) InterpreterNativeTestExtended interpreter_nativ
 }
 
 // Argument records do not make a scalar x87 result an aggregate. Discard more than a stack's worth of returns,
-// checking TOP and the stack-fault flag after every call; restore the environment even when testing a broken bridge.
+// checking TOP and the stack-fault flag after every call. Save/restore the full x87 state, including tags and values:
+// fesetenv restores exception/rounding state, not a broken bridge's leaked register stack.
 static void interpreter_native_test_typed_x87(InterpreterNativeTestTally* tally)
 {
     uint64_t calls = 0;
@@ -157,27 +157,26 @@ static void interpreter_native_test_typed_x87(InterpreterNativeTestTally* tally)
         .result_type = IR_VOID,
     };
     InterpreterValue result = { 0 };
-    fenv_t environment;
-    const bool saved = feholdexcept(&environment) == 0;
-    interpreter_native_test_expect(tally, saved, "save and mask the floating environment for ignored x87 return checks");
-    if (saved)
+    struct
     {
-        uint16_t before = 0;
-        __asm__ volatile("fnstsw %0" : "=m"(before));
-        bool ran = true;
-        bool balanced = true;
-        for (uint32_t i = 0; i < 17; i += 1)
-        {
-            ran &= interpreter_typed_native(&request, &function, 0, 0, 0, 0, &result);
-            uint16_t after = 0;
-            __asm__ volatile("fnstsw %0" : "=m"(after));
-            balanced &= ((before ^ after) & 0x3840) == 0;
-        }
-        interpreter_native_test_expect(tally, ran && calls == 17, "repeated ignored native long-double returns with a by-value struct argument execute");
-        interpreter_native_test_expect(tally, balanced, "ignored scalar x87 returns with argument records leave TOP and the stack-fault flag unchanged");
-        const bool restored = fesetenv(&environment) == 0;
-        interpreter_native_test_expect(tally, restored, "restore the floating environment after ignored x87 return checks");
+        uint8_t bytes[108];
+    } state;
+    // FNSAVE's 32-bit operand form writes 108 bytes and initializes a masked, empty x87 stack.
+    __asm__ volatile("fnsave %0" : "=m"(state) : : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", "memory");
+    uint16_t before = 0;
+    __asm__ volatile("fnstsw %0" : "=m"(before));
+    bool ran = true;
+    bool balanced = true;
+    for (uint32_t i = 0; i < 17; i += 1)
+    {
+        ran &= interpreter_typed_native(&request, &function, 0, 0, 0, 0, &result);
+        uint16_t after = 0;
+        __asm__ volatile("fnstsw %0" : "=m"(after));
+        balanced &= ((before ^ after) & 0x3840) == 0;
     }
+    __asm__ volatile("frstor %0" : : "m"(state) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", "memory");
+    interpreter_native_test_expect(tally, ran && calls == 17, "repeated ignored native long-double returns with a by-value struct argument execute");
+    interpreter_native_test_expect(tally, balanced, "ignored scalar x87 returns with argument records leave TOP and the stack-fault flag unchanged");
     const long double expected = 11.5L;
     const InterpreterValue expected_bits = interpreter_native_test_value(&expected, 10);
     request.result_type = IR_F80;
