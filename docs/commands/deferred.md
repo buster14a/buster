@@ -39,6 +39,9 @@ stay ordered. Graph purity and summary records are built with each part.
 Any post-merge error or allocation failure discards the partial result and
 repeats the complete source-order reader, preserving its diagnostic recovery.
 The driver's lane lease lasts through these rounds and is returned once.
+Warning interval summaries are private to each lane; token-local warning-count
+changes are reduced during publication. Expression numbering and per-action
+timing requests retain the original complete-unit expression walk.
 
 `--time-stages` reports `deferred-expression-parts`,
 `deferred-expression-parallel-tokens`, `deferred-expression-serial-tokens`,

@@ -64,6 +64,11 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int f(int n){return __builtin_expect(n,1)+__builtin_bswap32((unsigned)n);}\n"
       "int g(int n){int a;return __builtin_add_overflow(n,1,&a)?0:a;}\n"
       "int h(int n){return __builtin_expect_with_probability(n,1,0.75)+__builtin_popcount((unsigned)n);}\n", true },
+    { "postmerge-warning-metadata",
+      "int a[sizeof(1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20+21+22+23+24+25+26+27+28+29+30+31+32+33+34+35)];\n"
+      "unsigned long f(int n){return 9223372036854775808+n;}\n"
+      "unsigned long g(int n){return 18446744073709551615-n;}\n"
+      "unsigned long h(int n){return sizeof(a)+9223372036854775809+n;}\n", true },
     { "postmerge-leaf-boundaries",
       "int use(const char*);int f(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};while(n>0){if(n==2)break;n--;continue;}return a[n&7]+use(__func__);}\n"
       "int g(int n){int a[]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};return a[n&15]+use(\"second\");}\n"

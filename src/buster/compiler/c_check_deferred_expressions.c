@@ -37,6 +37,7 @@ struct CheckDeferredExpressionPart
     uint32_t leaf_capacity;
     uint32_t base;
     uint32_t lane;
+    int64_t constant_warnings;
     uint64_t ticks[BUSTER_CHECK_EXPRESSION_PARTS];
     uint32_t acted[BUSTER_CHECK_EXPRESSION_CODES];
     uint32_t left[BUSTER_CHECK_EXPRESSION_CODES];
@@ -450,6 +451,7 @@ static void check_deferred_expression_lane(void* argument)
     const uint32_t count = run->count;
     const uint32_t* order = run->order;
     CheckDeferredExpressionPart* parts = run->parts;
+    uint16_t* warning_index = NULL;
     while (run->deferred->late_first && lane == 0 && __atomic_load_n(&run->deferred->others_took, __ATOMIC_ACQUIRE) + 1 < lane_count())
     {
         sched_yield();
@@ -481,13 +483,21 @@ static void check_deferred_expression_lane(void* argument)
             reader.source_warning_keys.borrowed = true;
             reader.literal_warnings.arena = reader.arena;
             reader.literal_warnings.borrowed = true;
+            // Token warning bytes are disjoint, but their interval summaries have shared ancestors. Reuse one
+            // private reservation per lane, conservatively reopened for each forest part that lane takes.
+            if (warning_index == NULL)
+            {
+                warning_index = BUSTER_ARENA_PUSH_ARRAY(reader.arena, uint16_t, (uint64_t)reader.warning_index_base * 2);
+            }
+            reader.warning_index = warning_index;
+            reader.warning_index_ready = false;
             reader.const_warning_capacity = 0;
             input.warning_events = (CheckWarningEvents){ 0 };
             input.reports = BUSTER_ARENA_PUSH_ARRAY(reader.arena, CheckInputReport, 1);
             input.report_count = 0;
             input.report_capacity = 1;
             memset(input.expression_left, 0, sizeof(input.expression_left));
-            part->valid = input.reports != NULL && check_deferred_expression_graph(part, &top->output->graph, top->value_next, reader.arena);
+            part->valid = input.reports != NULL && warning_index != NULL && check_deferred_expression_graph(part, &top->output->graph, top->value_next, reader.arena);
             if (part->valid)
             {
                 input.graph = part->graph;
@@ -503,6 +513,7 @@ static void check_deferred_expression_lane(void* argument)
                 memcpy(part->acted, input.expression_acted, sizeof(part->acted));
                 memcpy(part->left, input.expression_left, sizeof(part->left));
                 part->warnings = check_warning_view(&reader.warning_events);
+                part->constant_warnings = (int64_t)input.constant_warning_count - (int64_t)top->output->constant_warning_count;
                 part->valid = !input.resource && input.report_count == 0 && input.graph.leaf_count <= part->leaf_capacity;
                 part->lane = lane;
             }
@@ -660,7 +671,8 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
     const uint32_t count = parser->tokens.count;
     const uint32_t lanes = check_deferred_rule(deferred, deferred->body_tokens, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
     bool used = !deferred->unsupported && lanes > 1 && input->report_count == 0 && !input->resource && input->graph.count == 0 &&
-                input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit == count && !reader->pp->options.expression_numbering;
+                input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit == count &&
+                !reader->pp->options.expression_numbering && !reader->pp->options.expression_timing;
     if (used)
     {
         const uint64_t plan_start = __rdtsc();
@@ -760,6 +772,8 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
         }
         valid = valid && check_deferred_lanes_run(deferred, BUSTER_CHECK_DEFERRED_ROUND_EXPRESSIONS, lanes, check_deferred_expression_lane, &run);
         const uint64_t publish_start = __rdtsc();
+        // Workers changed token-local warning facts without updating the caller's shared interval summaries.
+        reader->warning_index_ready = false;
         deferred->expression_ticks[1] = publish_start - round_start;
         uint64_t serial_ticks = 0;
         uint64_t ticks[BUSTER_CHECK_EXPRESSION_PARTS] = { 0 };
@@ -798,6 +812,7 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
             deferred->expression_parallel_tokens += part->end - part->begin;
             part->base = input->graph.count;
             valid = part->valid && check_deferred_expression_append(reader, part, !deferred->scalar_merge);
+            input->constant_warning_count += part->constant_warnings;
             for (uint32_t i = 1; i < BUSTER_CHECK_EXPRESSION_PARTS; i += 1)
             {
                 ticks[i] += part->ticks[i];
