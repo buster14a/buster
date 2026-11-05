@@ -1171,11 +1171,57 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "  TS g __attribute__((deprecated)); (void)g;\n}\n__attribute__((deprecated)) TS h;\nTS i __attribute__((deprecated));\n",
         // An attribute that takes no arguments is checked for its subject first (check_input_attribute_subjects' count), not a
         // type's; and a declarator's type's convention warnings come before the declaration's attributes'
-        // (check_input_attribute_function_types).
+        // (check_input_attribute_type_warnings).
         "void f(void) __attribute__((cold(1)));\n",
         "int e __attribute__((const(1)));\nint i __attribute__((always_inline(1)));\nint m __attribute__((returns_twice(1)));\n",
         "int __attribute__((cold)) __stdcall x;\n__attribute__((cold)) int __stdcall y;\nint __stdcall __attribute__((cold)) z;\n"
         "int __attribute__((unused, cold)) __fastcall w;\n",
+        // A function type's attribute anywhere in a declarator (#147, check_input_attribute_type_warnings): clang warns of it
+        // as it builds the declarator's type, before the declaration's attributes: a convention x86-64 hasn't for the
+        // specifiers' and the trailing ones, then a group's or a pointer's; off a function, a group's or a pointer's with the
+        // type built so far, then the specifiers' and the trailing ones with the whole type. Each declarator in turn, in
+        // parameters, members, typedefs, type names and bodies, and after unknown attributes.
+        "__attribute__((noinline)) void (__stdcall *p)(void);\n__attribute__((noinline)) void (__attribute__((stdcall)) *q)(void);\n"
+        "__attribute__((noinline)) int (__attribute__((regparm(2))) *r);\n__attribute__((noinline)) __stdcall void (*s)(void);\n"
+        "__attribute__((noinline)) void (__fastcall *a1)(void);\n__attribute__((noinline)) void (__thiscall *a2)(void);\n"
+        "__attribute__((noinline)) void (__pascal *a3)(void);\n__attribute__((noinline)) void (__attribute__((ms_abi)) *a4)(void);\n"
+        "__attribute__((noinline)) int (__attribute__((ms_abi)) *a5);\n__attribute__((noinline)) int (__attribute__((sysv_abi)) *a6);\n"
+        "__attribute__((noinline)) int (__attribute__((noreturn)) *a9);\n__attribute__((noinline)) void (__attribute__((noreturn)) *a10)(void);\n"
+        "__attribute__((noinline)) int (__stdcall *a11);\n__attribute__((noinline)) int __stdcall *a12;\n"
+        "__attribute__((noinline)) int *a13 __attribute__((regparm(1)));\n__attribute__((noinline)) void (__stdcall *b1)(void), (__fastcall *b2)(void);\n"
+        "__attribute__((cold, noinline)) void (__stdcall *b3)(void);\n__attribute__((noinline)) __attribute__((fastcall)) void (__stdcall *b4)(void);\n"
+        "void (__stdcall *b5)(void) __attribute__((noinline));\n__attribute__((noinline)) void (* __stdcall b6)(void);\n"
+        "__attribute__((noinline)) void (*(__stdcall *b7))(void);\n__attribute__((noinline)) int (__attribute__((regparm(2))) r2);\n"
+        "struct S { __attribute__((noinline)) void (__stdcall *m)(void); __attribute__((noinline)) int (__attribute__((regparm(2))) *n); };\n"
+        "void f(__attribute__((noinline)) void (__stdcall *p)(void), __attribute__((noinline)) int (__attribute__((regparm(2))) *r));\n"
+        "typedef __attribute__((noinline)) void (__stdcall *T)(void);\n__attribute__((noinline)) __attribute__((regparm(2))) int c1;\n"
+        "__attribute__((noinline)) int (__attribute__((noinline)) *c2);\n",
+        "int * __attribute__((regparm(1))) x1;\nint *(__attribute__((regparm(1))) x2);\nint (__attribute__((regparm(1))) *(*x3));\n"
+        "int (__attribute__((regparm(2))) a1[3]);\nint (__attribute__((regparm(2))) (*f1)(void));\nint (__attribute__((regparm(2))) *f2)(void);\n"
+        "int *(* __attribute__((regparm(2))) f3)[2];\nint __attribute__((regparm(2))) (*f4)[2];\nint (* __stdcall x5)[2];\n"
+        "int (__stdcall (*f5)(void));\n__attribute__((noinline)) int (__stdcall (*f6)(void));\n"
+        "int x6 __attribute__((noinline)), (__attribute__((regparm(2))) *x7);\n"
+        "__attribute__((noinline)) int (__attribute__((noreturn)) *x8), (__attribute__((regparm(2))) *x9);\n"
+        "int __attribute__((noinline)) (__attribute__((noreturn)) *x10);\nint (__attribute__((noinline)) __attribute__((noreturn)) *x11);\n"
+        "int (__attribute__((noreturn)) __attribute__((noinline)) *x12);\nint (__attribute__((noreturn, noinline)) *x13);\n"
+        "int (__attribute__((noinline, noreturn)) *x14);\n__attribute__((noinline)) __attribute__((regparm(1))) int (__stdcall *x15)(void);\n"
+        "__attribute__((noinline)) int (__attribute__((stdcall)) *x16)(void) __attribute__((cold));\n"
+        "int (__stdcall *x17)(void) __attribute__((cold)) __attribute__((fastcall));\n__attribute__((noinline)) int (__stdcall *x18)(void), x19;\n"
+        "__attribute__((noinline)) int (__attribute__((regparm(1))) **(*x20)[2])[3];\n"
+        "void g(void) { __attribute__((noinline)) int (__attribute__((regparm(1))) *l); (void)l; }\n"
+        "int y1 = sizeof(__attribute__((noinline)) int (__attribute__((regparm(1))) *));\n"
+        "typedef int D __attribute__((deprecated));\n__attribute__((foo)) void (__stdcall *h1)(void);\n"
+        "__attribute__((noinline)) D (__stdcall *h2)(void);\n__attribute__((noinline)) D (__attribute__((regparm(1))) *h3);\n"
+        "__attribute__((noinline)) void (__stdcall *h6)(D);\n[[gnu::noinline]] void (__stdcall *h8)(void);\n"
+        "__attribute__((noinline)) void (*h10)(void) __attribute__((stdcall));\n"
+        "__attribute__((noinline)) int x, y __attribute__((regparm(1)));\n"
+        "__attribute__((noinline)) int z3 __attribute__((unused)), w3 __attribute__((regparm(1)));\n",
+        // A declaration's specifiers' attributes before a declarator that starts with a group, which aren't a typeof's
+        // (check_input_free_standing); and a C23 list at a group's start, clang's parser's error.
+        "__attribute__((noinline)) int (e1);\n__attribute__((cold)) int (*e2);\n__attribute__((cold)) static int (*e3);\n"
+        "static __attribute__((cold)) int (*e4);\nvoid f(void) { __attribute__((cold)) int (*e9); }\n",
+        "void ([[gnu::stdcall]] *a7)(void);\n",
+        "int ([[gnu::regparm(2)]] *r3);\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {
