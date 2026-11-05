@@ -598,6 +598,26 @@ static void interpreter_native_test_copy_definedness(InterpreterNativeTestTally*
     interpreter_native_test_expect(tally, ok && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0, "copy into memory without a byte map preserves unrelated metadata");
 }
 
+// The host functions that the interpreter's programs bind (test_libm, #652) keep the process's own state: setenv
+// through its binding changes the environment the process's getenv reads, and the binding of __errno_location is the
+// process's errno. A static executable's lookup takes them from its table, rather than from the second C library its
+// fallback loads, whose environment and errno are its own.
+static void interpreter_native_test_host_state(InterpreterNativeTestTally* tally)
+{
+    int (*const bound_setenv)(const char*, const char*, int) = (int (*)(const char*, const char*, int))test_libm("setenv");
+    char* (*const bound_getenv)(const char*) = (char* (*)(const char*))test_libm("getenv");
+    int* (*const bound_errno)(void) = (int* (*)(void))test_libm("__errno_location");
+    const bool found = bound_setenv != NULL && bound_getenv != NULL && bound_errno != NULL;
+    interpreter_native_test_expect(tally, found, "find setenv, getenv and __errno_location for the interpreter's natives");
+    const bool set = found && bound_setenv("BUSTER_TEST_HOST_STATE", "PRESENT", 1) == 0;
+    const char* const own = getenv("BUSTER_TEST_HOST_STATE");
+    const char* const bound = found ? bound_getenv("BUSTER_TEST_HOST_STATE") : NULL;
+    interpreter_native_test_expect(tally, set && own != NULL && strcmp(own, "PRESENT") == 0 && bound != NULL && strcmp(bound, "PRESENT") == 0,
+                                   "a bound setenv changes the environment the process's own getenv reads");
+    unsetenv("BUSTER_TEST_HOST_STATE");
+    interpreter_native_test_expect(tally, found && bound_errno() == &errno, "a bound __errno_location is the process's errno");
+}
+
 static void interpreter_native_test_rejections(InterpreterNativeTestTally* tally)
 {
     const InterpreterNativeBinding binding = {
@@ -671,6 +691,7 @@ static __attribute__((unused)) int run_interpreter_native_tests(int argc, char**
     interpreter_native_test_allocations(&tally);
     interpreter_native_test_copy_definedness(&tally);
     interpreter_native_test_rejections(&tally);
+    interpreter_native_test_host_state(&tally);
     printf("interpreter-native: %" PRIu64 " checks, %" PRIu64 " failures\n", tally.checks, tally.failures);
     return tally.failures != 0;
 }

@@ -9,10 +9,13 @@
 //     too. The process has one libm, this one or the one its link took, so its objects (signgam) are those its
 //     functions set;
 //   - linked statically, from the table below first, which links in each function and object it names, the C
-//     library's that c-testsuite's programs and the generated ones call and libm's that the tests compare with, so
-//     that they are this process's own (its errno, its stdout). Any other name comes from libm.so.6 and the C library
-//     it brings, loaded as a linked-dynamically executable loads it: a second C library, with its own errno, stdio
-//     buffers and heap, which still binds every name the dynamic executable bound (interpret-ir's --bind contract).
+//     library's that c-testsuite's programs and the generated ones call, those with the C library's process-wide state
+//     (the heap, stdio, the environment, errno, the random numbers, strtok, the exit handlers, the signals, the locale
+//     and the time zone) and libm's that the tests compare with, so that they are this process's own: setenv through
+//     it changes what the process's getenv reads (test-interpreter-native). Any other name comes from libm.so.6 and
+//     the C library it brings, loaded as a linked-dynamically executable loads it: a second C library, whose state is
+//     its own, which still binds every name the dynamic executable bound (interpret-ir's --bind contract); a function
+//     whose state the process shares belongs in the table.
 #ifndef BUSTER_TEST_LIBM_INCLUDED
 #define BUSTER_TEST_LIBM_INCLUDED
 
@@ -30,9 +33,14 @@
 
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
 #include <fenv.h>
+#include <locale.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+
+extern char** environ;
 
 typedef struct TestHostSymbol TestHostSymbol;
 struct TestHostSymbol
@@ -94,6 +102,45 @@ static TestHostSymbol test_host_symbols[] = {
     BUSTER_TEST_HOST_SYMBOL(stdin),
     BUSTER_TEST_HOST_SYMBOL(stdout),
     BUSTER_TEST_HOST_SYMBOL(stderr),
+    // The C library's process-wide state beyond the heap and stdio above, which a second C library would keep apart:
+    // the environment, errno, the random numbers, strtok's position, the exit handlers, the signals, the locale and the
+    // time zone. The fallback below serves the functions without such state.
+    BUSTER_TEST_HOST_SYMBOL(getenv),
+    BUSTER_TEST_HOST_SYMBOL(setenv),
+    BUSTER_TEST_HOST_SYMBOL(unsetenv),
+    BUSTER_TEST_HOST_SYMBOL(putenv),
+    BUSTER_TEST_HOST_SYMBOL(clearenv),
+    BUSTER_TEST_HOST_SYMBOL(environ),
+    BUSTER_TEST_HOST_SYMBOL(__errno_location),
+    BUSTER_TEST_HOST_SYMBOL(perror),
+    BUSTER_TEST_HOST_SYMBOL(rand),
+    BUSTER_TEST_HOST_SYMBOL(srand),
+    BUSTER_TEST_HOST_SYMBOL(random),
+    BUSTER_TEST_HOST_SYMBOL(srandom),
+    BUSTER_TEST_HOST_SYMBOL(drand48),
+    BUSTER_TEST_HOST_SYMBOL(srand48),
+    BUSTER_TEST_HOST_SYMBOL(strtok),
+    BUSTER_TEST_HOST_SYMBOL(atexit),
+    BUSTER_TEST_HOST_SYMBOL(signal),
+    BUSTER_TEST_HOST_SYMBOL(raise),
+    BUSTER_TEST_HOST_SYMBOL(setlocale),
+    BUSTER_TEST_HOST_SYMBOL(localeconv),
+    BUSTER_TEST_HOST_SYMBOL(tzset),
+    BUSTER_TEST_HOST_SYMBOL(localtime),
+    BUSTER_TEST_HOST_SYMBOL(gmtime),
+    BUSTER_TEST_HOST_SYMBOL(mktime),
+    BUSTER_TEST_HOST_SYMBOL(strftime),
+    BUSTER_TEST_HOST_SYMBOL(time),
+    BUSTER_TEST_HOST_SYMBOL(setvbuf),
+    BUSTER_TEST_HOST_SYMBOL(ferror),
+    BUSTER_TEST_HOST_SYMBOL(feof),
+    BUSTER_TEST_HOST_SYMBOL(clearerr),
+    BUSTER_TEST_HOST_SYMBOL(fseek),
+    BUSTER_TEST_HOST_SYMBOL(ftell),
+    BUSTER_TEST_HOST_SYMBOL(rewind),
+    BUSTER_TEST_HOST_SYMBOL(scanf),
+    BUSTER_TEST_HOST_SYMBOL(fscanf),
+    BUSTER_TEST_HOST_SYMBOL(sscanf),
     // libm's: the programs' (00174.c's sin), the math helpers' oracles (c_builtin_math_helpers_test.c), host_math.h's
     // oracles and the other tests'.
     BUSTER_TEST_HOST_SYMBOL(sin),
