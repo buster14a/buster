@@ -1451,7 +1451,17 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         else if (valid && string)
         {
             String8 text = { 0 };
-            valid = check_input_attribute_string(reader, first, end, &text);
+            uint32_t string_first = first;
+            uint32_t string_end = end;
+            // Clang delays these attributes' arguments as expressions: glibc parenthesizes the message.
+            while (attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS && string_first + 1 < string_end &&
+                   parser->tokens.kinds[string_first] == PARSE_KIND_L_PAREN && parser->tree.parents[string_first] == string_end - 1)
+            {
+                string_first += 1;
+                string_end -= 1;
+            }
+            const bool decoded = check_input_attribute_string(reader, string_first, string_end, &text);
+            valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
             if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2)
             {
@@ -1465,7 +1475,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
             // checkStringLiteralArgumentAttr's.
             // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
-            if (!valid)
+            if (!decoded)
             {
                 const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
                 check_input_attribute_argument_error(reader, attributes, attribute, first,
@@ -2859,7 +2869,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const CheckInputSubjectRow* subject_row = known ? check_input_subject_row(scope, name, scoped, standard) : NULL;
         const bool subjectless = subject_row != NULL && subject_row->subjects == 0;
         const bool custom = parsed != NULL && (parsed->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0;
-        const CheckInputArgumentsRow* arguments = valid && known && !custom ? check_input_arguments_row(name) : NULL;
+        // The compatibility conditions are retained, not evaluated here. Their expression-form messages are
+        // validated by their own schema below, after peeling parentheses, rather than the eager literal pass.
+        const bool condition = rule != NULL && rule->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS;
+        const CheckInputArgumentsRow* arguments = valid && known && !custom && !condition ? check_input_arguments_row(name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t index = 0;

@@ -68,8 +68,11 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
             "int wrap(char*p){return 11;}extern inline __attribute__((gnu_inline,always_inline,overloadable))"
             "int wrap(char*const p P){return 13;}\n"
             "static int dyn(char*const p __attribute__((pass_dynamic_object_size(0)))) O{return 17;}\n"
+            "static int bounded(char*const p P,unsigned long n) O "
+            "__attribute__((diagnose_if((__builtin_object_size(p,1)!=(unsigned long)-1&&n>__builtin_object_size(p,1)),"
+            "(\"too large\"),\"warning\"))){return n;}\n"
             "int main(void){char b[8];int effects=0;int(*a)(char*)=&pick;int(*w)(char*)=&wrap;"
-            "return pick((effects++,b))!=7||wrap(b)!=13||dyn(b)!=17||a(b)!=3||w(b)!=11||effects!=1;}",
+            "return pick((effects++,b))!=7||wrap(b)!=13||dyn(b)!=17||bounded(b,3)!=3||a(b)!=3||w(b)!=11||effects!=1;}",
             0
         },
         {
