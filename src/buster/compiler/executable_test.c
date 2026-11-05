@@ -2013,18 +2013,19 @@ static bool executable_test_same_file(Arena* arena, const char* path, String8 by
     return file.pointer != 0 && bytes.pointer != 0 && file.length == bytes.length && memcmp(file.pointer, bytes.pointer, bytes.length) == 0;
 }
 
-// Waits up to 5 s until a process runs the file at `path`: until opening it for writing fails with ETXTBSY.
-static bool executable_test_running(const char* path)
+// Waits up to 5 s until this child runs the file. Opening the file for writing to probe ETXTBSY can itself make the
+// child's execve fail with ETXTBSY. Observe its executable's inode instead, without taking a writable descriptor.
+static bool executable_test_running(const char* path, pid_t child)
 {
+    struct stat expected;
+    const bool found = stat(path, &expected) == 0;
+    char process[64];
+    snprintf(process, sizeof(process), "/proc/%d/exe", (int)child);
     bool result = false;
-    for (uint32_t attempt = 0; !result && attempt < 5000; attempt += 1)
+    for (uint32_t attempt = 0; found && !result && attempt < 5000; attempt += 1)
     {
-        const int file = open(path, O_RDWR | O_CLOEXEC);
-        result = file < 0 && errno == ETXTBSY;
-        if (file >= 0)
-        {
-            close(file);
-        }
+        struct stat running;
+        result = stat(process, &running) == 0 && running.st_dev == expected.st_dev && running.st_ino == expected.st_ino;
         if (!result)
         {
             usleep(1000);
@@ -2235,7 +2236,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
             execve(path_bytes, arguments, environment);
             _exit(127);
         }
-        const bool running = child > 0 && executable_test_running(path.pointer);
+        const bool running = child > 0 && executable_test_running(path.pointer, child);
         executable_test_expect(&tally, running, "the program runs", 0);
         written = running && executable_test_write(&large.link, large.entry, path, 2, &result, 0, 0);
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED, "renamed over a running program", 0);
