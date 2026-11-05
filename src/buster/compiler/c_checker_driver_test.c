@@ -4105,7 +4105,7 @@ static void check_test_driver_unsupported_codegen(CheckTest* test, const char* e
     static const char* const options[] = {
         "-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all", "-fstack-protector-explicit",
         "-fcf-protection", "-fcf-protection=full", "-fcf-protection=branch", "-fcf-protection=return",
-        "-fstack-clash-protection", "-fstack-check", "-fstack-check=specific", "-pg", "-finstrument-functions",
+        "-fstack-check", "-fstack-check=specific", "-pg", "-finstrument-functions",
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-generate=path", "-fprofile-instr-generate",
         "-fprofile-instr-generate=path", "-fcs-profile-generate", "-fcs-profile-generate=path",
         "-fprofile-generate-cold-function-coverage", "-fprofile-generate-cold-function-coverage=path", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-ftls-model=global-dynamic", "-ftls-model=local-exec",
@@ -6747,6 +6747,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
+#include "c_check_stack_clash_driver_test.c"
 #include "c_check_fence_driver_test.c"
 
 // Whether the objects at `ours_path` and `theirs_path` both read and their .text sections have the same bytes, into *same:
@@ -8142,6 +8143,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_frame_pointer(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_stack_clash(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

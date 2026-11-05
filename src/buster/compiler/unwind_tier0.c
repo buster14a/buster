@@ -330,6 +330,46 @@ static bool unwind_tier0_realignment(const X86Instruction* records, uint32_t ali
     return rounds && copies;
 }
 
+// Whether `records` (`available` of them) begin with a probed prologue's records (#177): with `realignment` a realigned
+// frame's rounding (tier0_emit_realignment's, with its base's mov), and otherwise a probed reservation of the frame's
+// size (tier0_emit_probed_reservation's), made again here from the frame (`probe`, `size`, `alignment_log2` and `base`):
+// each the same, but a branch, which branch sizing may have widened to its rel32 form (its rel8's next) and given its
+// displacement. `*moved`, for a reservation, is the index of its last record that moves rsp, at whose end the whole
+// reservation is made.
+static bool unwind_tier0_probes(const X86Instruction* records, uint32_t available, bool realignment, bool probe, uint32_t size, uint32_t alignment_log2, bool base,
+                                uint32_t* moved)
+{
+    X86Instruction expected[BUSTER_TIER0_PROBE_ALIGN_RECORDS + 1];
+    uint32_t branches[2];
+    uint32_t targets[2];
+    Tier0Writer writer = { expected, 0, 0, 0, branches, targets, 0, 0, 0 };
+    Tier0Frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.probe = probe;
+    frame.size = size;
+    frame.alignment_log2 = (uint8_t)alignment_log2;
+    frame.based = base;
+    if (realignment)
+    {
+        tier0_emit_realignment(&frame, &writer);
+    }
+    else
+    {
+        tier0_emit_probed_reservation(size, &writer);
+    }
+    bool same = writer.count <= available;
+    for (uint32_t k = 0; same && k < writer.count; k += 1)
+    {
+        const bool branch = (writer.branch_count > 0 && branches[0] == k) || (writer.branch_count > 1 && branches[1] == k);
+        const uint16_t form = records[k].form;
+        same = branch ? (form == expected[k].form || form == expected[k].form + 1) && records[k].mode == BUSTER_X86_REGISTER_DIRECT
+                      : memcmp(&records[k], &expected[k], sizeof(X86Instruction)) == 0;
+    }
+    const uint32_t pages = size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    *moved = size != pages ? writer.count - BUSTER_TIER0_PROBE_REMAINDER_RECORDS : BUSTER_TIER0_PROBE_LOOP_RECORDS - 1;
+    return same;
+}
+
 // Whether a frame pointer's function's release, the record before its pops, is Tier 0's: rsp back from rbp, past the
 // `pushes` after rbp's (a lea, or a mov without any).
 static bool unwind_tier0_release(const X86Instruction* record, uint32_t pushes)
@@ -371,16 +411,22 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const bool base = code != 0 && code->frame_base;
     // An open frame (Tier0Code.frame_open, Tier 1's) has no epilogue at the end: each of its returns is a tail's.
     const bool open = code != 0 && code->frame_open;
+    // A probed prologue's reservation and realignment (#177, Tier0Code.frame_probe): their records' counts, Tier 0's.
+    const bool probe = code != 0 && code->frame_probe;
+    const uint32_t frame_size = code != 0 ? code->frame_size : 0;
+    const bool probed = tier0_probes_reservation(probe, frame_size, alignment_log2, pointer);
+    const uint32_t reservation = tier0_reservation_records(probe, frame_size, alignment_log2, pointer);
     // An eh_return function's (Tier0Code.frame_eh_return, #148): rdx and rax pushed after the others, no transitions (its
     // emission's rows describe their saves, emitted_from_tier0), which its epilogue steps over, and its tails
     // __builtin_eh_return's, which pop them first and set rsp from rcx before the jump through r11, or musttail calls',
-    // which step over them as the epilogue does.
+    // which step over them as the epilogue does. It has a frame pointer, so a probed reservation after its pushes (#177)
+    // is no transition either.
     const bool eh = code != 0 && code->frame_eh_return;
     const uint32_t eh_pushes = eh ? 2 : 0;
     // The prologue's records, and the epilogue's: its teardown, from its release (a frame pointer's lea or mov, which is
     // no transition), and its ret.
-    const uint32_t realignment = (alignment_log2 != 0 ? 1 : 0) + (base ? 1 : 0);
-    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + (code->frame_size != 0 ? 1 : 0) + realignment : pushes + (reserved ? 1 : 0));
+    const uint32_t realignment = tier0_realignment_records(probe, alignment_log2) + (base ? 1 : 0);
+    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + reservation + realignment : pushes + (reserved ? reservation : 0));
     const uint32_t teardown = pointer ? 1 + pushes + 1 : pushes + (reserved ? 1 : 0);
     const uint32_t epilogue = open ? 0 : teardown + 1;
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
@@ -436,16 +482,22 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     uint32_t amount = 0;
     if (records != 0 && error == UNWIND_OK && code->frame_size != 0)
     {
-        error = unwind_tier0_adjustment(&records[at], true, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        // A probed reservation (#177) is made whole at its last record that moves rsp; its loop's CFA in r11, which no
+        // fixed shape has, is the frame events' (emitted_from_tier0's).
+        uint32_t moved = 0;
+        error = probed ? (unwind_tier0_probes(&records[at], code->count - at, false, probe, frame_size, alignment_log2, base, &moved) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
+                       : (unwind_tier0_adjustment(&records[at], true, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED);
         if (reserved)
         {
-            events[count++] = at;
+            events[count++] = at + moved;
         }
-        at += 1;
+        at += reservation;
     }
     if (records != 0 && error == UNWIND_OK && alignment_log2 != 0)
     {
-        error = unwind_tier0_realignment(&records[at], alignment_log2, base) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        uint32_t moved = 0;
+        error = probe ? (unwind_tier0_probes(&records[at], code->count - at, true, probe, frame_size, alignment_log2, base, &moved) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
+                      : (unwind_tier0_realignment(&records[at], alignment_log2, base) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED);
     }
     // The epilogue, from its release.
     at = code != 0 ? code->count - epilogue : 0;

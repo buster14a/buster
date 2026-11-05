@@ -23,6 +23,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15); and
   the frame's address (`FRAME_ADDRESS`, #148's `__builtin_frame_address(0)`), its frame pointer.
+- **Stack-clash protection** (#177's `-fstack-clash-protection`, `Tier0Function.probe_stack`): a reservation of a page
+  or more, a realigned frame's and each `ALLOCA` touch every page below rsp before rsp passes it, with Tier 1's records
+  ([the frame guide](tier1-frame.md)'s "Stack-clash protection on request").
 - **Tail calls** (#147's musttail): a `TAIL_CALL` calls its row as the function's return, its arguments where the
   function's own arrived, the frame released before a jump ("Tail calls", below).
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
@@ -136,8 +139,8 @@ The ABI's locations come from `abi_assign`, which the front end runs once per un
 vectorized across the unit that way, and Tier 0 needs no type table. They name the convention's registers alone, and
 Tier 0 takes no others: a call's arguments and a function's parameters in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7,
 none in a register another argument of the call or another parameter takes, and results in rax, rdx, xmm0 and xmm1.
-The emitters rely on it: the prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters
-move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
+The emitters rely on it: the prologue sets a frame pointer's rbp, probes through r11 (#177), and copies through rax and
+xmm15 before the parameters move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
 result before it pops the callee-saved registers.
 
 **Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that

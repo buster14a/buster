@@ -1125,6 +1125,8 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
         _Static_assert(BUSTER_PREDEFINES_FRAME_POINTER_ALL == BUSTER_TIER0_FRAME_POINTER_ALL && BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF == BUSTER_TIER0_FRAME_POINTER_NON_LEAF &&
                            BUSTER_PREDEFINES_FRAME_POINTER_NONE == BUSTER_TIER0_FRAME_POINTER_NONE, "the options' frame pointer is Tier 0's");
         function->frame_pointer = run->program->frame_pointer;
+        // Stack-clash protection's probes (#177), which Tier 0's frame and allocations take, and Tier 1's.
+        function->probe_stack = run->program->probe_stack;
         if (run->tier1_inline != NULL)
         {
             run->tier1_inline->ready[b] = 1;

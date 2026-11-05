@@ -864,6 +864,10 @@ struct PredefinesOptions
     // pointer the code keeps (#177, predefines_frame_pointer).
     uint8_t omit_frame_pointer;
     uint8_t omit_leaf_frame_pointer;
+    // The last of -fstack-clash-protection and -fno-stack-clash-protection (BUSTER_PREDEFINES_ON for the first), which
+    // changes no macro but whether both tiers' frames and dynamic allocations probe the stack a page at a time (#177,
+    // predefines_stack_clash).
+    uint8_t stack_clash_protection;
     // -fcommon (the last of it and -fno-common): every tentative definition of external linkage a common symbol (#147),
     // which changes no macro.
     bool common;
@@ -1761,6 +1765,10 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     else if (strcmp(argument, "-fomit-frame-pointer") == 0 || strcmp(argument, "-fno-omit-frame-pointer") == 0)
     {
         options->omit_frame_pointer = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
+    }
+    else if (strcmp(argument, "-fstack-clash-protection") == 0 || strcmp(argument, "-fno-stack-clash-protection") == 0)
+    {
+        options->stack_clash_protection = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
     else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
     {
@@ -3647,6 +3655,15 @@ static __attribute__((unused)) uint8_t predefines_frame_pointer(const Predefines
     const bool keep = options->omit_frame_pointer == BUSTER_PREDEFINES_OFF;
     const bool leaf = options->omit_leaf_frame_pointer == BUSTER_PREDEFINES_ON;
     return !keep ? BUSTER_PREDEFINES_FRAME_POINTER_NONE : leaf ? BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF : BUSTER_PREDEFINES_FRAME_POINTER_ALL;
+}
+
+// Whether the code probes the stack as it grows it (#177): -fstack-clash-protection the last of its pair, as clang's driver
+// reads it; off by default, as clang's on x86-64 Linux. Tier 0's frames and allocations (Tier0Function.probe_stack) and
+// Tier 1's (BUSTER_TIER1_FRAME_PROBE_STACK) then touch each page below rsp before rsp moves past it, so that no frame or
+// allocation steps over a guard page.
+static __attribute__((unused)) bool predefines_stack_clash(const PredefinesOptions* options)
+{
+    return options->stack_clash_protection == BUSTER_PREDEFINES_ON;
 }
 
 // The macros the target and the options decide, as #define lines, into `buffer` (`capacity` bytes, at least

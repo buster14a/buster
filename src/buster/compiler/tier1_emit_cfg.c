@@ -343,12 +343,23 @@ static uint32_t tier1_emit_cfg_call_area(const Tier1EmitResult* emitted, uint32_
     return emitted->frame.dynamic_outgoing && stack_bytes != 0 ? (stack_bytes + alignment - 1) & ~(alignment - 1) : 0;
 }
 
-// rsp less or plus a call's outgoing area (#141): `sub rsp, area` or `add rsp, area`.
-static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, Tier1EmitBuffer* buffer)
+// rsp less or plus a call's outgoing area (#141): `sub rsp, area` or `add rsp, area`. Under stack-clash protection
+// (#177, `probe`), the area's lowest byte is touched after the subtraction, as an allocation's is
+// (tier1_emit_cfg_probed_allocation): rsp starts at a touched address (the probed frame's or an allocation's), and the
+// call's stores may write the area's lowest bytes first. An area of a page or more would need a touch per page, which
+// no register is free to loop with while the arguments are in theirs; the selection takes no by-value aggregate that
+// large, and such an area is refused (TIER1_EMIT_UNSUPPORTED: Tier 0 then compiles the function, its outgoing area in
+// its probed frame).
+static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, bool probe, Tier1EmitBuffer* buffer)
 {
     const uint16_t form = area <= 127 ? (release ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8) : (release ? X86_FORM_ADD_RM64_IMM32 : X86_FORM_SUB_RM64_IMM32);
     const X86Instruction record = { .form = form, .rm = X86_REGISTER_RSP, .immediate = (int32_t)area };
-    return area == 0 || tier1_emit_append(buffer, record) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    const X86Instruction touch = { .form = X86_FORM_OR_RM8_IMM8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
+    const bool probed = probe && !release && area != 0;
+    Tier1EmitError error = probed && area >= BUSTER_TIER1_FRAME_PAGE_BYTES ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_OK;
+    error = error != TIER1_EMIT_OK || area == 0 || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || !probed || tier1_emit_append(buffer, touch) ? error : TIER1_EMIT_MEMORY;
+    return error;
 }
 
 // The inverse of a conditional jump's form, or X86_FORM_NONE for a form the selector doesn't choose.
@@ -2728,6 +2739,80 @@ static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const 
 // its stack area and four per argument for its stack aggregates' copies, five per part for its parts' copies and loads,
 // and its result's stores and hidden pointer; per return of an aggregate result, its copies and loads; and the entry's
 // stores.
+// A probed dynamic allocation's records past its rule's (#177): an immediate's move into the destination, and the probes'
+// ten for its subtraction's one.
+#define BUSTER_TIER1_EMIT_PROBE_RECORDS 10u
+#define BUSTER_TIER1_EMIT_PROBE_BRANCHES 3u
+
+// A dynamic allocation under stack-clash protection (#177, the frame's probe_stack, -fstack-clash-protection): the
+// selection's records for the rule (tier1_select_expand's), but its subtraction from rsp, which the probed allocation of
+// the same bytes replaces, as Tier 0's (tier0_emit_probed_allocation): with the size in a register (the destination, an
+// immediate moved there first), while more than a page is left, rsp moved a page and its byte touched, the page taken
+// from the size; then, unless nothing is left, rsp moved by the rest and its byte touched. Each page is touched before
+// rsp passes it, and so is the allocation's lowest byte, from which the next one's probes start; no byte at or above the
+// old rsp, the frame's own, is touched. The size's register is the rule's own, which its last record sets to the
+// address. The loop's branches target its own records, in the buffer's columns as the frame's probes' do
+// (tier1_frame_emit.c). A function with an allocation keeps no code certificate (TIER1_CERT_EMITTED_DYNAMIC).
+static Tier1EmitError tier1_emit_cfg_probed_allocation(const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+{
+    const Tier1SelectRecords selected = tier1_select_expand(holes);
+    const uint8_t destination = holes->destination;
+    Tier1EmitError error = !selected.overflowed && !selected.requested && buffer->branch_count + BUSTER_TIER1_EMIT_PROBE_BRANCHES <= buffer->branch_capacity ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
+    for (uint32_t r = 0; error == TIER1_EMIT_OK && r < selected.count; r += 1)
+    {
+        const X86Instruction* record = &selected.records[r];
+        const bool dynamic = record->form == X86_FORM_SUB_R64_RM64 && record->reg == X86_REGISTER_RSP && record->mode == BUSTER_X86_REGISTER_DIRECT;
+        const bool constant = (record->form == X86_FORM_SUB_RM64_IMM8 || record->form == X86_FORM_SUB_RM64_IMM32) && record->rm == X86_REGISTER_RSP &&
+                              record->mode == BUSTER_X86_REGISTER_DIRECT;
+        if (!dynamic && !constant)
+        {
+            error = tier1_emit_append(buffer, *record) ? error : TIER1_EMIT_MEMORY;
+        }
+        else
+        {
+            const uint8_t size = dynamic ? record->rm : destination;
+            if (constant)
+            {
+                // The rounded constant into the destination, which the rule's last record overwrites with the address.
+                const X86Instruction move = { .form = X86_FORM_MOV_RM64_IMM32, .rm = destination, .immediate = (int32_t)x86_immediate_value(record->form, record->immediate, 0) };
+                error = tier1_emit_append(buffer, move) ? error : TIER1_EMIT_MEMORY;
+            }
+            const X86Instruction touch = { .form = X86_FORM_OR_RM8_IMM8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
+            const X86Instruction compare = { .form = X86_FORM_CMP_RM64_IMM32, .rm = size, .immediate = (int32_t)BUSTER_TIER1_FRAME_PAGE_BYTES };
+            const X86Instruction page = { .form = X86_FORM_SUB_RM64_IMM32, .rm = X86_REGISTER_RSP, .immediate = (int32_t)BUSTER_TIER1_FRAME_PAGE_BYTES };
+            const X86Instruction taken = { .form = X86_FORM_SUB_RM64_IMM32, .rm = size, .immediate = (int32_t)BUSTER_TIER1_FRAME_PAGE_BYTES };
+            const X86Instruction empty = { .form = X86_FORM_TEST_RM64_R64, .reg = size, .rm = size };
+            const X86Instruction rest = { .form = X86_FORM_SUB_RM64_R64, .reg = size, .rm = X86_REGISTER_RSP };
+            const uint32_t loop = buffer->count;
+            error = error == TIER1_EMIT_OK && tier1_emit_append(buffer, compare) && buffer->count < buffer->capacity ? error : TIER1_EMIT_MEMORY;
+            const uint32_t remainder = buffer->branch_count;
+            if (error == TIER1_EMIT_OK)
+            {
+                tier1_frame_emit_branch(buffer, X86_FORM_JBE_REL8, 0);
+            }
+            error = error == TIER1_EMIT_OK && tier1_emit_append(buffer, page) && tier1_emit_append(buffer, touch) && tier1_emit_append(buffer, taken) &&
+                            buffer->count < buffer->capacity ? error : TIER1_EMIT_MEMORY;
+            if (error == TIER1_EMIT_OK)
+            {
+                tier1_frame_emit_branch(buffer, X86_FORM_JMP_REL8, loop);
+                buffer->targets[remainder] = buffer->count;
+            }
+            error = error == TIER1_EMIT_OK && tier1_emit_append(buffer, empty) && buffer->count < buffer->capacity ? error : TIER1_EMIT_MEMORY;
+            const uint32_t done = buffer->branch_count;
+            if (error == TIER1_EMIT_OK)
+            {
+                tier1_frame_emit_branch(buffer, X86_FORM_JE_REL8, 0);
+            }
+            error = error == TIER1_EMIT_OK && tier1_emit_append(buffer, rest) && tier1_emit_append(buffer, touch) ? error : TIER1_EMIT_MEMORY;
+            if (error == TIER1_EMIT_OK)
+            {
+                buffer->targets[done] = buffer->count;
+            }
+        }
+    }
+    return error;
+}
+
 // A node's holes from `registers`, by node, as the emitter's view has them (#939: the certificate of the code builds them
 // from the allocation's): an allocation rounds to the alignment rsp keeps (#141), a realigned frame's past 16 bytes.
 static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const uint8_t* registers, uint32_t node)
@@ -2814,7 +2899,7 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
     return error;
 }
 
-static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function)
+static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool probe)
 {
     uint64_t records = function->parameter_passed != 0 ? 2u * (uint64_t)function->parameter_count + 2 : 0;
     for (uint32_t node = 0; node < function->instruction_count; node += 1)
@@ -2828,8 +2913,23 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function)
         records += op == IR_VCONST ? 17u : 0;
         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
+        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's touch
+        // (tier1_emit_cfg_adjust), in a probed frame alone.
+        records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
+        records += probe && call != 0 ? 1u : 0;
     }
     return records;
+}
+
+// The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), three each.
+static uint64_t tier1_emit_cfg_probe_branches(const IrFunction* function)
+{
+    uint64_t branches = 0;
+    for (uint32_t node = 0; node < function->instruction_count; node += 1)
+    {
+        branches += function->op[node] == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_BRANCHES : 0;
+    }
+    return branches;
 }
 
 // The long double phis' copies' records (#141, tier1_emit_cfg_x87_phis), past every node's share: on each edge, an fld and
@@ -2879,9 +2979,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t base = 2 * added;
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
-    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function) +
+    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function, emitted->frame.probe_stack) +
                               tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + tier1_emit_cfg_x87_node_records(plan, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
-    const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count;
+    const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count +
+                                     (emitted->frame.probe_stack ? tier1_emit_cfg_probe_branches(function) : 0);
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
@@ -3179,7 +3280,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 uint32_t staged_zmm = 0;
                 // A dynamic frame's call takes its outgoing area from rsp first (#141): its stores below are rsp's.
                 call_area = calls ? tier1_emit_cfg_call_area(emitted, tier1_select_call_stack_bytes(function, called)) : 0;
-                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, false, &buffer) : error;
+                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, false, emitted->frame.probe_stack, &buffer) : error;
                 tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_OTHER, node), BUSTER_IR_NONE);
                 for (uint32_t u = plan->effective_use_offsets[node]; calls && u < plan->effective_use_offsets[node + 1]; u += 1)
                 {
@@ -3338,7 +3439,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         tier1_emit_saved(&saves, &transitions, saved);
                     }
                 }
-                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, true, &buffer) : error;
+                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, true, false, &buffer) : error;
                 tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_OTHER, node), BUSTER_IR_NONE);
             }
             else if (error == TIER1_EMIT_OK && selected && (op == IR_BR || op == IR_CBR || (op == IR_BR_INDIRECT && input->successor_offsets[b + 1] - input->successor_offsets[b] == 1)))
@@ -3390,6 +3491,13 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 error = tier1_emit_cfg_vector_constant(function, &holes, &buffer);
                 // Its records are its node's, which the code's certificate regenerates (#1284).
+                tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
+            }
+            else if (error == TIER1_EMIT_OK && selected && emitted->frame.probe_stack &&
+                     (plan->patterns[node].rule == TIER1_RULE_ALLOCA || plan->patterns[node].rule == TIER1_RULE_ALLOCA_IMMEDIATE))
+            {
+                // A dynamic allocation under stack-clash protection (#177): its probes' loop.
+                error = tier1_emit_cfg_probed_allocation(&holes, &buffer);
                 tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
             }
             else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
