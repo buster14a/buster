@@ -443,7 +443,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
     uint32_t first = BUSTER_CHECK_NONE;
     uint32_t pragma = 0;
     uint32_t pragma_source = BUSTER_CHECK_NONE;
-    bool invalid_pragma = false;
+    const char* pragma_message = NULL;
     if (!path->suppress_warnings && !path->resource)
     {
         if (repair == NULL)
@@ -498,7 +498,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
                 if (check_diagnostic_pragma_source(record) == pragma_source)
                 {
                     pragma = record->pragma + 1;
-                    invalid_pragma = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
+                    pragma_message = check_diagnostic_pragma_message(record);
                 }
             }
             first = pragma_token;
@@ -514,8 +514,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
         path->pragma = pragma;
         path->warning_source = pragma_source;
         path->phase = "promoted-warning";
-        snprintf(path->message, sizeof(path->message), "%s", invalid_pragma ? "floating-point pragma is not permitted within an expression" :
-                 pragma != 0 ? check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA) : "semantic warning promoted to an error");
+        snprintf(path->message, sizeof(path->message), "%s", pragma_message != NULL ? pragma_message : "semantic warning promoted to an error");
     }
 }
 
@@ -1058,19 +1057,18 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             path->warning_token = token;
             path->warning_source = source;
             path->pragma = 0;
-            bool invalid_pragma = false;
+            const char* pragma_message = NULL;
             for (uint32_t i = 0; i < path->original_pragmas->fp_pragma_count && path->pragma == 0; i += 1)
             {
                 const CheckInputFpPragma* record = path->original_pragmas->fp_pragmas + i;
                 if (check_diagnostic_pragma_source(record) == source)
                 {
                     path->pragma = record->pragma + 1;
-                    invalid_pragma = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
+                    pragma_message = check_diagnostic_pragma_message(record);
                 }
             }
             path->phase = "promoted-warning";
-            snprintf(path->message, sizeof(path->message), "%s", invalid_pragma ? "floating-point pragma is not permitted within an expression" :
-                     check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+            snprintf(path->message, sizeof(path->message), "%s", pragma_message != NULL ? pragma_message : check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
             check_corpus_location(path, parser, pp);
         }
     }
@@ -1860,7 +1858,7 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
         const CheckInputFpPragma* q = b->fp_pragmas + i;
         equal = p->pragma == q->pragma && p->source_begin == q->source_begin && p->source_end == q->source_end && p->token == q->token &&
                 p->scope == q->scope && p->scope_end == q->scope_end && p->kind == q->kind && p->environment == q->environment &&
-                p->warnings == q->warnings && p->valid == q->valid;
+                p->warnings == q->warnings && p->warning_severity == q->warning_severity && p->warning_quiet == q->warning_quiet && p->error == q->error && p->valid == q->valid;
     }
     for (uint32_t token = 0; equal && contents && a->fp_environments != NULL && token <= a->token_count; token += 1)
     {

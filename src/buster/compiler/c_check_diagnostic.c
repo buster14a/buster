@@ -129,6 +129,15 @@ static bool check_diagnostic_option(String8 option, const char* expected)
 
 #include "c_check_warning_policy.c"
 
+static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, bool* quiet)
+{
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, CHECK_WARNING_ID_IGNORED_PRAGMA, false, false);
+    pp_history_ensure(pp);
+    const bool system = pp_system_level_at(pp, pp_expansion_location(pp, source, pp_history_at(pp, source))) != BUSTER_PP_USER_FILE;
+    *quiet = command.quiet || (system && !command.system_headers);
+    return (uint8_t)command.severity;
+}
+
 static uint32_t check_diagnostic_warning_index(uint32_t warning)
 {
     const uint32_t index = warning != 0 && (warning & (warning - 1)) == 0 ? (uint32_t)__builtin_ctz(warning) : UINT32_MAX;
@@ -506,9 +515,18 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
 {
     // The canonical header's '#' and 'pragma' are synthetic. The original state operand, or the setting name
     // when no state was supplied, retains _Pragma's expansion history and therefore its invocation location.
-    const uint32_t offset = record->source_end - record->source_begin > 5 ? 4 : 3;
+    const uint32_t offset = record->error != 0 ? (record->kind == CHECK_FP_PRAGMA_FENV_ACCESS ? 3 : 2) :
+                            (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? 2 : record->source_end - record->source_begin > 5 ? 4 : 3;
     const uint32_t source = record->source_begin + offset;
     return source;
+}
+
+static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* record)
+{
+    const char* result = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0 ? "floating-point pragma is not permitted within an expression" :
+                         (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? "#pragma float_control(pop, ...) failed: stack empty" :
+                         check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA);
+    return result;
 }
 
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
@@ -546,8 +564,12 @@ static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, ui
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
         const bool invalid = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
-        const bool promoted = !quiet && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
-                              check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        const bool unknown = (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
+                             check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        const bool empty = (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 && !record->warning_quiet &&
+                           check_diagnostic_severity_id_from(input, record->token, record->source_begin, CHECK_WARNING_ID_IGNORED_PRAGMA,
+                                                             (CheckWarningSeverity)record->warning_severity) >= CHECK_WARNING_ERROR;
+        const bool promoted = !quiet && (unknown || empty);
         if (record->token < before_token && record->token < first && (invalid || promoted))
         {
             first = record->token;

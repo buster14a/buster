@@ -14,13 +14,30 @@ static void check_test_pragma_extension_history(CheckTest* test)
         "double f(void){\n#pragma STDC FENV_ACCESS OFF\ndouble local_off=0;{\n"
         "#pragma STDC FENV_ACCESS ON\ndouble inner_on=0;}double restored_off=0;return 0;}double restored_on;\n"
         "#pragma STDC FENV_ACCESS OFF\ndouble file_off;\n"
-        "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n";
+        "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n"
+        "#pragma float_control(push)\n#pragma float_control(except, on)\ndouble exceptions_on;\n"
+        "double g(void){\n#pragma clang fp exceptions(ignore)\ndouble exceptions_off=0;{\n"
+        "#pragma clang fp exceptions(maytrap)\ndouble exceptions_maytrap=0;}double exceptions_restored=0;return 0;}double exceptions_file;\n"
+        "#pragma float_control(pop)\ndouble stack_restored;\n"
+        "#pragma float_control(precise, off, push)\ndouble relaxed;\n#pragma float_control(precise, on)\n"
+        "#pragma clang fp reassociate(on) reciprocal(on) contract(off)\ndouble permissions;\n"
+        "#pragma float_control(pop)\ndouble precise_restored;\n"
+        "#pragma float_control(except, on, push)\ndouble pushed_strict;\n"
+        "#pragma float_control(except, off)\ndouble exceptions_disabled;\n#pragma float_control(pop)\ndouble popped_off;\n"
+        "#pragma STDC CX_LIMITED_RANGE ON\n#pragma float_control(push)\n#pragma STDC CX_LIMITED_RANGE OFF\ndouble complex_off;\n"
+        "#pragma float_control(pop)\ndouble complex_on;\n#pragma STDC CX_LIMITED_RANGE OFF\ndouble complex_end;\n";
     const uint8_t kinds[] = { CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_PRECISE,
                              CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FENV_ACCESS, CHECK_FP_PRAGMA_FENV_ACCESS,
-                             CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_FP_CONTRACT };
-    const uint8_t states[] = { 1, 2, 1, 0, 1, 0, 1, 0 };
-    const char* names[] = { "file_on", "local_off", "inner_on", "restored_off", "restored_on", "file_off" };
-    const uint8_t expected[] = { 1, 0, 1, 0, 1, 0 };
+                             CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_FP_CONTRACT, CHECK_FP_PRAGMA_PUSH,
+                             CHECK_FP_PRAGMA_EXCEPTIONS, CHECK_FP_PRAGMA_EXCEPTIONS, CHECK_FP_PRAGMA_EXCEPTIONS,
+                             CHECK_FP_PRAGMA_POP, CHECK_FP_PRAGMA_PRECISE, CHECK_FP_PRAGMA_PRECISE, CHECK_FP_PRAGMA_OPTIONS,
+                             CHECK_FP_PRAGMA_POP, CHECK_FP_PRAGMA_EXCEPTIONS, CHECK_FP_PRAGMA_EXCEPTIONS, CHECK_FP_PRAGMA_POP,
+                             CHECK_FP_PRAGMA_CX_LIMITED_RANGE, CHECK_FP_PRAGMA_PUSH, CHECK_FP_PRAGMA_CX_LIMITED_RANGE, CHECK_FP_PRAGMA_POP, CHECK_FP_PRAGMA_CX_LIMITED_RANGE };
+    const uint8_t states[] = { 1, 2, 1, 0, 1, 0, 1, 0, 0, 2, 0, 1, 0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0 };
+    const char* names[] = { "file_on", "local_off", "inner_on", "restored_off", "restored_on", "file_off", "exceptions_on", "exceptions_off",
+                            "exceptions_maytrap", "exceptions_restored", "exceptions_file", "stack_restored", "relaxed", "permissions", "precise_restored",
+                            "pushed_strict", "exceptions_disabled", "popped_off", "complex_off", "complex_on", "complex_end" };
+    const uint8_t expected[] = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
     const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
     Arena arena = arena_reserve(UINT64_C(1) << 16);
     Arena scratch = arena_reserve(UINT64_C(1) << 16);
@@ -32,7 +49,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
         const ParseOptions parse_options = { .scalar = (schedule & 1) != 0, .tree_only = (schedule & 2) != 0 };
         const bool parsed = parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
         const bool retained = parsed && parser.tokens.pragma_count == BUSTER_ARRAY_LENGTH(kinds);
-        check_test_expect(test, retained, "all eight FP extension/STDC directives are retained on every parser schedule");
+        check_test_expect(test, retained, "all FP extension/STDC directives are retained on every parser schedule");
         const uint64_t arena_capacity = arena.capacity;
         const uint64_t scratch_capacity = scratch.capacity;
         uint64_t required = 31;
@@ -73,7 +90,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
                                                    record->source_begin == parser.tokens.pragma_sources[pragma] &&
                                                    record->source_end > record->source_begin && record->source_end <= pp.output.count &&
                                                    record->token == parser.tokens.pragma_positions[pragma] && record->scope_end <= parser.tokens.count &&
-                                                   ((record->scope != BUSTER_CHECK_NONE) == (pragma == 3 || pragma == 4)),
+                                                   ((record->scope != BUSTER_CHECK_NONE) == (pragma == 3 || pragma == 4 || pragma == 10 || pragma == 11)),
                                               "FP extension records retain exact state, scope, spelling span and source order");
                         }
                         uint32_t found = 0;
@@ -85,8 +102,8 @@ static void check_test_pragma_extension_history(CheckTest* test)
                                 if (intern_length(&identifiers, name) == strlen(names[item]) && memcmp(intern_bytes(&identifiers, name), names[item], strlen(names[item])) == 0)
                                 {
                                     found += 1;
-                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0,
-                                                      "STDC settings restore scope without changing complex-range policy");
+                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == (item == 19),
+                                                      "FP settings restore compound and stack scopes");
                                 }
                             }
                         }
@@ -163,13 +180,26 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma fenv_access(\n#pragma fenv_access(on)\nint x;\n", .accepted = true },
         { .source = "#pragma clang fp contract(unknown)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma clang fp contract(off\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma clang fp contract(off) reassociate(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma clang fp reassociate(on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma float_control(precise, off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma float_control(except, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma float_control(push)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma float_control(pop)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "#pragma float_control(precise, on, push)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp contract(off) reassociate(on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma clang fp reassociate(on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma clang fp reciprocal(on) exceptions(strict) contract(fast)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma clang fp exceptions(maytrap)\n#pragma clang fp exceptions(ignore)\nint x;\n", .records = 2, .accepted = true },
+        { .source = "#pragma float_control(precise, off)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma float_control(except, on)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma float_control(push)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma float_control(pop)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma float_control(precise, on, push)\nint x;\n", .records = 1, .accepted = true },
+        { .source = "#pragma float_control(precise)\n#pragma float_control(except, push)\n#pragma float_control(pop)\nint x;\n", .records = 3, .accepted = true },
+        { .source = "#pragma float_control(precise, off)\n#pragma float_control(except, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(precise, off)\n#pragma STDC FENV_ACCESS ON\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma float_control(except, on)\n#pragma float_control(precise, off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma STDC FENV_ACCESS ON\n#pragma float_control(precise, off)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp reassociate(on)\n#pragma float_control(except, on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp reciprocal(on)\n#pragma STDC FENV_ACCESS ON\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int f(void){\n#pragma float_control(push)\nreturn 0;}\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp eval_method(double)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#pragma clang fp reciprocal(on) contract(unknown)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define strict ignore\n#pragma clang fp exceptions(strict)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma float_control(precise on)\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma float_control(precise, on) trailing\nint x;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "int f(void){int x=0;\n#pragma fenv_access(on)\nreturn x;}\n", .accepted = true },

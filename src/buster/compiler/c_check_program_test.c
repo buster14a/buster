@@ -4129,6 +4129,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
             "double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}",
             "fenv-access-extension-ignored-on-linux", clang);
+        check_test_program_source(test,
+            "int clear_fp(void);int fp_state(void);\n#pragma float_control(except, on, push)\n"
+            "int strict_part(void){clear_fp();1.0/3.0;return fp_state();}\n#pragma float_control(pop)\n"
+            "int ordinary_part(void){clear_fp();1.0/3.0;return fp_state();}\n"
+            "int tested(int n){return strict_part()*100+ordinary_part()+n;}",
+            "float-control-exception-stack", clang);
+        check_test_program_source(test,
+            "#pragma clang fp exceptions(strict) contract(off)\nint clear_fp(void);int fp_state(void);\n"
+            "int tested(int n){clear_fp();int a=0;{\n#pragma clang fp exceptions(ignore)\n1.0/3.0;a=fp_state();}"
+            "clear_fp();1.0/3.0;return a*100+fp_state()+n;}",
+            "clang-fp-exception-scope", clang);
     }
     if (!check_test_program_daz())
     {

@@ -414,8 +414,9 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
     const CheckInputSectionDiagnostic* section = check_input_section_report(input, report);
     const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
+    const CheckInputFpPragma* fp = check_input_fp_report(input, report);
     return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
-           section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : check_driver_input_message(report->message);
+           section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)
@@ -771,6 +772,18 @@ static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input
             const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                            severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
             pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record), "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+        }
+    }
+    else if (!quiet && !record->warning_quiet && (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0)
+    {
+        const CheckWarningSeverity severity = check_diagnostic_severity_id_from(input, record->token, record->source_begin,
+            CHECK_WARNING_ID_IGNORED_PRAGMA, (CheckWarningSeverity)record->warning_severity);
+        if (severity != CHECK_WARNING_IGNORE)
+        {
+            const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                           severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+            pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record),
+                "%s [%s-Wignored-pragmas]", check_diagnostic_pragma_message(record), check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
 }
@@ -2129,7 +2142,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
-                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_PRAGMA_SEMANTICS && input->reports[index].pragma != 0)
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_PRAGMA_SEMANTICS && input->reports[index].pragma != 0 &&
+                                 check_input_fp_report(input, input->reports + index) == NULL)
                         {
                             const uint32_t start = parser->tokens.pragma_sources[input->reports[index].pragma - 1];
                             const CheckInputReader names = { .pp = pp, .parser = parser };

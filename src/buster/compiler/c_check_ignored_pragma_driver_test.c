@@ -120,6 +120,47 @@ static void check_test_driver_pragma_execution(CheckTest* test, const char* exec
     unlink(preprocessed);
 }
 
+static void check_test_driver_fp_pragma_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] =
+    {
+        "#pragma float_control(precise, off)\n#pragma float_control(except, on)\nint value;\n",
+        "#pragma float_control(precise, off)\n#pragma STDC FENV_ACCESS ON\nint value;\n",
+        "#pragma float_control(except, on)\n#pragma float_control(precise, off)\nint value;\n",
+        "#pragma STDC FENV_ACCESS ON\n#pragma float_control(except, off)\n#pragma float_control(precise, off)\nint value;\n",
+        "#pragma clang fp reciprocal(on)\n#pragma float_control(except, on)\nint value;\n",
+        "int main(void){\n#pragma float_control(push)\nreturn 0;}\n",
+    };
+    char source[512];
+    snprintf(source, sizeof(source), "%s/fp-pragma-error.c", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        const bool written = parse_test_write(source, sources[c], strlen(sources[c]));
+        char* expected = NULL;
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[5] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int result = written ? check_test_driver_spawn(arguments, &actual) : -1;
+            const uint64_t length = expected != NULL ? strcspn(expected, "\n") : 0;
+            const bool same = oracle == 1 && result == 1 && expected != NULL && actual != NULL && length != 0 &&
+                              strcspn(actual, "\n") == length && memcmp(actual, expected, length) == 0;
+            check_test_expect(test, same, "FP precision, exception and stack errors match Clang's message and source location");
+            if (!same)
+            {
+                fprintf(stderr, "FP pragma case %u scalar %u: Clang %d (%s), checker %d (%s)\n", c, scalar,
+                        oracle, expected != NULL ? expected : "", result, actual != NULL ? actual : "");
+            }
+            free(actual);
+        }
+        free(expected);
+    }
+    unlink(source);
+}
+
 static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char target_ignored[] =
@@ -151,6 +192,13 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         { target_ignored, "-Werror=unknown-pragmas", "-w", NULL },
         { target_malformed, "-Wunknown-pragmas", NULL, NULL },
         { target_malformed, "-Werror=unknown-pragmas", NULL, NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", NULL, NULL, NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", "-Wno-ignored-pragmas", "-Werror", NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", "-w", NULL },
+        { "#pragma clang diagnostic ignored \"-Wignored-pragmas\"\n#pragma float_control(pop)\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
+        { "#pragma float_control(precise, off, push)\n#pragma float_control(pop)\n#pragma float_control(except, on)\nint main(void){return 0;}\n", "-Wall", "-Werror", NULL },
+        { "#pragma clang fp contract(off) reassociate(on) reciprocal(on) exceptions(maytrap)\nint main(void){return 0;}\n", "-Wall", "-Werror", NULL },
         { "#pragma ident \"tooling\"\n#pragma GCC push_options\n#pragma GCC optimize(\"O3\")\n#pragma GCC ivdep\n#pragma GCC pop_options\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
         { "#pragma clang buster_unknown\n#pragma GCC buster_unknown\n#pragma STDC buster_unknown\nint main(void){return 0;}\n", NULL, NULL, NULL },
         { "#pragma clang buster_unknown\n#pragma GCC buster_unknown\n#pragma STDC buster_unknown\nint main(void){return 0;}\n", "-Werror=pragmas", NULL, NULL },
@@ -320,6 +368,7 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     }
     check_test_driver_pragma_system(test, clang, executable, directory);
     check_test_driver_pragma_execution(test, executable, directory);
+    check_test_driver_fp_pragma_errors(test, clang, executable, directory);
     unlink(source);
     unlink(object);
 }

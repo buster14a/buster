@@ -389,14 +389,27 @@ does, each rule checked against clang's answers on probes of it:
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
-  `#pragma clang fp contract(on|off|fast)` retains
-  its state (`fast` distinct) without contracting anything; and
-  `#pragma float_control(precise, on)` records the precise policy already used.
+  `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
+  `reassociate(on|off)`, `reciprocal(on|off)` and
+  `exceptions(ignore|maytrap|strict)`. `#pragma float_control` accepts
+  `precise` and `except`, with optional `on`/`off`, `push` modifiers, and
+  standalone `push`/`pop`. The file-scope stack saves every floating setting;
+  compound-scope settings restore at the closing brace. An empty `pop` reports
+  Clang's `-Wignored-pragmas` warning with ordinary command-line, source and
+  system-header policy. Illegal precision/exception combinations and stack
+  operations inside a compound have Clang's diagnostic text and location.
+  Permission to contract, reassociate, use reciprocals or relax precision does
+  not require those transformations; generated evaluation remains precise.
+  `strict` and `maytrap` preserve runtime operations and conversions through the
+  existing floating-environment path, including discarded results and constant
+  operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
+  one does not erase the other. `eval_method` remains refused because changing
+  intermediate evaluation precision requires additional lowering support.
   The handler names are not macro-expanded, but their argument words are, so a
   spelling that was a macro anywhere in the unit is refused conservatively
-  rather than read unexpanded. Other arguments, stack operations, additional
-  clauses, malformed forms and invalid placements are hard semantic-pragma
-  errors. The unqualified `#pragma fenv_access` uses the unknown-pragma warning
+  rather than read unexpanded. Unsupported arguments, malformed forms and
+  invalid placements are hard semantic-pragma errors.
+  The unqualified `#pragma fenv_access` uses the unknown-pragma warning
   policy in the accepted Linux mode, as Clang 23 does. Its handler requires
   `-fms-extensions`, which the driver refuses. Use `#pragma STDC FENV_ACCESS`
   for runtime floating-environment semantics.
