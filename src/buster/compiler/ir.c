@@ -153,7 +153,9 @@ typedef enum IrOp
     // x86's mul gives in rdx), and the x86 builtins' scalar bit manipulations of an I32 or an I64, BMI2's pdep and pext
     // (a's bits deposited at, or extracted from, mask b's set bits) and bzhi (a with its bits from b's low byte up
     // cleared), and BMI1's bextr (a's bits from b's low byte up, as many as its second byte says), whose x86 rows the
-    // typed stream's lowering admits (ir_simd_typed.c).
+    // typed stream's lowering admits (ir_simd_typed.c). The unary splat (#1450) repeats scalar a's raw bits throughout
+    // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
+    // including on floating operands, so signed zeros and NaN payloads are unchanged.
     IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
@@ -177,13 +179,15 @@ typedef enum IrOp
 #define BUSTER_IR_RMW_EXCHANGE 0x00u
 #define BUSTER_IR_RMW_ADD 0x20u
 #define BUSTER_IR_RMW_COMPARE 0x40u
-// An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, the others an I32's or an I64's.
+// An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, BMI operations an I32's or an I64's; splat's
+// result a vector, its only operand an I8, I16, I32, I64, F32 or F64 whose bit pattern is repeated in every lane.
 #define BUSTER_IR_INTRINSIC_MULHU 0u
 #define BUSTER_IR_INTRINSIC_PDEP 1u
 #define BUSTER_IR_INTRINSIC_PEXT 2u
 #define BUSTER_IR_INTRINSIC_BZHI 3u
 #define BUSTER_IR_INTRINSIC_BEXTR 4u
-#define BUSTER_IR_INTRINSIC_COUNT 5u
+#define BUSTER_IR_INTRINSIC_SPLAT 5u
+#define BUSTER_IR_INTRINSIC_COUNT 6u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -577,6 +581,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "pext",
     "bzhi",
     "bextr",
+    "splat",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -821,7 +826,7 @@ typedef enum IrRule
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
     X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
-    X(IR_INTRINSIC,     3, 7, (1u << IR_I32) | (1u << IR_I64), IR_RULE_INTRINSIC, 0) \
+    X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
@@ -829,13 +834,14 @@ static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_R
 #undef BUSTER_IR_OPERAND_ROW
 // The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
 // a return's value (a), a call's destination for its aggregate result (c) and an atomic compare-exchange's desired
-// value (c, #1059).
+// value (c, #1059), and an intrinsic's second input (b, absent for splat alone).
 static const uint8_t ir_optional_table[64] = {
     [IR_ADDRESS] = 2,
     [IR_RET] = 1,
     [IR_CALL] = 4,
     [IR_CALL_INDIRECT] = 4,
     [IR_ATOMIC_RMW] = 4,
+    [IR_INTRINSIC] = 2,
 };
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
@@ -868,6 +874,30 @@ static IrSimdShape ir_simd_shape(uint32_t type)
 {
     const IrSimdShape result = type >= IR_V4I32 && type <= IR_M64 ? (IrSimdShape)(type - IR_V4I32 + IR_SIMD_V4I32) : IR_SIMD_NONE;
     return result;
+}
+
+static bool ir_splat_scalar_type(uint32_t type)
+{
+    return (type >= IR_I8 && type <= IR_I64) || type == IR_F32 || type == IR_F64;
+}
+
+// A splat copies bits, never evaluates a floating value. The independent lane model writes every lane and keeps
+// the bytes past the vector's width zero. A failed request leaves the caller's result unchanged.
+static bool ir_splat_value(uint32_t type, uint32_t scalar_type, uint64_t bits, IrSimdValue* result)
+{
+    const bool valid = ir_vector_type(type) && ir_splat_scalar_type(scalar_type) && result != NULL;
+    if (valid)
+    {
+        IrSimdValue value = {0};
+        const uint32_t lane_bits = ir_type_bits[scalar_type];
+        const uint32_t lanes = ir_type_bits[type] / lane_bits;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            ir_simd_lane_write(&value, lane_bits, lane, bits);
+        }
+        *result = value;
+    }
+    return valid;
 }
 
 // A vector operation's lanes (#141's element types), its `flags`: an IrSimdLane. The IR's vector types are containers of
@@ -1324,7 +1354,22 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_VECTOR_SELECT: valid = ir_vector_type(type) && ta == ir_lane_mask(type, f->flags[i]) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
-            case IR_RULE_INTRINSIC: valid = ta == type && tb == type && c < BUSTER_IR_INTRINSIC_COUNT && (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64); break;
+            case IR_RULE_INTRINSIC:
+            {
+                if (c == BUSTER_IR_INTRINSIC_SPLAT)
+                {
+                    valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
+                }
+                else if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                {
+                    check = ir_check(IR_ERROR_OPERAND, i, 1);
+                }
+                else
+                {
+                    valid = (type == IR_I32 || type == IR_I64) && ta == type && f->type[b] == type && c < BUSTER_IR_INTRINSIC_SPLAT &&
+                            (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64);
+                }
+            } break;
             case IR_RULE_ATOMIC_RMW:
             {
                 // A compare-exchange's desired value of its type (an optional use, which the operand loop leaves
@@ -1509,15 +1554,13 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     bad |= fcmp & (_mm512_cmpneq_epi32_mask(ta, tb) | _mm512_cmpgt_epu32_mask(c, _mm512_set1_epi32(IR_GE)) | ~a_float);
     bad |= select & (_mm512_cmpneq_epi32_mask(ta, _mm512_set1_epi32(IR_I1)) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpneq_epi32_mask(tc, type));
     bad |= memory & _mm512_cmpneq_epi32_mask(ta, _mm512_set1_epi32(IR_PTR));
-    // An intrinsic's operands of its type, and an operation of its type's (mulhu an I64's alone).
-    const __mmask16 intrinsic = _mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_INTRINSIC));
-    const __mmask16 mulhu = _mm512_cmpeq_epi32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_MULHU)) & _mm512_cmpneq_epi32_mask(type, _mm512_set1_epi32(IR_I64));
-    bad |= intrinsic & (_mm512_cmpneq_epi32_mask(ta, type) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpge_epu32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT)) | mulhu);
+    // Intrinsics have operation-specific operands: two integers for BMI/mulhu, one scalar for a vector splat.
+    // Their uncommon rows take the scalar semantic check, including the optional second operand's bounds.
     // A vector's floating arithmetic (#141's element types) reads the lanes its flags name, which the scalar oracle checks
     // (a nonzero flag is deferred above; this is fadd's default I32, which no lanes are).
     const __mmask16 vector_result = _mm512_cmpge_epu32_mask(type, _mm512_set1_epi32(IR_V4I32)) & _mm512_cmple_epu32_mask(type, _mm512_set1_epi32(IR_V16I32));
     bad |= vector_result & _mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(IR_FADD)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(IR_FDIV));
-    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | intrinsic | no_rule);
+    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | no_rule);
     return active & (bad | defer);
 }
 

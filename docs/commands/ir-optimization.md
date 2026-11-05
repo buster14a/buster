@@ -17,6 +17,10 @@ requirements. [Command index](README.md).
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
   through both parser paths, both twins, the canonical printer and the
   independent executor (`--print-text` prints them for review).
+  #1450's SIMD fixtures exercise constant lane folding against the lane model
+  and interpreter, wide phi/bitcast propagation, exact-bit splats, GVN's complete
+  vector payload keys and LICM's integer-lane motion on both paths. Floating
+  values can propagate while their original environment effects remain.
   `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs

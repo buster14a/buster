@@ -2686,6 +2686,8 @@ static const char check_test_tier1_zmm_other_source[] =
     "unsigned long b_mixed(long x, V16 a, V8 b, double d, V4 c, V16 e, V8 f, long y) { unsigned long h = fold((unsigned long)x * 7 + (unsigned long)y, (int*)&a, 16); h = fold(h, (int*)&b, 8); h = fold(h, (int*)&c, 4); h = fold(h, (int*)&e, 16); h = fold(h, (int*)&f, 8); return h + (unsigned long)(d * 4); }\n"
     "unsigned long b_nine(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h, V16 i) { V16 v[9] = { a, b, c, d, e, f, g, h, i }; return fold(5, (int*)v, 144); }\n";
 
+#include "c_check_tier1_staging_driver_test.c"
+
 // The vectors' fixture (#141), for x86-64-v4, run where the host has every feature of it: both compilers' code is
 // x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review). Then
 // the stack-passed vectors' check and the 64-byte vector arguments' fixture, on the same hosts.
@@ -2699,6 +2701,7 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
     check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-zmm", "64-byte vector arguments'", check_test_tier1_zmm_header, check_test_tier1_zmm_source,
                                   check_test_tier1_zmm_other_source, "-march=x86-64-v4", host, 0);
+    check_test_driver_tier1_staging(test, clang, executable, directory, "-march=x86-64-v4", host);
 }
 
 // The x86 builtins' bit manipulations' fixture (#141): BMI2's pdep, pext and bzhi and BMI1's bextr of unsigned ints and
@@ -3060,8 +3063,8 @@ static const char check_test_tier1_lanes_other_source[] =
     "}\n";
 
 // Its builds, by x86-64-v4, run where the host has every feature of it; then the unit by --tier1 -c, by each path with
-// and without rematerialization, has 14 machine rows alone, its splats of a scalar (8 shift counts' masks, 6 floating
-// `b + 3`), which the IR has no operation for: every operator on the lanes is the IR's own.
+// and without rematerialization, has no machine row: the former 14 scalar splats (8 shift counts' masks, 6 floating
+// `b + 3`) are the IR's unary splat intrinsic (#1450), alongside its own lane operators.
 static void check_test_driver_tier1_lanes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     X86Target v4 = { 0 };
@@ -3083,9 +3086,9 @@ static void check_test_driver_tier1_lanes(CheckTest* test, const char* clang, co
         CheckTestTier1Build build;
         const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
         char message[256];
-        snprintf(message, sizeof(message), "the lanes' unit is the IR's own operations, its splats' 14 machine rows alone (path %u, rematerialize %u: %llu rows)", run & 1,
+        snprintf(message, sizeof(message), "the lanes' unit and its scalar splats have no machine row (path %u, rematerialize %u: %llu rows)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows);
-        check_test_expect(test, compiled && build.machine_rows == 14, message);
+        check_test_expect(test, compiled && build.machine_rows == 0, message);
         unlink(object);
     }
     unlink(unit);
@@ -3669,6 +3672,7 @@ static void check_test_driver_tier1_vex(CheckTest* test, const char* clang, cons
     const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vex", "VEX vectors'", check_test_tier1_vex_header, check_test_tier1_vex_source, check_test_tier1_vex_other_source,
                                   "-march=x86-64-v3", host, 0);
+    check_test_driver_tier1_staging(test, clang, executable, directory, "-march=x86-64-v3", host);
 }
 
 // The AVX fixture (#1281's review): Sandy Bridge's AVX without AVX2, whose ymm integer forms Tier 1 doesn't take: 32-byte

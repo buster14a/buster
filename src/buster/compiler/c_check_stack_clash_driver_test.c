@@ -15,8 +15,8 @@
 // variable-length array, a frame realigned to 64 bytes and one realigned to two pages. Unprobed, the code steps over the
 // guard and prints "skipped"; probed, it faults on the guard page, whose handler (on a stack of its own) prints
 // "probed". Each build prints what clang -O0's does with the option and without it: by Tier 0 and by --tier1 (with and
-// without rematerialization), by each path, with a frame pointer and without, under --verify, every function Tier 1's but
-// the page-aligned one, which Tier 1's selection refuses with or without probes and Tier 0 compiles. The probes fixture
+// without rematerialization), by each path, with a frame pointer and without, under --verify, every function Tier 1's,
+// including the two-page-aligned frame (#1450). The probes fixture
 // computes through frames of pages, variable-length arrays and allocas in loops, an allocation of none, one of a page and
 // one of a constant, recursion through two-page frames, a realigned frame and 24 allocations in a straight line (Tier 1's
 // capacity for their probes, which its emission checks), printing clang -O0's line. A probed
@@ -276,7 +276,7 @@ static const char check_test_stack_clash_probes_source[] =
     "}\n"
     "\n"
     "// A call after an allocation, its argument an aggregate by value on the stack: a dynamic frame's call area, which\n"
-    "// Tier 1 takes from rsp at the call and touches.\n"
+    "// Tier 1 takes from rsp at the call and probes. The local's alignment rounds that area to two pages.\n"
     "struct big\n"
     "{\n"
     "    unsigned char bytes[256];\n"
@@ -289,7 +289,7 @@ static const char check_test_stack_clash_probes_source[] =
     "\n"
     "static unsigned long call_area(int n)\n"
     "{\n"
-    "    struct big b;\n"
+    "    _Alignas(8192) struct big b;\n"
     "    memset(&b, 7, sizeof(b));\n"
     "    b.bytes[255] = (unsigned char)n;\n"
     "    volatile char* p = alloca((size_t)n);\n"
@@ -422,7 +422,7 @@ static const char check_test_stack_clash_tail_source[] =
 #define BUSTER_CHECK_TEST_STACK_CLASH_TAIL_CASES 6
 
 // A build of `source` into `object` by Tier 0 or by --tier1 (`tier1`, with or without rematerialization), by each path,
-// with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's but `paged`.
+// with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's.
 static bool check_test_stack_clash_build(const char* executable, const char* source, const char* object, bool tier1, bool rematerialize, bool scalar,
                                          const char* const* options)
 {
@@ -452,7 +452,7 @@ static bool check_test_stack_clash_build(const char* executable, const char* sou
     arguments[count] = NULL;
     char* text = NULL;
     const int status = check_test_driver_spawn(arguments, &text);
-    static const char* const names[] = { "frame", "allocation", "array", "aligned", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
+    static const char* const names[] = { "frame", "allocation", "array", "aligned", "paged", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
                                          "call_area", "tail_register", "tail_constant", "tail_constant_large", "tail_array" };
     const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
     if ((status != 0 || !taken) && text != NULL)
@@ -641,7 +641,7 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
                 const char* const* options = pointer != 0 ? pointer_options : probe_options;
                 const bool compiled = check_test_stack_clash_build(executable, guard, object, build != 0, build == 1, path != 0, options);
                 check_test_expect(test, compiled, build == 0 ? "the guard fixture compiles by Tier 0 with -fstack-clash-protection" :
-                                                               "the guard fixture compiles by --tier1 with -fstack-clash-protection, every function Tier 1's but the page-aligned one");
+                                                               "the guard fixture compiles by --tier1 with -fstack-clash-protection, including its page-aligned frame");
                 bool found = false;
                 const bool probed = compiled && check_test_stack_clash_probed(object, "frame", &found);
                 check_test_expect(test, !compiled || (found && probed), "-fstack-clash-protection: a frame of pages starts with the probes' loop");

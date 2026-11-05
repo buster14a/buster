@@ -245,7 +245,9 @@ grow.
 
 - **Tier 1's prologue** takes `PROBE_STACK` (`Tier1EmitOptions.frame_flags`):
   the planner's `PROBE_ALLOCATE` and `PROBE_ALIGN` above, with their frame
-  events. `Tier1Frame.probe_stack` records it.
+  events. `Tier1Frame.probe_stack` records it. Selection accepts object
+  alignments through the planner's `1 << 30` bound, including those larger
+  than a page (#1450).
 - **Tier 1's dynamic allocations** (`TIER1_RULE_ALLOCA` and its immediate
   form) are the CFG consumer's `tier1_emit_cfg_probed_allocation`: the rule's
   records, but its subtraction from rsp, whose bytes a loop takes instead, in
@@ -255,6 +257,13 @@ grow.
   its own records. No byte at or above the old rsp, the frame's own, is
   touched, so the frame events' proof (`emitted_verify_frames`) keeps the
   saved registers' slots.
+- **Tier 1's dynamic outgoing call areas** (`tier1_emit_cfg_adjust`) touch
+  their lowest byte for a sub-page area and use the frame emitter's page loop
+  and final partial touch for a larger one (#1450). Reserved r11 holds the
+  bound, leaving all argument registers and an indirect callee intact; the
+  dynamic frame's CFA stays in rbp. Records and branch columns reserve the
+  loop's full capacity before emission, and release adds the area back without
+  a probe.
 - **Tier 0's prologue** probes a reservation of a page or more, and a realigned
   frame's whatever its size (`tier0_probes_reservation`), with Tier 1's records:
   `tier0_emit_probed_reservation`, r11 set to rsp less the pages, rsp moved a
@@ -289,11 +298,17 @@ frame and two-page-aligned frame. Each build prints what clang -O0's does:
 "skipped" past the guard without the option, "probed" at the guard with it.
 That holds by Tier 0 and by `--tier1` with and without rematerialization, by
 each path, with a frame pointer and without, under `--verify`, every function
-Tier 1's but the page-aligned one, which Tier 1's selection refuses with or
-without probes. Its probes fixture prints clang -O0's line through frames of
+required to use Tier 1, including the two-page-aligned frame. Its probes fixture prints clang -O0's line through frames of
 pages, variable-length arrays and allocas in loops, an allocation of none, of
 a page and of a constant, recursion through two-page frames and a realigned
-frame. Each probed frame's function starts with the probes' loop; and the last
+frame, plus a dynamic call whose aligned local rounds its outgoing area to
+two pages. `test-tier1-emit`'s native call-probe fixture checks six integer and
+eight vector argument registers, AL, an indirect-callee register, callee-save
+registers and exact rsp restoration for zero, sub-page, page and multi-page
+areas. Protected intermediate and final partial pages fault only with probes;
+unprotected runs and the no-probe controls return normally. Exact-capacity and
+short-column cases check the transactional emission boundary.
+Each probed frame's function starts with the probes' loop; and the last
 of the pair wins, byte for byte. `test-emitted-code` proves probed Tier 0
 frames' events (every other round's programs, and frames of each size and
 alignment with a frame pointer and without, the loop's without one a row

@@ -1461,6 +1461,8 @@ static void tier1_call_failures(Tier1EmitTest* test)
     }
 }
 
+#include "tier1_call_probe_test.c"
+
 static void tier1_call_cases(Tier1EmitTest* test)
 {
     arena_pop_to(&test->input, 0);
@@ -1534,6 +1536,7 @@ static void tier1_call_cases(Tier1EmitTest* test)
         arena_pop_to(&test->input, 0);
     }
     tier1_call_failures(test);
+    tier1_call_probe_tests(test);
 }
 
 // The enclosing test runner already isolates generated instructions. This additional bounded child makes a bad

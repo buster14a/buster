@@ -368,6 +368,100 @@ static void ir_licm_test_progress(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+static void ir_licm_test_simd(IrOptimizeTest* test)
+{
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena vector = arena_reserve(UINT64_C(16) << 20);
+    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    const IrSizes sizes = {
+        .instruction_count = 21,
+        .block_count = 4,
+        .constant_count = 4,
+        .vector_constant_count = 2,
+        .extra_count = 8,
+    };
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
+    ir_optimize_test_expect(test, ready, "LICM SIMD loop fixture allocation");
+    if (ready)
+    {
+        f.result_type = IR_M64;
+        const uint32_t offsets[] = { 0, 7, 11, 20, 21 };
+        const uint32_t incoming[] = { 0, 2, 2, 18, 0, 5, 2, 15 };
+        memcpy(f.block_offsets, offsets, sizeof(offsets));
+        memcpy(f.extra, incoming, sizeof(incoming));
+        f.constants[1].low = 1;
+        f.constants[2].low = 3;
+        memset(f.vector_constants[0].words, 2, sizeof(IrSimdValue));
+        memset(f.vector_constants[1].words, 1, sizeof(IrSimdValue));
+        ir_optimize_test_instruction(&f, 0, IR_VCONST, IR_V16I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 1, IR_VCONST, IR_V16I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t i = 2; i < 5; i += 1)
+        {
+            ir_optimize_test_instruction(&f, i, IR_CONST, IR_I64, i - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        ir_optimize_test_instruction(&f, 5, IR_CONST, IR_M64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 6, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 7, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 8, IR_PHI, IR_M64, 4, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 9, IR_ICMP, IR_I1, 7, 4, IR_LT);
+        ir_optimize_test_instruction(&f, 10, IR_CBR, IR_VOID, 9, 2, 3);
+        ir_optimize_test_instruction(&f, 11, IR_ADD, IR_V16I32, 0, 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 12, IR_SHL, IR_V16I32, 11, 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 13, IR_VCMP, IR_M64, 12, 0, IR_EQ);
+        ir_optimize_test_instruction(&f, 14, IR_VSELECT, IR_V16I32, 13, 12, 1);
+        ir_optimize_test_instruction(&f, 15, IR_VCMP, IR_M64, 14, 0, IR_NE);
+        for (uint32_t i = 11; i < 16; i += 1)
+        {
+            f.flags[i] = IR_SIMD_LANE_I8;
+        }
+        ir_optimize_test_instruction(&f, 16, IR_FADD, IR_V16I32, 0, 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 17, IR_VCMP, IR_M16, 0, 1, IR_EQ);
+        f.flags[16] = IR_SIMD_LANE_F32;
+        f.flags[17] = IR_SIMD_LANE_F32;
+        ir_optimize_test_instruction(&f, 18, IR_ADD, IR_I64, 7, 3, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 19, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 20, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        IrLicmResult results[2] = { 0 };
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            IrLicmOptions options = ir_licm_options();
+            options.scalar = path != 0;
+            const IrCheck check = ir_optimize_licm(&f, path != 0 ? &scalar : &vector, &scratch, options, results + path);
+            ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 5, "LICM hoists vector arithmetic, total shifts, integer compare and select");
+            if (check.error == IR_OK)
+            {
+                const IrFunction* out = &results[path].function;
+                uint32_t floating_inside = 0;
+                for (uint32_t i = out->block_offsets[2]; i < out->block_offsets[3]; i += 1)
+                {
+                    floating_inside += ir_optimize_simd_effect(out, i);
+                }
+                ir_optimize_test_expect(test, floating_inside == 2, "LICM keeps both floating environment effects inside the loop");
+                ir_optimize_test_simd_semantics(test, &f, out, &scratch);
+            }
+        }
+        ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
+                                ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM SIMD sweeps and worklist produce identical remapped rows");
+        f.op[0] = IR_UNDEF;
+        f.a[0] = BUSTER_IR_NONE;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            arena_pop_to(&vector, 0);
+            IrLicmOptions options = ir_licm_options();
+            options.scalar = path != 0;
+            IrLicmResult result = { 0 };
+            const IrCheck check = ir_optimize_licm(&f, &vector, &scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.moved == 0, "LICM keeps undef-tainted vector operations in their original blocks");
+        }
+    }
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&scalar);
+    arena_release(&scratch);
+}
+
 static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -392,6 +486,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_guards(&test);
         ir_licm_test_ir(&test);
         ir_licm_test_progress(&test);
+        ir_licm_test_simd(&test);
         printf("ir-licm: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

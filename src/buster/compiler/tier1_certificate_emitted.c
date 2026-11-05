@@ -180,7 +180,7 @@ _Static_assert(BUSTER_CERT_EMITTED_STEPS <= UINT8_MAX, "a call's steps count in 
 
 typedef enum Tier1CertEmittedStepKind
 {
-    // An argument's bytes [from, from + size) from its address into rsp + to: a part's staging slots or its stack slot, or
+    // An argument's bytes [from, from + size) from its address into to_base + to: a part's staging slots or its stack slot, or
     // a whole aggregate's slots in the outgoing area (`chunks` values of 64 bytes, the last of what is left).
     TIER1_CERT_STEP_COPY,
     // An argument's 64-byte part from its address into zmm16 and on (`reg`).
@@ -212,6 +212,7 @@ struct Tier1CertEmittedStep
     uint32_t from;
     uint32_t size;
     int32_t to;
+    uint8_t to_base;
     uint8_t kind;
     uint8_t reg;
     uint8_t bytes;
@@ -742,7 +743,7 @@ static bool tier1_cert_emitted_add_use(Tier1CertEmittedKernel* kernel, uint32_t 
 // By-value aggregates (#789, #1284)
 //
 // A by-value aggregate's ABI record makes the CFG consumer copy its parts: a parameter's from its registers (or its
-// incoming slot) into its copy at entry, a call argument's from its address into the red zone's staging slots, zmm16 and
+// incoming slot) into its copy at entry, a call argument's from its address into staging slots, zmm16 and
 // on (a 64-byte part) or its stack slots, and from there into its argument register, a call's result from its registers
 // into the result's object, and the function's own result from its address into its result registers, or through the
 // hidden pointer. Each part is a value of the certificate (a pseudo value past the function's), defined where its copy
@@ -851,6 +852,7 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
                 .chunks = (record->size + BUSTER_CERT_MAX_WIDTH - 1) / BUSTER_CERT_MAX_WIDTH,
                 .size = record->size,
                 .to = (int32_t)record->location.stack_offset,
+                .to_base = X86_REGISTER_RSP,
                 .kind = TIER1_CERT_STEP_COPY,
                 .slot = true,
             };
@@ -866,14 +868,17 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
             const uint32_t slots = slot ? 0 : tier1_select_argument_part_slots(part.bytes);
             const uint32_t at = zmm ? BUSTER_TIER1_SELECT_PART_ZMM + staged_zmm : staged;
             const uint8_t width = tier1_cert_emitted_part_width(vector, part.bytes, false);
+            const Tier1EmitInto storage = slot ? (Tier1EmitInto){ .displacement = (int32_t)record->location.stack_offset, .base = X86_REGISTER_RSP, .valid = true } :
+                                               zmm ? (Tier1EmitInto){ .valid = true } : tier1_emit_argument_staging(build->emitted, staged, part.bytes);
             valid = n < BUSTER_CERT_EMITTED_STEPS && (slot || load_count < BUSTER_ARRAY_LENGTH(loads)) && record->location.stack_offset <= INT32_MAX &&
-                    (zmm ? staged_zmm < BUSTER_ABI_VECTOR_ARGUMENTS : slot || staged + slots <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS);
+                    (zmm ? staged_zmm < BUSTER_ABI_VECTOR_ARGUMENTS : storage.valid);
             steps[valid ? n : 0] = (Tier1CertEmittedStep){
                 .value = value,
                 .pseudo = pseudo,
                 .from = part.offset,
                 .size = part.bytes,
-                .to = slot ? (int32_t)record->location.stack_offset : zmm ? 0 : tier1_emit_staging_part(staged, part.bytes),
+                .to = storage.displacement,
+                .to_base = storage.base,
                 .kind = zmm ? TIER1_CERT_STEP_ZMM : TIER1_CERT_STEP_COPY,
                 .reg = (uint8_t)(zmm ? at : 0),
                 .bytes = part.bytes,
@@ -885,9 +890,9 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
             {
                 loads[load_count++] = (Tier1CertEmittedStep){
                     .record = {
-                        .displacement = zmm ? 0 : tier1_emit_staging_part(at, part.bytes),
+                        .displacement = storage.displacement,
                         .reg = (uint8_t)(part.reg & 0x1f),
-                        .rm = zmm ? (uint8_t)at : (uint8_t)X86_REGISTER_RSP,
+                        .rm = zmm ? (uint8_t)at : storage.base,
                         .mode = zmm ? BUSTER_X86_REGISTER_DIRECT : BUSTER_X86_MEMORY_BASE,
                         .form = vector ? tier1_select_part_form(part.bytes, true) : X86_FORM_MOV_R64_RM64,
                     },
@@ -1101,7 +1106,7 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
         {
             X86Instruction read;
             X86Instruction write;
-            tier1_cert_emitted_piece(data, X86_REGISTER_RSP, step->to, source, (int32_t)step->from, step->size, k, &read, &write);
+            tier1_cert_emitted_piece(data, step->to_base, step->to, source, (int32_t)step->from, step->size, k, &read, &write);
             valid = tier1_cert_emitted_exactly(records[at + 2 * k], read) && tier1_cert_emitted_exactly(records[at + 2 * k + 1], write);
             valid = valid && tier1_cert_emitted_take_reference(build, at + 2 * k, 0) && tier1_cert_emitted_take_reference(build, at + 2 * k + 1, 0);
         }
@@ -1112,7 +1117,8 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
         {
             const uint32_t left = step->size - BUSTER_CERT_MAX_WIDTH * j;
             const uint32_t width = step->chunks != 0 ? (left < BUSTER_CERT_MAX_WIDTH ? left : BUSTER_CERT_MAX_WIDTH) : step->width;
-            valid = tier1_cert_emitted_define(build, node, step->pseudo + j, tier1_cert_emitted_stack(build, (int64_t)step->to + BUSTER_CERT_MAX_WIDTH * j, width));
+            const X86Instruction storage = { .displacement = step->to + (int32_t)(BUSTER_CERT_MAX_WIDTH * j), .rm = step->to_base, .mode = BUSTER_X86_MEMORY_BASE };
+            valid = tier1_cert_emitted_define(build, node, step->pseudo + j, tier1_cert_emitted_memory(build, storage, width));
         }
         valid = valid && (registered || (at < end && tier1_cert_emitted_exactly(records[at], restored) && tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, tier1_cert_emitted_gpr(X86_REGISTER_RAX, 8))));
         at += registered ? 0 : 1;
@@ -3035,6 +3041,17 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     for (uint32_t row = 0; valid && row < rows && row < emitted->frame.count; row += 1)
     {
         tier1_cert_emitted_range(&build, &range, false, emitted->frame.offset[row], (int64_t)emitted->frame.offset[row] + tier1_emit_cfg_row_bytes(emitted, row));
+    }
+    // Overflow staging (#1450) is the last frame object, distinct from live spills and locals. Its stores and loads
+    // define and consume the same part values as red-zone staging, and the frame boundary below covers its bytes too.
+    if (valid && prepared->staging_slots != 0)
+    {
+        const Tier1EmitInto storage = tier1_emit_argument_staging(emitted, 0, 8);
+        valid = storage.valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
+        if (valid)
+        {
+            tier1_cert_emitted_range(&build, &range, false, storage.displacement, (int64_t)storage.displacement + 8 * prepared->staging_slots);
+        }
     }
     // Rows are bytes no callee writes: at or above rsp after the prologue, or in a function without calls in the red
     // zone, the ABI's 128 bytes below it. The certificate models no write below rsp but the code's own (a call's push, its

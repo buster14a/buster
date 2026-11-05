@@ -412,6 +412,100 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+static void ir_gvn_test_simd(IrOptimizeTest* test)
+{
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena vector = arena_reserve(UINT64_C(16) << 20);
+    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    const IrSizes sizes = {
+        .instruction_count = 14,
+        .block_count = 1,
+        .vector_constant_count = 3,
+    };
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
+    ir_optimize_test_expect(test, ready, "GVN SIMD fixture allocation");
+    if (ready)
+    {
+        f.result_type = IR_M64;
+        f.block_offsets[1] = 14;
+        memset(f.vector_constants[0].words, 0xff, sizeof(IrSimdValue));
+        f.vector_constants[1] = f.vector_constants[0];
+        f.vector_constants[1].words[7] ^= UINT64_C(0x0101010101010101);
+        f.vector_constants[2] = f.vector_constants[0];
+        ir_optimize_test_instruction(&f, 0, IR_VCONST, IR_V16I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 1, IR_VCONST, IR_V16I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 2, IR_VCONST, IR_V16I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 3, IR_ADD, IR_V16I32, 0, 0, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 4, IR_ADD, IR_V16I32, 2, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(&f, 5, IR_ADD, IR_V16I32, 0, 0, BUSTER_IR_NONE);
+        f.flags[3] = IR_SIMD_LANE_I8;
+        f.flags[4] = IR_SIMD_LANE_I8;
+        f.flags[5] = IR_SIMD_LANE_I16;
+        ir_optimize_test_instruction(&f, 6, IR_VCMP, IR_M64, 3, 4, IR_EQ);
+        ir_optimize_test_instruction(&f, 7, IR_VCMP, IR_M64, 0, 1, IR_NE);
+        f.flags[6] = IR_SIMD_LANE_I8;
+        f.flags[7] = IR_SIMD_LANE_I8;
+        ir_optimize_test_instruction(&f, 8, IR_AND, IR_M64, 6, 7, BUSTER_IR_NONE);
+        for (uint32_t i = 9; i < 13; i += 1)
+        {
+            ir_optimize_test_instruction(&f, i, i < 11 ? IR_FADD : IR_VCMP, i < 11 ? IR_V16I32 : IR_M16, 0, 1, i < 11 ? BUSTER_IR_NONE : IR_EQ);
+            f.flags[i] = IR_SIMD_LANE_F32;
+        }
+        ir_optimize_test_instruction(&f, 13, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            IrGvnOptions options = ir_gvn_options();
+            options.scalar = path != 0;
+            IrGvnResult result = { 0 };
+            Arena* output = path != 0 ? &scalar : &vector;
+            const IrCheck check = ir_optimize_gvn(&f, output, &scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK, "GVN takes vector constants, lane operations and masks");
+            if (check.error == IR_OK)
+            {
+                uint32_t constants = 0;
+                uint32_t byte_adds = 0;
+                uint32_t short_adds = 0;
+                uint32_t floating = 0;
+                for (uint32_t i = 0; i < result.function.instruction_count; i += 1)
+                {
+                    constants += result.function.op[i] == IR_VCONST;
+                    byte_adds += result.function.op[i] == IR_ADD && result.function.flags[i] == IR_SIMD_LANE_I8;
+                    short_adds += result.function.op[i] == IR_ADD && result.function.flags[i] == IR_SIMD_LANE_I16;
+                    floating += ir_optimize_simd_effect(&result.function, i);
+                }
+                ir_optimize_test_expect(test, constants == 2 && byte_adds == 1 && short_adds == 1 && floating == 4 && result.removed == 2,
+                                        "GVN merges identical payloads and lanes, keeps high-word differences, lane widths and floating effects");
+                ir_optimize_test_simd_semantics(test, &f, &result.function, &scratch);
+            }
+        }
+        // Full equality is mandatory even if an adversarial hash collides on constants differing only in word 7.
+        uint64_t fields[14 * BUSTER_IR_GVN_FIELDS] = { 0 };
+        uint64_t hashes[14] = { 0 };
+        uint32_t aliases[14] = { 0 };
+        uint32_t classes[14] = { 0 };
+        uint8_t pure[14] = { 0 };
+        IrGvnWork work = {
+            .ir.function = &f,
+            .fields = fields,
+            .hashes = hashes,
+            .alias = aliases,
+            .classes = classes,
+            .pure = pure,
+        };
+        pure[0] = 1;
+        pure[1] = 1;
+        ir_gvn_key(&work, 0, true, false);
+        ir_gvn_key(&work, 1, true, false);
+        ir_optimize_test_expect(test, ir_gvn_compare(&work, 0, 1, true) != 0, "a forced GVN hash collision still compares the complete vector payload");
+    }
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&scalar);
+    arena_release(&scratch);
+}
+
 static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -436,6 +530,7 @@ static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
         ir_gvn_test_guards(&test);
         ir_gvn_test_partitions(&test);
         ir_gvn_test_ir(&test);
+        ir_gvn_test_simd(&test);
         printf("ir-gvn: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

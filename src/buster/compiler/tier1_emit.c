@@ -30,6 +30,8 @@
 #include <stdint.h>
 #include <string.h>
 
+_Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == BUSTER_TIER1_FRAME_MAX_ALIGNMENT, "selector and frame alignment bounds agree");
+
 #define BUSTER_TIER1_EMIT_GENERAL_REGISTERS 16
 // The emitter's view of who is where is by tier1_cfg.c's register locations, class * 32 + register: a general
 // register's location is its number, an opmask register's (#179) 64 + k.
@@ -155,6 +157,9 @@ struct Tier1EmitPrepared
     uint32_t* alignments;
     uint32_t reserved_registers;
     uint32_t call_count;
+    // A call whose aggregate register parts exceed the red zone's staging capacity reserves this many eightbytes in
+    // the last frame object (#1450). Zero keeps the existing red-zone path. All calls reuse that object's maximum.
+    uint32_t staging_slots;
     // The straight-line consumer's nodes of fixed-register rules (tier1_select_fixed_registers), whose records take more
     // than a node's share.
     uint32_t fixed_count;
@@ -1177,6 +1182,23 @@ static int32_t tier1_emit_staging_part(uint32_t k, uint32_t bytes)
     return tier1_emit_staging(k + tier1_select_part_slots(bytes) - 1);
 }
 
+// A call argument's part waits in the reserved frame object where one is needed (#1450), otherwise below rsp as
+// before. The frame object is last in the CFG consumer's row order and uses the stable frame base, also when a dynamic
+// allocation or the call's outgoing area moves rsp. Its accesses are unaligned, so eightbyte alignment is sufficient.
+static Tier1EmitInto tier1_emit_argument_staging(const Tier1EmitResult* emitted, uint32_t k, uint32_t bytes)
+{
+    const uint32_t slots = emitted->prepared.staging_slots;
+    const bool framed = slots != 0;
+    const uint32_t capacity = framed ? slots : BUSTER_TIER1_SELECT_STAGING_SLOTS;
+    const bool valid = k <= capacity && tier1_select_part_slots(bytes) <= capacity - k && (!framed || emitted->frame.count != 0);
+    const Tier1EmitInto place = {
+        .displacement = !valid ? 0 : framed ? emitted->frame.offset[emitted->frame.count - 1] + (int32_t)(8 * k) : tier1_emit_staging_part(k, bytes),
+        .base = (uint8_t)(framed ? emitted->frame.base_register : X86_REGISTER_RSP),
+        .valid = valid,
+    };
+    return place;
+}
+
 // A call at `node`: the `saved` registers' values live past it in their call-save rows, each stored before the argument
 // moves but those in `kept`, whose rows hold them already (#1116). Their loads are owed (Tier1EmitSaves).
 static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node, const uint32_t* argument_registers, uint32_t saved, uint32_t kept, uint32_t destination, const Tier1EmitInto* into,
@@ -1213,7 +1235,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     uint32_t general = 0;
     uint32_t vectors = 0;
     // A call with ABI records (#789) takes each argument where its record says. A by-value aggregate's parts in registers
-    // wait in the red zone's staging slots (tier1_emit_staging), one after another in the arguments' order, where the CFG
+    // wait in staging slots (tier1_emit_argument_staging), one after another in the arguments' order, where the CFG
     // consumer copied them from its address before the moves read and write the argument registers it may be in
     // (tier1_emit_cfg_aggregate_copy); their registers are loaded from there after the moves. One on the stack whole is
     // the CFG consumer's too, copied into its slots, and so is a part in a stack slot (#141, tier1_select_location_parts).
@@ -1331,21 +1353,23 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     // The saves, the arguments' moves and their narrowing are moves of values (#939).
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, buffer->origin_base + 2 * node + 1), BUSTER_IR_NONE);
     // The aggregates' parts from their staging slots (#789), each its 8 bytes, or a whole vector register's its bytes (#141)
-    // from its slots' lowest (tier1_emit_staging_part): past an aggregate's end, the register's bytes are padding, which the
+    // from its slots' lowest (tier1_emit_argument_staging): past an aggregate's end, the register's bytes are padding, which the
     // callee ignores. A 64-byte part (#141) from the zmm register it waits in (tier1_emit_cfg_aggregate_zmm).
-    error = error == TIER1_EMIT_OK && (slot_count > BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS || zmm_count > BUSTER_ABI_VECTOR_ARGUMENTS) ? TIER1_EMIT_ALLOCATION : error;
+    const uint32_t staging_capacity = result->prepared.staging_slots != 0 ? result->prepared.staging_slots : BUSTER_TIER1_SELECT_STAGING_SLOTS;
+    error = error == TIER1_EMIT_OK && (slot_count > staging_capacity || zmm_count > BUSTER_ABI_VECTOR_ARGUMENTS) ? TIER1_EMIT_ALLOCATION : error;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         const bool vector_part = (part_registers[k] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const bool zmm = vector_part && tier1_select_part_in_zmm(part_bytes[k]);
+        const Tier1EmitInto staged = zmm ? (Tier1EmitInto){ .valid = true } : tier1_emit_argument_staging(result, part_slots[k], part_bytes[k]);
         const X86Instruction load = {
-            .displacement = zmm ? 0 : tier1_emit_staging_part(part_slots[k], part_bytes[k]),
+            .displacement = staged.displacement,
             .reg = (uint8_t)(part_registers[k] & 0x1f),
-            .rm = zmm ? (uint8_t)part_slots[k] : X86_REGISTER_RSP,
+            .rm = zmm ? (uint8_t)part_slots[k] : staged.base,
             .mode = zmm ? BUSTER_X86_REGISTER_DIRECT : BUSTER_X86_MEMORY_BASE,
             .form = vector_part ? tier1_select_part_form(part_bytes[k], true) : X86_FORM_MOV_R64_RM64,
         };
-        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+        error = !staged.valid ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
     // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's address.
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;

@@ -261,7 +261,11 @@ patterns are:
   a frame pointer, its places rbp's (or r15's in a realigned frame), and each
   call with stack arguments takes its outgoing area, its stack bytes rounded up
   to the alignment, from rsp before its stores and gives it back after it
-  returns (`tier1_emit_cfg_call_area`).
+  returns (`tier1_emit_cfg_call_area`). With stack-clash protection, a call
+  area of a page or more uses the frame emitter's page loop and final partial
+  touch, with reserved r11 as its bound; all argument registers and the stable
+  frame base survive it (#1450). Object alignments through the frame planner's
+  `1 << 30` bound are accepted, including alignments larger than a page.
 - By-value aggregates (#789): a call or a function with ABI records takes each
   argument and parameter where its record says (`tier1_select_argument_place`,
   `tier1_select_parameter_place`): a scalar in its register or stack slot, and
@@ -289,15 +293,20 @@ patterns are:
   `IGNORE`, an empty struct or one of unnamed bit-fields) is passed and returned
   nowhere: a call copies nothing for it, and a parameter's copy keeps no bytes it
   was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
-  which only a vector type makes, and a call whose parts in registers take more
-  than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
-  bytes' (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  which only a vector type makes. A call's parts in registers take staging
+  slots of 8 bytes, a whole vector register's its bytes'
+  (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
   zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
   register past xmm15, and only an AVX-512F target passes a zmm one), so that a
-  call takes all eight of its vector registers' 64-byte vectors. Every function
-  and call with records goes to the CFG consumer. Before a call's moves, it
+  call takes all eight of its vector registers' 64-byte vectors. Up to 14
+  staging slots use the red zone. If any call needs more, the CFG consumer
+  reserves one frame object sized for the largest call (#1450), with a
+  whole-function lifetime and the stable frame base, so neither live values
+  nor a dynamic outgoing area overlap it. This also supports all eight
+  32-byte vector arguments on x86-64-v3, without extra vector registers.
+  Every function and call with records goes to the CFG consumer. Before a call's moves, it
   copies the call's aggregates from their addresses into their stack slots, or
-  into the red zone's staging slots or a 64-byte part's zmm register, whose
+  into the staging slots or a 64-byte part's zmm register, whose
   argument registers it loads or moves after the moves. An address
   in a slot, or recomputed, goes through the scratch register, with rax saved
   below rsp, so its use needn't be required: a call may pass more aggregates than
@@ -307,6 +316,11 @@ patterns are:
   return loads the parts staged below rsp (the frame stays out of the red zone),
   or copies the bytes through the hidden pointer that the entry stored, which
   rax returns.
+  `test-checker-driver`'s overflow-staging fixture cross-links four, five,
+  eight and nine vector arguments, mixed integer aggregate parts, repeated
+  values, and dynamic and indirect callers with clang. Both v3 and v4 policies,
+  both host paths and both rematerialization choices require Tier 1 under
+  `--verify`; fixed callers retain emitted-code certificates.
 - Arguments and parameters past the registers (#141): a call takes up to
   sixteen `I32`, `I64` or pointer arguments, and a function up to sixteen such
   parameters (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`); those past the sixth are in

@@ -167,7 +167,7 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
             function.block_offsets[1] = 4;
             ir_interpreter_test_instruction(&function, 0, IR_CONST, test.source, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_interpreter_test_instruction(&function, 1, IR_CONST, test.source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            const uint8_t operands = ir_operand_table[test.op];
+            const uint8_t operands = ir_operand_table[test.op] | (test.op == IR_INTRINSIC ? 2 : 0);
             const uint32_t b = (operands & 2) != 0 ? 1 : BUSTER_IR_NONE;
             const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP || test.op == IR_INTRINSIC ? test.predicate : BUSTER_IR_NONE;
             ir_interpreter_test_instruction(&function, 2, test.op, test.type, 0, b, c);
