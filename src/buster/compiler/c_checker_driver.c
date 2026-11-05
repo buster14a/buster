@@ -427,7 +427,7 @@ static const char* check_driver_report_message(const CheckReport* report)
         case CHECK_MESSAGE_CONSTANT: result = check_driver_fault_message(report->fault); break;
         case CHECK_MESSAGE_ICE: result = "expression is not an integer constant expression"; break;
         case CHECK_MESSAGE_STATIC_ASSERT: result = "static assertion failed"; break;
-        case CHECK_MESSAGE_STATIC_INITIALIZER: result = "initializer is not a constant expression"; break;
+        case CHECK_MESSAGE_STATIC_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
     }
     return result;
 }
@@ -437,7 +437,7 @@ static const char* check_driver_initializer_message(CheckInitStatus status)
     const char* result = "invalid initializer";
     switch (status)
     {
-        case CHECK_INIT_NON_CONSTANT: result = "initializer is not a constant expression"; break;
+        case CHECK_INIT_NON_CONSTANT: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INIT_UNSUPPORTED: result = "initializer construct is not supported"; break;
         case CHECK_INIT_RESOURCE: result = "initializer checking capacity exhausted"; break;
         case CHECK_INIT_INVALID:

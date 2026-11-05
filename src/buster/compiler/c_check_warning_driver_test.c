@@ -19,6 +19,21 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "nonconstant file initializer",
+        .source = "int a;\nint b=a;\n",
+        .errors = 1,
+    },
+    {
+        .name = "nonconstant aggregate initializer element",
+        .source = "int a;\nint values[2]={1,a};\n",
+        .errors = 1,
+    },
+    {
+        .name = "nonconstant static local initializer",
+        .source = "int read(void);\nint f(void){static int value=read();return value;}\n",
+        .errors = 1,
+    },
+    {
         .name = "duplicate qualifiers and declaration specifiers",
         .source = "const const int a;\nvolatile volatile int b;\n_Atomic _Atomic int c;\nextern extern int d;\n"
                   "static static int e;\ntypedef typedef int T;\nunsigned unsigned int f;\n",
