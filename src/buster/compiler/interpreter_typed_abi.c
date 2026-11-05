@@ -16,9 +16,9 @@ static bool interpreter_typed_native(const InterpreterNativeRequest* request, co
     }
     bool valid = !records || (function->calls != 0 && (request->argument_count == 0 || function->argument_locations != 0));
     if (request->result_type == IR_VOID && function->calls != 0 && function->calls[call].result.kind == BUSTER_ABI_RESULT_REGISTERS &&
-        function->calls[call].result.registers[0] == BUSTER_ABI_REGISTER_X87 && !records)
+        function->calls[call].result.registers[0] == BUSTER_ABI_REGISTER_X87 && result_size == 0)
     {
-        // Even an ignored x87 result must leave the host's floating stack balanced.
+        // An ignored scalar x87 result still needs a pop, including when only its arguments need ABI records.
         native.result_type = IR_F80;
     }
     if (valid && records)
