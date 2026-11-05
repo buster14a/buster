@@ -103,7 +103,13 @@ static bool check_input_attribute_expressions(CheckInputReader* reader, CheckInp
         const bool identifier = schema == CHECK_ATTRIBUTE_IDENTIFIER_LIST || (index == 0 &&
                                (schema == CHECK_ATTRIBUTE_IDENTIFIER || schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS));
         const bool string = schema == CHECK_ATTRIBUTE_STRING_LIST || (index == 0 && schema == CHECK_ATTRIBUTE_STRING);
-        if (!identifier && !string)
+        if (string && (first == end || parser->tokens.kinds[first] != PARSE_KIND_STRING))
+        {
+            // The string slot precedes a trailing empty argument's expression error (section(,), for example).
+            check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            valid = false;
+        }
+        else if (!identifier && !string)
         {
             CheckValue value = { 0 };
             valid = check_input_attribute_expression(reader, attributes, attribute, first, end, false, &value, &call_failure);

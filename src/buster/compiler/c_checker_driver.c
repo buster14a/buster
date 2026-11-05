@@ -2084,7 +2084,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             {
                                 const String8 second = check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, 0);
                                 const char* both = check_warning_text(scratch, "%.*s and %.*s", (int)literal.length, literal.pointer, (int)second.length, second.pointer);
-                                literal = both != NULL ? (String8){ both, strlen(both) } : (String8){ "", 0 };
+                                literal = both != NULL ? (String8){ (char*)both, strlen(both) } : (String8){ "", 0 };
                             }
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
                             // (An incomplete tag's declaration, named by its type alone: preferred_type's, #147.)

@@ -5729,7 +5729,11 @@ arguments against the function. The checker now gives these as clang does.
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
     "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
-    argument must be a string literal;
+    argument must be a string literal. Its later arguments must be constant
+    expressions, including floating values and addresses. A rejected extra
+    argument names its position starting at 1 after the string, with the
+    evaluator's note at the failing subexpression or division operator
+    (`check_input_attribute_annotate`);
   - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
     `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
     subject's diagnostic is all clang gives in C;
@@ -5762,11 +5766,16 @@ arguments against the function. The checker now gives these as clang does.
     function's declarator is its type's, clang's "non-member function has no
     implicit object parameter" error; elsewhere its subjects' error.
   - `loader_uninitialized`'s variable is a definition without an initializer,
-    in `.bss`, never common: where common linkage would be clang's (`-fcommon`,
+    in `.bss` by default, never common: where common linkage would be clang's (`-fcommon`,
     or `common`, without `nocommon` or a section) a weak one, as clang's code
     makes it for an initializer that isn't zero. An initializer, `extern`, an
     incomplete type, and adding it after the variable's definition are clang's
-    errors (the last with its note at the definition).
+    errors. An incomplete variable names its type and its tag's forward
+    declaration; a redefinition names the variable and its earlier definition.
+    An ordinary explicit `section` places its undefined initializer in
+    read-only storage, while named BSS and TLS families retain their section
+    kind. Both the executable's atom class and the object's section flags
+    retain that choice.
   - `weak_import`'s declaration is a weak reference where the unit doesn't
     define its entity. On a variable's definition (a tentative one, a local's
     or a parameter's) it is clang's warning "cannot be specified on a
@@ -5784,7 +5793,8 @@ arguments against the function. The checker now gives these as clang does.
   `requires_capability`, `acquire_capability`, `capability` and the others,
   `check_input_thread_rows`) change nothing here past their handlers'
   checks (`c_check_thread_safety_input.c`). Their arguments are
-  expressions that clang's parser reads where the attribute is, so each of
+  complete expressions, evaluated with the declaration evaluator, including
+  members, calls, casts and binary operators. Each of
   their names must be the scope's there: an earlier declaration (not the
   one being declared), a struct's earlier member, or a function
   declarator's own parameter; one that names nothing is clang's "use of
@@ -5794,6 +5804,14 @@ arguments against the function. The checker now gives these as clang does.
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of
   bounds" error and its extra information.
+
+  `-Wthread-safety-attributes`, off by default, retains capability-type,
+  pointer-subject, non-static-method, invalid-string and acquire-order-context
+  warnings as sparse events. Capability checks preserve the typedef
+  declaration that carries an annotation; annotating one typedef of `int`
+  does not annotate every `int`. The completed declarator's parameters and
+  earlier record members supply expression bindings without reopening the
+  ordinary scope.
 
   The retain-ownership attributes (`cf_consumed`, `ns_consumed`,
   `os_consumed`, `cf_returns_retained`, `cf_returns_not_retained`,
@@ -5962,12 +5980,23 @@ arguments against the function. The checker now gives these as clang does.
   "expected a type" alone, and a second argument "expected ')'" without its
   note, as clang's balanced reading of it gives them.
 - **Argument counts.** An attribute's count of arguments other than clang's
-  is clang's error, worded as clang's three messages: "'X' attribute takes no
+  is clang's error, worded as clang's messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at
-  least N arguments", "takes no more than N arguments". A generic attribute's
-  is checked after its subject, as clang checks it; a supported one's as its
-  arguments are read. `cleanup`'s is checked after its subject already, and an
-  attribute whose arguments clang parses its own way isn't counted.
+  least N arguments", "takes no more than N arguments". Declaration attributes
+  are counted after their subject and their arguments' parser errors: a
+  required string slot, an undeclared name, a malformed type, an incomplete
+  `sizeof` operand, a call or a builtin (`check_input_attribute_parsed`,
+  `check_input_attribute_expressions`). The shared expression evaluator retains
+  the actual operation, types and callee so those errors keep their locations
+  and notes. A trailing empty argument is an expression error, while an empty
+  required string slot is the string's error first (`section(,)`). The type
+  attributes `noreturn`, `packed`, `may_alias`, `transparent_union` and
+  nullability, and `sentinel`, keep their count-first checks.
+
+  Custom grammars keep their handlers' rules: `cpu_specific` and
+  `cpu_dispatch` require at least one identifier, `no_sanitize` at least one
+  string, and `target_clones` requires a default target. Their zero-argument
+  forms reach those checks after the subject instead of a generic refusal.
 - **Arguments' errors** (`CHECK_INPUT_ATTRIBUTE_ARGUMENT`, with
   c_check_attribute.c's `CheckAttributeArgumentError` in its detail). An
   argument a handler refuses is clang's error, in clang's words and at its
@@ -6017,7 +6046,8 @@ arguments against the function. The checker now gives these as clang does.
     enumeration types", "mode attribute only supported for integer and
     floating-point types", "type of machine mode does not match type of base
     type", "unsupported machine mode 'M'" and "type of machine mode does not
-    support base vector types".
+    support base vector types". A wrong base does not suppress the separate
+    unsupported-mode error when both apply.
   - `mode` on an enum gives it the mode's integer type, signed (an enum of no
     integer type yet takes `int`'s, as clang's `AddModeAttr` defaults it).
     Before its body, as clang's `EnumDecl::setIntegerType` makes it, the enum
@@ -6047,15 +6077,22 @@ arguments against the function. The checker now gives these as clang does.
   (-Wunknown-sanitizers) and format's "GCC requires a function with the
   'format' attribute to be variadic" (-Wgcc-compat) at the declaration's
   name. A cleanup's name that names nothing is clang's parser's error alone:
-  the attribute is dropped, its subject unchecked.
+  the attribute is dropped, its subject unchecked. Target warnings name the
+  decoded string fragment, including permitted escapes, rather than the
+  source literal's escape spelling.
 - **Subject before arguments** (`CheckInputAttribute.deferred`). The
   handlers clang runs once an attribute's subject takes it give their
-  arguments' errors only then: tls_model's model, constructor's, destructor's
-  and assume_aligned's integers. The reader evaluates them where it reads them
+  arguments' errors only then: tls_model's model, constructor's, destructor's,
+  assume_aligned's, alloc_size's and alloc_align's integers, and format's kind
+  and indices. The reader evaluates them where it reads them
   (a tag's subjects are reached from the constant evaluator) and moves the
   error into the attribute (`check_input_attribute_defer`), which
   `check_input_attribute_subjects` gives after the subject, the exclusions and
-  the count; a use of an undeclared name, clang's parser's error, stays. The
+  the count; a use of an undeclared name, clang's parser's error, stays. An
+  unsupported format kind or a non-pointer allocation result warns and ignores
+  the attribute before any constant-value error. A malformed format kind is
+  likewise checked only after its subject: `format(1, 2, 3)` on a variable
+  has only the subject's warning. The
   type attributes clang leaves to a declarator's type (regparm,
   ext_vector_type) are ignored on a tag's declaration without a word, their
   arguments unread (`CheckInputReader.tag_attributes`).
@@ -6165,39 +6202,12 @@ arguments against the function. The checker now gives these as clang does.
     recovery errors and their notes (a first error's "to match this '('" is
     the parser's: `docs/c-parser.md`).
   - GNU's `noderef` is refused by name.
-  - Thread-safety attributes use the declaration evaluator for their whole
-    arguments, including members, calls, casts and binary expressions. The
-    completed declarator's parameters and earlier record members supply
-    expression bindings without reopening or changing the ordinary scope.
-    `-Wthread-safety-attributes` retains capability-type, pointer-subject,
-    non-static-method, invalid-string and acquire-order-context warnings as
-    sparse events, off by default. Capability checks preserve the typedef
-    declaration that carries an annotation; annotating one typedef of `int`
-    does not annotate every `int`. The driver fixtures compare complete
-    Clang diagnostic streams for both reader paths.
-  - `loader_uninitialized` names an incomplete variable's type and its tag's
-    forward declaration, and a repeated definition names the variable with
-    its earlier-definition note. An ordinary explicit `section` places its
-    undefined initializer in read-only storage, as LLVM does; named BSS and
-    TLS families retain their mandated section kind. This includes the
-    direct executable's atom class and the emitted object's section flags.
   - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
     "an attribute list cannot appear here".
-  - An argument's undeclared name after a type's keyword or a `sizeof` stays
-    the generic error, which comes first, where clang's parser gives the
-    type's errors in turn and then the name's. A format kind's warning, and
-    alloc_size's and alloc_align's of a function that returns no pointer,
-    come after the arguments are evaluated: an argument that is no constant
-    is its error first, where clang's handler warns and stops. `mode`'s base
-    of the wrong type is one error, where clang goes on to "unsupported
-    machine mode" where both apply. A string argument with escapes names the
-    piece of target's string from its spelling.
   - A function definition's attribute whose argument count is wrong
     (`regparm`, `pcs`) is the count's error alone: clang's parser's
     `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
     made (nor `-Wreturn-type` but for a function returning an aggregate).
-  - `annotate`'s arguments after its string must be constant expressions,
-    clang's error with its evaluator's notes otherwise; they are taken here.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker
     error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
     stops at "requested alignment is not a power of 2", where clang goes on
@@ -6222,21 +6232,6 @@ arguments against the function. The checker now gives these as clang does.
     (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
     clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
     that print such a type differ the same way.
-  - A supported attribute's argument count is checked after its subject, as
-    clang's (`int x __attribute__((format(printf)));` is the subject's
-    warning alone), and after the errors clang's parser gives of its
-    arguments: a string literal's position that holds none, and a name that
-    names nothing (`check_input_attribute_parsed`). An argument whose
-    parser errors clang gives otherwise (a tag's or `typeof`'s type, a call,
-    a builtin, an empty one) keeps the count's error first, where clang gives
-    those (`aligned(sizeof(struct q), 2)` is the count's error, where clang
-    gives the incomplete type's). A type's (`noreturn`, `packed`,
-    `may_alias`, `transparent_union`, nullability) and `sentinel`'s count
-    is checked first, as clang's. Those whose arguments clang parses its own
-    way (`cpu_specific()`, `no_sanitize()`, `target_clones()`) aren't
-    counted against clang's and are refused; `format`'s first argument that
-    is no identifier is its error before the subject's, where clang's
-    handler checks it after.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6272,7 +6267,14 @@ arguments against the function. The checker now gives these as clang does.
     `c_check_lane_attribute_driver_test.c`).
 
   `test-checker` checks the exclusions table's order and pairs, and that the
-  facts tell C's attributes from another language's.
+  facts tell C's attributes from another language's. The binding tests retain
+  a block declaration's effective scope before its attributes are published.
+  `c_check_attribute_arguments_driver_test.c` compares complete diagnostic
+  streams for malformed expressions, custom empty lists, annotate constants,
+  deferred format/allocation checks, secondary mode errors and escaped target
+  strings. `c_check_attribute_effects_driver_test.c` covers complete
+  thread-safety expressions with their warning option, loader diagnostics and
+  loader section bytes and flags, through the scalar and vector paths.
 
 ## Ignorable and unsupported pragmas
 

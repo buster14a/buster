@@ -1547,8 +1547,8 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
 // ParseAttributeArgsCommon): CLEAN, no error, so the count's error waits for the subject's check; ERROR, its first
 // argument's error, reported (a string literal's position that holds none, clang's "expected string literal", or an
 // expression's name that names nothing, "use of undeclared identifier"), which drops the attribute; or UNSURE, an
-// argument whose errors clang's parser gives otherwise (a type's, a call's, a builtin's or an empty one), for which the
-// count's error stays where its arguments are read. Linear over the arguments' tokens: only an attribute whose count is
+// argument whose errors need the expression reader (a type's, a call's, a builtin's or an empty one), which reads it
+// before the handler counts it. Linear over the arguments' tokens: only an attribute whose count is
 // wrong (or cleanup's) gets here.
 #define BUSTER_CHECK_PARSED_CLEAN 0
 #define BUSTER_CHECK_PARSED_ERROR 1
@@ -1586,7 +1586,8 @@ static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInput
             const String8 spelled = kind == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
             const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
             const uint8_t next = token + 1 < stop ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
-            unsure |= kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_TYPEOF ||
+            unsure |= kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+                      kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_ATOMIC ||
                       kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || (kind == PARSE_KIND_IDENTIFIER && next == PARSE_KIND_L_PAREN) ||
                       (spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0);
             const bool named = previous == PARSE_KIND_PERIOD || previous == PARSE_KIND_ARROW ||
