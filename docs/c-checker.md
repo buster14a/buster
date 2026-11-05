@@ -5619,10 +5619,18 @@ arguments against the function. The checker now gives these as clang does.
   use is diagnosed once, in the first declarator's context. A declarator's
   name is past the tag's body, a fixed enum's base (whose typedef name is
   none) and attribute groups (whose names are none).
-  A file-scope declaration's specifiers take its declarator's worst mark as
+  A declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
-  declaration's drop both. That is the specifiers' alone (`typeof`'s operand
+  declaration's drop both. A declarator is an object's, a function's, a
+  typedef's (`check_input_typedef_declared`: `C_BINDING_TYPEDEF` is every
+  other token's zero too) or a marked member's, whose own mark is its
+  specifiers', parameter lists' and bounds' context
+  (`CheckInputReader.member_marks`). A declaration in a record's, a
+  function's or a block's body is read from that body's own bracket level.
+  In a function's body, only a typedef's or a member's mark is its
+  specifiers' context: a block's object's isn't, as clang diagnoses a block
+  declaration's typedef name as it reads it. That is the specifiers' alone (`typeof`'s operand
   and an attribute list included, with their commas): a `,` or `=` at the
   declaration's own bracket level ends an initializer or an earlier
   declarator, whose use keeps its own context, not a later declarator's mark.
@@ -5631,7 +5639,19 @@ arguments against the function. The checker now gives these as clang does.
   only at the declaration's own level; a compound literal's in a group
   (`typeof((T){0})`) is theirs. A tag's body in them isn't: an enumerator's
   value keeps its own context. There
-  is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
+  is none in a bare declaration of a tag.
+  A typedef that its own marks don't mark takes the marks of the struct,
+  union or enum it names (through qualifiers and other typedefs), as clang's
+  `ShouldDiagnoseAvailabilityOfDecl` looks through an available typedef to
+  its tag type: those of the tag's definition where one is before the use,
+  else its first declaration's own (`TagType::getDecl`). The use names the
+  typedef, the note the tag. An anonymous struct's, union's or enum's
+  definition with declarators, in a type name or as an anonymous member is a
+  use of its type at its keyword (`check_input_anonymous_mark`), once for each
+  declarator, named as clang names the type: its first typedef's name, else
+  `struct (unnamed at FILE:LINE:COL)`, or `(anonymous at ...)` for an
+  anonymous member's (`check_driver_spelling_build`); an unavailable one's
+  error names it too (`check_driver_reports`). The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
   the declaration its uses count by (its object's first, its tag's first),
@@ -5656,7 +5676,25 @@ arguments against the function. The checker now gives these as clang does.
   uses are the initializers' walk's (`check_init_member_use`, through
   `CheckGraph.marked_members`): a designator's member, at its name, and a
   member a value takes by its position, at the value's first token, at each
-  level of elided braces, as SemaInit's `DiagnoseUseOfDecl` has them.
+  level of elided braces, as SemaInit's `DiagnoseUseOfDecl` has them. An
+  unavailable member's error there is staged with the walk's warnings
+  (`CHECK_WARNING_EVENT_UNAVAILABLE_USE`), which the driver gives as the
+  error whatever the warning options (the walk stages its events under `-w`
+  too, of which the driver gives this one alone), and the corpus comparison
+  counts as the initializer's failure.
+  An access only the reader's evaluator reads (`typeof`'s operand, a
+  file-scope array bound, an enumerator's value, a static assertion's) is
+  recorded where its member is marked (`CheckInputReader.evaluated_members`)
+  and diagnosed by the uses' pass in its context, its declaration's
+  specifiers' included; one the graph reads too (a variable length array's
+  bound) is diagnosed once.
+- **Deprecated overloads** (`check_input_overload_uses`). An overloadable
+  function's declarations that a `deprecated` attribute marks (by them or an
+  earlier redeclaration) are recorded by the uses' pass
+  (`CheckInput.marked_overloads`). After checking, a call whose selection
+  (`CheckStream.overloads`) is one gets clang's warning at the callee's name,
+  in its context; an address taken through the overload set gets none, as in
+  clang. An unavailable overload is the selection's error already.
 - **Attributes without a rule** (`check_input_attribute_generic`). An
   attribute clang knows that the checker has no rule for is taken by its facts:
   - one clang ignores everywhere (`bounded`) is ignored without a word;
@@ -6077,28 +6115,25 @@ arguments against the function. The checker now gives these as clang does.
     clang's error with its evaluator's notes otherwise; they are taken here.
   - `int x _Alignas(3);` stops at clang's "expected ';' after top level
     declarator", where clang's recovery also reads `_Alignas(3);` as a
-    declaration that declares nothing (-Wmissing-declarations).
-  - When a GNU attribute of a declaration and a calling convention keyword
-    on another type share the specifiers, the two warnings come in the
-    attributes' order. Clang gives the type's first.
-  - A deprecated or unavailable member's use gets no diagnostic where the
-    reader's evaluator alone reads the access (`typeof`'s operand, an array
-    bound at file scope), and an unavailable member's in an initializer gets
-    no error (a designator's, or a value's by its position). Nor does an overloadable function's call that
-    resolves to a deprecated overload, which clang warns of (it doesn't at an
-    address taken through the overload set, and neither does the checker).
-    A struct member's own mark isn't its specifiers' and parameter lists'
-    context (`int (*m)(D) __attribute__((deprecated));` in a struct warns of
-    `D`), which clang drops: the member marks aren't the uses' pass's. Nor
-    does a deprecated anonymous struct's use in its own declaration warn
-    (`struct __attribute__((deprecated)) { ... } x;`, clang's "'struct
-    (unnamed at ...)' is deprecated" at its keyword, or its typedef's name
-    for `typedef struct __attribute__((deprecated)) { ... } T;`).
+    declaration that declares nothing (-Wmissing-declarations). That is the
+    parser's recovery (`docs/c-parser.md`), which keeps no declaration after
+    the error for the reader to warn of.
+  - A calling convention keyword in a nested declarator
+    (`__attribute__((noinline)) void (__stdcall *p)(void);`) warns after the
+    declaration's attributes, where clang warns of the type's first; one in
+    the specifiers warns before them, as clang's
+    (`check_input_attribute_function_types`).
   - A body checked on a lane doesn't warn of attributes after a definition, nor
-    check mutual exclusions across redeclarations.
-  - An argument count of a supported attribute is checked as its arguments are
-    read, before its subject. So `int x __attribute__((cold(1)));` is the
-    count's error, where clang warns of the subject and ignores it.
+    check mutual exclusions across redeclarations: both need the earlier
+    declarations' attributes, which a lane doesn't publish
+    (`check_input_lane_refuse`'s linked state).
+  - An argument count of a supported attribute that takes arguments is
+    checked as its arguments are read, before its subject. So
+    `int x __attribute__((format(printf)));` is the count's error, where
+    clang warns of the subject and ignores it. One that takes none
+    (`int x __attribute__((cold(1)));`) is checked after its subject, as
+    clang's, but for a type's (`noreturn`, `packed`, `may_alias`,
+    `transparent_union`, nullability), whose count clang checks first.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6116,7 +6151,12 @@ arguments against the function. The checker now gives these as clang does.
   - attributes without a rule of each kind, argument counts, and mutual
     exclusions on one declaration, through a specifier's list and across
     redeclarations;
-  - deprecated and unavailable uses of each kind, and their context rules.
+  - deprecated and unavailable uses of each kind, and their context rules:
+    members' in initializers and where the evaluator alone reads them,
+    overloads' calls, members' own marks, anonymous tags', and typedefs that
+    name marked tags;
+  - a no-argument attribute's count after its subject, and a declarator's
+    type's convention warnings before the declaration's attributes'.
 
   `test-checker` checks the exclusions table's order and pairs, and that the
   facts tell C's attributes from another language's.

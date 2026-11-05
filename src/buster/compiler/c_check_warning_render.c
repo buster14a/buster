@@ -120,10 +120,24 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
             memset(named, 0, (uint64_t)named_words * sizeof(*named));
             memset(anonymous, 0, (uint64_t)tag_count * sizeof(*anonymous));
             const uint32_t count = input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
+            // The brackets open before each token, innermost last: whether each is a struct's or union's body.
+            bool* opens = BUSTER_ARENA_PUSH_ARRAY(scratch, bool, (uint64_t)count + 1);
+            uint32_t open_count = 0;
+            valid = opens != NULL;
             for (uint32_t i = 0; valid && i < count; i += 1)
             {
+                const uint8_t bracket = i != 0 ? parser->tokens.kinds[i - 1] : PARSE_KIND_END;
+                if (bracket == PARSE_KIND_L_PAREN || bracket == PARSE_KIND_L_SQUARE || bracket == PARSE_KIND_L_BRACE)
+                {
+                    opens[open_count] = bracket == PARSE_KIND_L_BRACE && parser->tree.roles[i - 1] == PARSE_ROLE_OPEN_STRUCT;
+                    open_count += 1;
+                }
+                open_count -= (bracket == PARSE_KIND_R_PAREN || bracket == PARSE_KIND_R_SQUARE || bracket == PARSE_KIND_R_BRACE) && open_count != 0;
+                // C_BINDING_TYPEDEF is also every other token's zero (a use's, a member's): a typedef declares an object of
+                // its own.
                 const uint8_t binding = input->declaration_kinds[i];
-                if (binding == C_BINDING_TAG_KIND || binding == C_BINDING_TYPEDEF)
+                const bool declared = binding != C_BINDING_TYPEDEF || (input->objects != NULL && input->objects[i] == i + 1);
+                if ((binding == C_BINDING_TAG_KIND || binding == C_BINDING_TYPEDEF) && declared)
                 {
                     const TypeId declared = type_unqualified(type_strip_aligned(types, input->declared_types[i]));
                     const uint32_t index = type_is_valid(types, declared) ? type_index(declared) : types->types.count;
@@ -161,7 +175,15 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                                 {
                                     (void)pp_line_of(pp, range, location, &column);
                                 }
-                                const char* text = check_warning_text(scratch, "(unnamed at %.*s:%u:%u)", (int)file_length, file, line, column);
+                                // clang's anonymous member's record (a definition with no declarator in a record's
+                                // body) is "anonymous", any other "unnamed".
+                                const uint32_t body = check_input_skip_attributes(parser, i + 1, parser->tokens.count);
+                                const uint32_t closer = body < parser->tokens.count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? parser->tree.parents[body] : parser->tokens.count;
+                                const uint32_t after = closer < parser->tokens.count && closer > body ? check_input_skip_attributes(parser, closer + 1, parser->tokens.count) :
+                                                       parser->tokens.count;
+                                const bool member = after < parser->tokens.count && parser->tokens.kinds[after] == PARSE_KIND_SEMI && open_count != 0 &&
+                                                    opens[open_count - 1];
+                                const char* text = check_warning_text(scratch, "(%s at %.*s:%u:%u)", member ? "anonymous" : "unnamed", (int)file_length, file, line, column);
                                 valid = text != NULL;
                                 if (valid)
                                 {
@@ -592,12 +614,25 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "attribute declaration must precede definition";
             break;
         }
+        case CHECK_WARNING_EVENT_UNAVAILABLE_USE:
+        {
+            const String8 message = check_warning_string_text(parser, pp, payload->token, scratch);
+            result = message.length != 0 ? check_warning_text(scratch, "'%.*s' is unavailable: %.*s", (int)name.length, name.pointer, (int)message.length, message.pointer) :
+                                          check_warning_text(scratch, "'%.*s' is unavailable", (int)name.length, name.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
-            // The message is the attribute's string as written, without its quotes or prefix.
+            // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
+            // type's spelling, with its own quotes (BUSTER_CHECK_DEPRECATED_TYPE_NAME).
             const String8 message = check_warning_string_text(parser, pp, payload->token, scratch);
-            result = message.length != 0 ? check_warning_text(scratch, "'%.*s' is deprecated: %.*s", (int)name.length, name.pointer, (int)message.length, message.pointer) :
-                                          check_warning_text(scratch, "'%.*s' is deprecated", (int)name.length, name.pointer);
+            const bool typed = payload->data == BUSTER_CHECK_DEPRECATED_TYPE_NAME;
+            const char* quotes = typed ? "" : "'";
+            const String8 used = typed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0) : name;
+            result = used.length == 0 ? NULL :
+                     message.length != 0 ? check_warning_text(scratch, "%s%.*s%s is deprecated: %.*s", quotes, (int)used.length, used.pointer, quotes, (int)message.length,
+                                                              message.pointer) :
+                                          check_warning_text(scratch, "%s%.*s%s is deprecated", quotes, (int)used.length, used.pointer, quotes);
             break;
         }
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
@@ -842,7 +877,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     return result;
 }
 
-static const char* check_driver_warning_note(const Preprocessor* pp, const CheckWarningNote* note, Arena* scratch)
+static const char* check_driver_warning_note(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                             CheckWarningSpelling* spell, const CheckWarningNote* note, Arena* scratch)
 {
     const String8 name = check_driver_warning_name(pp, note->payload.name);
     const char* result = NULL;
@@ -860,10 +896,22 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
         case CHECK_WARNING_NOTE_DEPRECATED_HERE:
         {
-            const String8 noted = check_driver_warning_name(pp, note->payload.name);
-            result = check_warning_text(scratch, "'%.*s' has been explicitly marked deprecated here", (int)noted.length, noted.pointer);
+            // An anonymous tag's name is its type's spelling, which carries its own quotes (BUSTER_CHECK_DEPRECATED_TYPE_NAME).
+            if (note->payload.data == BUSTER_CHECK_DEPRECATED_TYPE_NAME)
+            {
+                const String8 spelled = check_driver_warning_type(parser, pp, input, types, spell, scratch, note->payload.first_type, 0);
+                result = spelled.length != 0 ? check_warning_text(scratch, "%.*s has been explicitly marked deprecated here", (int)spelled.length, spelled.pointer) : NULL;
+            }
+            else
+            {
+                const String8 noted = check_driver_warning_name(pp, note->payload.name);
+                result = check_warning_text(scratch, "'%.*s' has been explicitly marked deprecated here", (int)noted.length, noted.pointer);
+            }
             break;
         }
+        case CHECK_WARNING_NOTE_UNAVAILABLE_HERE:
+            result = check_warning_text(scratch, "'%.*s' has been explicitly marked unavailable here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {
             static const char* const places[] = { "", "1st", "2nd" };
@@ -906,7 +954,9 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                   (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
                    event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
                    event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
-                   event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT);
+                   event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT ||
+                   (event->kind == CHECK_WARNING_EVENT_DEPRECATED_USE && event->note_count != 0 && event->note_first < view->note_count &&
+                    view->notes[event->note_first].payload.data == BUSTER_CHECK_DEPRECATED_TYPE_NAME));
     }
     // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks when some
     // event renders a type: every event's mark then sits above them, so per-event release keeps them, and each
@@ -944,7 +994,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                 {
                     const CheckWarningNote* note = view->notes + event->note_first + n;
                     const bool located = note->token < parser->tokens.count && (note->source == BUSTER_CHECK_WARNING_NO_SOURCE || note->source < pp->output.count);
-                    const char* text = located ? check_driver_warning_note(pp, note, scratch) : NULL;
+                    const char* text = located ? check_driver_warning_note(parser, pp, input, types, &spell, note, scratch) : NULL;
                     valid = text != NULL;
                     if (valid)
                     {

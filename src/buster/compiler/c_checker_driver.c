@@ -684,14 +684,17 @@ static bool tier1_select_initialize(void);
 
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
+// The initializers' walk's warnings, and its unavailable members' errors (CHECK_WARNING_EVENT_UNAVAILABLE_USE, #147), which
+// `quiet` (-w) keeps alone: the walk stages them all, whatever the warning options.
 static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
-                                                      const CheckWarningEvents* view, const CheckRepair* repair, Arena* scratch)
+                                                      const CheckWarningEvents* view, const CheckRepair* repair, bool quiet, Arena* scratch)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && !pp->fatal && i < view->count; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
+        const bool shown = !quiet || event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE;
+        if (shown && event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
         {
             valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count &&
                     (event->payload.data & 0xffff) == CHECK_WARNING_EXCESS_INITIALIZERS;
@@ -719,7 +722,29 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 }
             }
         }
-        else
+        else if (shown && event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
+        {
+            // An unavailable member's use (check_init_member_use, #147): clang's error, whatever the warning options.
+            const CheckWarningNote* note = event->note_count == 1 && event->note_first < view->note_count ? view->notes + event->note_first : NULL;
+            valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count && note != NULL && note->token < parser->tokens.count;
+            if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
+            {
+                const uint64_t mark = scratch->length;
+                CheckWarningSpelling spell = { 0 };
+                const char* message = check_driver_warning_message(parser, pp, input, types, &spell, event, scratch);
+                const char* text = check_driver_warning_note(parser, pp, input, types, &spell, note, scratch);
+                valid = message != NULL && text != NULL;
+                if (valid)
+                {
+                    const PPOutputDiagnosticNote noted = { .token = parser->tokens.sources[note->token], .message = text };
+                    const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
+                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[event->token], publication, &noted, 1, "%s", message);
+                    valid = !pp->diagnostic_collection_failed;
+                }
+                arena_pop_to(scratch, mark);
+            }
+        }
+        else if (shown)
         {
             const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
             valid = check_driver_warning_events(parser, pp, input, types, &one, repair, scratch);
@@ -1598,13 +1623,26 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
                             // attribute's message, and the note at it.
                             const CheckInputReport* report = input->reports + index;
-                            const uint32_t used = parser->tokens.names[token];
                             const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
-                            // The note names its declaration: an enumerator's enum's where the enum marks it.
-                            const uint32_t declared = report->note_token < count && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ?
-                                                      parser->tokens.names[report->note_token] : used;
-                            char noted[160];
-                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, declared), intern_bytes(pp->table, declared));
+                            // The names are the tokens' (the note's its declaration's: an enumerator's enum's where the enum
+                            // marks it), or at an anonymous tag's keyword its type's spelling, with its quotes.
+                            const bool typed = input->declared_types != NULL;
+                            const String8 used_type = parser->tokens.kinds[token] != PARSE_KIND_IDENTIFIER && typed ?
+                                                      check_driver_warning_type(parser, pp, input, types, &spell, scratch, input->declared_types[token], 0) : (String8){ 0 };
+                            const bool noted_token = report->note_token < count;
+                            const String8 note_type = noted_token && parser->tokens.kinds[report->note_token] != PARSE_KIND_IDENTIFIER && typed ?
+                                                      check_driver_warning_type(parser, pp, input, types, &spell, scratch, input->declared_types[report->note_token], 0) :
+                                                      (String8){ 0 };
+                            const uint32_t used = parser->tokens.names[token];
+                            const String8 used_name = { .pointer = (char*)intern_bytes(pp->table, used), .length = intern_length(pp->table, used) };
+                            const uint32_t declared = noted_token && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[report->note_token] : used;
+                            const String8 declared_name = { .pointer = (char*)intern_bytes(pp->table, declared), .length = intern_length(pp->table, declared) };
+                            const String8 used_text = used_type.length != 0 ? used_type : used_name;
+                            const String8 declared_text = note_type.length != 0 ? note_type : noted_token || used_type.length == 0 ? declared_name : used_type;
+                            const char* used_quote = used_type.length != 0 ? "" : "'";
+                            const char* note_quote = note_type.length != 0 || (!noted_token && used_type.length != 0) ? "" : "'";
+                            char noted[256];
+                            snprintf(noted, sizeof(noted), "%s%.*s%s has been explicitly marked unavailable here", note_quote, (int)declared_text.length, declared_text.pointer, note_quote);
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = noted,
@@ -1613,7 +1651,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             for (uint64_t copy = 0; copy <= report->value; copy += 1)
                             {
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
-                                                            "'%.*s' is unavailable%s%.*s", (int)intern_length(pp->table, used), intern_bytes(pp->table, used),
+                                                            "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
                                                             message.length != 0 ? ": " : "", (int)message.length, message.pointer);
                             }
                         }
@@ -3986,7 +4024,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 asms.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", asms.token };
                         }
                         if (check_initializers_run_events(&initializers, &input, &stream, checking, &types, output_arena, scratch,
-                                                          !quiet ? &initializer_warnings : NULL, !quiet ? &initializer_warning_keys : NULL))
+                                                          &initializer_warnings, &initializer_warning_keys))
                         {
                             excess_tokens = initializers.warning_tokens;
                             excess_count = initializers.warning_count;
@@ -3996,16 +4034,17 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckInitDiagnostic earlier = { 0 };
                         const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
+                        // Under -w too: its unavailable members' errors are its events' (#147), which publication keeps alone.
                         CheckInitWarningSink warnings = {
-                            .capacity = !quiet ? tokens : 0,
-                            .events = !quiet ? &initializer_warnings : NULL,
-                            .event_keys = !quiet ? &initializer_warning_keys : NULL,
+                            .capacity = tokens,
+                            .events = &initializer_warnings,
+                            .event_keys = &initializer_warning_keys,
                         };
                         warnings.tokens = warnings.capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, warnings.capacity) : NULL;
                         const bool storage = warnings.capacity == 0 || warnings.tokens != NULL;
                         const bool diagnosed = storage && initializers.status != CHECK_INIT_RESOURCE &&
                                                check_initializers_diagnose_warnings(&earlier, &input, &stream, checking, &types, before,
-                                                                                     output_arena, scratch, !quiet ? &warnings : NULL);
+                                                                                     output_arena, scratch, &warnings);
                         if (!storage || initializers.status == CHECK_INIT_RESOURCE)
                         {
                             earlier.status = CHECK_INIT_RESOURCE;
@@ -4080,7 +4119,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
-                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, scratch) ||
+                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, scratch) ||

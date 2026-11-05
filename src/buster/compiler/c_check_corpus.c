@@ -953,6 +953,17 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         path->initialized = check_initializers_run_events(&path->initializers, &path->input, &path->stream, view, &path->types,
                                                           &path->output_arena, &path->scratch, &path->warning_events, &path->warning_keys);
         path->resource |= path->initializers.status == CHECK_INIT_RESOURCE;
+        // An unavailable member's use is an error the walk stages with its warnings (check_init_member_use, #147).
+        for (uint32_t i = 0; path->initialized && i < path->warning_events.count; i += 1)
+        {
+            const CheckWarningEvent* event = path->warning_events.events + i;
+            if (event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
+            {
+                path->initialized = false;
+                path->initializers.status = CHECK_INIT_INVALID;
+                path->initializers.token = event->token;
+            }
+        }
         if (!path->initialized)
         {
             path->token = path->initializers.token;
