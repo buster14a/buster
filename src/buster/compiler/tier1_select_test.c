@@ -2356,7 +2356,13 @@ static void tier1_select_test_narrow_memory(Tier1SelectTest* test)
                     tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "narrow volatile and ordinary memory selects");
                     if (planned == TIER1_SELECT_OK)
                     {
-                        tier1_select_test_expect(test, plan.patterns[4].width == bytes && plan.patterns[6].width == bytes && plan.covered[2] && plan.covered[5] && !plan.covered[4] && !plan.covered[6], "folded address retains exact narrow access width and memory operation");
+                        const bool folded_signed = sign && variant < 2;
+                        const Tier1SelectPattern* access = &plan.patterns[folded_signed ? 7 : 6];
+                        const bool load_width = folded_signed ? access->rule == TIER1_RULE_LOAD_ADDRESS && access->width == 8 && access->source_width == bytes
+                                                              : access->width == bytes;
+                        tier1_select_test_expect(test, plan.patterns[4].width == bytes && load_width && plan.covered[2] && plan.covered[5] && !plan.covered[4] &&
+                                                         (plan.covered[6] != 0) == folded_signed && !plan.covered[7],
+                                                 "folded address retains exact narrow access width and memory operation");
                         Tier1SelectCode code;
                         const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
                         tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "narrow memory emits baseline forms");
