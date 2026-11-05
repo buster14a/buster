@@ -646,8 +646,9 @@ and its old-style `member: value` field designator (#1251), with the values clan
 gives, whatever begins the value. The old field spelling uses the same member
 selection, positional continuation, constant evaluation and override history as
 `.member = value`; an unknown field names the selected record in its diagnostic.
-What stays out: `1.5q`, as every `__float128` constant (`__float128 z = 1.5;` is
-"not a constant expression" to the checker).
+Quad-precision `q`/`Q` literals are accepted on supported glibc hosts only when
+their binary128 values are exactly representable by the checker's x87 storage;
+wider values and unsupported hosts remain refused (#1250).
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or
