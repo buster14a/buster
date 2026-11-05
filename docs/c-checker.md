@@ -5993,6 +5993,16 @@ arguments against the function. The checker now gives these as clang does.
   attributes `noreturn`, `packed`, `may_alias`, `transparent_union` and
   nullability, and `sentinel`, keep their count-first checks.
 
+  The scalar parser uses those same generated string-slot facts when a
+  malformed expression would otherwise hide an earlier string error, as in
+  `section(1,)`. A stray name immediately before the closing parenthesis of a
+  `sizeof` or `alignof` type inside a GNU attribute is retained as a parser
+  error with its opener note. The diagnostic-only recovery view drops that
+  name, keeping the original complete type and closing parenthesis, so the
+  outer attribute can still diagnose its count. This view cannot accept or
+  emit the source. A delayed count diagnostic takes its name from its source
+  report and publishes after the arguments, independently of its sort key.
+
   Custom grammars keep their handlers' rules: `cpu_specific` and
   `cpu_dispatch` require at least one identifier, `no_sanitize` at least one
   string, and `target_clones` requires a default target. Their zero-argument

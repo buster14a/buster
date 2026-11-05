@@ -24,7 +24,7 @@ static const CheckNoderefType* check_input_noderef_make(CheckInputReader* reader
     CheckNoderefType* result = NULL;
     if (base != NULL || parameters != NULL || marked)
     {
-        result = BUSTER_ARENA_PUSH(reader->arena, CheckNoderefType);
+        result = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckNoderefType, 1);
         reader->output->resource |= result == NULL;
         if (result != NULL)
         {
@@ -65,7 +65,7 @@ static const CheckNoderefParameter* check_input_noderef_parameter_add(CheckInput
     const CheckNoderefParameter* result = parameters;
     if (type != NULL)
     {
-        CheckNoderefParameter* item = BUSTER_ARENA_PUSH(reader->arena, CheckNoderefParameter);
+        CheckNoderefParameter* item = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckNoderefParameter, 1);
         reader->output->resource |= item == NULL;
         if (item != NULL)
         {
@@ -248,7 +248,7 @@ static bool check_input_noderef_equal(CheckInputReader* reader, const CheckNoder
                 equal = a != NULL && b != NULL && a->index == b->index;
                 if (equal && a->type != b->type)
                 {
-                    CheckNoderefPair* pair = BUSTER_ARENA_PUSH(reader->scratch, CheckNoderefPair);
+                    CheckNoderefPair* pair = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckNoderefPair, 1);
                     reader->output->resource |= pair == NULL;
                     equal = pair != NULL;
                     if (equal)

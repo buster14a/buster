@@ -5367,7 +5367,14 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         }
         else if (kept && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
         {
+            const uint32_t before = reader->output->report_count;
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            if (reader->output->report_count > before)
+            {
+                // All original argument syntax precedes the handler, including a type-name error retained by the
+                // diagnostic-only parser view. Keep the attribute's name as its location, and its end as publication.
+                reader->output->reports[before].completion = attribute->end;
+            }
             valid = false;
             if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
             {
