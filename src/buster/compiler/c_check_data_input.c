@@ -19,13 +19,15 @@ typedef enum CheckDataInputStatus
 } CheckDataInputStatus;
 
 // A constant CFString's call (#148): its object, its `)`'s token plus one (the call's value's), and the object whose
-// symbol it takes, the first call's of its characters (itself for that one), whose 32-byte object the unit holds, as
-// clang's code makes one of each literal (GetAddrOfConstantCFString).
+// symbol it takes, the lowest call's of its characters (itself for that one), whose 32-byte record the unit holds, as
+// clang's code makes one of each literal (GetAddrOfConstantCFString). CheckDataPrepared.cfstrings is in object order.
 typedef struct CheckDataCFString CheckDataCFString;
 struct CheckDataCFString
 {
     uint32_t object;
     uint32_t canonical;
+    // The canonical call's characters' object: its literal's, or its UTF-16 array's.
+    uint32_t characters;
 };
 
 typedef struct CheckDataPrepared CheckDataPrepared;
@@ -53,6 +55,9 @@ struct CheckDataPrepared
     uint32_t cfstring_count;
     uint32_t cfstring_class;
     bool cfstring_class_own;
+    // The first of the records' references (the last of `references`), which no program takes as roots: a record's
+    // class and characters are needed only where the record is (check_program_alias_number).
+    uint32_t cfstring_reference_first;
     LinkCapacity capacity;
     uint32_t token;
     CheckDataInputStatus status;
@@ -125,6 +130,35 @@ static uint32_t check_data_latest(const CheckDataPrepared* prepared, uint32_t ob
 // tokens declare a static object (#592), so the vector path finds them 64 tokens at a time (the scalar path, `scalar`,
 // takes every token), as keys of their object and token, which c_bindings_sort puts in object order, each object's
 // declarations in token order: no token-sized column is filled or read past them.
+// The canonical object of `object` among the `count` calls of `calls` (in object order), or `object` itself where it is no
+// call's: a reference to a call's object is its canonical record's (#148).
+static uint32_t check_data_cfstring_canonical(const CheckDataCFString* calls, uint32_t count, uint32_t object)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = calls[middle].object < object ? middle + 1 : low;
+        high = calls[middle].object < object ? high : middle;
+    }
+    return low < count && calls[low].object == object ? calls[low].canonical : object;
+}
+
+// The index of the call of `object` among the `count` calls of `calls` (in object order), or `count`.
+static uint32_t check_data_cfstring_index(const CheckDataCFString* calls, uint32_t count, uint32_t object)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = calls[middle].object < object ? middle + 1 : low;
+        high = calls[middle].object < object ? high : middle;
+    }
+    return low < count && calls[low].object == object ? low : count;
+}
+
 // A constant CFString's characters (#148), as clang's GetConstantCFStringEntry keys its objects: an ASCII literal's own
 // bytes (none past 0x7f, no NUL), or else the UTF-16 units of LLVM's strict conversion, which stops at the first byte that
 // begins no sequence (the units before it kept), and a NUL unit. Of one call: its object (its `)`'s token plus one), its
@@ -192,7 +226,7 @@ static uint32_t check_data_cfstring_hash(const uint8_t* bytes, uint32_t count, b
 // __CFConstantStringClassReference (CheckGraph.cfstring_class), or else the object of the lowest call's name, which the
 // emission names so, an undefined global. `keys` holds `capacity` keys of `*key_count` found; the UTF-16 units go in
 // `output`.
-static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream* stream, Arena* output, Arena* scratch, CheckDataCFStringKey** keys,
+static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream* stream, bool scalar, Arena* output, Arena* scratch, CheckDataCFStringKey** keys,
                                      uint32_t* key_count)
 {
     const CheckGraph* graph = &input->graph;
@@ -246,7 +280,21 @@ static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream*
             }
         }
     }
-    *keys = found;
+    // In object order (the calls' records are looked up by their objects, check_data_cfstring_canonical).
+    uint64_t* order = valid && count > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count) : 0;
+    uint64_t* temporary = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count) : 0;
+    CheckDataCFStringKey* sorted = temporary != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataCFStringKey, count) : 0;
+    valid = valid && (count <= 1 || sorted != 0);
+    for (uint32_t k = 0; valid && count > 1 && k < count; k += 1)
+    {
+        order[k] = (uint64_t)found[k].object << 32 | k;
+    }
+    const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(order, temporary, count, !scalar, UINT32_MAX) : 0;
+    for (uint32_t k = 0; ordered != 0 && k < count; k += 1)
+    {
+        sorted[k] = found[(uint32_t)ordered[k]];
+    }
+    *keys = ordered != 0 ? sorted : found;
     *key_count = count;
     return valid;
 }
@@ -323,6 +371,9 @@ static bool check_data_cfstring_objects(CheckDataPrepared* result, const CheckIn
         const CheckDataCFStringKey* key = keys + k;
         const bool canonical = result->cfstrings[k].canonical == key->object;
         const uint32_t characters_object = key->utf16 ? key->name + 2 : key->literal;
+        // A canonical call's characters, which its later calls (in object order) take.
+        const uint32_t canonical_at = canonical ? k : check_data_cfstring_index(result->cfstrings, k, result->cfstrings[k].canonical);
+        result->cfstrings[k].characters = canonical ? characters_object : canonical_at < k ? result->cfstrings[canonical_at].characters : 0;
         if (canonical && key->utf16)
         {
             const TypeId array = type_array(types, unit, key->byte_count / 2);
@@ -480,7 +531,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     uint32_t cfstring_key_count = 0;
     if (valid && input->graph.ns_constant_string != 0)
     {
-        valid = check_data_cfstring_keys(input, stream, output, scratch, &cfstring_keys, &cfstring_key_count);
+        valid = check_data_cfstring_keys(input, stream, scalar, output, scratch, &cfstring_keys, &cfstring_key_count);
         result->cfstrings = valid && cfstring_key_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataCFString, cfstring_key_count) : 0;
         valid = valid && (cfstring_key_count == 0 || result->cfstrings != 0) &&
                 check_data_cfstring_unique(cfstring_keys, cfstring_key_count, scalar, scratch, result->cfstrings);
@@ -593,7 +644,8 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                     valid = references[reference] != 0 && references[reference] <= count;
                     if (valid)
                     {
-                        result->references[result->reference_count++] = references[reference];
+                        // A constant CFString's call is its canonical record's reference (#148).
+                        result->references[result->reference_count++] = check_data_cfstring_canonical(result->cfstrings, result->cfstring_count, references[reference]);
                     }
                 }
                 if (!valid && result->status == CHECK_DATA_INPUT_OK)
@@ -632,6 +684,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             result->token = string->token;
         }
     }
+    result->cfstring_reference_first = result->reference_count;
     if (valid && cfstring_key_count != 0)
     {
         valid = check_data_cfstring_objects(result, input, cfstring_keys, cfstring_key_count, types, output);

@@ -521,7 +521,8 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
             needed[alias->object] = 0;
         }
     }
-    // A constant CFString's call (#148) takes its canonical call's symbol in the same way: one object of each literal's.
+    // A constant CFString's call (#148) takes its canonical call's symbol in the same way, one record of each literal's;
+    // and a needed record needs its class and characters, which no record unreferenced does (they are no roots).
     for (uint32_t k = 0; k < program->cfstring_count; k += 1)
     {
         const CheckDataCFString* call = program->cfstrings + k;
@@ -529,6 +530,15 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
         {
             needed[call->canonical] = 1;
             needed[call->object] = 0;
+        }
+    }
+    for (uint32_t k = 0; k < program->cfstring_count; k += 1)
+    {
+        const CheckDataCFString* call = program->cfstrings + k;
+        if (call->canonical == call->object && needed[call->object] && call->characters != 0 && program->cfstring_class != 0)
+        {
+            needed[program->cfstring_class] = 1;
+            needed[call->characters] = 1;
         }
     }
     program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));

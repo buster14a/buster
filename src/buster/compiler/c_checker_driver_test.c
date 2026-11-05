@@ -1729,11 +1729,28 @@ static void check_test_driver_section_bounds(CheckTest* test, const char* clang,
 // link of both, each printing clang's: one object of each literal (a static initializer's, NSString's and another
 // function's), an address constant cast and offset, the records' fields (the class's address, the flags, ASCII and
 // UTF-16 characters, a surrogate pair, a NUL, a conversion cut short, parentheses and a cast, the empty string) and the
-// record's size. The unit doesn't declare the class: its object's symbol is the program's own, an undefined global.
-// And a unit that declares it takes the declaration's object.
+// record's size, and a literal whose lowest call is in a function nothing calls (its record is the program's all the same).
+// The unit doesn't declare the class: its object's symbol is the program's own, an undefined global. A unit that declares
+// it takes the declaration's object. And a unit of a CFString in sizeof alone, whose record nothing references, has no
+// record, characters or class (#1363's review): its object, by -c and by -c --lower-all, names no class, and it links
+// without one, by cc and by the direct path.
+static bool check_test_driver_file_holds(const char* path, const char* needle)
+{
+    FILE* file = fopen(path, "rb");
+    char buffer[1 << 16];
+    const size_t length = file != NULL ? fread(buffer, 1, sizeof(buffer), file) : 0;
+    const bool result = file != NULL && memmem(buffer, length, needle, strlen(needle)) != NULL;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    return result;
+}
+
 static void check_test_driver_cfstrings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char unit[] =
+        "static const void* never_called(void) { return __builtin___CFStringMakeConstantString(\"only\"); }\n"
         "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
         "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
         "static const void* s1 = __builtin___CFStringMakeConstantString(\"hello\");\n"
@@ -1762,6 +1779,7 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
         "    bytes((const CF*)__builtin___CFStringMakeConstantString((\"pa\" \"ren\")));\n"
         "    bytes((const CF*)__builtin___CFStringMakeConstantString((const char*)\"cast\"));\n"
         "    bytes((const CF*)__builtin___NSStringMakeConstantString(\"ns\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"only\"));\n"
         "    mix(__builtin___NSStringMakeConstantString(\"ns\") == __builtin___CFStringMakeConstantString(\"ns\"));\n"
         "    mix(__builtin___CFStringMakeConstantString(\"a\\0b\") != __builtin___CFStringMakeConstantString(\"a\"));\n"
         "    mix(__builtin___CFStringMakeConstantString(\"abc\")->length * 10 + sizeof(*__builtin___CFStringMakeConstantString(\"q\")));\n"
@@ -1829,6 +1847,44 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
         unlink(object);
         unlink(reference);
     }
+    // Its files' names hold no "cfstring", which the object is searched for.
+    static const char unreferenced[] = "int main(void) { return sizeof(__builtin___CFStringMakeConstantString(\"x\")) != sizeof(void *); }\n";
+    char source[256];
+    char object[256];
+    char linked[256];
+    snprintf(source, sizeof(source), "%s/constant-string-sizeof.c", directory);
+    snprintf(object, sizeof(object), "%s/constant-string-sizeof.o", directory);
+    snprintf(linked, sizeof(linked), "%s/constant-string-sizeof", directory);
+    const bool written = parse_test_write(source, unreferenced, sizeof(unreferenced) - 1);
+    check_test_expect(test, written, "the unreferenced CFString's fixture is written");
+    for (uint32_t path = 0; written && path < 4; path += 1)
+    {
+        const bool all = (path & 1) != 0;
+        const bool direct = (path & 2) != 0;
+        char* plain[] = { (char*)executable, "-w", "-c", "-o", object, source, NULL };
+        char* plain_all[] = { (char*)executable, "--lower-all", "-w", "-c", "-o", object, source, NULL };
+        char* linking[] = { (char*)executable, "-w", "-o", linked, source, NULL };
+        char* linking_all[] = { (char*)executable, "--lower-all", "-w", "-o", linked, source, NULL };
+        char* const* arguments = direct ? (all ? linking_all : linking) : (all ? plain_all : plain);
+        char* text = NULL;
+        int status = check_test_driver_spawn(arguments, &text);
+        free(text);
+        text = NULL;
+        const bool clean = direct || (status == 0 && !check_test_driver_file_holds(object, "__CFConstantStringClassReference") &&
+                                      !check_test_driver_file_holds(object, "cfstring"));
+        char* link_arguments[] = { "cc", "-o", linked, object, NULL };
+        status = status == 0 && !direct ? check_test_driver_spawn(link_arguments, &text) : status;
+        free(text);
+        text = NULL;
+        char captured[16] = { 0 };
+        char description[160];
+        snprintf(description, sizeof(description), "a CFString in sizeof alone%s: %s, no record or class, links and runs", all ? " (--lower-all)" : "",
+                 direct ? "the direct path's link" : "-c's object, linked by cc");
+        check_test_expect(test, clean && status == 0 && check_test_driver_capture(linked, captured, sizeof(captured)), description);
+        unlink(linked);
+    }
+    unlink(source);
+    unlink(object);
 }
 
 // #1122's own program, one atom in the section, whose count is 1: by clang, by -c's object that cc links, by the direct

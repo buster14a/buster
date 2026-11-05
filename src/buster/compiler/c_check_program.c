@@ -2722,14 +2722,16 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         {
             if (op == CHECK_OP_BUILTIN_MISC && (graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || graph->members[node] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING))
             {
-                // A constant CFString's call (#148), whose value is its object's address (check_data_cfstring_keys' object).
+                // A constant CFString's call (#148), whose value is its object's address: a reference to its canonical
+                // record (check_data_cfstring_keys), whose symbol the call's object takes.
                 const CheckValue value = check_stream_value(program->stream, node);
-                if (value.constant_kind == CHECK_CONSTANT_ADDRESS && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && value.object != 0 &&
-                    value.object < program->object_count && seen[value.object] != epoch)
+                const uint32_t object = value.constant_kind == CHECK_CONSTANT_ADDRESS && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 ?
+                                        check_data_cfstring_canonical(program->cfstrings, program->cfstring_count, value.object) : 0;
+                if (object != 0 && object < program->object_count && seen[object] != epoch)
                 {
-                    seen[value.object] = epoch;
-                    needed[value.object] = 1;
-                    references[reference_count++] = (uint64_t)value.object << 32;
+                    seen[object] = epoch;
+                    needed[object] = 1;
+                    references[reference_count++] = (uint64_t)object << 32;
                 }
             }
             if (op == CHECK_OP_STATEMENT_VALUE)
@@ -3465,6 +3467,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
+    // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
+    if (options.prepared_data != NULL)
+    {
+        program->cfstrings = options.prepared_data->cfstrings;
+        program->cfstring_count = options.prepared_data->cfstring_count;
+        program->cfstring_class = options.prepared_data->cfstring_class;
+        program->cfstring_class_own = options.prepared_data->cfstring_class_own;
+    }
     if (options.return_flow_work != NULL)
     {
         *options.return_flow_work = 0;
@@ -3915,16 +3925,15 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
         // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
-        if (options.prepared_data != NULL)
-        {
-            program->cfstrings = options.prepared_data->cfstrings;
-            program->cfstring_count = options.prepared_data->cfstring_count;
-            program->cfstring_class = options.prepared_data->cfstring_class;
-            program->cfstring_class_own = options.prepared_data->cfstring_class_own;
-        }
         const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, &target_events) :
                                                               check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), &target_events);
-        for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
+        // The constant CFStrings' records' references, the last ones, are no roots (#148): a live record's are needed
+        // (check_program_alias_number).
+        const CheckDataPrepared* prepared = options.prepared_data;
+        const uint32_t roots = prepared != NULL && options.initializer_references == prepared->references &&
+                               prepared->cfstring_reference_first < options.initializer_reference_count ? prepared->cfstring_reference_first :
+                                                                                                          options.initializer_reference_count;
+        for (uint32_t i = 0; i < roots; i += 1)
         {
             const uint32_t object = options.initializer_references[i];
             if (object != 0 && object <= count)
