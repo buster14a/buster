@@ -984,7 +984,8 @@ static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* s
         {
             const uint32_t reg = allocation->registers[f];
             const bool in_register = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
-            general_saved |= class == BUSTER_TIER1_ALLOCATE_GPR && tier1_emit_fragment_saved(allocation, f, own, columns, emitted->callee_registers, &saves) ? 1u << reg : 0;
+            // A register found saved isn't searched again: its column is left out.
+            general_saved |= class == BUSTER_TIER1_ALLOCATE_GPR && tier1_emit_fragment_saved(allocation, f, own, columns & ~general_saved, emitted->callee_registers, &saves) ? 1u << reg : 0;
             for (uint32_t list = 0; class != BUSTER_TIER1_ALLOCATE_GPR && list < 2; list += 1)
             {
                 const uint32_t* positions = list == 0 ? calls : rows;

@@ -1080,12 +1080,13 @@ static Tier1EmitError tier1_emit_saves(const Tier1SelectPlan* plan, Arena* scrat
     Tier1EmitSavePositions saves;
     const bool ok = tier1_emit_save_positions(plan, columns, 0, emitted->prepared.call_count, emitted->prepared.fixed_count, scratch, &saves);
     uint32_t saved = 0;
-    for (uint32_t i = 0; ok && saves.positions != 0 && i < allocation->interval_count; i += 1)
+    // A register found saved isn't searched again (its fragments' columns left out), and once every column's is, nothing is.
+    for (uint32_t i = 0; ok && saves.positions != 0 && saved != columns && i < allocation->interval_count; i += 1)
     {
         const uint32_t own = 2 * input->values[i] + 1;
         for (uint32_t f = allocation->fragment_offsets[i]; f < allocation->fragment_offsets[i + 1]; f += 1)
         {
-            saved |= tier1_emit_fragment_saved(allocation, f, own, columns, 0, &saves) ? 1u << allocation->registers[f] : 0;
+            saved |= tier1_emit_fragment_saved(allocation, f, own, columns & ~saved, 0, &saves) ? 1u << allocation->registers[f] : 0;
         }
     }
     emitted->prepared.call_save_mask = saved & columns;
