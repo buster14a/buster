@@ -16,6 +16,14 @@
 #ifndef BUSTER_TEST_LIBM_INCLUDED
 #define BUSTER_TEST_LIBM_INCLUDED
 
+// Whether this executable is linked statically (BUSTER_HOST_STATIC, cmake/BusterSettings.cmake): then nothing is
+// preloaded into it, and the tests that count its threads read the lanes' own count alone (lane_threads_report).
+#if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+#define BUSTER_HOST_STATIC_EXECUTABLE 1
+#else
+#define BUSTER_HOST_STATIC_EXECUTABLE 0
+#endif
+
 #include <dlfcn.h>
 #include <stddef.h>
 #include <string.h>

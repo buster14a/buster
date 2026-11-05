@@ -201,7 +201,10 @@ linker is mold (or clang's default without it), and an explicit
 says which (`static: TRUE`), and the units see it as `BUSTER_HOST_STATIC`. A static executable's `dlsym(RTLD_DEFAULT, ...)`
 finds nothing, so the host functions that the interpreter's programs and the
 tests' libm oracles name come from `test_libm.c`'s table there, and a `dlopen`ed
-library brings a C library of its own. The compiler needs no libm either way
+library brings a C library of its own. Nothing can be preloaded into it either:
+the tests that count a command's threads read the count its lanes write at exit
+to the file `BUSTER_TEST_THREADS` names (`lane_threads_report`), which a
+dynamic executable's preloaded counter of `pthread_create` must match. The compiler needs no libm either way
 (`host_math.h`); a dynamic link takes it only as needed.
 
 The post-link step has each executable write itself with the backend's tables
