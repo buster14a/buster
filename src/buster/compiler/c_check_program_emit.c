@@ -2830,6 +2830,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 symbol_aliases[symbol] = k + 1;
                 symbol_names[symbol] = alias->kind == CHECK_PROGRAM_WEAKREF ? alias->target : symbol_names[symbol];
+                // An alias has its base's atom, so selectany changes its binding alone. It must not allocate an
+                // empty COMDAT group before check_program_define_aliases places it in the base's section.
+                commons[symbol] &= (uint8_t)~BUSTER_CHECK_EMIT_SELECTANY;
             }
             const SymbolId target = alias->kind == CHECK_PROGRAM_WEAKREF && alias->target_object != 0 ? program->object_symbols[alias->target_object] : 0;
             weak[target] |= target != 0 && (state & BUSTER_CHECK_PROGRAM_ALIAS_WEAK) != 0 && !defined[alias->target_object];

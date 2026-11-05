@@ -6,14 +6,18 @@
 // the first definition, discard its competitors' undefined references and keep stronger ordinary definitions.
 // Included by c_check_units_test.c after its subprocess and file helpers.
 
-static bool check_units_test_selectany_object(const char* path)
+static bool check_units_test_selectany_object(const char* path, bool foreign)
 {
     static const char* const names[] = { "choice", "extra", "zero", "constant", "tls", "tls_zero", "override" };
     uint64_t size = 0;
     char* bytes = check_units_test_read(path, &size);
     ObjectView view;
     char error[256] = { 0 };
-    bool valid = bytes != NULL && object_view_open(&view, (const uint8_t*)bytes, size, false, error, sizeof(error));
+    bool valid = bytes != NULL && object_view_open(&view, (const uint8_t*)bytes, size, foreign, error, sizeof(error));
+    if (!valid)
+    {
+        fprintf(stderr, "  selectany object %s: %s\n", path, bytes != NULL ? error : "cannot read object");
+    }
     uint32_t found = 0;
     uint32_t groups = 0;
     for (uint64_t s = 1; valid && s < view.section_count; s += 1)
@@ -56,9 +60,35 @@ static bool check_units_test_selectany_object(const char* path)
                 }
                 valid = valid && defines && relocations == (which == 0 ? 1u : 0u) && count == (which == 0 ? 3u : 2u);
             }
+            if (!valid)
+            {
+                fprintf(stderr, "  selectany group %s: binding %u, %llu member words, signature section %llu\n", name,
+                        ELF64_ST_BIND(view.symbols[section->sh_info].st_info), (unsigned long long)count,
+                        (unsigned long long)object_view_symbol_section(&view, section->sh_info));
+            }
         }
     }
     valid = valid && groups == BUSTER_ARRAY_LENGTH(names) && found == (1u << BUSTER_ARRAY_LENGTH(names)) - 1;
+    static const char* const aliases[] = { "selected_alias", "selected_group_alias" };
+    static const char* const bases[] = { "aliased", "extra" };
+    for (uint32_t a = 0; valid && a < BUSTER_ARRAY_LENGTH(aliases); a += 1)
+    {
+        uint64_t alias = 0;
+        uint64_t base = 0;
+        for (uint64_t s = 1; s < view.symbol_count; s += 1)
+        {
+            const char* name = object_view_symbol_name(&view, s);
+            alias = strcmp(name, aliases[a]) == 0 ? s : alias;
+            base = strcmp(name, bases[a]) == 0 ? s : base;
+        }
+        valid = alias != 0 && base != 0 && ELF64_ST_BIND(view.symbols[alias].st_info) == STB_WEAK &&
+                object_view_symbol_section(&view, alias) == object_view_symbol_section(&view, base) &&
+                view.symbols[alias].st_value == view.symbols[base].st_value && view.symbols[alias].st_size == view.symbols[base].st_size;
+        if (!valid)
+        {
+            fprintf(stderr, "  selectany alias %s does not share %s's section, value and size with weak binding\n", aliases[a], bases[a]);
+        }
+    }
     free(bytes);
     return valid;
 }
@@ -74,7 +104,10 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
         "const int constant __attribute__((selectany)) = 19;\n"
         "_Thread_local int tls __attribute__((selectany)) = 23;\n"
         "_Thread_local int tls_zero __attribute__((selectany));\n"
-        "int override __attribute__((selectany)) = 7;\n";
+        "int override __attribute__((selectany)) = 7;\n"
+        "int aliased = 31;\n"
+        "extern int selected_alias __attribute__((alias(\"aliased\"), selectany));\n"
+        "extern int selected_group_alias __attribute__((alias(\"extra\"), selectany));\n";
     static const char second[] =
         "struct Row { int *pointer; int value; };\n"
         "extern int discarded_only;\n"
@@ -89,8 +122,9 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
         "#include <stdio.h>\n"
         "struct Row { int *pointer; int value; };\n"
         "extern struct Row choice; extern int extra, zero, override; extern const int constant;\n"
+        "extern int selected_alias, selected_group_alias;\n"
         "extern _Thread_local int tls, tls_zero;\n"
-        "int main(void) { printf(\"%d %d %d %d %d %d %d\\n\", *choice.pointer + choice.value, extra, zero, constant, tls, tls_zero, override); return 0; }\n";
+        "int main(void) { printf(\"%d %d %d %d %d %d %d\\n\", *choice.pointer + choice.value, extra, zero, constant, tls, tls_zero, override); return selected_alias != 31 || selected_group_alias != 29; }\n";
     static const char one[] = "int value __attribute__((selectany)) = 11; int main(void) { return value == 11 ? 0 : 1; }\n";
     static const char* const sources[] = { "first.c", "second.c", "main.c", "one.c" };
     const char* const texts[] = { first, second, main_unit, one };
@@ -167,7 +201,7 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
                               kernel == 2 ? "--scalar" : NULL, NULL };
         const bool built = check_units_test_run(own, arguments, "/dev/null", errors, false) == 0;
         snprintf(path, sizeof(path), "%s/first.o", own);
-        check_units_test_expect(tally, built && check_units_test_selectany_object(path), "selectany objects have Clang's weak COMDAT signatures and relocation members", arguments[0]);
+        check_units_test_expect(tally, built && check_units_test_selectany_object(path, kernel == 0), "selectany objects have Clang's weak COMDAT signatures and relocation members", arguments[0]);
         char* link[] = { (char*)clang, "first.o", "second.o", "main.o", "-o", "objects", NULL };
         const bool linked = built && check_units_test_run(own, link, "/dev/null", errors, false) == 0;
         char* run[] = { "./objects", NULL };

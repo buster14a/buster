@@ -5960,6 +5960,9 @@ arguments against the function. The checker now gives these as clang does.
   so references belonging only to discarded groups disappear. Ordinary strong
   definitions still take precedence over weak definitions. `-c` objects and
   direct links share this producer; no additional object-writer format is used.
+  An accepted `alias("name"), selectany` declaration has weak binding at its
+  base's section, value and size. It creates no group of its own, including when
+  its base belongs to a selectany group.
 
   The rest stay refused by name: `no_caller_saved_registers` (a calling convention), and the attributes
   whose handlers clang has its own (`pass_object_size`, `ms_struct`,

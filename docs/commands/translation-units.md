@@ -128,7 +128,8 @@ too.
 `test-check-units` also covers `selectany` through
 `c_check_selectany_driver_test.c`: Clang's weak COMDAT signatures and grouped
 relocations, zero-fill/const/TLS data, equal explicit section names in different
-groups, stronger ordinary definitions, and a relocation to an undefined symbol
+groups, selectany aliases of ordinary and grouped definitions, stronger ordinary
+definitions, and a relocation to an undefined symbol
 that must disappear with its discarded group. Direct linking uses the same
 first-group choice through one lane, the scalar twin, multiple lanes and
 poisoned arenas. Single-unit runtime binding, debug output and Tier 1 are covered
