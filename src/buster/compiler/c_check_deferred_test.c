@@ -1247,7 +1247,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
                                                        outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size_lanes < lane_counts[l] ? size_lanes : lane_counts[l]));
-                const bool postmerge = strcmp(name, "postmerge-independent-expressions") == 0 || strcmp(name, "postmerge-builtin-expressions") == 0 || strcmp(name, "postmerge-leaf-boundaries") == 0;
+                const bool postmerge = strncmp(name, "postmerge-", 10) == 0 && strcmp(name, "postmerge-ordered-expressions") != 0;
                 const bool expressions = !postmerge || outcome.deferred_active <= 1 ||
                                          (outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&

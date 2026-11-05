@@ -533,7 +533,7 @@ static __attribute__((unused)) bool check_clock_read_walk(const char* text, doub
         valid = seen[i] == 1;
         sum += i < BUSTER_CHECK_CLOCK_WALK_PARTS ? parts[i] : 0;
     }
-    return valid && (work || sum <= walk + 0.001 * BUSTER_CHECK_CLOCK_WALK_PARTS);
+    return valid && walk >= 0 && (work || sum <= walk + 0.001 * BUSTER_CHECK_CLOCK_WALK_PARTS);
 }
 
 // Prints measure-compile's rows of the expressions' walk's parts under its `check-input.expressions` row: `median`,
