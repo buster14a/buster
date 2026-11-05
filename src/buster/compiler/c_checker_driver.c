@@ -3691,11 +3691,13 @@ static void check_driver_deferred_give_back(void* context)
 // (--time-stages), each stage's time. With `release`, it releases the parser's, the preprocessor's and the type table's
 // memory before it returns. With `deferred` (--deferred-bodies, one source file's), the unit's reading reads its bodies
 // apart on the command's lanes, with that state, which the caller keeps until the unit is done (check_deferred_release).
+// If `fatal` is nonnull, retain the publication's fatal state before releasing the preprocessor: a multi-unit caller
+// uses that state to publish the canonical prefix, independently of which lane finishes first.
 // Returns the command's exit status: 0 for a unit without errors whose outputs were written.
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
-                             CheckDeferred* deferred)
+                             CheckDeferred* deferred, bool* fatal)
 {
     int result = 1;
     Arena type_arena = { 0 };
@@ -4250,6 +4252,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
     result = pp->errors != 0 ? 1 : result;
+    if (fatal != NULL)
+    {
+        *fatal = pp->fatal;
+    }
     if (result == 0 && options->dependencies.enabled)
     {
         result = pp_dependencies(pp, path, output, dependency_arena, dependency, errors) ? 0 : 1;
@@ -4301,7 +4307,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     DependencyOutput dependency = { 0 };
     int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
-                                  run->command->deferred_bodies ? &deferred : NULL);
+                                  run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
