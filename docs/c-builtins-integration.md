@@ -1753,9 +1753,19 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
     offset and the handler go into temporaries, the expression's pending
     values are discarded, and the TAIL_CALL then has nothing under its
     operands (`check_lower_eh_unwind`). The rest of the expression is dead.
-    Dead constants of the discarded values' classes stand in for them, as for
-    a terminal helper's call (`check_lower_terminate`). A unit that calls
-    `__builtin_eh_return` tracks its typed stacks for this
+    Dead stand-ins of the discarded values' classes take their places, as for
+    a terminal helper's call (`check_lower_terminate`), both by
+    `check_lower_dead_value`:
+    - a vector's is a zero constant of its bytes;
+    - a mask's is an integer's zero converted to its bytes;
+    - any other's is a constant of its class.
+
+    The tracked stack keeps each vector's and mask's bytes
+    (`check_lower_track_bytes`): an X86 row's result's, a constant's, a local
+    object's, or the entry's own. Before #1436's review this was missing, and a
+    terminal helper's call under a pending vector
+    (`v * (__builtin_trap(), w)`) broke Tier 0's rule on vector constants.
+    A unit that calls `__builtin_eh_return` tracks its typed stacks for this
     (`CheckLowerShared.terminal`). The pending values are evaluated before
     the offset and the handler, as clang evaluates them.
 - **Its consumers:**
@@ -1767,13 +1777,25 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
     `__builtin_unwind_init`'s frame.
 - **Tests.** `test-checker-driver`'s eh_return program writes rax's and
   rdx's slots, then unwinds at offsets 0, 16 and 32 into a handler that
-  records the registers and rsp. It runs four functions: one with two
-  unwinding sites, a variadic one that reads its variadic argument first,
-  one that unwinds within expressions after a call, and one that makes a
-  musttail call where it doesn't unwind. For the last, the runner also
-  records the callee's result, the callee-saved registers and rsp. It is
-  built on both paths at Tier 0 and with `--tier1`, all with `--verify`, and
-  prints what clang `-O0`'s build prints.
+  records the registers and rsp. It runs six functions:
+  - one with two unwinding sites;
+  - a variadic one that reads its variadic argument first;
+  - one that unwinds within expressions after a call;
+  - one that unwinds within a `?:`, an `&&`, a statement expression and a
+    comma, with a `double`, a `long double`, a struct's member and a vector
+    pending;
+  - one that makes a musttail call where it doesn't unwind;
+  - one whose musttail call copies a 32-byte struct to the stack's incoming
+    area.
+
+  For the musttail calls the runner also records the callee's result, the
+  callee-saved registers and rsp. A vector function holds a value under
+  `__builtin_trap`. The program is built on both paths at Tier 0 and with
+  `--tier1`, all with `--verify`, and prints what clang `-O0`'s build prints.
+- **A clang bug.** Clang can't be the oracle for a musttail call with a third
+  integer argument in such a function. LLVM's teardown of a `CSR_64EHRet`
+  frame pops the saved rdx over the argument already loaded into rdx, so its
+  callee gets the slot's value. This compiler passes the argument.
 
 `__builtin___CFStringMakeConstantString(s)` and
 `__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are

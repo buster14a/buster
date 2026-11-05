@@ -587,6 +587,9 @@ struct CheckLowerWriter
     uint32_t* label_heads;
     uint32_t* stack_parents;
     uint8_t* stack_classes;
+    // A tracked vector's or mask's bytes (check_lower_track_bytes), whose dead stand-ins need them
+    // (check_lower_dead_value); 0 for any other class.
+    uint8_t* stack_bytes;
     // Each object's local in the body being lowered, read through check_lower_local_of: where `locals` has the object's
     // bit, its entry, and for every other object none, since nothing writes its entry (#877). Without `locals` (a test's
     // writer) every entry is read.
@@ -1805,6 +1808,23 @@ static uint64_t check_lower_stride(CheckLowerWriter* writer, TypeId pointer)
 }
 
 // Persistent stack heads let a forward branch retain its complete typed stack without copying it at every
+// The bytes of a vector or mask value an entry pushes, as Tier 0's validator gives them their widths: an X86 row's
+// result's, a vector constant's, a local object's, a duplicate's (`top` its value), and the other kinds' own (a LOAD's,
+// a store's, a mask's CONVERT and logic carry their bytes in their value). 0 for any other class.
+static uint8_t check_lower_track_bytes(const CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value, uint32_t top)
+{
+    uint64_t bytes = 0;
+    if (class == BUSTER_TYPED_CLASS_VECTOR || class == BUSTER_TYPED_CLASS_MASK)
+    {
+        bytes = kind == BUSTER_TYPED_X86   ? (value < writer->operation_count ? writer->operations[value].result_bytes : 0) :
+                kind == BUSTER_TYPED_CONST ? (value < writer->vector_constant_count ? writer->vector_constant_bytes[value] : 0) :
+                kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ? (value < writer->local_count && writer->local_sizes != NULL ? writer->local_sizes[value] : 0) :
+                kind == BUSTER_TYPED_DUP   ? (top != 0 ? writer->stack_bytes[top] : 0) :
+                                             value;
+    }
+    return bytes <= UINT8_MAX ? (uint8_t)bytes : 0;
+}
+
 // label. This is bookkeeping for spilling live outer operands around statement regions; Tier0 still validates
 // the finished stream independently, including both sides of every join.
 static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
@@ -1880,6 +1900,7 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     if (push && writer->stack_count + 1 < writer->capacity)
     {
         const uint32_t entry = ++writer->stack_count;
+        writer->stack_bytes[entry] = check_lower_track_bytes(writer, kind, class, value, writer->stack_head);
         writer->stack_parents[entry] = writer->stack_head;
         writer->stack_classes[entry] = class;
         writer->stack_head = entry;
@@ -6639,6 +6660,31 @@ static void check_lower_math(CheckLowerWriter* writer, uint32_t node, const Chec
     }
 }
 
+static uint32_t check_lower_vector_constant(CheckLowerWriter* writer, const uint64_t words[8], uint32_t bytes);
+
+// A dead stand-in for tracked value `entry` (check_lower_terminate's and check_lower_eh_unwind's), as tasks: a constant of
+// its class, a vector's a zero constant of its bytes, and a mask's an integer's zero converted to its bytes, so that Tier
+// 0's validator finds the value's own width where the expression's dead rest takes it.
+static void check_lower_dead_value(CheckLowerWriter* writer, uint32_t entry)
+{
+    const uint8_t class = writer->stack_classes[entry];
+    const uint8_t bytes = writer->stack_bytes[entry];
+    if (class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        const uint64_t zero[8] = { 0 };
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, zero, bytes));
+    }
+    else if (class == BUSTER_TYPED_CLASS_MASK)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, bytes);
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, class, 0);
+    }
+}
+
 // __builtin_eh_return's unwinding within an expression (#148), its offset and its handler in their locals: the
 // expression's pending values discarded, so that its TAIL_CALL has nothing under its operands, as at statement level;
 // then, as check_lower_terminate's, dead constants of their classes, from which the rest of the expression, which no path
@@ -6655,7 +6701,7 @@ static __attribute__((noinline)) void check_lower_eh_unwind(CheckLowerWriter* wr
     check_lower_emit(writer, BUSTER_TYPED_TAIL_CALL, BUSTER_TYPED_CLASS_VOID, call);
     for (uint32_t value = pending; value != 0; value = writer->stack_parents[value])
     {
-        check_lower_instruction(writer, BUSTER_TYPED_CONST, writer->stack_classes[value], 0);
+        check_lower_dead_value(writer, value);
     }
 }
 
@@ -6664,7 +6710,8 @@ static inline __attribute__((always_inline)) void check_lower_terminate(CheckLow
 {
     // Tier0 has ordinary calls and jumps. A terminal native helper traps; this self edge also prevents its
     // typed CFG from reaching the continuation. The validator checks unreachable expressions from an empty
-    // stack, so recreate only their pending classes, with dead constants that no runtime path can execute.
+    // stack, so recreate only their pending classes, with dead constants that no runtime path can execute, a vector's
+    // and a mask's of their bytes (check_lower_dead_value).
     const uint32_t pending = writer->stack_head;
     for (uint32_t value = pending; value != 0; value = writer->stack_parents[value])
     {
@@ -6675,7 +6722,7 @@ static inline __attribute__((always_inline)) void check_lower_terminate(CheckLow
     check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, label);
     for (uint32_t value = pending; value != 0; value = writer->stack_parents[value])
     {
-        check_lower_instruction(writer, BUSTER_TYPED_CONST, writer->stack_classes[value], 0);
+        check_lower_dead_value(writer, value);
     }
 }
 
@@ -13736,6 +13783,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(label_heads, uint32_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(stack_parents, uint32_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(stack_classes, uint8_t, track ? capacity : 1);
+    BUSTER_CHECK_LOWER_COLUMN(stack_bytes, uint8_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(extent_locals, uint32_t, (uint64_t)input->vla_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(indirect, uint8_t, local_capacity);
     BUSTER_CHECK_LOWER_COLUMN(local_classes, uint8_t, local_capacity);
