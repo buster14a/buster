@@ -39,8 +39,42 @@ do not build in another session's tree. Check out the harness at the exact pin a
 both source SHAs. Stage the official Clang 23.1.4/build tools using
 `tools/ci/setup-benchpress.sh` and extract and verify the frozen corpus with
 `tools/ci/fetch-corpus.sh` into the task's own `corpus` directory. Take the host lock for each
-setup operation, and apply the tool paths and environment those scripts produce. No system
-package, runner configuration or access-policy change is needed.
+setup operation. No system package, runner configuration or access-policy change is needed.
+
+Outside Actions, create the two files that `setup-benchpress.sh` writes and apply their contents
+in the same shell that will run the campaign. For example, in a dedicated Bash session, with
+`source` checked out at a revision containing that setup script:
+
+```bash
+set -euo pipefail
+campaign_root="$HOME/buster-fast-bench/1175-session"
+mkdir -p "$campaign_root"
+setup_dir=$(mktemp -d "$campaign_root/setup-env.XXXXXXXX")
+export GITHUB_PATH="$setup_dir/path" GITHUB_ENV="$setup_dir/env"
+: > "$GITHUB_PATH"
+: > "$GITHUB_ENV"
+EXCLUSIVE_OWNER=layout-1175 \
+EXCLUSIVE_TITLE='Stage checker layout acceptance tools #1175' \
+EXCLUSIVE_LINK=https://github.com/buster14a/buster/pull/1296 \
+    "$HOME/buster-fast-bench/exclusive.sh" \
+    bash "$campaign_root/source/tools/ci/setup-benchpress.sh"
+while IFS= read -r tool_dir; do
+    if [[ -n $tool_dir ]]; then export PATH="$tool_dir:$PATH"; fi
+done < "$GITHUB_PATH"
+while IFS='=' read -r name value; do
+    case $name in
+        BUSTER_CLANG_RESOURCE_DIR|LD_LIBRARY_PATH) export "$name=$value" ;;
+        *) printf 'Unexpected setup variable: %s\n' "$name" >&2; exit 1 ;;
+    esac
+done < "$GITHUB_ENV"
+hash -r
+unset GITHUB_PATH GITHUB_ENV
+```
+
+The fresh files avoid reusing another run's entries. The setup script currently writes one path
+per line and the two named single-line environment assignments; do not evaluate the files as
+shell code. If setup fails, stop and fix it before continuing. Keep this shell's environment for
+the corpus setup and campaign commands below.
 
 With those inputs qualified and staged, run from the pinned harness checkout:
 
