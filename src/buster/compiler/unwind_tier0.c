@@ -371,10 +371,15 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const bool base = code != 0 && code->frame_base;
     // An open frame (Tier0Code.frame_open, Tier 1's) has no epilogue at the end: each of its returns is a tail's.
     const bool open = code != 0 && code->frame_open;
+    // An eh_return function's (Tier0Code.frame_eh_return, #148): rdx and rax pushed after the others, no transitions (its
+    // emission's rows describe their saves, emitted_from_tier0), which its epilogue steps over, and its tails
+    // __builtin_eh_return's, which pop them first and set rsp from rcx before the jump through r11.
+    const bool eh = code != 0 && code->frame_eh_return;
+    const uint32_t eh_pushes = eh ? 2 : 0;
     // The prologue's records, and the epilogue's: its teardown, from its release (a frame pointer's lea or mov, which is
     // no transition), and its ret.
     const uint32_t realignment = (alignment_log2 != 0 ? 1 : 0) + (base ? 1 : 0);
-    const uint32_t prologue = (pointer ? 2 + pushes + (code->frame_size != 0 ? 1 : 0) + realignment : pushes + (reserved ? 1 : 0));
+    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + (code->frame_size != 0 ? 1 : 0) + realignment : pushes + (reserved ? 1 : 0));
     const uint32_t teardown = pointer ? 1 + pushes + 1 : pushes + (reserved ? 1 : 0);
     const uint32_t epilogue = open ? 0 : teardown + 1;
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
@@ -382,7 +387,7 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
     // Without final offsets, each transition's position is its record boundary (the record after it's index), as
     // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
-    if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 ||
+    if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 || (eh && (!pointer || open)) ||
         (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
         (final_offsets == 0 && size != code->count))
     {
@@ -421,6 +426,11 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
             events[count++] = at;
             at += 1;
         }
+    }
+    if (records != 0 && error == UNWIND_OK && eh)
+    {
+        error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, X86_REGISTER_RDX) && unwind_tier0_stack(&records[at + 1], X86_FORM_PUSH_R64, X86_REGISTER_RAX) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        at += 2;
     }
     uint32_t amount = 0;
     if (records != 0 && error == UNWIND_OK && code->frame_size != 0)
@@ -489,20 +499,32 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     for (uint32_t tail = 0; error == UNWIND_OK && tail < tail_count; tail += 1)
     {
         const uint32_t jump = code->tail_records[tail];
-        error = jump >= next && jump - next >= teardown && jump < code->count - epilogue ? UNWIND_OK : UNWIND_ERROR_INVALID;
-        uint32_t record = error == UNWIND_OK ? jump - teardown : 0;
+        // An eh_return's teardown has rax's and rdx's pops after its release, and rsp's mov from rcx before its jump; and
+        // before the release, rcx the CFA plus the offset, lea rcx, [rbp + rcx + 16] (#1420's review).
+        const uint32_t torn = teardown + (eh ? eh_pushes + 1 : 0);
+        error = jump >= next && jump - next >= torn + (eh ? 1 : 0) && jump < code->count - epilogue ? UNWIND_OK : UNWIND_ERROR_INVALID;
+        uint32_t record = error == UNWIND_OK ? jump - torn : 0;
+        const X86Instruction* cfa = error == UNWIND_OK && eh ? &records[record - 1] : 0;
+        error = cfa == 0 || (cfa->form == X86_FORM_LEA_R64_M && cfa->reg == X86_REGISTER_RCX && cfa->rm == X86_REGISTER_RBP && cfa->index == X86_REGISTER_RCX &&
+                             cfa->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) && cfa->displacement == 16) ? error : UNWIND_ERROR_UNSUPPORTED;
         uint32_t ends[BUSTER_UNWIND_EVENTS];
         uint32_t ended = 0;
         if (error == UNWIND_OK && (pointer || reserved))
         {
             uint32_t amount = 0;
-            error = pointer ? (unwind_tier0_release(&records[record], pushes) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
+            error = pointer ? (unwind_tier0_release(&records[record], pushes + eh_pushes) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
                             : (unwind_tier0_adjustment(&records[record], false, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED);
             if (reserved)
             {
                 ends[ended++] = record;
             }
             record += 1;
+        }
+        if (error == UNWIND_OK && eh)
+        {
+            error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, X86_REGISTER_RAX) && unwind_tier0_stack(&records[record + 1], X86_FORM_POP_R64, X86_REGISTER_RDX)
+                        ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            record += 2;
         }
         for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); error == UNWIND_OK && r > 0; r -= 1)
         {
@@ -519,10 +541,15 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
             ends[ended++] = record;
             record += 1;
         }
-        // The jump: tier0_emit_tail's direct one, whose fixup is a call's, or through r11; or an early return's ret.
+        // An eh_return's rsp, from rcx.
+        const X86Instruction* setting = error == UNWIND_OK && eh ? &records[record] : 0;
+        error = setting == 0 || (setting->form == X86_FORM_MOV_RM64_R64 && setting->reg == X86_REGISTER_RCX && setting->rm == X86_REGISTER_RSP &&
+                                 setting->mode == BUSTER_X86_REGISTER_DIRECT) ? error : UNWIND_ERROR_UNSUPPORTED;
+        // The jump: tier0_emit_tail's direct one, whose fixup is a call's, or through r11 (an eh_return's alone); or an early
+        // return's ret.
         const X86Instruction* jumping = error == UNWIND_OK ? &records[jump] : 0;
-        error = jumping != 0 && (jumping->form == (X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP) || jumping->form == X86_FORM_RET ||
-                                 (jumping->form == X86_FORM_JMP_RM64 && jumping->mode == BUSTER_X86_REGISTER_DIRECT && jumping->rm == X86_REGISTER_R11)) ? UNWIND_OK :
+        const bool through = jumping != 0 && jumping->form == X86_FORM_JMP_RM64 && jumping->mode == BUSTER_X86_REGISTER_DIRECT && jumping->rm == X86_REGISTER_R11;
+        error = jumping != 0 && (through || (!eh && (jumping->form == (X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP) || jumping->form == X86_FORM_RET))) ? UNWIND_OK :
                 error == UNWIND_OK ? UNWIND_ERROR_UNSUPPORTED : error;
         ends[ended++] = jump;
         for (uint32_t event = 0; error == UNWIND_OK && event < ended; event += 1)

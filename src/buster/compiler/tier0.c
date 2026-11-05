@@ -514,6 +514,13 @@ struct Tier0Operation
 // through a hidden pointer goes where the function's own hidden pointer (parameter 0) points, which the call passes on.
 // Tier0Code.tail_records gives each one's jump.
 //
+// A function that calls __builtin_eh_return (#148, `eh_return`) unwinds to a handler through a tail call's row of its
+// own, call_tails[c] BUSTER_TIER0_TAIL_EH: an indirect one, whose callee is the handler, of one U64 argument in rcx, the
+// offset, in a function that isn't variadic and has no other tail calls (tier0_tail_call_valid). Its frame has a frame
+// pointer and saves every callee-saved register and then rdx and rax (LLVM's CSR_64EHRet, which libgcc's unwinder,
+// uw_install_context, writes through the CFI), and its TAIL_CALL tears the frame down with them all, rsp the CFA plus
+// the offset, and jumps to the handler (tier0_emit_tail). Its ordinary returns leave rax and rdx as the body left them.
+//
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
 // compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
 // requests to the form choice (Tier0Code.choice_records and the rest), for measuring the choice on real functions
@@ -564,6 +571,8 @@ struct Tier0Function
     // local in one (tier0_assign_homes) and no value of its stacks either (its integer depths are the caller-saved
     // registers' alone), and a realigned frame whose base is r15 is refused.
     bool returns_twice;
+    // Whether the function calls __builtin_eh_return (#148): its frame, and its TAIL_CALL of a BUSTER_TIER0_TAIL_EH row.
+    bool eh_return;
     const uint64_t* vector_constants;
     const uint8_t* vector_constant_bytes;
     uint32_t vector_constant_count;
@@ -601,6 +610,11 @@ struct Tier0Function
 #define BUSTER_TIER0_FRAME_POINTER_NONE 0
 #define BUSTER_TIER0_FRAME_POINTER_ALL 1
 #define BUSTER_TIER0_FRAME_POINTER_NON_LEAF 2
+// A call_tails value: a musttail call's row, or __builtin_eh_return's (Tier0Function.eh_return).
+#define BUSTER_TIER0_TAIL_CALL 1
+#define BUSTER_TIER0_TAIL_EH 2
+// The registers an eh_return function saves past the callee-saved ones, rdx's push then rax's (Tier0Frame.eh_return).
+#define BUSTER_TIER0_EH_PUSHES 2
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
 static bool tier0_is_object(const Tier0Function* function, uint64_t local)
@@ -715,6 +729,9 @@ struct Tier0Code
     uint8_t frame_alignment_log2;
     bool frame_base;
     bool frame_open;
+    // Whether the frame is an eh_return function's (Tier0Frame.eh_return): rdx and rax pushed after the callee-saved
+    // registers, and its tail calls' teardowns those of __builtin_eh_return (tier0_emit_tail).
+    bool frame_eh_return;
     Tier0Error error;
     uint32_t node;
 };
@@ -1364,13 +1381,20 @@ static __attribute__((unused)) uint32_t tier0_call_chain(const Tier0Function* fu
 // which it writes before it jumps.
 static bool tier0_tail_call_valid(const Tier0Function* function, uint32_t c)
 {
+    // __builtin_eh_return's row (Tier0Function.eh_return), in an eh_return function, whose tail calls are all its.
+    const bool eh = function->call_tails[c] == BUSTER_TIER0_TAIL_EH;
+    const uint32_t first = function->call_first[c];
+    const bool offset = function->call_argument_counts[c] == 1 && function->argument_classes[first] == BUSTER_TYPED_CLASS_U64 &&
+                        function->argument_locations[first].kind == BUSTER_ABI_LOCATION_REGISTERS && function->argument_locations[first].registers[0] == BUSTER_ABI_RCX &&
+                        (function->argument_sizes == 0 || function->argument_sizes[first] == 0);
     const AbiReturn result = function->calls[c].result;
     const AbiReturn own = function->result;
     const bool same = result.kind == own.kind && result.flags == own.flags && result.part_bytes == own.part_bytes &&
                       memcmp(result.registers, own.registers, sizeof(result.registers)) == 0;
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
     return same && object == 0 && !function->call_variadic[c] && function->incoming_variadic == 0 &&
-           function->calls[c].stack_bytes <= tier0_incoming_bytes(function);
+           function->calls[c].stack_bytes <= tier0_incoming_bytes(function) && eh == function->eh_return &&
+           (!eh || (function->call_targets[c] == 0 && offset && function->calls[c].stack_bytes == 0));
 }
 
 // Call `c`'s locations and its aggregates' metadata (argument_sizes and call_result_objects), so that no emitter reads or
@@ -4038,6 +4062,9 @@ struct Tier0Frame
     // Whether the function has masks (Tier0Function.masks), whose slots, 8 bytes per depth of the mask stack from
     // `mask_area`, `mask_slots` of them, hold the masks past its registers and those a call or a row saves (#179).
     bool masks;
+    // Whether the function calls __builtin_eh_return (#148, Tier0Function.eh_return): `pushes` counts rdx's and rax's,
+    // pushed after the callee-saved registers, which its ordinary teardown steps over and its eh_return's pops.
+    bool eh_return;
 };
 
 // A memory class's slot: 16 bytes for each integer depth, of which an x87 value takes 10 and a 128-bit integer 16.
@@ -4074,10 +4101,11 @@ static bool tier0_value_object(const Tier0Function* function, uint64_t local, ui
 }
 
 // Whether a frame that neither moves rsp nor is realigned keeps a frame pointer all the same (#177): where the options
-// ask for one (Tier0Function.frame_pointer), every frame's, or with the leaf rule one whose function `calls`.
+// ask for one (Tier0Function.frame_pointer), every frame's, or with the leaf rule one whose function `calls`; and an
+// eh_return function's (#148, Tier0Function.eh_return), from which its unwinding finds the CFA.
 static bool tier0_kept_pointer(const Tier0Function* function, bool calls)
 {
-    return function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
+    return function->eh_return || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
 }
 
 // The frame's registers, once selection knows whether the entries move rsp (`moves`) and whether the options keep a
@@ -4550,12 +4578,15 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     // __builtin_unwind_init's function saves them all (Tier0Function.unwind_init), rbp as the frame pointer where it is one,
     // and so does __builtin_setjmp's (Tier0Function.returns_twice), so that its return restores its caller's registers
     // whatever a longjmp left in them.
-    for (uint32_t c = 0; (function->unwind_init || function->returns_twice) && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    // So does __builtin_eh_return's (Tier0Function.eh_return), which pushes rdx and rax after them, counted with them.
+    const bool all = function->unwind_init || function->returns_twice || function->eh_return;
+    for (uint32_t c = 0; all && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         frame->saved |= tier0_callee_saved[c] != X86_REGISTER_RBP || !frame->pointer ? 1u << c : 0;
     }
     // The frame pointer's push, first, counts with the others.
-    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
+    frame->eh_return = function->eh_return;
+    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u) + (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0u);
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
@@ -5665,12 +5696,14 @@ static uint32_t tier0_tail_clobbers(const Tier0Function* function, uint32_t i)
 
 // The frame released (with a frame pointer, rsp back from rbp, past what the body allocated, or the reservation added
 // back) and the saved registers popped, rbp last with a frame pointer: the epilogue's before its ret, and a tail call's
-// before its jump (tier0_emit_tail).
-static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
+// before its jump (tier0_emit_tail). An eh_return function's (Tier0Frame.eh_return) steps over rax's and rdx's slots,
+// below the others, or with `unwinding` (its __builtin_eh_return's) pops them first.
+static void tier0_emit_teardown(const Tier0Frame* frame, bool unwinding, Tier0Writer* writer)
 {
+    const uint32_t stepped = frame->eh_return && !unwinding ? BUSTER_TIER0_EH_PUSHES : 0;
     if (frame->pointer)
     {
-        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1));
+        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1 - stepped));
         tier0_put(writer, pushed != 0 ? tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, -pushed, 0)
                                       : tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
@@ -5678,6 +5711,11 @@ static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
     {
         const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
+    }
+    if (frame->eh_return && unwinding)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RAX, 0, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RDX, 0, 0, 0));
     }
     for (uint32_t c = BUSTER_TIER0_CALLEE_SAVED; c > 0; c -= 1)
     {
@@ -5692,10 +5730,11 @@ static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
     }
 }
 
-// How many records tier0_emit_teardown writes: the release (an add, or with a frame pointer the lea or mov) and the pops.
+// How many records tier0_emit_teardown writes (without `unwinding`): the release (an add, or with a frame pointer the lea
+// or mov) and the pops.
 static uint32_t tier0_count_teardown(const Tier0Frame* frame)
 {
-    return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes;
+    return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes - (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0);
 }
 
 // The records a function's tail calls end with besides their stack arguments' copy (tier0_emit_tail's): the hidden
@@ -5706,19 +5745,14 @@ static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tie
 {
     const bool hidden = function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0 &&
                         !(homes[0].is_register && homes[0].reg == X86_REGISTER_RDI);
-    return (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
+    // __builtin_eh_return's (Tier0Frame.eh_return): the CFA's lea, the teardown with rax's and rdx's pops, rsp's mov and
+    // the jump (tier0_emit_tail).
+    return frame->eh_return ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 : (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
 }
 
-// A tail call's last records, once its arguments are where its callee's parameters arrive (tier0_emit_call's): rdi set to
-// the function's own hidden pointer (parameter 0's home) for a result through one, which the callee then writes and
-// returns; the call's stack arguments copied from the outgoing area, where the call put them, to the function's own
-// incoming ones, where its callee's arrive (through rax and xmm15, no argument's register: neither the call nor the
-// function is variadic, so al passes nothing), after every argument has been read from wherever it was, the incoming
-// slots among them; the frame released and the saved registers popped (tier0_emit_teardown), which no argument's
-// register is; and the jump, through r11 for an indirect one, to the callee, which returns to the function's caller.
-// Out of line: tail calls are rare.
-static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call,
-                                                     Tier0Writer* writer)
+// A musttail call's last records (tier0_emit_tail's): the hidden pointer, the stack arguments' copy, the teardown and the
+// jump.
+static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
 {
     if (function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0)
     {
@@ -5741,7 +5775,7 @@ static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* funct
         const int32_t incoming = frame->pointer ? 16 : frame->incoming;
         tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15);
     }
-    tier0_emit_teardown(frame, writer);
+    tier0_emit_teardown(frame, false, writer);
     if (function->call_targets[call] == 0)
     {
         tier0_put(writer, tier0_instruction(X86_FORM_JMP_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
@@ -5760,6 +5794,35 @@ static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* funct
         }
         writer->reference_count += 1;
         tier0_put(writer, tier0_instruction(X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    }
+}
+
+// A tail call's last records, once its arguments are where its callee's parameters arrive (tier0_emit_call's): rdi set to
+// the function's own hidden pointer (parameter 0's home) for a result through one, which the callee then writes and
+// returns; the call's stack arguments copied from the outgoing area, where the call put them, to the function's own
+// incoming ones, where its callee's arrive (through rax and xmm15, no argument's register: neither the call nor the
+// function is variadic, so al passes nothing), after every argument has been read from wherever it was, the incoming
+// slots among them; the frame released and the saved registers popped (tier0_emit_teardown), which no argument's
+// register is; and the jump, through r11 for an indirect one, to the callee, which returns to the function's caller.
+// __builtin_eh_return's (Tier0Function.eh_return, its offset in rcx and its handler in r11), as LLVM's EH_RETURN: rcx the
+// CFA (rbp + 16) plus the offset, the frame torn down with rax and rdx (tier0_emit_teardown's `unwinding`), rsp rcx and
+// the jump to the handler, which so runs as LLVM's ret from rcx - 8, where it stores the handler, makes it run. Out of
+// line: tail calls are rare.
+static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call,
+                                                     Tier0Writer* writer)
+{
+    if (frame->eh_return)
+    {
+        X86Instruction cfa = tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RCX, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE_INDEX(0), 16, 0);
+        cfa.index = X86_REGISTER_RCX;
+        tier0_put(writer, cfa);
+        tier0_emit_teardown(frame, true, writer);
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RCX, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_JMP_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else
+    {
+        tier0_emit_tail_jump(function, frame, homes, call, writer);
     }
 }
 
@@ -8674,6 +8737,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, tier0_callee_saved[c], 0, 0, 0));
         }
     }
+    // An eh_return function's rdx and rax, which its __builtin_eh_return pops (Tier0Frame.eh_return).
+    if (frame->eh_return)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RDX, 0, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RAX, 0, 0, 0));
+    }
     if (frame->size != 0)
     {
         const uint32_t form = tier0_immediate_form(X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, frame->size);
@@ -8876,7 +8945,7 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_put(writer, tier0_memory_slot(X86_FORM_FLD_M80, frame, 0, 0));
     }
-    tier0_emit_teardown(frame, writer);
+    tier0_emit_teardown(frame, false, writer);
     tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
@@ -10061,6 +10130,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         code->frame_pointer = frame.pointer;
         code->frame_alignment_log2 = frame.alignment_log2;
         code->frame_base = frame.based;
+        code->frame_eh_return = frame.eh_return;
     }
     return error;
 }
