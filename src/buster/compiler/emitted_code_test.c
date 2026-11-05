@@ -331,7 +331,7 @@ static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* 
                                                                                      memcmp(twin.targets, code.targets, code.branch_count * sizeof(uint32_t)) == 0))),
                         "Tier 0's paths compile the same code", id);
     const bool r11 = code.error == TIER0_OK && !code.frame_pointer && (code.frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1)) != 0 &&
-                     tier0_probes_reservation(code.frame_probe, code.frame_size, code.frame_alignment_log2);
+                     tier0_probes_reservation(code.frame_probe, code.frame_size, code.frame_alignment_log2, false);
     EmittedTestLayout layout;
     bool valid = emitted_test_expect(test, code.error == TIER0_OK, "Tier 0 compiles the generated function", id) &&
                  emitted_test_expect(test, emitted_test_layout(code.records, code.count, code.branches, code.targets, code.branch_count, code.reference_count, arena, &layout),

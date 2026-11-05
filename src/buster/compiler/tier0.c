@@ -8816,20 +8816,23 @@ static X86Instruction tier0_realignment(uint32_t alignment_log2)
 }
 
 // Whether a frame's prologue probes its reservation of `size` bytes: under stack-clash protection (`probe`), one of a page
-// or more, or a realigned frame's whatever its size, so that its alignment's gap starts from a touched address (as Tier
-// 1's frame does). The unwind tables' reader (unwind_tier0_frame_tails) asks it of the frame Tier0Code publishes.
-static bool tier0_probes_reservation(bool probe, uint32_t size, uint32_t alignment_log2)
+// or more; a realigned frame's whatever its size, so that its alignment's gap starts from a touched address; and a frame
+// with a frame pointer's (`pointer`) whatever its size, since every frame whose body moves rsp has one: an allocation
+// after an unprobed reservation under a page could otherwise take rsp past a guard page before its first touch (LLVM's
+// constraint: a dynamic allocation starts from a probed rsp). Tier 1's frame does the same. The unwind tables' reader
+// (unwind_tier0_frame_tails) asks it of the frame Tier0Code publishes.
+static bool tier0_probes_reservation(bool probe, uint32_t size, uint32_t alignment_log2, bool pointer)
 {
-    return probe && size != 0 && (size >= BUSTER_TIER0_PAGE_BYTES || alignment_log2 != 0);
+    return probe && size != 0 && (size >= BUSTER_TIER0_PAGE_BYTES || alignment_log2 != 0 || pointer);
 }
 
 // The records of the prologue's reservation of `size` bytes (tier0_emit_prologue's): a sub, or probed, the pages' loop
 // and the remainder's subtraction and touch.
-static uint32_t tier0_reservation_records(bool probe, uint32_t size, uint32_t alignment_log2)
+static uint32_t tier0_reservation_records(bool probe, uint32_t size, uint32_t alignment_log2, bool pointer)
 {
     const uint32_t pages = size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
     const uint32_t probed = (pages != 0 ? BUSTER_TIER0_PROBE_LOOP_RECORDS : 0) + (size != pages ? BUSTER_TIER0_PROBE_REMAINDER_RECORDS : 0);
-    return tier0_probes_reservation(probe, size, alignment_log2) ? probed : size != 0 ? 1 : 0;
+    return tier0_probes_reservation(probe, size, alignment_log2, pointer) ? probed : size != 0 ? 1 : 0;
 }
 
 // The records of a realigned frame's rounding (tier0_emit_realignment's, but the base's mov): its and, and probed, a
@@ -8843,7 +8846,7 @@ static uint32_t tier0_realignment_records(bool probe, uint32_t alignment_log2)
 // The prologue's branches: a probed reservation's loop's, and a probed realignment's past a page.
 static uint32_t tier0_prologue_branches(const Tier0Frame* frame)
 {
-    const bool probed = tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2);
+    const bool probed = tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2, frame->pointer);
     return (probed && frame->size >= BUSTER_TIER0_PAGE_BYTES ? 1 : 0) + (frame->probe && frame->alignment_log2 > BUSTER_TIER0_PROBE_ALIGN_TOUCH_LOG2 ? 2 : 0);
 }
 
@@ -8942,7 +8945,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RAX, 0, 0, 0));
     }
     // The reservation, after every push: probed (#177), or a sub.
-    if (tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2))
+    if (tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2, frame->pointer))
     {
         tier0_emit_probed_reservation(frame->size, writer);
     }
@@ -9046,7 +9049,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 // epilogue's are tier0_count_epilogue's.
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
-    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + tier0_reservation_records(frame->probe, frame->size, frame->alignment_log2) +
+    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + tier0_reservation_records(frame->probe, frame->size, frame->alignment_log2, frame->pointer) +
                      tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     const bool objects = frame->object_parameters;

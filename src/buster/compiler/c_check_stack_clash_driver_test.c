@@ -275,13 +275,151 @@ static const char check_test_stack_clash_probes_source[] =
     "    return sum;\n"
     "}\n"
     "\n"
+    "// A call after an allocation, its argument an aggregate by value on the stack: a dynamic frame's call area, which\n"
+    "// Tier 1 takes from rsp at the call and touches.\n"
+    "struct big\n"
+    "{\n"
+    "    unsigned char bytes[256];\n"
+    "};\n"
+    "\n"
+    "__attribute__((noinline)) static unsigned long take_big(struct big b)\n"
+    "{\n"
+    "    return b.bytes[0] + b.bytes[128] + b.bytes[255];\n"
+    "}\n"
+    "\n"
+    "static unsigned long call_area(int n)\n"
+    "{\n"
+    "    struct big b;\n"
+    "    memset(&b, 7, sizeof(b));\n"
+    "    b.bytes[255] = (unsigned char)n;\n"
+    "    volatile char* p = alloca((size_t)n);\n"
+    "    p[0] = 1;\n"
+    "    return take_big(b) + (unsigned long)p[0];\n"
+    "}\n"
+    "\n"
     "int main(void)\n"
     "{\n"
-    "    printf(\"%lu %lu %lu %d %lu %d %lu\\n\", table_sum(5), array_sum(9), allocation_chain(12), edges(0), deep(20), aligned(77), many(3000));\n"
+    "    printf(\"%lu %lu %lu %d %lu %d %lu %lu\\n\", table_sum(5), array_sum(9), allocation_chain(12), edges(0), deep(20), aligned(77), many(3000), call_area(77));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_stack_clash_tail_source[] =
+    "#define _GNU_SOURCE\n"
+    "#include <alloca.h>\n"
+    "#include <signal.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "#include <stdlib.h>\n"
+    "#include <sys/mman.h>\n"
+    "#include <ucontext.h>\n"
+    "#include <unistd.h>\n"
+    "\n"
+    "#define PAGE 4096\n"
+    "\n"
+    "static ucontext_t main_context;\n"
+    "static ucontext_t run_context;\n"
+    "static char* guard;\n"
+    "\n"
+    "// A fixed frame under a page, its local not touched before the allocation, then a dynamic allocation: of a register's\n"
+    "// size or a constant's, under a page or past one.\n"
+    "__attribute__((noinline)) void tail_register(int bytes)\n"
+    "{\n"
+    "    volatile char local[3500];\n"
+    "    volatile char* p = alloca(bytes);\n"
+    "    p[0] = 1;\n"
+    "    local[3499] = p[0];\n"
+    "}\n"
+    "\n"
+    "__attribute__((noinline)) void tail_constant(void)\n"
+    "{\n"
+    "    volatile char local[3500];\n"
+    "    volatile char* p = alloca(3500);\n"
+    "    p[0] = 1;\n"
+    "    local[3499] = p[0];\n"
+    "}\n"
+    "\n"
+    "__attribute__((noinline)) void tail_constant_large(void)\n"
+    "{\n"
+    "    volatile char local[3500];\n"
+    "    volatile char* p = alloca(9000);\n"
+    "    p[0] = 1;\n"
+    "    local[3499] = p[0];\n"
+    "}\n"
+    "\n"
+    "__attribute__((noinline)) void tail_array(int bytes)\n"
+    "{\n"
+    "    volatile char local[3500];\n"
+    "    volatile char p[bytes];\n"
+    "    p[0] = 1;\n"
+    "    local[3499] = p[0];\n"
+    "}\n"
+    "\n"
+    "static void handler(int signal, siginfo_t* info, void* context)\n"
+    "{\n"
+    "    (void)signal;\n"
+    "    (void)context;\n"
+    "    const char* address = info->si_addr;\n"
+    "    if (address >= guard && address < guard + PAGE)\n"
+    "    {\n"
+    "        write(1, \"probed\\n\", 7);\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        write(1, \"fault\\n\", 6);\n"
+    "    }\n"
+    "    _exit(0);\n"
+    "}\n"
+    "\n"
+    "int main(int argc, char** argv)\n"
+    "{\n"
+    "    const int which = argc > 1 ? argv[1][0] - '0' : 0;\n"
+    "    char* mapping = mmap(NULL, 26 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
+    "    char* region = (char*)(((uintptr_t)mapping + 16 * PAGE - 1) & ~(uintptr_t)(16 * PAGE - 1));\n"
+    "    guard = region + 8 * PAGE;\n"
+    "    mprotect(guard, PAGE, PROT_NONE);\n"
+    "    stack_t alternate = { .ss_sp = malloc(65536), .ss_size = 65536, .ss_flags = 0 };\n"
+    "    sigaltstack(&alternate, NULL);\n"
+    "    struct sigaction action = { 0 };\n"
+    "    action.sa_sigaction = handler;\n"
+    "    action.sa_flags = SA_SIGINFO | SA_ONSTACK;\n"
+    "    sigaction(SIGSEGV, &action, NULL);\n"
+    "    getcontext(&run_context);\n"
+    "    // The function's own stack: 192 bytes above the guard, so that its fixed frame ends inside the guard page and its\n"
+    "    // allocation below it.\n"
+    "    run_context.uc_stack.ss_sp = guard + PAGE;\n"
+    "    run_context.uc_stack.ss_size = 192;\n"
+    "    run_context.uc_link = &main_context;\n"
+    "    if (which == 0)\n"
+    "    {\n"
+    "        makecontext(&run_context, (void (*)(void))tail_register, 1, 3500);\n"
+    "    }\n"
+    "    else if (which == 1)\n"
+    "    {\n"
+    "        makecontext(&run_context, (void (*)(void))tail_register, 1, 9000);\n"
+    "    }\n"
+    "    else if (which == 2)\n"
+    "    {\n"
+    "        makecontext(&run_context, tail_constant, 0);\n"
+    "    }\n"
+    "    else if (which == 3)\n"
+    "    {\n"
+    "        makecontext(&run_context, tail_constant_large, 0);\n"
+    "    }\n"
+    "    else if (which == 4)\n"
+    "    {\n"
+    "        makecontext(&run_context, (void (*)(void))tail_array, 1, 3500);\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        makecontext(&run_context, (void (*)(void))tail_array, 1, 9000);\n"
+    "    }\n"
+    "    swapcontext(&main_context, &run_context);\n"
+    "    puts(\"skipped\");\n"
     "    return 0;\n"
     "}\n";
 
 #define BUSTER_CHECK_TEST_STACK_CLASH_CASES 5
+#define BUSTER_CHECK_TEST_STACK_CLASH_TAIL_CASES 6
 
 // A build of `source` into `object` by Tier 0 or by --tier1 (`tier1`, with or without rematerialization), by each path,
 // with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's but `paged`.
@@ -314,7 +452,8 @@ static bool check_test_stack_clash_build(const char* executable, const char* sou
     arguments[count] = NULL;
     char* text = NULL;
     const int status = check_test_driver_spawn(arguments, &text);
-    static const char* const names[] = { "frame", "allocation", "array", "aligned", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many" };
+    static const char* const names[] = { "frame", "allocation", "array", "aligned", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
+                                         "call_area", "tail_register", "tail_constant", "tail_constant_large", "tail_array" };
     const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
     if ((status != 0 || !taken) && text != NULL)
     {
@@ -367,12 +506,13 @@ static bool check_test_stack_clash_same(const char* left, const char* right)
     return same;
 }
 
-// The guard fixture's verdicts, case by case, of the program at `program` into `verdicts` (each case's line).
-static bool check_test_stack_clash_verdicts(const char* program, char* verdicts, size_t capacity)
+// A guard program's verdicts, case by case (`cases` of them), of the program at `program` into `verdicts` (each case's
+// line).
+static bool check_test_stack_clash_cases(const char* program, uint32_t cases, char* verdicts, size_t capacity)
 {
     bool ran = true;
     verdicts[0] = 0;
-    for (uint32_t c = 0; ran && c < BUSTER_CHECK_TEST_STACK_CLASH_CASES; c += 1)
+    for (uint32_t c = 0; ran && c < cases; c += 1)
     {
         char command[640];
         char line[64] = { 0 };
@@ -382,6 +522,69 @@ static bool check_test_stack_clash_verdicts(const char* program, char* verdicts,
         snprintf(verdicts + used, capacity - used, "%s", line);
     }
     return ran;
+}
+
+// The guard fixture's verdicts (check_test_stack_clash_cases' of its cases).
+static bool check_test_stack_clash_verdicts(const char* program, char* verdicts, size_t capacity)
+{
+    return check_test_stack_clash_cases(program, BUSTER_CHECK_TEST_STACK_CLASH_CASES, verdicts, capacity);
+}
+
+// The tail fixture (#1434's review): a function entered 192 bytes above the guard page, whose fixed frame under a page
+// ends inside the guard, its local not touched before a dynamic allocation that takes rsp below the guard (of a
+// register's size or a constant's, under a page or past one, an alloca's or a variable-length array's). Without the
+// prologue's touch of a frame pointer's reservation, the allocation's own touches all fall below the guard, and the
+// function steps over it. Every build with the option faults at the guard, as clang -O0's: by Tier 0 and by --tier1
+// (with and without rematerialization), by each path, with a frame pointer and without, under --verify. Without the
+// option clang's -O0 frame keeps slots at its bottom, inside the guard, so only the option's verdicts are compared.
+static void check_test_stack_clash_tail(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/stack-clash-tail.c", directory);
+    snprintf(reference, sizeof(reference), "%s/stack-clash-tail-clang", directory);
+    const bool written = parse_test_write(source, check_test_stack_clash_tail_source, sizeof(check_test_stack_clash_tail_source) - 1);
+    char* arguments[] = { (char*)clang, "-O0", "-fno-stack-protector", "-fstack-clash-protection", "-o", reference, source, NULL };
+    char* text = NULL;
+    char expected[128] = { 0 };
+    const bool referenced = written && check_test_driver_spawn(arguments, &text) == 0 &&
+                            check_test_stack_clash_cases(reference, BUSTER_CHECK_TEST_STACK_CLASH_TAIL_CASES, expected, sizeof(expected)) &&
+                            strcmp(expected, "probed\nprobed\nprobed\nprobed\nprobed\nprobed\n") == 0;
+    free(text);
+    check_test_expect(test, referenced, "clang -O0's probed allocations after a fixed frame under a page fault on the guard page");
+    static const char* const probe_options[] = { "-fstack-clash-protection", NULL };
+    static const char* const pointer_options[] = { "-fstack-clash-protection", "-fno-omit-frame-pointer", NULL };
+    for (uint32_t build = 0; referenced && build < 3; build += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+            {
+                char object[512];
+                char program[512];
+                snprintf(object, sizeof(object), "%s/stack-clash-tail-%u-%u-%u.o", directory, build, path, pointer);
+                snprintf(program, sizeof(program), "%s/stack-clash-tail-%u-%u-%u", directory, build, path, pointer);
+                const bool compiled = check_test_stack_clash_build(executable, source, object, build != 0, build == 1, path != 0, pointer != 0 ? pointer_options : probe_options);
+                check_test_expect(test, compiled, build == 0 ? "the tail fixture compiles by Tier 0 with -fstack-clash-protection" :
+                                                               "the tail fixture compiles by --tier1 with -fstack-clash-protection, every function Tier 1's");
+                char* link_arguments[] = { (char*)clang, "-o", program, object, NULL };
+                char* link_text = NULL;
+                const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+                free(link_text);
+                char actual[128] = { 0 };
+                const bool same = linked && check_test_stack_clash_cases(program, BUSTER_CHECK_TEST_STACK_CLASH_TAIL_CASES, actual, sizeof(actual)) && strcmp(actual, expected) == 0;
+                check_test_expect(test, same, "-fstack-clash-protection: an allocation after a fixed frame under a page faults on the guard page, as clang's");
+                if (linked && !same)
+                {
+                    fprintf(stderr, "  ours:\n%s  clang's:\n%s", actual, expected);
+                }
+                unlink(object);
+                unlink(program);
+            }
+        }
+    }
+    unlink(source);
+    unlink(reference);
 }
 
 static void check_test_driver_stack_clash(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -506,4 +709,5 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
     unlink(guard);
     unlink(probes);
     unlink(reference);
+    check_test_stack_clash_tail(test, clang, executable, directory);
 }

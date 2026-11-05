@@ -343,12 +343,23 @@ static uint32_t tier1_emit_cfg_call_area(const Tier1EmitResult* emitted, uint32_
     return emitted->frame.dynamic_outgoing && stack_bytes != 0 ? (stack_bytes + alignment - 1) & ~(alignment - 1) : 0;
 }
 
-// rsp less or plus a call's outgoing area (#141): `sub rsp, area` or `add rsp, area`.
-static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, Tier1EmitBuffer* buffer)
+// rsp less or plus a call's outgoing area (#141): `sub rsp, area` or `add rsp, area`. Under stack-clash protection
+// (#177, `probe`), the area's lowest byte is touched after the subtraction, as an allocation's is
+// (tier1_emit_cfg_probed_allocation): rsp starts at a touched address (the probed frame's or an allocation's), and the
+// call's stores may write the area's lowest bytes first. An area of a page or more would need a touch per page, which
+// no register is free to loop with while the arguments are in theirs; the selection takes no by-value aggregate that
+// large, and such an area is refused (TIER1_EMIT_UNSUPPORTED: Tier 0 then compiles the function, its outgoing area in
+// its probed frame).
+static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, bool probe, Tier1EmitBuffer* buffer)
 {
     const uint16_t form = area <= 127 ? (release ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8) : (release ? X86_FORM_ADD_RM64_IMM32 : X86_FORM_SUB_RM64_IMM32);
     const X86Instruction record = { .form = form, .rm = X86_REGISTER_RSP, .immediate = (int32_t)area };
-    return area == 0 || tier1_emit_append(buffer, record) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    const X86Instruction touch = { .form = X86_FORM_OR_RM8_IMM8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
+    const bool probed = probe && !release && area != 0;
+    Tier1EmitError error = probed && area >= BUSTER_TIER1_FRAME_PAGE_BYTES ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_OK;
+    error = error != TIER1_EMIT_OK || area == 0 || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || !probed || tier1_emit_append(buffer, touch) ? error : TIER1_EMIT_MEMORY;
+    return error;
 }
 
 // The inverse of a conditional jump's form, or X86_FORM_NONE for a form the selector doesn't choose.
@@ -2902,8 +2913,10 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool 
         records += op == IR_VCONST ? 17u : 0;
         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
-        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, in a probed frame alone.
+        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's touch
+        // (tier1_emit_cfg_adjust), in a probed frame alone.
         records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
+        records += probe && call != 0 ? 1u : 0;
     }
     return records;
 }
@@ -3267,7 +3280,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 uint32_t staged_zmm = 0;
                 // A dynamic frame's call takes its outgoing area from rsp first (#141): its stores below are rsp's.
                 call_area = calls ? tier1_emit_cfg_call_area(emitted, tier1_select_call_stack_bytes(function, called)) : 0;
-                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, false, &buffer) : error;
+                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, false, emitted->frame.probe_stack, &buffer) : error;
                 tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_OTHER, node), BUSTER_IR_NONE);
                 for (uint32_t u = plan->effective_use_offsets[node]; calls && u < plan->effective_use_offsets[node + 1]; u += 1)
                 {
@@ -3426,7 +3439,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         tier1_emit_saved(&saves, &transitions, saved);
                     }
                 }
-                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, true, &buffer) : error;
+                error = error == TIER1_EMIT_OK ? tier1_emit_cfg_adjust(call_area, true, false, &buffer) : error;
                 tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_OTHER, node), BUSTER_IR_NONE);
             }
             else if (error == TIER1_EMIT_OK && selected && (op == IR_BR || op == IR_CBR || (op == IR_BR_INDIRECT && input->successor_offsets[b + 1] - input->successor_offsets[b] == 1)))

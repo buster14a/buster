@@ -5752,7 +5752,7 @@ static void tier0_test_probes(Tier0TestTally* tally)
 {
     static const uint32_t sizes[] = { 0, 16, 100, 4095, 4096, 4097, 5000, 8192, 12288, 100000, 1u << 20 };
     static const uint8_t alignments[] = { 0, 5, 6, 12, 13, 16 };
-    for (uint32_t probe = 0; probe < 2; probe += 1)
+    for (uint32_t probe = 0; probe < 4; probe += 1)
     {
         for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
         {
@@ -5760,11 +5760,13 @@ static void tier0_test_probes(Tier0TestTally* tally)
             {
                 Tier0Frame frame;
                 memset(&frame, 0, sizeof(frame));
-                frame.probe = probe != 0;
+                frame.probe = (probe & 1) != 0;
+                // A frame pointer's, which a realigned frame has (#177: probed whatever its size).
+                frame.pointer = (probe & 2) != 0 || alignments[a] != 0;
                 frame.size = sizes[s];
                 frame.alignment_log2 = alignments[a];
                 Tier0Writer reservation = { 0 };
-                if (tier0_probes_reservation(frame.probe, frame.size, frame.alignment_log2))
+                if (tier0_probes_reservation(frame.probe, frame.size, frame.alignment_log2, frame.pointer))
                 {
                     tier0_emit_probed_reservation(frame.size, &reservation);
                 }
@@ -5777,10 +5779,10 @@ static void tier0_test_probes(Tier0TestTally* tally)
                 {
                     tier0_emit_realignment(&frame, &realignment);
                 }
-                tier0_test_expect(tally, reservation.count == tier0_reservation_records(frame.probe, frame.size, frame.alignment_log2) &&
+                tier0_test_expect(tally, reservation.count == tier0_reservation_records(frame.probe, frame.size, frame.alignment_log2, frame.pointer) &&
                                              realignment.count == tier0_realignment_records(frame.probe, frame.alignment_log2) &&
                                              reservation.branch_count + realignment.branch_count == tier0_prologue_branches(&frame),
-                                  "probes", "probe %u size %u alignment %u: %u and %u records, %u branches", probe, frame.size, frame.alignment_log2,
+                                  "probes", "probe %u size %u alignment %u pointer %u: %u and %u records, %u branches", probe & 1, frame.size, frame.alignment_log2, frame.pointer,
                                   reservation.count, realignment.count, reservation.branch_count + realignment.branch_count);
             }
         }

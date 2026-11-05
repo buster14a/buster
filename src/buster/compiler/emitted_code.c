@@ -217,7 +217,7 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
 {
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
     const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
-    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2);
+    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
     uint32_t result = count;
     if (loop && count + 2 <= room)
     {
