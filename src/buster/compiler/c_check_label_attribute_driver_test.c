@@ -388,15 +388,18 @@ static bool check_test_unknown_attribute_lines(const char* text, char* lines, si
 {
     size_t length = 0;
     bool fits = capacity != 0;
-    lines[0] = 0;
+    if (fits)
+    {
+        lines[0] = 0;
+    }
     for (const char* line = text; fits && line != NULL && *line != 0;)
     {
         const char* end = strchr(line, '\n');
         const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
-        const char* found = strstr(line, "unknown attribute");
-        const char* macro = strstr(line, "is a predefined macro name, not an attribute scope specifier");
-        const bool kept = (found != NULL && found < line + size) || (macro != NULL && macro < line + size);
-        fits = !kept || length + size + 1 < capacity;
+        const bool kept = memmem(line, size, "unknown attribute", sizeof("unknown attribute") - 1) != NULL ||
+                          memmem(line, size, "is a predefined macro name, not an attribute scope specifier",
+                                 sizeof("is a predefined macro name, not an attribute scope specifier") - 1) != NULL;
+        fits = !kept || size + 1 < capacity - length;
         if (kept && fits)
         {
             memcpy(lines + length, line, size);
@@ -410,21 +413,22 @@ static bool check_test_unknown_attribute_lines(const char* text, char* lines, si
 }
 
 // The diagnostic lines (errors, warnings and notes) of a compiler's output `text`, in order, into `lines`; false where they
-// don't fit.
+// don't fit. Search each bounded line alone: rescanning the whole remaining output for an absent marker is quadratic
+// in the number of lines (for example, #1443's 200,000-line diagnostic fixture).
 static bool check_test_diagnostic_lines(const char* text, char* lines, size_t capacity)
 {
     size_t length = 0;
     bool fits = capacity != 0;
-    lines[0] = 0;
+    if (fits)
+    {
+        lines[0] = 0;
+    }
     for (const char* line = text; fits && line != NULL && *line != 0;)
     {
         const char* end = strchr(line, '\n');
         const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
-        const char* error = strstr(line, ": error: ");
-        const char* warning = strstr(line, ": warning: ");
-        const char* note = strstr(line, ": note: ");
-        const bool kept = (error != NULL && error < line + size) || (warning != NULL && warning < line + size) || (note != NULL && note < line + size);
-        fits = !kept || length + size + 1 < capacity;
+        const bool kept = memmem(line, size, ": error: ", 9) != NULL || memmem(line, size, ": warning: ", 11) != NULL || memmem(line, size, ": note: ", 8) != NULL;
+        fits = !kept || size + 1 < capacity - length;
         if (kept && fits)
         {
             memcpy(lines + length, line, size);
