@@ -1045,14 +1045,18 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     // The register arguments into their registers, each where its place says (tier1_select_next_place, #141): the
     // integers and pointers into the general argument registers, and an indirect call's callee, its effective use after
-    // the arguments, into R10, which no argument takes, as one parallel move through the scratch register; the floating
+    // the arguments, into R10, which no argument takes but a static chain, as one parallel move through the scratch
+    // register; the floating
     // values into xmm0 to xmm7, as another through the vector class's. A move doesn't overwrite a source before it is
     // read. The arguments past their classes' registers are the CFG consumer's, which stores them first
     // (tier1_emit_cfg_stack_argument): `argument_registers` holds a location for the others alone (a general register's
     // number, or an xmm register's BUSTER_TIER1_EMIT_VECTOR_LOCATION + n), and the callee's at the arguments' count.
+    // A static chain (#148) is a general argument in r10, and its indirect call's callee goes to rax instead
+    // (tier1_select_callee_register).
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
-    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 1];
-    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 1];
+    const uint8_t callee = tier1_select_callee_register(function, call);
+    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
+    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
     uint32_t vector_sources[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t vector_destinations[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t general = 0;
@@ -1119,7 +1123,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     if (indirect)
     {
         sources[general] = argument_registers[call->argument_count];
-        destinations[general] = X86_REGISTER_R10;
+        destinations[general] = callee;
         general += 1;
     }
     const Tier1ParallelMoves moves = {
@@ -1213,7 +1217,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     if (error == TIER1_EMIT_OK && indirect)
     {
-        error = tier1_emit_append(buffer, (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = X86_REGISTER_R10 }) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append(buffer, (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = callee }) ? error : TIER1_EMIT_MEMORY;
     }
     else if (error == TIER1_EMIT_OK)
     {

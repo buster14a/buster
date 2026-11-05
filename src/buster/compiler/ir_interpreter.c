@@ -491,6 +491,33 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     return status;
 }
 
+// A call that passes a static chain (#148, __builtin_call_with_static_chain's): its argument 0's record in r10, which
+// isn't a C parameter. The call is taken without it, its value into *chain for a native callee's r10 (an interpreted one
+// can't read r10), and without its ABI records where they are only the chain's; a chain beside a by-value aggregate or
+// an aggregate result is INTERPRETER_UNSUPPORTED. Any other call is returned as it is.
+static IrCall ir_interpreter_unchained(const IrFunction* function, IrCall call, const InterpreterValue* values, uint64_t* chain, InterpreterStatus* status)
+{
+    const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+    const AbiLocation first = records != 0 && call.argument_count != 0 ? function->passed[records->passed].location : (AbiLocation){ 0 };
+    if (first.kind == BUSTER_ABI_LOCATION_REGISTERS && first.registers[0] == BUSTER_ABI_R10)
+    {
+        bool scalars = records->result_size == 0;
+        for (uint32_t p = 1; p < call.argument_count; p += 1)
+        {
+            const IrPassed passed = function->passed[records->passed + p];
+            scalars = scalars && passed.size == 0 && passed.location.kind != BUSTER_ABI_LOCATION_IGNORE;
+        }
+        *status = scalars ? *status : INTERPRETER_UNSUPPORTED;
+        *chain = values[function->extra[call.argument_first]].low;
+        call.argument_first += 1;
+        call.argument_count -= 1;
+        call.parameter_count -= call.parameter_count != 0 ? 1 : 0;
+        call.type_first += 1;
+        call.abi = 0;
+    }
+    return call;
+}
+
 // A call's arguments as its interpreted callee takes them (#131, #148), as both functions' records have them: a named
 // aggregate's size alike in each (a callee's IGNOREd one, an empty record's, takes a fresh object of its own, whatever the
 // call passes, as no bytes pass), and a result's kind; a hidden pointer, the call's destination, as the callee's parameter
@@ -1246,7 +1273,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_CALL:
                 case IR_CALL_INDIRECT:
                 {
-                    const IrCall call = function->calls[b];
+                    // A static chain (#148, ir_interpreter_unchained): the call without it, its value for a native callee's r10.
+                    uint64_t chain = 0;
+                    const IrCall call = ir_interpreter_unchained(function, function->calls[b], frame->values, &chain, &result.status);
                     const uint32_t callee = ir_interpreter_find_function(program, a, av.low, op == IR_CALL_INDIRECT);
                     const InterpreterNativeBinding* native = callee == UINT32_MAX ? ir_interpreter_find_native(program, a, av.low, op == IR_CALL_INDIRECT) : 0;
                     // A call with ABI records (#131): an aggregate result's destination is c.
@@ -1352,6 +1381,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             .passed = records != 0 ? &function->passed[records->passed] : 0,
                             .destination = destination,
                             .result_size = result_size,
+                            .chain = chain,
                         };
                         const bool invoked = interpreter_native_invoke(&request, &value);
                         if (!invoked)

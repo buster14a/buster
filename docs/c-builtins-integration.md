@@ -1705,7 +1705,6 @@ compile, and this compiler doesn't yet:
   `__builtin___NSStringMakeConstantString`, whose `cfstring` object;
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns;
-- `__builtin_call_with_static_chain`, whose chain register (`r10`);
 - `__builtin_os_log_format` of data its items take again across side
   effects, or of a `__float128` or a 2-byte vector;
 - `__builtin_dump_struct`, whose generated calls.
@@ -1767,11 +1766,39 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
   declared), found through the callee's parentheses, as `getBuiltinCallee`
   finds it.
 - **The chain.** The second argument is a pointer, of any type.
-- **Code.** clang's code evaluates the callee, then the chain, then the
-  arguments, and passes the chain in `r10`. This compiler's calls have no
-  static chain register, so `-c` refuses the call by name. Adding one would
-  touch every consumer of a call's record: Tier 0, Tier 1, the interpreter
-  and the SSA lowering.
+- **Code.** As clang's code does, `-c` evaluates the callee, then the
+  chain, then the arguments, and passes the chain in `r10`, SysV's static
+  chain register (LLVM's `nest`). The call's own arguments and result stay
+  as they were. A musttail return of such a call is refused by name.
+- **The call's record.** The chain is the call's argument 0, of class `U64`.
+  Its ABI type is `void`, which no other argument has and `abi_assign`
+  ignores, so it takes no register of the convention's. After the batch,
+  `check_lower_chain_location` puts it in `r10`. Its consumers take it as
+  follows:
+  - **Tier 0.** `r10` is one of the argument registers that its locations
+    may name (`BUSTER_TIER0_ARGUMENT_REGISTERS`), and every call emitter's
+    moves take it as any register argument's. An indirect callee still goes
+    through `r11`.
+  - **The typed IR.** A call with an argument in `r10` keeps its ABI records
+    (`ir_typed_aggregate_call`).
+  - **Tier 1.** A record in `r10` is general place 6, past the six argument
+    registers (`tier1_select_parameter_registers`). A chained indirect call
+    calls through `rax` (`tier1_select_callee_register`), since its chain
+    takes `r10` and the moves' scratch `r11`. The code certificate checks the
+    same sequence. A chained indirect variadic call, whose `al` takes `rax`,
+    falls back to Tier 0 (`ir_lower`'s `IR_ERROR_UNSUPPORTED`).
+  - **The interpreters.** Both take the call without its chain
+    (`tier0_call_chain`, `ir_interpreter_unchained`). A native callee gets
+    the chain in `r10` from the bridge; an interpreted one, whose C
+    parameters don't include it, doesn't. The IR interpreter refuses a chain
+    beside a by-value aggregate (`INTERPRETER_UNSUPPORTED`).
+  - **SSA promotion** sees calls as opaque values and needs nothing.
+- **Tests.** `test-checker-driver`'s static chain program runs naked
+  callees that read `r10`, direct and indirect, of aggregate, floating and
+  variadic calls, past six arguments and in a loop. It is built on both
+  paths at Tier 0 and with `--tier1 --verify`, and each build prints what
+  clang `-O0`'s does. `test-interpreter` and `test-ir-lowering` pass a chain
+  to native and interpreted callees.
 - **Identities.** The miscellaneous builtins past 0x45f start at 0x4b0, past
   the `<stdbit.h>` library builtins' identities (0x460 to 0x4a5). A static
   assertion keeps them apart.

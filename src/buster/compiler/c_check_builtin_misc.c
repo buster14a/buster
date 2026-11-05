@@ -1314,8 +1314,8 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     else if (id == CBUILTIN_CALL_WITH_STATIC_CHAIN)
     {
         // The call's value (#148), its first argument a call as written of no builtin (CheckBuiltinMiscAction.static_chain_call)
-        // and its second a pointer, as clang's BuiltinCallWithStaticChain checks them. clang's code passes the chain in r10,
-        // which this compiler's calls don't (check_lower_unsupported).
+        // and its second a pointer, as clang's BuiltinCallWithStaticChain checks them. The chain is passed in r10, as clang's
+        // code passes it (check_lower_call_body).
         const TypeId chain = type_strip_aligned(table, input->arguments[1].type);
         const uint8_t kind = type_is_valid(table, chain) ? check_action_kind(table, chain) : BUSTER_TYPE_KIND_VOID;
         if (!input->static_chain_call)

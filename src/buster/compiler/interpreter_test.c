@@ -899,6 +899,145 @@ static void interpreter_test_native(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, !ok && result.status == INTERPRETER_SYMBOL, "unresolved native symbol");
 }
 
+// The static chain's sum with its argument (#148): r10, where a chained call passes it, plus rdi.
+static __attribute__((naked, noinline)) int64_t interpreter_test_chain_plus(int64_t x __attribute__((unused)))
+{
+    __asm__("leaq (%r10,%rdi), %rax\n\tret\n");
+}
+
+// A call with a static chain (#148, tier0_call_chain): its argument 0 in r10, which a native callee gets there and an
+// interpreted one, whose C parameters don't include it, doesn't; the stack loses it either way.
+static void interpreter_test_chain(InterpreterTestTally* tally, Arena* scratch)
+{
+    // f: 100 + (chain 40 and argument 2 to the native, 42) + (chain 1 and argument 3 to g, 3); g(x) returns x.
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint64_t values[] = {
+        100,
+        40,
+        2,
+        0,
+        0,
+        1,
+        3,
+        1,
+        0,
+        0,
+    };
+    const uint8_t g_kinds[] = {
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t g_classes[] = {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint64_t g_values[] = {
+        0,
+        0,
+    };
+    const uint8_t argument_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const AbiLocation chain = { .registers = { BUSTER_ABI_R10, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+    const AbiLocation first_integer = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+    const AbiLocation locations[] = {
+        chain,
+        first_integer,
+        chain,
+        first_integer,
+    };
+    const uint8_t local_class = BUSTER_TYPED_CLASS_I64;
+    const uint8_t local_flags = 0;
+    const SymbolId symbols[] = {
+        1,
+        2,
+    };
+    const SymbolId native_symbol = 3;
+    const SymbolId targets[] = {
+        native_symbol,
+        2,
+    };
+    const uint32_t firsts[] = {
+        0,
+        2,
+    };
+    const uint32_t counts[] = {
+        2,
+        2,
+    };
+    const uint8_t variadic[] = {
+        0,
+        0,
+    };
+    const Tier0Function functions[] = {
+        {
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .count = BUSTER_ARRAY_LENGTH(kinds),
+            .call_targets = targets,
+            .call_first = firsts,
+            .call_argument_counts = counts,
+            .call_variadic = variadic,
+            .argument_locations = locations,
+            .argument_classes = argument_classes,
+            .call_count = 2,
+            .argument_count = 4,
+        },
+        {
+            .kinds = g_kinds,
+            .classes = g_classes,
+            .values = g_values,
+            .count = BUSTER_ARRAY_LENGTH(g_kinds),
+            .local_classes = &local_class,
+            .local_flags = &local_flags,
+            .local_count = 1,
+            .parameter_count = 1,
+            .parameters = &first_integer,
+        },
+    };
+    const InterpreterNativeBinding native = {
+        .symbol = native_symbol,
+        .address = (void*)interpreter_test_chain_plus,
+    };
+    const InterpreterProgram program = {
+        .functions = functions,
+        .function_symbols = symbols,
+        .function_count = 2,
+        .natives = &native,
+        .native_count = 1,
+    };
+    InterpreterResult result;
+    const bool ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, ok && result.value.low == 145, "typed calls with a static chain: r10 to a native, none to an interpreted callee");
+}
+
 static void interpreter_test_heap(InterpreterTestTally* tally, Arena* scratch)
 {
     const uint8_t kinds[] = {
@@ -1543,6 +1682,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);
+        interpreter_test_chain(&tally, &scratch);
         interpreter_test_heap(&tally, &scratch);
         interpreter_test_mappings(&tally, &scratch);
         interpreter_test_function_addresses(&tally, &scratch);
