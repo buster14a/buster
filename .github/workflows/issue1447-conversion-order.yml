@@ -1,0 +1,36 @@
+name: Issue 1447 conversion diagnostic oracle
+
+on:
+  push:
+    branches: [codex/issue-1447-conversion-order-oracle-01a1ad8e]
+
+permissions:
+  contents: read
+
+jobs:
+  conversion-order:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out oracle sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang 23.1.4
+        run: bash tools/ci/setup-hosted.sh
+      - name: Probe conversion order and inactive operands
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          clang --version
+          for mode in default all; do
+            flags=()
+            if [ "$mode" = all ]; then flags=(-Wall -Wextra); fi
+            for case in {0..17}; do
+              echo "CONVERSION MODE=$mode CASE=$case"
+              clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics "${flags[@]}" -DCASE="$case" tools/issue1447-conversion-order.c 2>&1
+              echo "COMPILE_STATUS=$?"
+            done
+          done
+          exit 0
