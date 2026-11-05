@@ -5058,7 +5058,7 @@ static X86Instruction tier0_instruction(uint32_t form, uint8_t reg, uint8_t rm, 
 #define BUSTER_TIER0_PROBE_LOOP_RECORDS 6u
 #define BUSTER_TIER0_PROBE_REMAINDER_RECORDS 2u
 // A probed realignment past a page's alignment: tier1_frame_emit_probe_align's loop.
-#define BUSTER_TIER0_PROBE_ALIGN_RECORDS 11u
+#define BUSTER_TIER0_PROBE_ALIGN_RECORDS 12u
 // The largest alignment's log2 whose gap a single touch after the and covers: a page's.
 #define BUSTER_TIER0_PROBE_ALIGN_TOUCH_LOG2 12u
 
@@ -6226,10 +6226,12 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
                entries->floating_depths[i]);
 }
 
-// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's
-// (#177) are 14, three of them branches.
+// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
+// are its add and and, tier0_emit_probed_allocation's ten (three of them branches) and its address's lea or mov: the
+// vector path's positions count them so, the scalar path's by running the emitter.
 #define BUSTER_TIER0_ALLOCA_RECORDS 4
-#define BUSTER_TIER0_PROBED_ALLOCA_RECORDS 14
+#define BUSTER_TIER0_PROBED_ALLOCATION_RECORDS 10
+#define BUSTER_TIER0_PROBED_ALLOCA_RECORDS (3 + BUSTER_TIER0_PROBED_ALLOCATION_RECORDS)
 #define BUSTER_TIER0_PROBED_ALLOCA_BRANCHES 3
 #define BUSTER_TIER0_STACK_RECORDS 1
 

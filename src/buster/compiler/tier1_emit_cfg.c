@@ -2713,8 +2713,8 @@ static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const 
 // and its result's stores and hidden pointer; per return of an aggregate result, its copies and loads; and the entry's
 // stores.
 // A probed dynamic allocation's records past its rule's (#177): an immediate's move into the destination, and the probes'
-// eleven for its subtraction's one.
-#define BUSTER_TIER1_EMIT_PROBE_RECORDS 11u
+// ten for its subtraction's one.
+#define BUSTER_TIER1_EMIT_PROBE_RECORDS 10u
 #define BUSTER_TIER1_EMIT_PROBE_BRANCHES 3u
 
 // A dynamic allocation under stack-clash protection (#177, the frame's probe_stack, -fstack-clash-protection): the

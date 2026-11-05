@@ -5744,6 +5744,53 @@ static const Tier0TestEntry tier0_test_frame_entry[] = {
 
 // The frame's address: a function of it alone, compiled by both paths alike with a frame pointer and its record (mov
 // from rbp at its depth), then the program above, both of its functions with frame pointers, run natively on 8 inputs.
+// Stack-clash protection's records (#177): the counts the vector path's positions take from formulas
+// (tier0_reservation_records, tier0_realignment_records, tier0_prologue_branches and BUSTER_TIER0_PROBED_ALLOCA_RECORDS)
+// are the records and branches the emitters write, which the scalar path counts by running them. A host without the
+// vector path runs only the scalar one, whose twins can't differ: this holds there too.
+static void tier0_test_probes(Tier0TestTally* tally)
+{
+    static const uint32_t sizes[] = { 0, 16, 100, 4095, 4096, 4097, 5000, 8192, 12288, 100000, 1u << 20 };
+    static const uint8_t alignments[] = { 0, 5, 6, 12, 13, 16 };
+    for (uint32_t probe = 0; probe < 2; probe += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+        {
+            for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(alignments); a += 1)
+            {
+                Tier0Frame frame;
+                memset(&frame, 0, sizeof(frame));
+                frame.probe = probe != 0;
+                frame.size = sizes[s];
+                frame.alignment_log2 = alignments[a];
+                Tier0Writer reservation = { 0 };
+                if (tier0_probes_reservation(frame.probe, frame.size, frame.alignment_log2))
+                {
+                    tier0_emit_probed_reservation(frame.size, &reservation);
+                }
+                else
+                {
+                    reservation.count = frame.size != 0 ? 1 : 0;
+                }
+                Tier0Writer realignment = { 0 };
+                if (frame.alignment_log2 != 0)
+                {
+                    tier0_emit_realignment(&frame, &realignment);
+                }
+                tier0_test_expect(tally, reservation.count == tier0_reservation_records(frame.probe, frame.size, frame.alignment_log2) &&
+                                             realignment.count == tier0_realignment_records(frame.probe, frame.alignment_log2) &&
+                                             reservation.branch_count + realignment.branch_count == tier0_prologue_branches(&frame),
+                                  "probes", "probe %u size %u alignment %u: %u and %u records, %u branches", probe, frame.size, frame.alignment_log2,
+                                  reservation.count, realignment.count, reservation.branch_count + realignment.branch_count);
+            }
+        }
+    }
+    Tier0Writer allocation = { 0 };
+    tier0_emit_probed_allocation(X86_REGISTER_RAX, &allocation);
+    tier0_test_expect(tally, allocation.count == BUSTER_TIER0_PROBED_ALLOCATION_RECORDS && allocation.branch_count == BUSTER_TIER0_PROBED_ALLOCA_BRANCHES, "probes",
+                      "a probed ALLOCA's loop: %u records and %u branches", allocation.count, allocation.branch_count);
+}
+
 static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 {
     static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
@@ -6087,6 +6134,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_frame_address(&tally, &tables);
                 tier0_test_report("frame address", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_probes(&tally);
+                tier0_test_report("probes", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
