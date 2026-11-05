@@ -961,15 +961,21 @@ static void check_test_x86_hard_every(CheckTest* test, TypeTable* table, const c
             };
             builtin_intrinsic_types_decode(table, &input, &types);
         }
+        const uint32_t parameters = types.parameter_count;
         const uint64_t required = types.ice_parameters | check_graph_x86_ice_mask(info, false);
         const bool immediate = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE;
+        const bool paired = rule->immediate_extra != 0;
         const bool rounding = rule->rounding != CHECK_X86_ROUND_NONE;
-        if (immediate || rounding)
+        if (immediate || paired || rounding)
         {
-            const uint32_t last = types.parameter_count != 0 ? types.parameter_count - 1 : 0;
+            // Most rounding controls are the last parameter. VCVTPS2PH512's SAE shares its immediate instead;
+            // its last parameter is a runtime mask. SSE4a's second immediate has its own prototype ICE marker.
+            const uint32_t rounded = rule->rounding == CHECK_X86_ROUND_IMMEDIATE_SAE ? rule->immediate : parameters != 0 ? parameters - 1 : 0;
+            const uint32_t extra = paired ? rule->immediate_extra - 1u : 0;
             const bool right = info != NULL && types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS &&
-                               (!immediate || (rule->immediate < types.parameter_count && (required & (UINT64_C(1) << rule->immediate)) != 0)) &&
-                               (!rounding || (types.parameter_count != 0 && (required & (UINT64_C(1) << last)) != 0));
+                               (!immediate || (rule->immediate < parameters && (required & (UINT64_C(1) << rule->immediate)) != 0)) &&
+                               (!paired || (immediate && extra < parameters && (required & (UINT64_C(1) << extra)) != 0)) &&
+                               (!rounding || (rounded < parameters && (required & (UINT64_C(1) << rounded)) != 0));
             rows += 1;
             loose += !right;
             first_loose = first_loose == NULL && !right ? rule->name : first_loose;

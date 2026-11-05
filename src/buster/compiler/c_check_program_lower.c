@@ -9495,7 +9495,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     const uint32_t count = graph->argument_counts[node];
     const BuiltinIntrinsicInfo* info = effect != NULL ? effect->info : NULL;
     const CheckX86LowerRule* rule = info != NULL ? check_x86_lower_rule(info->name, info->name_length) : NULL;
-    // The immediate the rule's records take, and its rounding control, its last argument where it has one.
+    // The immediate the rule's records take, its optional second byte, and a separate rounding control at the end.
     const uint32_t skipped = rule != NULL ? rule->immediate : BUSTER_CHECK_X86_NO_IMMEDIATE;
     const uint32_t rounded = rule != NULL && rule->rounding != CHECK_X86_ROUND_NONE && rule->rounding != CHECK_X86_ROUND_IMMEDIATE_SAE && count != 0 ? count - 1 : BUSTER_CHECK_X86_NO_IMMEDIATE;
     const uint32_t paired = rule != NULL && rule->immediate_extra != 0 ? rule->immediate_extra - 1u : BUSTER_CHECK_X86_NO_IMMEDIATE;

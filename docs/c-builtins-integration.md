@@ -2699,8 +2699,12 @@ are original. The additional semantic facts are audited from
   narrowing rows with source in ModRM.reg and destination in r/m. The
   128/256-bit forms require AVX-512VL and the 512-bit form AVX-512F.
   SemaX86's cases at lines 761, 763 and 764 constrain argument 1 to 0–255.
-  The 512-bit form selects its SAE encoding from bit 3 of that same
-  immediate; there is no extra rounding operand or separate SAE-set check.
+  The 512-bit form selects its SAE encoding only for controls 8–12 and
+  encodes them as 0–4. Other controls, including 13–15 and 255, keep their
+  ordinary encoding; there is no extra rounding operand or separate
+  SAE-set check. A pinned Clang 23.1.4 assembly oracle confirms this
+  distinction, and the native fixture resets MXCSR between controls and
+  width groups so that exception status cannot conceal it.
 - `readeflags_u32` and `writeeflags_u32` are recognized by `__has_builtin`
   even on x86-64. Calls receive `this builtin is only available on 32-bit
   targets`, following `isX86_32Builtin` and its early check at lines
@@ -2720,6 +2724,9 @@ output failure. Diagnostic fixtures compare both SSE4a ICE positions,
 string controls and the 32-bit-only errors against Clang. The existing
 supplementary-range oracle covers the three new range facts; catalogue and
 preprocessor tests cover exact names, bounded slices and target features.
+The lowering-to-prototype coverage check also requires both SSE4a immediate
+arguments to be ICEs, and checks VCVTPS2PH512's shared immediate/SAE control
+at its actual parameter index while leaving the runtime mask unrestricted.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these

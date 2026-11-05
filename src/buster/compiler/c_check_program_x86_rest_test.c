@@ -530,22 +530,23 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
         {
             // AVX-512's narrowing conversions encode the source in ModRM.reg and destination in r/m. Nonzero
             // passthroughs and zero/sparse/full masks expose a reversed copy; the 128-bit result's high half must zero.
-            // Bit 3 suppresses exceptions only at 512 bits. Exercise every low control and MXCSR rounding mode, with
+            // Controls 8..12 suppress exceptions only at 512 bits. Exercise every low control and MXCSR rounding mode, with
             // ties, signed zero, overflow, subnormals, infinities and a quiet NaN, and restore the caller's MXCSR.
             "x86-rest-masked-halves",
-            "#define H(I) {v8hi x[]={__builtin_ia32_vcvtps2ph_mask(a,I,w,0),__builtin_ia32_vcvtps2ph_mask(a,I,w,k),"
+            "#define H(I) {__builtin_ia32_ldmxcsr(setting);v8hi x[]={__builtin_ia32_vcvtps2ph_mask(a,I,w,0),__builtin_ia32_vcvtps2ph_mask(a,I,w,k),"
             "__builtin_ia32_vcvtps2ph_mask(a,I,w,255),__builtin_ia32_vcvtps2ph256_mask(b,I,w,0),"
-            "__builtin_ia32_vcvtps2ph256_mask(b,I,w,k),__builtin_ia32_vcvtps2ph256_mask(b,I,w,255)};"
+            "__builtin_ia32_vcvtps2ph256_mask(b,I,w,k),__builtin_ia32_vcvtps2ph256_mask(b,I,w,255)};FOLD(x);"
+            "unsigned status=__builtin_ia32_stmxcsr()&0x603fu;FOLD(status);__builtin_ia32_ldmxcsr(setting);"
             "v16hi y[]={__builtin_ia32_vcvtps2ph512_mask(c,I,z,0),__builtin_ia32_vcvtps2ph512_mask(c,I,z,j),"
-            "__builtin_ia32_vcvtps2ph512_mask(c,I,z,65535)};FOLD(x);FOLD(y);}\n"
+            "__builtin_ia32_vcvtps2ph512_mask(c,I,z,65535)};FOLD(y);status=__builtin_ia32_stmxcsr()&0x603fu;FOLD(status);}\n"
             "int tested(int n){unsigned h=2166136261u;v4sf a;v8sf b;v16sf c;v8hi w;v16hi z;fill(&w,16,n);fill(&z,32,n+1);"
             "static const unsigned bits[]={0,0x80000000u,0x3f801000u,0xbf801000u,0x477ff000u,0xc77ff000u,0x33000000u,0xb3000000u,"
             "0x7f800000u,0xff800000u,0x7fc12345u,0x3f803000u,0x38800000u,0x33800000u,0x3f000000u,0xbf000000u};"
             "for(int i=0;i<16;i++){union{unsigned u;float f;}v;v.u=bits[(i+n)&15];c[i]=v.f;if(i<8)b[i]=v.f;if(i<4)a[i]=v.f;}"
             "unsigned char k=(unsigned char)mask(n);unsigned short j=(unsigned short)(mask(n)>>8);unsigned csr=__builtin_ia32_stmxcsr();"
-            "for(unsigned mode=0;mode<4;mode++){__builtin_ia32_ldmxcsr((csr&~0x603fu)|0x1f80u|(mode<<13));"
+            "for(unsigned mode=0;mode<4;mode++){unsigned setting=(csr&~0x603fu)|0x1f80u|(mode<<13);"
             "H(0)H(1)H(2)H(3)H(4)H(5)H(6)H(7)H(8)H(9)H(10)H(11)H(12)H(13)H(14)H(15)H(255)"
-            "unsigned flags=__builtin_ia32_stmxcsr()&0x603fu;FOLD(flags);}__builtin_ia32_ldmxcsr(csr);return (int)h;}",
+            "}__builtin_ia32_ldmxcsr(csr);return (int)h;}",
             BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL),
             false,
         },

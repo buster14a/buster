@@ -1324,7 +1324,7 @@
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 16, false, 1, X86_FORM_VCVTPS2PH_XM64_X_IMM8, 16, BUSTER_X86_FEATURE(F16C))
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph256", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 32, false, 1, X86_FORM_VCVTPS2PH_XM128_Y_IMM8, 16,
                                 BUSTER_X86_FEATURE(F16C))
-    // VCVTPS2PH writes rm, unlike the other masked unary conversions. The 512-bit form gets SAE from this immediate's bit 3.
+    // VCVTPS2PH writes rm, unlike the other masked unary conversions. The 512-bit form uses SAE for controls 8..12.
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph_mask", CHECK_X86_LOWER_MASK_UNARY, 4, 16, true, 1, X86_FORM_VCVTPS2PH_XM64_X_IMM8_EVEX, 16,
                                 BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL))
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vcvtps2ph256_mask", CHECK_X86_LOWER_MASK_UNARY, 4, 32, true, 1, X86_FORM_VCVTPS2PH_XM128_Y_IMM8_EVEX, 16,

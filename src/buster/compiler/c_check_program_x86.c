@@ -261,7 +261,7 @@ typedef enum CheckX86LowerRounding
     CHECK_X86_ROUND_NONE,
     CHECK_X86_ROUND_SAE,
     CHECK_X86_ROUND_ER,
-    // VCVTPS2PH512's SAE is bit 3 of its existing immediate, not another argument.
+    // VCVTPS2PH512's existing controls 8..12 request SAE, encoded as 0..4, without another argument.
     CHECK_X86_ROUND_IMMEDIATE_SAE,
 } CheckX86LowerRounding;
 
@@ -443,9 +443,15 @@ static uint32_t check_x86_lower_float_predicate(uint64_t immediate, bool strict,
 // nearest, down, up, zero).
 static void check_x86_lower_round(const CheckX86LowerRule* rule, uint64_t round, X86Instruction* record)
 {
-    if (rule->rounding != CHECK_X86_ROUND_NONE && (round & 8) != 0)
+    const bool immediate = rule->rounding == CHECK_X86_ROUND_IMMEDIATE_SAE;
+    const bool suppressed = immediate ? round >= 8 && round <= 12 : (round & 8) != 0;
+    if (rule->rounding != CHECK_X86_ROUND_NONE && suppressed)
     {
         record->form = rule->round_form;
+        if (immediate)
+        {
+            record->immediate = (int32_t)(round - 8);
+        }
         if (rule->rounding == CHECK_X86_ROUND_ER)
         {
             record->decorations = (uint8_t)(record->decorations | (round & 3) << 5);
