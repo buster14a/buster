@@ -1080,20 +1080,28 @@ static uint64_t check_builtin_cpu_lookup(const CheckBuiltinCpuName* names, uint3
 }
 
 // Whether __builtin_dump_struct of a record of `record` dumps a bit-field that no format prints (#148): a named one of
-// a _BitInt or a 128-bit integer type, among its fields, its anonymous members' and its fields' records' (by an explicit
-// stack, at most 64 deep).
+// a _BitInt or a 128-bit integer type, among its fields, its anonymous members' and its fields' records'. A frame per
+// record being walked, its tag and its next member, so the stack's bound is the records' nesting; past 64 levels the
+// walk stops, and the lowering refuses such a dump by name (check_lower_dump_record).
 static bool check_builtin_misc_dump_bit_field(const TypeTable* table, TypeId record)
 {
-    uint32_t stack[64];
+    uint32_t tags[64];
+    uint32_t next[64];
     uint32_t depth = 0;
     bool found = false;
-    stack[depth++] = table->types.index[type_index(record)];
+    tags[depth] = table->types.index[type_index(record)];
+    next[depth++] = 0;
     while (!found && depth != 0)
     {
-        const uint32_t tag = stack[--depth];
-        for (uint32_t m = 0; !found && m < table->tags.member_count[tag]; m += 1)
+        const uint32_t tag = tags[depth - 1];
+        if (next[depth - 1] >= table->tags.member_count[tag])
         {
-            const uint32_t member = table->tags.member_begin[tag] + m;
+            depth -= 1;
+        }
+        else
+        {
+            const uint32_t member = table->tags.member_begin[tag] + next[depth - 1];
+            next[depth - 1] += 1;
             const TypeId bare = type_unqualified(type_strip_aligned(table, table->members.type[member]));
             const uint8_t kind = type_kind(table, bare);
             const bool bits = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
@@ -1101,7 +1109,8 @@ static bool check_builtin_misc_dump_bit_field(const TypeTable* table, TypeId rec
                     (kind == BUSTER_TYPE_KIND_BIT_INT || bare == BUSTER_TYPE_INT128 || bare == BUSTER_TYPE_UINT128);
             if (!bits && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && depth < 64)
             {
-                stack[depth++] = table->types.index[type_index(bare)];
+                tags[depth] = table->types.index[type_index(bare)];
+                next[depth++] = 0;
             }
         }
     }
