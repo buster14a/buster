@@ -80,12 +80,16 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .position = point,
             .flags = check_input_overload_flags(check_input_attributes_at(input, token)) | (check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
         };
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+        candidate.object_sizes = attributes != NULL ? attributes->object_sizes : NULL;
+        candidate.object_size_count = attributes != NULL ? attributes->object_size_count : 0;
         const CheckOverloadContext context = {
             .semantic = check_input_context(reader, point, token, false),
         };
         CheckOverloadIndex* index = &reader->overload_index;
         uint64_t signature_hash = 0;
         const bool hashed = check_overload_signature_hash(index, reader->types, candidate.type, reader->scratch, &signature_hash);
+        signature_hash = candidate.object_sizes != NULL ? type_hash_mix(signature_hash, 1) : signature_hash;
         const uint64_t lexical_key = check_overload_index_key(signature_hash, name, scope);
         const uint64_t linked_key = check_overload_index_key(signature_hash, name, UINT32_MAX);
         const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
@@ -99,9 +103,11 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         {
             const uint32_t linked = reader->linked_declarations[name];
             const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+            const CheckInputAttributes* previous_attributes = previous != BUSTER_CHECK_NONE ? check_input_attributes_at(input, previous) : NULL;
+            const bool separate_size_overload = (candidate.object_sizes != NULL) != (previous_attributes != NULL && previous_attributes->object_sizes != NULL);
             if ((old != 0 && reader->bindings.depth[old - 1] == reader->scope_count && reader->bindings.kind[old - 1] != C_BINDING_FUNCTION) ||
                 (linked != 0 && reader->declaration_kinds[linked - 1] != C_BINDING_FUNCTION) ||
-                (old != 0 && check_input_linkage(reader->declaration_bits, previous) != 0 && check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token)))
+                (old != 0 && !separate_size_overload && check_input_linkage(reader->declaration_bits, previous) != 0 && check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token)))
             {
                 declared.status = CHECK_OVERLOAD_CONFLICT;
             }
@@ -117,7 +123,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             for (uint32_t linked = linked_head; !complete && declared.status == CHECK_OVERLOAD_OK && linked != UINT32_MAX; linked = index->linked_next[linked])
             {
                 const CheckOverloadCandidate* prior = reader->overload_candidates + linked;
-                const TypeAnswer signature = check_overload_signature(reader->types, prior->type, candidate.type);
+                const TypeAnswer signature = check_overload_candidate_signature(reader->types, prior, &candidate);
                 if (signature == TYPE_ANSWER_FULL)
                 {
                     declared.status = CHECK_OVERLOAD_FULL;
@@ -126,7 +132,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
                 {
                     const TypeAnswer compatible = check_overload_compatible(reader->types, prior->type, candidate.type, &context);
                     if (compatible != TYPE_ANSWER_YES || check_input_linkage(reader->declaration_bits, prior->declaration) != check_input_linkage(reader->declaration_bits, token) ||
-                        ((prior->flags ^ candidate.flags) & BUSTER_CHECK_OVERLOADABLE) != 0)
+                        ((prior->flags ^ candidate.flags) & BUSTER_CHECK_OVERLOADABLE) != 0 || !check_overload_object_sizes_same(prior, &candidate))
                     {
                         declared.status = compatible == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_CONFLICT;
                     }

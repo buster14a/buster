@@ -107,6 +107,12 @@ requirements. [Command index](README.md).
   [The request guide](../../docs/compilation-requests.md) has the contract,
   lifetimes, overrides and the series' discontinuities.
 
+The focused `test-checker-fortify --clang clang --executable build/compiler`
+suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3`,
+including ordinary function addresses and scalar/vector, eager/lazy headers.
+The object-size attributes currently use conservative unknown bounds, without
+Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
+
 ## Object and linkage options (#1124)
 
 The C driver refuses an effective `-ffunction-sections`,

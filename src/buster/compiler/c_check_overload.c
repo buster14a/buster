@@ -27,6 +27,9 @@ struct CheckOverloadCandidate
     uint32_t scope;
     uint32_t position;
     uint32_t flags;
+    // Immutable parameter modes retained by the source adapter; no hidden arguments in the conservative ABI.
+    const uint8_t* object_sizes;
+    uint32_t object_size_count;
 };
 
 typedef struct CheckOverloadContext CheckOverloadContext;
@@ -99,9 +102,24 @@ static CheckOverloadResult check_overload_result(CheckOverloadStatus status)
 
 static bool check_overload_candidate_valid(const TypeTable* table, const CheckOverloadCandidate* candidate)
 {
-    return type_is_valid(table, candidate->type) && check_action_kind(table, candidate->type) == BUSTER_TYPE_KIND_FUNCTION &&
-           candidate->declaration != UINT32_MAX && candidate->canonical != UINT32_MAX &&
-           (candidate->flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0;
+    bool valid = type_is_valid(table, candidate->type) && check_action_kind(table, candidate->type) == BUSTER_TYPE_KIND_FUNCTION &&
+                 candidate->declaration != UINT32_MAX && candidate->canonical != UINT32_MAX &&
+                 (candidate->flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0;
+    if (valid && candidate->object_sizes != NULL)
+    {
+        uint32_t count = 0;
+        type_parameters(table, candidate->type, &count);
+        valid = count != 0 && count == candidate->object_size_count;
+        for (uint32_t p = 0; valid && p < count; p += 1)
+        {
+            valid = candidate->object_sizes[p] <= 8;
+        }
+    }
+    else
+    {
+        valid &= candidate->object_size_count == 0;
+    }
+    return valid;
 }
 
 static TypeAnswer check_overload_compatible(const TypeTable* table, TypeId left, TypeId right, const CheckOverloadContext* context)
@@ -126,6 +144,18 @@ static TypeAnswer check_overload_signature(const TypeTable* table, TypeId left, 
         answer = type_same_canonical(table, type_unqualified(lp[i]), type_unqualified(rp[i]));
     }
     return answer;
+}
+
+static TypeAnswer check_overload_candidate_signature(const TypeTable* table, const CheckOverloadCandidate* left, const CheckOverloadCandidate* right)
+{
+    return (left->object_sizes != NULL) == (right->object_sizes != NULL) ? check_overload_signature(table, left->type, right->type) : TYPE_ANSWER_NO;
+}
+
+static bool check_overload_object_sizes_same(const CheckOverloadCandidate* left, const CheckOverloadCandidate* right)
+{
+    return left->object_size_count == right->object_size_count &&
+           (left->object_size_count == 0 || (left->object_sizes != NULL && right->object_sizes != NULL &&
+                                            memcmp(left->object_sizes, right->object_sizes, left->object_size_count) == 0));
 }
 
 static CheckOverloadResult check_overload_declare_chain(const TypeTable* table, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, const CheckOverloadCandidate* candidate, const CheckOverloadContext* context, const uint32_t* next, const uint8_t* checked, uint32_t unmarked)
@@ -163,7 +193,7 @@ static CheckOverloadResult check_overload_declare_chain(const TypeTable* table, 
             }
             else
             {
-                const TypeAnswer signature = check_overload_signature(table, candidate->type, prior->type);
+                const TypeAnswer signature = check_overload_candidate_signature(table, candidate, prior);
                 if (signature == TYPE_ANSWER_FULL)
                 {
                     result.status = CHECK_OVERLOAD_FULL;
@@ -179,7 +209,7 @@ static CheckOverloadResult check_overload_declare_chain(const TypeTable* table, 
                     {
                         result.status = returns == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_CONFLICT;
                     }
-                    else if (((candidate->flags ^ prior->flags) & BUSTER_CHECK_OVERLOADABLE) != 0)
+                    else if (((candidate->flags ^ prior->flags) & BUSTER_CHECK_OVERLOADABLE) != 0 || !check_overload_object_sizes_same(candidate, prior))
                     {
                         result.status = CHECK_OVERLOAD_ATTRIBUTE;
                     }
@@ -470,6 +500,10 @@ static uint32_t check_overload_better(const TypeTable* table, const CheckOverloa
                 }
             }
         }
+    }
+    if (order == 0 && (request->candidates[li].object_sizes != NULL) != (request->candidates[ri].object_sizes != NULL))
+    {
+        order = request->candidates[li].object_sizes != NULL ? 1 : 2;
     }
     return order & 3u;
 }
