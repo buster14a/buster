@@ -222,7 +222,7 @@ The `compatible` table is an exact-spelling list, not a family-prefix escape:
 
 - Inactive/default controls: `-ftrivial-auto-var-init=uninitialized`,
   `-fzero-call-used-regs=skip`, `-mcmodel=small`, `-fno-split-stack`,
-  `-fno-trapv`, `-fno-stack-clash-protection`, `-fno-stack-check`,
+  `-fno-trapv`, `-fno-stack-check`,
   `-fno-instrument-functions`, `-fno-profile-arcs`, `-fno-test-coverage`,
   `-fno-profile-generate`, `-fno-profile-instr-generate`, `-fno-lto`,
   `-fno-blocks`, `-fplt`, `-ffp-contract=off`, `-mfpmath=sse`, `-m64`,
@@ -235,7 +235,8 @@ The `compatible` table is an exact-spelling list, not a family-prefix escape:
   preference, not a promise of target-specific scheduling. The frame pointer's
   `-f[no-]omit-frame-pointer` and `-m[no-]omit-leaf-frame-pointer` are
   `handled` (#177): both tiers' frames take them ([the driver
-  guide](driver.md)).
+  guide](driver.md)), and so are `-f[no-]stack-clash-protection`, whose probes
+  both tiers' frames and allocations take.
 - Presentation and C-inapplicable controls: `-frtti`, `-fno-rtti`,
   `-fdwarf2-cfi-asm`, `-fno-dwarf2-cfi-asm`, `-fdiagnostics-color`,
   `-fno-diagnostics-color`, its exact `=always`, `=never`, `=auto` forms,

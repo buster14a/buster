@@ -716,7 +716,8 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
                 a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep && a->entry_count == b->entry_count &&
                 (a->entry_records == 0) == (b->entry_records == 0) && a->frame_saved == b->frame_saved && a->frame_size == b->frame_size &&
-                a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base;
+                a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base &&
+                a->frame_probe == b->frame_probe;
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && (a->count == 0 || memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0);
     same = same && (a->branch_count == 0 || memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0);
@@ -1325,9 +1326,14 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             // A quarter of the programs keep a frame pointer in every function, and a quarter in every one that calls
             // (#177: -fno-omit-frame-pointer, and -momit-leaf-frame-pointer's leaf rule), run against the same oracle.
             const uint8_t frame_pointer = program_seed % 4 == 2 ? BUSTER_TIER0_FRAME_POINTER_ALL : program_seed % 4 == 3 ? BUSTER_TIER0_FRAME_POINTER_NON_LEAF : BUSTER_TIER0_FRAME_POINTER_NONE;
+            // Half the programs, in each of those quarters, probe their frames and allocations (#177,
+            // -fstack-clash-protection): ALLOCA's loop runs natively against the same oracle, and its branches and the
+            // prologue's are both paths' twins.
+            const bool probe_stack = (program_seed / 4) % 2 == 1;
             for (uint32_t f = 0; ok && f < functions->count; f += 1)
             {
                 functions->functions[f].frame_pointer = frame_pointer;
+                functions->functions[f].probe_stack = probe_stack;
             }
             code->records = 0;
             code->entries = 0;

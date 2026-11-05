@@ -52,7 +52,11 @@ requirements. [Command index](README.md).
   (`predefines_frame_pointer`, #177: [the frame guide](../../docs/tier1-frame.md)'s
   "The frame pointer on request"); without it neither tier keeps one where its
   frame doesn't need one, at every `-O` (clang keeps it at `-O0`).
-  `-fstack-clash-protection` stays refused: Tier 0's frames don't probe. Either
+  `-fstack-clash-protection`, the last of it and `-fno-stack-clash-protection`,
+  makes both tiers' frames of a page or more and their dynamic allocations
+  touch each page below rsp before rsp passes it (`predefines_stack_clash`,
+  #177: the frame guide's "Stack-clash protection on request"); without it
+  neither probes, as clang's default. Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](../../docs/function-lanes.md)): by default as many as the bodies'
   tokens pay for, up to one per core of the CPUs the process may run on, and

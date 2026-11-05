@@ -134,10 +134,41 @@ static bool emitted_cfa_fits(uint32_t saved, uint32_t frame_size)
 }
 
 // The rows of a fixed descriptor at most: the prologue's (2 per push and rbp's pointing, 15), the epilogue's (2 per
-// pop, 16) and each tail's (its bracket and the epilogue's, 18).
+// pop, 16) and each tail's (its bracket and the epilogue's, 18); and a probed reservation's loop's two (#177,
+// emitted_tier0_probe_rows).
 static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 {
-    return 31 + 18 * (uint64_t)code->tail_count;
+    return 31 + 18 * (uint64_t)code->tail_count + 2;
+}
+
+// A probed reservation's loop without a frame pointer (#177, tier0_emit_probed_reservation): its CFA in r11 from the end
+// of r11's subtraction to the loop's bound, which no record of the loop changes, and back in rsp at the loop's exit,
+// where rsp equals it, as Tier 1's frame events have it (tier1_frame_emit.c). The fixed shape's rows (`rows`, `count` of
+// them, in order) then take the two at their places, before the reservation's own, with the pushes' before them; the
+// emission resolves such rows into a row program. Returns the rows' count.
+static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count, uint32_t room)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2);
+    uint32_t result = count;
+    if (loop && count + 2 <= room)
+    {
+        // The records: the pushes, then r11's mov and its subtraction (the bound), the loop's three and its jne (the exit).
+        const uint32_t bound = pushes + 2;
+        const uint32_t exit = pushes + BUSTER_TIER0_PROBE_LOOP_RECORDS;
+        const int32_t cfa = 8 + 8 * (int32_t)pushes + (int32_t)pages;
+        uint32_t at = 0;
+        while (at < count && rows[at].offset < bound)
+        {
+            at += 1;
+        }
+        memmove(rows + at + 2, rows + at, (count - at) * sizeof(EmissionFrameRow));
+        rows[at] = (EmissionFrameRow){ .offset = bound, .value = cfa, .reg = (uint16_t)emission_x86_registers[X86_REGISTER_R11], .kind = EMISSION_FRAME_CFA };
+        rows[at + 1] = (EmissionFrameRow){ .offset = exit, .value = cfa, .reg = BUSTER_EMISSION_X86_RSP, .kind = EMISSION_FRAME_CFA };
+        result = count + 2;
+    }
+    return loop && count + 2 > room ? UINT32_MAX : result;
 }
 
 // Tier 0's code as the emission takes it: its records, columns, references and labels as they are; with `sources` its
@@ -187,7 +218,8 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
             result.frame_status = !read ? EMITTED_FRAME_UNDESCRIBED : !emitted_cfa_fits(boundaries.saved, boundaries.frame_size) ? EMITTED_FRAME_LIMIT :
                                                                                                                                    EMITTED_FRAME_DESCRIBED;
         }
-        const uint32_t count = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
+        const uint32_t fixed = result.frame_status == EMITTED_FRAME_DESCRIBED ? unwind_function_rows(&boundaries, rows, (uint32_t)room) : 0;
+        const uint32_t count = fixed <= room ? emitted_tier0_probe_rows(code, rows, fixed, (uint32_t)room) : fixed;
         result.frame_status = count <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
         for (uint32_t i = 0; result.frame_status == EMITTED_FRAME_DESCRIBED && i < count; i += 1)
         {

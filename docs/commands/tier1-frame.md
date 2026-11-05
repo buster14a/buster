@@ -32,6 +32,10 @@ requirements. [Command index](README.md).
 - `-fno-omit-frame-pointer` and `-momit-leaf-frame-pointer` reach both tiers'
   frames (the frame guide's "The frame pointer on request"); `test-checker-driver`'s
   frame pointer fixture walks the rbp chain through them.
+- `-fstack-clash-protection` makes both tiers' frames and dynamic allocations
+  probe each page (the frame guide's "Stack-clash protection on request");
+  `test-checker-driver`'s stack-clash fixture faults on a guard page through
+  them where clang -O0's build does, and steps over it without the option.
 - `measure-frames [--functions] LABEL=FILE...` (`frame_measure.c`) reads each
   function's frame from an ELF object's or executable's code: its pushes and
   `sub rsp` along the control flow's paths (each instruction's depth its

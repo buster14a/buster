@@ -149,6 +149,10 @@ struct Tier1Frame
     bool realigned;
     bool red_zone;
     bool variadic;
+    // BUSTER_TIER1_FRAME_PROBE_STACK's (#177, -fstack-clash-protection): the prologue probes its allocation (the steps'
+    // PROBE_ALLOCATE and PROBE_ALIGN), and the instruction consumer the body's dynamic allocations
+    // (tier1_emit_cfg_probed_allocation).
+    bool probe_stack;
     int32_t variadic_offset;
     // The callee-saved registers the prologue pushes and each one's slot: from rbp with a frame pointer, otherwise from
     // the post-prologue rsp. RBP's own push with a frame pointer is its prologue/epilogue steps', not one of these.
@@ -782,6 +786,7 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
         .frame_pointer = requirements.frame_pointer,
         .realigned = requirements.realigned,
         .variadic = (request->flags & BUSTER_TIER1_FRAME_VARIADIC) != 0,
+        .probe_stack = (request->flags & BUSTER_TIER1_FRAME_PROBE_STACK) != 0,
         .saved_registers = request->used_callee_saved,
     };
     if (requirements.realigned && requirements.dynamic_stack)

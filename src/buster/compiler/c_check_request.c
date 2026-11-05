@@ -127,7 +127,7 @@ struct CheckRequestReceipt
 static bool check_request_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
-        "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
+        "-fstack-protector-explicit", "-fstack-check", "-pg", "-finstrument-functions",
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
         "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
         "-fpcc-struct-return", "-freg-struct-return", "-fshort-double", "-fsanitize-coverage",
@@ -476,6 +476,7 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     unit.target = pp->options.target;
     unit.predefines = &pp->options.predefines;
     unit.frame_pointer = predefines_frame_pointer(&pp->options.predefines);
+    unit.probe_stack = predefines_stack_clash(&pp->options.predefines);
     return unit;
 }
 
