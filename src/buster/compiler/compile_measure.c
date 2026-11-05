@@ -176,6 +176,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     // templates' shares of the evaluated nodes), which every run repeats, kept to print with the medians.
     char coverage_line[512] = { 0 };
     bool covered = false;
+    bool expression_work = false;
     for (uint32_t run = 0; failures == 0 && run < m->warmups + m->runs; run += 1)
     {
         const bool warmup = run < m->warmups;
@@ -194,6 +195,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             if (c == 1)
             {
                 row[BUSTER_MEASURE_OUTSIDE] = (double)one.wall_ns / 1e6 - row[BUSTER_MEASURE_SPAN];
+                expression_work = check_clock_walk_work(errors);
             }
             const char* coverage = errors != NULL && !covered ? strstr(errors, "lowering-nodes\t") : NULL;
             if (coverage != NULL)
@@ -304,7 +306,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             {
                 printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", "check-input.expressions", median[BUSTER_MEASURE_WALK], low[BUSTER_MEASURE_WALK],
                        high[BUSTER_MEASURE_WALK], span > 0 ? median[BUSTER_MEASURE_WALK] * 100.0 / span : 0.0);
-                check_clock_print_walk(stdout, median + BUSTER_MEASURE_PARTS, low + BUSTER_MEASURE_PARTS, high + BUSTER_MEASURE_PARTS, span);
+                check_clock_print_walk(stdout, median + BUSTER_MEASURE_PARTS, low + BUSTER_MEASURE_PARTS, high + BUSTER_MEASURE_PARTS, span, expression_work);
             }
         }
         printf("  %-22s %9.3f  (%.3f to %.3f)  the stages' medians add up to %.3f\n", "span", span, low[BUSTER_MEASURE_SPAN], high[BUSTER_MEASURE_SPAN], sum);

@@ -893,6 +893,9 @@ static void asm_test_code(AsmTest* test)
                              "bswapl %eax\nbswapq %r9\nfxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)", 16,
                        "inline code: processor-state instructions");
     // Symbols the source doesn't define: references by name, a call's preemptible, the records marked.
+    const AsmCode section_name = asm_test_code_pair(test, "leaq .text(%rip), %rax", 1, "inline code: section name stays a symbolic reference");
+    asm_test_check(test, section_name.reference_count == 1 && section_name.references[0].name.length == 5 &&
+                   memcmp(section_name.references[0].name.pointer, ".text", 5) == 0, "inline code: section reference name", 0);
     const AsmCode symbols = asm_test_code_pair(test, "call external\n\tmovq data+8(%rip), %rax\n\tmovl $sym+4, %eax", 3, "inline code: references");
     const bool marked = symbols.count == 3 && (symbols.records[0].form & BUSTER_X86_FORM_FIXUP) != 0 && (symbols.records[1].form & BUSTER_X86_FORM_FIXUP) != 0 &&
                         (symbols.records[2].form & BUSTER_X86_FORM_FIXUP) != 0;

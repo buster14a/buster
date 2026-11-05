@@ -77,6 +77,13 @@ struct AsmSymbol
     uint32_t location;
     SymbolId link;
     uint32_t section_index;
+    uint32_t group;
+    uint32_t group_flags;
+    // A mention outside a group declaration, and an expression use (including one cancelled by arithmetic).
+    bool ordinary;
+    bool referenced;
+    // An explicit binding, visibility, type or size directive named this symbol.
+    bool section_attributes;
     uint8_t flags;
     bool defined;
     bool absolute;
@@ -237,6 +244,9 @@ typedef struct AsmSection AsmSection;
 struct AsmSection
 {
     ObjectAtomSection object;
+    uint32_t group;
+    uint32_t name_symbol;
+    bool name_ambiguous;
     uint32_t size;
     AtomId atom;
     uint8_t class;
@@ -361,8 +371,11 @@ struct AsmParser
     AsmSection* sections;
     uint32_t* section_slots;
     uint32_t section_mask;
+    uint32_t* section_name_slots;
+    uint32_t section_name_mask;
     uint32_t section_count;
     uint32_t section_capacity;
+    uint32_t group_count;
     uint32_t section;
     // .pushsection/.popsection's stack, and the section .previous returns to.
     uint32_t* section_stack;
@@ -862,7 +875,8 @@ static uint32_t asm_fragment(AsmParser* parser, uint8_t kind, uint32_t location)
     return result;
 }
 
-static uint32_t asm_find_section(const AsmParser* parser, String8 name);
+static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group);
+static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name);
 static void asm_line_instruction(AsmParser* parser, uint32_t location);
 
 static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
@@ -890,7 +904,7 @@ static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t loca
             parser->symbols[result] = (AsmSymbol){.name = name, .location = location, .internal = internal};
             if (!internal && name.length != 0 && name.pointer[0] == '.')
             {
-                const uint32_t section = asm_find_section(parser, name);
+                const uint32_t section = asm_find_section(parser, name, 0);
                 parser->symbols[result].section_start = section != 0;
                 parser->symbols[result].section_index = section;
             }
@@ -900,9 +914,54 @@ static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t loca
     return result;
 }
 
+// Bind earlier unresolved section-name expressions when the first section of that name is created.
+static void asm_bind_forward_section(AsmParser* parser, String8 name, uint32_t section)
+{
+    uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->symbol_mask;
+    uint32_t id = parser->symbol_slots[slot];
+    while (id != 0 && (parser->symbols[id].internal || parser->symbols[id].name.length != name.length ||
+                       memcmp(parser->symbols[id].name.pointer, name.pointer, name.length) != 0))
+    {
+        slot = (slot + 1) & parser->symbol_mask;
+        id = parser->symbol_slots[slot];
+    }
+    if (id != 0)
+    {
+        AsmSymbol* symbol = &parser->symbols[id];
+        if ((symbol->defined && !symbol->absolute && !symbol->alias) || symbol->common != 0)
+        {
+            asm_fail(parser, symbol->location, "section name already defined as a symbol");
+        }
+        else if (symbol->section_attributes)
+        {
+            asm_fail(parser, symbol->location, "section symbol attributes are not supported");
+        }
+        else if (symbol->referenced && !symbol->defined && !symbol->alias && !symbol->section_start)
+        {
+            symbol->section_start = true;
+            symbol->section_index = section;
+            symbol->flags = BUSTER_LINK_SYMBOL_LOCAL;
+        }
+    }
+}
+
 static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
 {
-    return asm_symbol_scoped(parser, name, location, false);
+    const uint32_t result = asm_symbol_scoped(parser, name, location, false);
+    parser->symbols[result].ordinary = true;
+    return result;
+}
+
+// Section symbols have ELF attributes of their own, which the shared writer cannot currently preserve. Remember
+// directives before a section's declaration, too, so a later declaration cannot silently change their meaning.
+static void asm_section_attribute(AsmParser* parser, AsmSymbol* symbol, String8 name, uint32_t location)
+{
+    symbol->section_attributes = true;
+    const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+    if (section != 0)
+    {
+        asm_fail(parser, location, "section symbol attributes are not supported");
+    }
 }
 
 static uint32_t asm_numeric(AsmParser* parser, uint32_t digit, bool forward, bool definition, uint32_t location)
@@ -1277,7 +1336,34 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                         {
                             asm_fail(parser, token.start, "expected address register");
                         }
-                        const uint32_t symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
+                        const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, text) : asm_find_section(parser, text, 0);
+                        uint32_t symbol = 0;
+                        if (section != 0)
+                        {
+                            // GNU as versions disagree on which same-name section a bare section name denotes.
+                            // Do not silently pick a different relocation target than the assembler in use.
+                            if (parser->sections[section].name_ambiguous)
+                            {
+                                asm_fail(parser, token.start, "ambiguous section name in expression");
+                            }
+                            symbol = parser->sections[section].name_symbol;
+                            if (symbol == 0 && parser->symbol_count >= parser->capacity)
+                            {
+                                asm_fail(parser, token.start, "symbol capacity exhausted");
+                            }
+                            else if (symbol == 0)
+                            {
+                                symbol = parser->symbol_count++;
+                                parser->sections[section].name_symbol = symbol;
+                                parser->symbols[symbol] = (AsmSymbol){.name = text, .location = token.start, .section_index = section,
+                                                                      .section_start = true, .internal = true};
+                            }
+                        }
+                        else
+                        {
+                            symbol = text.length == 1 && text.pointer[0] == '.' ? asm_dot(parser, token.start) : asm_symbol(parser, text, token.start);
+                        }
+                        parser->symbols[symbol].referenced = true;
                         if (parser->at < end && parser->tokens[parser->at].kind == '@')
                         {
                             if (parser->at + 1 >= end || parser->tokens[parser->at + 1].kind != BUSTER_ASM_WORD)
@@ -2893,7 +2979,13 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
     }
     else
     {
-        const uint32_t id = asm_symbol(parser, asm_name_text(parser, parser->at++), location);
+        const String8 name = asm_name_text(parser, parser->at++);
+        const uint32_t id = asm_symbol(parser, name, location);
+        const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+        if (section != 0)
+        {
+            asm_fail(parser, location, "section name already defined as a symbol");
+        }
         asm_expect(parser, ',', "expected ',' after symbol");
         const __int128 size = asm_absolute(parser, end);
         __int128 alignment = 0;
@@ -3267,7 +3359,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 asm_fail(parser, location, "binding directive requires a symbol name");
                 break;
             }
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
+            const String8 name = asm_name_text(parser, parser->at++);
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            asm_section_attribute(parser, symbol, name, location);
             symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | binding;
             symbol->explicit_binding = true;
         } while (asm_take(parser, ','));
@@ -3284,7 +3378,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 asm_fail(parser, location, "visibility directive requires a symbol name");
                 break;
             }
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
+            const String8 name = asm_name_text(parser, parser->at++);
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            asm_section_attribute(parser, symbol, name, location);
             symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility;
         } while (asm_take(parser, ','));
     }
@@ -3296,7 +3392,17 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         }
         else
         {
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
+            const String8 name = asm_name_text(parser, parser->at++);
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            if (asm_is(parser, token, ".type") || asm_is(parser, token, ".size"))
+            {
+                asm_section_attribute(parser, symbol, name, location);
+            }
+            const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+            if (section != 0 && (asm_is(parser, token, ".equ") || asm_is(parser, token, ".equiv") || asm_is(parser, token, ".set")))
+            {
+                asm_fail(parser, location, "section name already defined as a symbol");
+            }
             asm_expect(parser, ',', "expected ',' after symbol");
             if (asm_is(parser, token, ".type"))
             {
@@ -3679,6 +3785,11 @@ static void asm_parse(AsmParser* parser)
             else
             {
                 id = asm_symbol(parser, name, location);
+                const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+                if (section != 0)
+                {
+                    asm_fail(parser, location, "section name already defined as a symbol");
+                }
                 if ((name.pointer[0] >= '0' && name.pointer[0] <= '9') || (name.length == 1 && name.pointer[0] == '.'))
                 {
                     asm_fail(parser, location, "invalid label (numeric labels are 0 through 9)");
@@ -4890,7 +5001,7 @@ static void asm_emit(AsmParser* parser)
         AsmSymbol* symbol = &parser->symbols[i];
         if (symbol->absolute)
         {
-            if (symbol->explicit_binding || symbol->has_size)
+            if (symbol->explicit_binding || symbol->has_size || symbol->group != 0)
             {
                 asm_fail(parser, symbol->location, "exported absolute symbols are not supported by the shared object writer");
             }
@@ -4917,6 +5028,13 @@ static void asm_emit(AsmParser* parser)
             }
             continue;
         }
+        // A group-only signature is a local NOTYPE symbol of its SHT_GROUP section, not an undefined Link symbol.
+        // An explicitly global or referenced signature, and any definition, retain their ordinary symbol instead.
+        if (symbol->group != 0 && !symbol->defined && !symbol->alias && symbol->common == 0 &&
+            (!symbol->ordinary || ((symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK && !symbol->used && !symbol->referenced)))
+        {
+            continue;
+        }
         if (symbol->alias || symbol->view != 0)
         {
             // No reference is to it any more (asm_resolve_aliases), or it is a view number (asm_resolve).
@@ -4933,7 +5051,7 @@ static void asm_emit(AsmParser* parser)
             symbol->link = link_add_symbol(link, name, target->atom, 0, 0, symbol->flags, BUSTER_LINK_SOURCE_PROGRAM);
             continue;
         }
-        if (!symbol->defined && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0)))
+        if (!symbol->defined && symbol->group == 0 && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0)))
         {
             asm_fail(parser, symbol->location, "undefined local symbol");
             continue;

@@ -1153,7 +1153,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
 // is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
 // overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
 // candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
-static void check_input_expressions_coded(CheckInputReader* reader)
+static void check_input_expressions_coded_range(CheckInputReader* reader, uint32_t begin, uint32_t stop)
 {
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
@@ -1168,7 +1168,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     // tokens the classes' actions leave, which it takes as the walk's visits.
     const uint32_t base = reader->output->graph.count;
     const uint64_t scratch_mark = reader->scratch->length;
-    reader->expression_declined = coded && reader->pp->options.expression_numbering ? arena_push_array(reader->scratch, (uint64_t)count + 1, 1, 1) : NULL;
+    reader->expression_declined = coded && begin == 0 && stop == count && reader->pp->options.expression_numbering ? arena_push_array(reader->scratch, (uint64_t)count + 1, 1, 1) : NULL;
     if (reader->expression_declined != NULL)
     {
         memset(reader->expression_declined, 0, (uint64_t)count + 1);
@@ -1183,10 +1183,10 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     // A coded unit's actions timed by class where the options ask (CheckInput.expression_class_ticks).
     const bool timed = coded && reader->pp->options.expression_timing;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
-    for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
+    for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint64_t start = __rdtsc();
-        const uint32_t end = count - first < BUSTER_CHECK_EXPRESSION_CHUNK ? count : first + BUSTER_CHECK_EXPRESSION_CHUNK;
+        const uint32_t end = stop - first < BUSTER_CHECK_EXPRESSION_CHUNK ? stop : first + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX, false);
         if (coded)
         {
@@ -1241,6 +1241,11 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     }
     reader->expression_declined = NULL;
     arena_pop_to(reader->scratch, scratch_mark);
+}
+
+static void check_input_expressions_coded(CheckInputReader* reader)
+{
+    check_input_expressions_coded_range(reader, 0, reader->parser->tokens.count);
 }
 
 // The tokens the coded walk acted at by their classes' own actions: CheckInput.expression_acted's sum over the classes.

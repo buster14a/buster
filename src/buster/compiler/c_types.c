@@ -1882,6 +1882,12 @@ static uint32_t type_find_or_add(TypeTable* table, uint8_t kind, uint8_t flags, 
     {
         TypeProperties properties;
         TypeError error = type_check_derivation(table, kind, flags, base, extent, parameters, &properties);
+        // A bounded, immutable view may find existing types, but must not grow the shared index before discovering
+        // that its type column is full. Deferred expression lanes use such views; their error word is lane-local.
+        if (error == TYPE_ERROR_NONE && table->types.count == table->types.capacity)
+        {
+            error = TYPE_ERROR_FULL;
+        }
         if (error == TYPE_ERROR_NONE && (uint64_t)table->index.count + 1 > 3ull * table->index.bucket_count)
         {
             if (type_index_grow(table))
