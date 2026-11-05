@@ -1765,6 +1765,15 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
     object's, or the entry's own. Before #1436's review this was missing, and a
     terminal helper's call under a pending vector
     (`v * (__builtin_trap(), w)`) broke Tier 0's rule on vector constants.
+
+    The tracked emitter's adjacency filler makes its constants the same way
+    (`check_lower_emit_tracked`, #1438's review). That filler is the
+    cancelling pair it writes where a pending value's class must precede its
+    consumer. Before, it wrote `CONST MASK`, which no mask entry takes, under
+    a pending mask (`__builtin_ia32_kandhi(k, (__builtin_trap(), k))`).
+    `test-checker-driver`'s dead vectors' program builds such masks and 64-
+    and 32-byte vectors for x86-64-v4 with `--verify`, under the trap and
+    under `__builtin_eh_return`.
     A unit that calls `__builtin_eh_return` tracks its typed stacks for this
     (`CheckLowerShared.terminal`). The pending values are evaluated before
     the offset and the handler, as clang evaluates them.

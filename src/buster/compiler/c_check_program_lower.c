@@ -1982,6 +1982,8 @@ static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
     }
 }
 
+static uint32_t check_lower_vector_constant(CheckLowerWriter* writer, const uint64_t words[8], uint32_t bytes);
+
 // check_lower_emit's entry in a function that tracks its stack (CheckLowerWriter.track: one with a statement expression,
 // or a program with a terminal helper or a __builtin_eh_return), out of line, as few functions do.
 static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
@@ -1994,16 +1996,29 @@ static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter*
     {
         // Tier0's operand-class column is the preceding entry's class. A void call or a spill of a different
         // stack class can interrupt that adjacency. This cancelling pair restores the contract without
-        // reading or changing the pending value, and works for narrow, floating and pointer classes alike.
-        if (writer->count + 2 >= writer->capacity || writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES)
+        // reading or changing the pending value, and works for narrow, floating and pointer classes alike. A
+        // vector's constant is a zero one of the pending vector's bytes, and a mask's, which no CONST has, an
+        // integer's zero converted to the pending mask's bytes (#1438's review), as check_lower_dead_value makes them.
+        const bool mask = top == BUSTER_TYPED_CLASS_MASK;
+        const uint32_t added = mask ? 3 : 2;
+        const uint8_t bytes = writer->stack_bytes[writer->stack_head];
+        const uint64_t zero[8] = { 0 };
+        const uint32_t constant = top == BUSTER_TYPED_CLASS_VECTOR ? check_lower_vector_constant(writer, zero, bytes) : 0;
+        if (writer->count + added >= writer->capacity || writer->count + added >= BUSTER_TIER0_MAX_ENTRIES)
         {
-            check_lower_resource(writer, writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
+            check_lower_resource(writer, writer->count + added >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
         }
         else
         {
             writer->kinds[writer->count] = BUSTER_TYPED_CONST;
-            writer->classes[writer->count] = top;
-            writer->values[writer->count++] = 0;
+            writer->classes[writer->count] = mask ? BUSTER_TYPED_CLASS_U64 : top;
+            writer->values[writer->count++] = constant;
+            if (mask)
+            {
+                writer->kinds[writer->count] = BUSTER_TYPED_CONVERT;
+                writer->classes[writer->count] = BUSTER_TYPED_CLASS_MASK;
+                writer->values[writer->count++] = bytes;
+            }
             writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
             writer->classes[writer->count] = top;
             writer->values[writer->count++] = 0;
@@ -6659,8 +6674,6 @@ static void check_lower_math(CheckLowerWriter* writer, uint32_t node, const Chec
         }
     }
 }
-
-static uint32_t check_lower_vector_constant(CheckLowerWriter* writer, const uint64_t words[8], uint32_t bytes);
 
 // A dead stand-in for tracked value `entry` (check_lower_terminate's and check_lower_eh_unwind's), as tasks: a constant of
 // its class, a vector's a zero constant of its bytes, and a mask's an integer's zero converted to its bytes, so that Tier

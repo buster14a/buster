@@ -1644,6 +1644,107 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
     }
 }
 
+// Dead stand-ins of vectors and masks (#1438's review): an expression's values held under a terminal helper's call
+// (__builtin_trap) and under __builtin_eh_return, of AVX-512 masks (kandhi's and a select's first operands, which the
+// lowering converts to masks before the trap) and of 64- and 32-byte vectors, where the tracked emitter's class
+// adjacency (check_lower_emit_tracked) and the expression's dead rest (check_lower_dead_value) take stand-ins of their
+// widths, a mask's by an integer's CONVERT, since no CONST has one. Built for x86-64-v4 by both paths at Tier 0 and with
+// --tier1, all with --verify, and, where the host has the features, printing what clang -O0's build prints (the eh_return
+// functions' results through a global: clang's epilogue pops the saved rax over a returned one).
+static void check_test_driver_dead_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <immintrin.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "static volatile int go;\n"
+                                  "static volatile long sink;\n"
+                                  "__attribute__((noinline)) __mmask16 kand_trap(__mmask16 k) { return go ? __builtin_ia32_kandhi(k, (__builtin_trap(), k)) : (__mmask16)(k + 1); }\n"
+                                  "__attribute__((noinline)) __m512i select_trap(__m512i a, __m512i b, __mmask16 k) { return go ? (__m512i)__builtin_ia32_selectd_512(k, (__v16si)a, (__builtin_trap(), (__v16si)b)) : b; }\n"
+                                  "__attribute__((noinline)) __m512i add_trap(__m512i a, __m512i b) { return go ? (__m512i)((__v16si)a + (__builtin_trap(), (__v16si)b)) : a; }\n"
+                                  "__attribute__((noinline)) __m256i add_trap256(__m256i a, __m256i b) { return go ? (__m256i)((__v8si)a + (__builtin_trap(), (__v8si)b)) : b; }\n"
+                                  "__attribute__((noinline)) void eh_mask(long offset, void* h, __mmask16 k) { __builtin_unwind_init(); sink = go ? (long)__builtin_ia32_kandhi(k, (__builtin_eh_return(offset, h), k)) : (long)k; }\n"
+                                  "__attribute__((noinline)) void eh_vector(long offset, void* h, __m512i a) { __builtin_unwind_init(); sink = go ? ((__v16si)a + (__builtin_eh_return(offset, h), (__v16si)a))[0] : ((__v16si)a)[1]; }\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    __m512i a = _mm512_set1_epi32(3), b = _mm512_set1_epi32(4);\n"
+                                  "    __m256i c = _mm256_set1_epi32(5);\n"
+                                  "    printf(\"%d %d %d %d\\n\", (int)kand_trap(6), _mm512_reduce_add_epi32(select_trap(a, b, 7)), _mm512_reduce_add_epi32(add_trap(a, b)), ((__v8si)add_trap256(c, c))[0]);\n"
+                                  "    eh_mask(0, 0, 9);\n"
+                                  "    long m = sink;\n"
+                                  "    eh_vector(0, 0, a);\n"
+                                  "    printf(\"%ld %ld\\n\", m, sink);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[5][256];
+    snprintf(source, sizeof(source), "%s/dead_vectors.c", directory);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        snprintf(outputs[k], sizeof(outputs[k]), "%s/dead_vectors-%u", directory, k);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the dead vectors' program written");
+    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) | BUSTER_X86_FEATURE(AVX512DQ) |
+                              BUSTER_X86_FEATURE(AVX512VL);
+    const bool native = (x86_target_native().features & required) == required;
+    char* text = NULL;
+    static char expected[1024];
+    bool referenced = false;
+    if (written && native)
+    {
+        char* const reference[] = { (char*)clang, "-O0", "-march=x86-64-v4", "-o", outputs[4], source, NULL };
+        const int built = check_test_driver_spawn(reference, &text);
+        free(text);
+        text = NULL;
+        referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+        check_test_expect(test, referenced && strlen(expected) > 10, "clang's build of the dead vectors' program runs");
+    }
+    static const char* const names[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
+    for (uint32_t mode = 0; written && mode < 4; mode += 1)
+    {
+        char* arguments[16] = { (char*)executable, "-march=x86-64-v4" };
+        uint32_t count = 2;
+        if ((mode & 1) != 0)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (mode >= 2)
+        {
+            arguments[count++] = "--tier1";
+        }
+        arguments[count++] = "--verify";
+        arguments[count++] = "-o";
+        arguments[count++] = outputs[mode];
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        char description[256];
+        snprintf(description, sizeof(description), "the dead vectors' and masks' stand-ins build and verify (%s)", names[mode]);
+        check_test_expect(test, status == 0, description);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        text = NULL;
+        static char captured[1024];
+        const bool ran = status == 0 && referenced && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
+        if (referenced)
+        {
+            snprintf(description, sizeof(description), "the dead vectors' program prints what clang's build does (%s)", names[mode]);
+            check_test_expect(test, ran && strcmp(captured, expected) == 0, description);
+        }
+    }
+    if (written && !native)
+    {
+        printf("  dead vectors: native execution skipped (the host lacks x86-64-v4's AVX-512 features); the program builds\n");
+    }
+    unlink(source);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        unlink(outputs[k]);
+    }
+}
+
 // The unwinder in the direct path (#489): a program whose own code walks its stack with _Unwind_Backtrace, which GCC's
 // driver takes from libgcc_s.so.1, as needed, and so must the direct path: by both paths, it must link without a
 // diagnostic into an executable that names libgcc_s.so.1 (its DT_NEEDED entry and version need), the same bytes by
@@ -7920,6 +8021,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_eh_return(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_dead_vectors(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
