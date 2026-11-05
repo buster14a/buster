@@ -5,43 +5,21 @@ on:
 permissions:
   contents: read
 jobs:
-  oracle:
+  diagnostics-debug:
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '1'
+      BUSTER_HOST_SSP: off
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Install verified pinned Clang only
-        run: |
-          llvm="$RUNNER_TEMP/llvm-23.1.4"
-          curl --fail --location --retry 5 --max-time 240 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.zst --output "$RUNNER_TEMP/llvm.tar.zst"
-          printf '%s  %s\n' efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378 "$RUNNER_TEMP/llvm.tar.zst" | sha256sum --check
-          mkdir -p "$llvm"
-          tar -I 'zstd -d --long=30' -xf "$RUNNER_TEMP/llvm.tar.zst" -C "$llvm" --strip-components=1 --no-same-owner --wildcards 'LLVM-23.1.4-Linux-X64/bin/clang' 'LLVM-23.1.4-Linux-X64/bin/clang-23' 'LLVM-23.1.4-Linux-X64/lib/clang/23/*'
-          curl --fail --location --retry 5 --max-time 120 https://raw.githubusercontent.com/llvm/llvm-project/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/LICENSE.TXT --output "$llvm/LICENSE.TXT"
-          printf '%s  %s\n' 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee "$llvm/LICENSE.TXT" | sha256sum --check
-          test "$("$llvm/bin/clang" -dumpversion)" = 23.1.4
-          printf '%s\n' "$llvm/bin" >> "$GITHUB_PATH"
-      - name: Record diagnostic oracle
-        run: |
-          mkdir -p build/issue1447-continuation
-          for file in tools/issue1447-probes/*/*.c; do
-            for standard in gnu17 gnu23; do
-              printf '\nPROBE %s %s\n' "$file" "$standard"
-              clang -std="$standard" -fsyntax-only -ferror-limit=0 -fno-color-diagnostics -fno-caret-diagnostics -fdiagnostics-show-option "$file" || true
-            done
-          done
-          for file in tools/issue1447-probes/noderef-probes/{placement,propagation}.c; do
-            printf '\nAST %s\n' "$file"
-            clang -std=gnu17 -fsyntax-only -Xclang -ast-dump -fno-color-diagnostics -fno-caret-diagnostics "$file" || true
-            printf '\nEXPLICIT WNODEREF %s\n' "$file"
-            clang -std=gnu17 -fsyntax-only -Wnoderef -fno-caret-diagnostics "$file" || true
-          done
-          for file in loader_sections selectany; do
-            for policy in -fcommon -fno-common; do
-              printf '\nOBJECT %s %s\n' "$file" "$policy"
-              clang -std=gnu23 "$policy" -c "tools/issue1447-probes/attribute-completion-probes/$file.c" -o "build/issue1447-continuation/$file.o"
-              readelf -SWgsr "build/issue1447-continuation/$file.o"
-            done
-          done
+          ref: fcab74faf28d9e65b6eff6d121615d1111364b85
+      - name: Install pinned Clang and debug tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build exact diagnostic snapshot with debug information
+        run: ./build.sh --config Release
+      - name: Capture checker failure
+        run: gdb -batch -ex run -ex 'thread apply all bt full' --args ./build/compiler test-checker --seed 133 --part 1/4
