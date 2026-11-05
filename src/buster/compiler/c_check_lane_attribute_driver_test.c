@@ -44,6 +44,10 @@ static void check_test_driver_lane_attributes(CheckTest* test, const char* clang
         { "void k(void) { extern void h(void) __attribute__((hot)); }\nvoid h(void);\n" BUSTER_LANE_PADDING
           "void m(void) { void h(void) __attribute__((cold)); }\n", false },
         { "void k(void) { extern void h(void) __attribute__((hot)); }\n" BUSTER_LANE_PADDING "void h(void) __attribute__((cold));\n", false },
+        // The same, after an earlier late attribute made the masks, which then take the block's first declaration as it
+        // binds (#1446's second review).
+        { "void f(void) {}\nvoid f(void) __attribute__((cold));\nvoid k(void) { extern void g(void) __attribute__((hot)); }\n" BUSTER_LANE_PADDING
+          "void g(void) {}\nvoid g(void) __attribute__((hot));\n", false },
         // A redeclaration without such attributes stays on its lane.
         { "void h(void) __attribute__((hot));\n" BUSTER_LANE_PADDING "void k(void) { void h(void); h(); }\n" BUSTER_LANE_TAIL, false },
     };

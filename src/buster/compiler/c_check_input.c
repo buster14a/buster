@@ -7477,9 +7477,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 reader->declaration_scope_ends[token] = reader->scope_ends[reader->scope_count - 1];
             }
         }
-        // (A file-scope declaration's attributes alone are a definition's, which a later declaration's are checked against:
-        // a block's don't reach it, check_input_attribute_late.)
-        if (!reader->lane && reader->scope_count == 0 && reader->late_attribute_masks != NULL && reader->objects[token] != 0 &&
+        // (A file-scope declaration's attributes are a definition's, which a later declaration's are checked against, and a
+        // block's first declaration's, which a later file-scope one links to; another block's don't reach it: the same
+        // effective scope as declaration_scope_ends', check_input_attribute_late.)
+        if (!reader->lane && (reader->scope_count == 0 || !linked_visible) && reader->late_attribute_masks != NULL && reader->objects[token] != 0 &&
             reader->output->function_flags != NULL)
         {
             reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, token), reader->output->function_flags[token]);
