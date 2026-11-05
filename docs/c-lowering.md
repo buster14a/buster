@@ -221,9 +221,19 @@ definition. Its flags and edges:
   `if (BUSTER_VECTOR_PATH(vector))` in a baseline build no longer emits the
   AVX-512 kernel it calls. A variable-length array's address is read only after
   its allocation, which the lowering checks at each read: one in an operand that
-  a constant condition never evaluates is never allocated, nor read. A constant
-  `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
-  `FindCaseStatementsForValue`) are still written and selected.
+  a constant condition never evaluates is never allocated, nor read. Constant
+  `switch` statements use the same dropped ranges (#1192), before reference
+  selection: a foldable selector keeps the matching case or default and its
+  fallthrough statements through the first direct break, or nothing without a
+  match/default. The nonrecursive collector in `c_check_program_switch.c`
+  retains the whole switch when skipped labels or declarations, an escaping
+  inner break, a partially entered scope's fallthrough declarations, or a case
+  range encountered before the reverse-order match prevent Clang's
+  `FindCaseStatementsForValue` shortcut. Nonconstant/effectful selectors and
+  the outside-constant-context refusals (`__builtin_constant_p(n)`, `(n,1)`)
+  keep normal dispatch. Complete retained blocks keep their scope exits;
+  terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
+  Dropped regions and block-scope statics introduce no selection roots.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
   section, not a member, so no edge reaches the members nothing else does — a
   static registry entry first — but GNU ld's bounds still cover them. After

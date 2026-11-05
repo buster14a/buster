@@ -411,7 +411,8 @@ struct Tier0Operation
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
 // size rounded up to 16 and, aligned past 16, its alignment less 16 (the most its place may move by), so that every frame
-// displacement fits a disp32. An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
+// displacement can fit a disp32; layout still checks the complete allocation and each displacement before emission.
+// An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
 // most 2^30: past 16 bytes, the function's frame is realigned to the most any of them needs (Tier0Frame.alignment_log2).
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
@@ -420,7 +421,8 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_MASK_DEPTH 240
 // The ABI row's bound is independent of the number of values live across nested calls.
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 239
-#define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
+// The largest multiple of the validation rounding unit below INT32_MAX, not an unrelated 1 GB object cap (#1149).
+#define BUSTER_TIER0_MAX_OBJECT_BYTES ((1u << 31) - 16)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
 // The alignment an ordinary frame keeps (rsp's at every call, as the convention has it), past which it is realigned.
 #define BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 4

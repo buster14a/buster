@@ -128,6 +128,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         const char* third;
     } cases[] = {
         { "#pragma buster_unknown\nint main(void){return 0;}\n", NULL, NULL, NULL },
+        { "#pragma GCC target(\"avx2\")\n#pragma GCC push_options\n#pragma GCC pop_options\n#pragma GCC reset_options\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
+        { "#pragma GCC target(\"avx2\")\nint main(void){return 0;}\n", "-Werror=unknown-pragmas", NULL, NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wunknown-pragmas", "-Werror", NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Werror=unknown-pragmas", "-w", NULL },
@@ -222,9 +224,9 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        { "#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL, NULL },
+        { "#pragma redefine_extname old new trailing\nint old;\n", "redefine_extname", NULL, NULL, NULL },
         { "#pragma scalar_storage_order big-endian\nint object;\n", "scalar_storage_order", NULL, NULL, NULL },
-        { "#pragma GCC target(\"avx2\")\nint object;\n", "GCC target", NULL, NULL, NULL },
+        { "#pragma weak missing\nint object;\n", "weak", NULL, NULL, NULL },
         { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
         { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },

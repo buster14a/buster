@@ -882,9 +882,127 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     arena_pop_to(&test->input, 0);
 }
 
+// The producer's row owners are assertions, not evidence. Corrupt them without
+// touching the allocation, and corrupt the predecessor's store without changing
+// its metadata: both must be refused even though the register assertion remains.
+static void tier1_code_certificate_carry(Tier1EmitTest* test, bool vector, bool pointer, bool aggregate)
+{
+    Tier1CallFixture fixture = { 0 };
+    const bool created = tier1_call_carry_fixture(test, &fixture, TIER1_CALL_CARRY);
+    // The first call takes a two-eightbyte aggregate through its third parameter's pointer. The ABI metadata is
+    // borrowed for this fixture's lifetime. The second call and the fourth parameter's carried row are unchanged.
+    IrPassed passed = {
+        .location = {
+            .registers = { BUSTER_ABI_RDI, BUSTER_ABI_RSI },
+            .kind = BUSTER_ABI_LOCATION_REGISTERS,
+        },
+        .size = 16,
+    };
+    IrAbiCall abi = {
+        .call = {
+            .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+            .integer_registers = 2,
+            .result = {
+                .kind = BUSTER_ABI_RESULT_REGISTERS,
+                .part_bytes = 8,
+                .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE },
+            },
+        },
+    };
+    if (created && aggregate)
+    {
+        fixture.function.type[2] = IR_PTR;
+        fixture.function.parameter_types[2] = IR_PTR;
+        fixture.function.call_types[0] = IR_PTR;
+        fixture.function.calls[0].abi = 1;
+        fixture.function.abi_calls = &abi;
+        fixture.function.abi_call_count = 1;
+        fixture.function.passed = &passed;
+        fixture.function.passed_count = 1;
+    }
+    const IrDominance dominance = {
+        .enter = fixture.dominance_enter,
+        .leave = fixture.dominance_leave,
+        .block_count = created ? fixture.function.block_count : 0,
+    };
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = created && tier1_select_plan(&fixture.function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const Tier1EmitOptions options = {
+        .register_mask = tier1_liveness_register_mask(),
+        .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+        .vector = vector,
+        .certify = true,
+    };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.entry_rows != 0;
+    tier1_emit_test_expect(test, certified, "a carried call-save row and its register are independently certified");
+    if (certified && aggregate)
+    {
+        // Inspect the published certificate, rather than only the ABI input, to ensure the aggregate's parts actually
+        // entered the same certificate as the carried row. The reserved parameter/result pseudo-values are separate.
+        const uint64_t saved = test->output.length;
+        Tier1CertProgram program = { 0 };
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted(&plan, &emitted, &test->output, &test->scratch, &program, &stats);
+        const uint64_t reserved = (uint64_t)emitted.cfg_input.value_count + BUSTER_CERT_EMITTED_PSEUDO + fixture.function.parameter_count +
+                                  2 * ((uint64_t)fixture.function.parameter_count + 1) + 2;
+        tier1_emit_test_expect(test, reason == TIER1_CERT_EMITTED_OK && program.value_count > reserved, "the carried-row certificate includes by-value aggregate parts");
+        arena_pop_to(&test->output, saved);
+    }
+    uint32_t rows = 0;
+    uint32_t stores = 0;
+    for (uint32_t b = 1; certified && b < emitted.cfg_input.block_count; b += 1)
+    {
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            uint32_t* const row = emitted.entry_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg;
+            const uint32_t owner = *row;
+            if (owner != BUSTER_IR_NONE)
+            {
+                rows += 1;
+                *row = owner == 3 ? 2 : 3;
+                tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "a carried row naming another parameter is refused");
+                *row = fixture.function.instruction_count;
+                tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "a carried row's out-of-range owner is refused before indexing");
+                *row = owner;
+                const X86Instruction save = tier1_emit_call_save(&emitted, reg, false);
+                for (uint32_t r = 0; r < emitted.block_records[b]; r += 1)
+                {
+                    const X86Instruction record = emitted.code.records[r];
+                    if (record.form == save.form && record.mode == save.mode && record.rm == save.rm && record.displacement == save.displacement)
+                    {
+                        X86Instruction wrong = record;
+                        wrong.reg = (uint8_t)(record.reg == X86_REGISTER_RAX ? X86_REGISTER_RCX : X86_REGISTER_RAX);
+                        const bool refused = tier1_code_certificate_refuses(test, &plan, &emitted, r, wrong, UINT32_MAX);
+                        stores += 1;
+                        tier1_emit_test_expect(test, refused, "a carried row whose predecessor stored another register is refused");
+                    }
+                }
+            }
+        }
+    }
+    if (certified)
+    {
+        uint32_t* const saved = emitted.entry_rows;
+        emitted.entry_rows = 0;
+        tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "omitting carried-row assertions cannot certify a later reload");
+        emitted.entry_rows = saved;
+    }
+    tier1_emit_test_expect(test, rows != 0 && stores != 0, "carried-row mutants cover actual saved rows, not an empty metadata table");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
+    for (uint32_t variant = 0; variant < 8; variant += 1)
+    {
+        tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0);
+    }
     for (uint32_t variant = 0; variant < 8; variant += 1)
     {
         tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0, &counts);

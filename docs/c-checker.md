@@ -6071,7 +6071,41 @@ arguments against the function. The checker now gives these as clang does.
   begin such a declaration are clang's parser's error, "misplaced attributes;
   expected attributes here" just after a file-scope tag declaration's keyword,
   else "an attribute list cannot appear here", with "declaration does not
-  declare anything" at the specifiers after them.
+  declare anything" at the specifiers after them. Specifiers without a type
+  specifier (`const;`, `static;`, `_Alignas(8);`, a calling convention's
+  keyword, `_Nonnull`) are int's, in any language, without a word, and
+  declare nothing; a list whose specifiers are all such keywords and GNU
+  attributes is a declaration, not a null statement's attributes. Its errors
+  come first, in clang's order whatever their places', then its warnings:
+  "restrict requires a pointer or reference" at its first restrict, whatever
+  the type, "'inline' can only appear on functions", then "'_Noreturn' can
+  only appear on functions".
+- **Declarations after a missing `;`** (`check_prefix_resume`,
+  `c_check_prefix.c`). Where a declaration's `;` is missing before a
+  declaration specifier, clang's `ParseDeclGroup` goes on as if it were
+  there, so `int x _Alignas(3);` declares `x`, and `_Alignas(3);` is a
+  declaration that declares nothing (-Wmissing-declarations). The parser
+  marks such an error (`ParseDiagnostic.resumed`, `docs/c-parser.md`), and a
+  failed parse's checking takes a view of the unit with a synthetic `;`
+  before each such specifier, parsed again: in rounds, each for the missing
+  `;`s before the parse's first other error, as a body's after its first
+  show up only once the body is parsed past it. The rounds go on until one
+  finds none (a body with k of them takes k), within a budget of 256 times
+  the unit's tokens parsed in all, past which the last view stands with its
+  errors; the two views' columns take turns, so the memory is the unit's
+  size whatever the rounds, and the errors of all rounds are merged in order
+  by a stable merge sort (50,000 bodies of two each: 0.66 s, clang's
+  output). A view without errors is
+  checked whole, as a prefix is (no translation unit's end); one with errors
+  takes the repair and prefix views of its own first error. The view's
+  tokens are its own (the synthetic `;`s take the next token's place), and
+  the parse's errors printed are each round's missing `;`s' and the last
+  view's, at the original's tokens: so a body's second missing `;`, which the
+  parser's recovery skips with the rest of the body, is clang's error too. A
+  pragma that clang's parser reads as a token between the declarator and the
+  specifier (`#pragma pack`, `weak`, `GCC visibility`: any but those its
+  preprocessor takes alone, such as `message` and the diagnostic ones) stops
+  the recovery, as it does clang's.
 - **Alignment specifiers** (`check_input_alignas_error`, C11 6.7.5). On a
   parameter, a `register` variable or a bit-field, "'_Alignas' attribute cannot
   be applied to a function parameter" (and the others); on a typedef or a
@@ -6093,6 +6127,32 @@ arguments against the function. The checker now gives these as clang does.
   declarations' (`check_input_attribute_merge_exclusions`) after the
   attributes it drops after the definition, as clang's `mergeDeclAttributes`
   does.
+- **Block-scope redeclarations** (`check_input_declaration_visible`). Of an
+  entity's earlier declarations, a redeclaration's attributes are checked
+  against those clang's lookup finds: the file scope's and an enclosing
+  block's, not another body's nor a closed block's (and every earlier one
+  where none is visible, as clang's `findLocallyScopedExternCDecl` finds a
+  closed block's extern). A block's attributes reach the definition's, which
+  the attributes after it are checked against, only from a block's first
+  declaration of its entity, which a later file-scope declaration that sees
+  none links to and inherits from; the late masks take file scope's and
+  those. Each attributed block-scope declaration with linkage that has a
+  visible previous one records its scope's end
+  (`CheckInputReader.declaration_scope_ends`, allocated at the first); the
+  others count as file scope's.
+- **Bodies on lanes** (`check_input_attribute_late`). A body read on a lane
+  can't read its entity's other declarations' attributes, which other lanes'
+  columns hold, nor publish its own to later ones. A redeclaration there that
+  writes an attribute clang drops after a definition
+  (`check_input_attribute_after_kind`) or one of a mutual exclusion sends the
+  unit to source order ("a body's redeclaration has attributes its entity's
+  other declarations decide"), as the late kinds' did already; one it inherits
+  (naked) doesn't. Measured in a cloud container with `-c --deferred-bodies
+  --lanes 4 --time-stages`: none of the 220 c-testsuite units it reports on
+  (45 merged on lanes, 175 too small for them) gives this reason, nor does a
+  unit of 19 glibc headers with their extern inline functions (merged). So
+  source order costs nothing measured there, where publishing the attribute
+  state across lanes would take a merge of its own.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers
     (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
@@ -6132,11 +6192,14 @@ arguments against the function. The checker now gives these as clang does.
     made (nor `-Wreturn-type` but for a function returning an aggregate).
   - `annotate`'s arguments after its string must be constant expressions,
     clang's error with its evaluator's notes otherwise; they are taken here.
-  - `int x _Alignas(3);` stops at clang's "expected ';' after top level
-    declarator", where clang's recovery also reads `_Alignas(3);` as a
-    declaration that declares nothing (-Wmissing-declarations). That is the
-    parser's recovery (`docs/c-parser.md`), which keeps no declaration after
-    the error for the reader to warn of.
+  - After a missing `;`'s recovery, as everywhere, a declaration's checker
+    error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
+    stops at "requested alignment is not a power of 2", where clang goes on
+    to the second declaration's errors); a unit's later parse errors are
+    printed. A pragma that clang's recovery skips (`GCC visibility push`) is
+    still applied. `-Wduplicate-decl-specifier` (`inline inline;`) isn't
+    made, and `__private_extern__` is refused by name, with or without a
+    declarator.
   - A function type's attribute's warnings come in clang's order
     (`check_input_attribute_type_warnings`) but for three places. A parameter's
     attributes' warnings, which clang gives as it reads the parameter list,
@@ -6153,10 +6216,8 @@ arguments against the function. The checker now gives these as clang does.
     (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
     clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
     that print such a type differ the same way.
-  - A body checked on a lane doesn't warn of attributes after a definition, nor
-    check mutual exclusions across redeclarations: both need the earlier
-    declarations' attributes, which a lane doesn't publish
-    (`check_input_lane_refuse`'s linked state).
+  - A block-scope declaration whose attributes are set after it binds (by a
+    constant's job) records no scope, and is taken as a file scope's.
   - A supported attribute's argument count is checked after its subject, as
     clang's (`int x __attribute__((format(printf)));` is the subject's
     warning alone), and after the errors clang's parser gives of its
@@ -6196,6 +6257,15 @@ arguments against the function. The checker now gives these as clang does.
   - an attribute's count after its subject and its arguments' parser
     errors, with or without arguments, and a declarator's type's convention
     warnings before the declaration's attributes'.
+  - declarations after a missing `;` and declarations of no declarator
+    without a type specifier, with a function specifier or with restrict,
+    under gnu17 and gnu23 and the warnings' options
+    (`check_test_driver_resumed_declarations`,
+    `c_check_resume_driver_test.c`).
+  - bodies' redeclarations with attributes after a definition and of mutual
+    exclusions, against the declarations each sees, by both paths and with the
+    bodies on 1, 2 and 4 lanes (`check_test_driver_lane_attributes`,
+    `c_check_lane_attribute_driver_test.c`).
 
   `test-checker` checks the exclusions table's order and pairs, and that the
   facts tell C's attributes from another language's.
@@ -6209,8 +6279,10 @@ Unknown `STDC` directives warn by default. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.
-GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
-`optimize` use the unknown-pragma policy, as in the Clang oracle.
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`,
+`reset_options`, `target`, and `optimize` use the unknown-pragma policy, as in
+the pinned Clang 23.1.4 oracle. In particular, accepting `GCC target("avx2")`
+does **not** enable AVX2; use the implemented per-function `target` attribute.
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
@@ -6221,10 +6293,29 @@ reading source (the instrumentation boundary in the introduction), while a
 non-emitting action refuses each `#pragma omp` directive through the checker. A
 subsequent `-fno-openmp` restores the ignore behavior for both.
 
-Known unsupported semantic effects remain hard, named errors, including
-`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
-`align=packed`. Warning suppression cannot approve these directives. Already
-supported directives keep their original handlers and syntax validation.
+Literal file-scope `#pragma weak name` and `#pragma redefine_extname old new`
+are implemented for externally linked functions and objects, before their first
+use or non-tentative definition. They attach the existing weak-binding and
+assembler-label metadata to the canonical declaration, preserving redeclaration
+identity, object emission and relocations. A prototype may precede the pragma;
+a weak directive may follow a tentative definition. Repeated renamings keep the
+first mapping. An unused external-name mapping has no effect.
+
+This is a bounded subset of #1135, not full pragma compatibility. Weak aliases
+(`weak a = b`), unmatched weak names, internal-linkage subjects, macro operands,
+nested/interrupted placement, trailing tokens, conflicting assembler labels,
+and changes after a use/definition still produce a named unsupported-semantic
+error. Clang expands both directives' operands; retained macro spellings must
+not accidentally alter a different symbol. Late changes also depend on Clang's
+code-emission timing, so they are refused rather than applied retroactively.
+With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
+deferred body is conservatively refused because its binding was not checked;
+unrelated deferred bodies do not suppress weak or renamed symbol metadata.
+These refusal boundaries remain errors under `-w` and diagnostic suppression.
+
+Other unsupported semantic effects, including `scalar_storage_order` and
+layout-changing `align=packed`, remain hard, named errors. Already supported
+directives keep their original handlers and syntax validation.
 
 Directive warnings are sparse lexical facts with independent preprocessing
 source coordinates. Command-line policy, source-ordered diagnostic push/pop,
