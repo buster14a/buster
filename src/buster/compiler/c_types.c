@@ -620,6 +620,9 @@ struct TypeNames
     const TypeId* alias_types;
     const String8* alias_names;
     uint32_t alias_count;
+    // Optional, per alias: the qualifiers its name covers where it matches a level unqualified, which then print only
+    // the level's others (__builtin_dump_struct's `volatile CI` of a const int's CI, #148); null prints them all.
+    const uint32_t* alias_covered;
     const String8* anonymous;
     uint32_t anonymous_count;
 };
@@ -5738,9 +5741,10 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         {
             // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
-            if (whole == UINT32_MAX && type_qualifiers(type) != 0)
+            const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] : 0;
+            if (whole == UINT32_MAX && (type_qualifiers(type) & ~covered) != 0)
             {
-                type_print_qualifiers(printer, type_qualifiers(type));
+                type_print_qualifiers(printer, type_qualifiers(type) & ~covered);
                 type_print_text(printer, " ");
             }
             const String8 alias = printer->names->alias_names[sugar];

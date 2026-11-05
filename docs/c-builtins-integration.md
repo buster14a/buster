@@ -1900,7 +1900,11 @@ record dump, as `BuiltinDumpStruct` checks it.
   in its record's body (`check_lower_dump_member`), from the token past the
   body's `}` (`CheckGraph.tag_completions`, which the deferred reader's merge
   maps for records its lanes complete), and its typedef specifier
-  (`check_input_typedef_spelling`) gives the alias `type_print` prints. An
+  (`check_input_typedef_spelling`) gives the alias `type_print` prints. A
+  typedef's name covers its own qualifiers but those its declaration writes
+  with it, which print before it as clang prints them (`CI`, `const CI`,
+  `volatile CI` of a `const int`'s `CI`: `TypeNames.alias_covered`,
+  `check_lower_dump_alias`). An
   unnamed record's canonical name has its scope, as clang's
   `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
   it, whatever declarator it is part of (an array's, a pointer's, a
@@ -1908,8 +1912,9 @@ record dump, as `BuiltinDumpStruct` checks it.
   function whose body holds the outermost, with its parameters' types where
   it has a written prototype, each as its declaration spells it
   (`check_lower_dump_parameter`: its declarator's declared type, qualifiers
-  kept, with every typedef its tokens name; an array's or a function's
-  adjusted type, which keeps none) (`struct main()::L::(unnamed)`,
+  kept, the first identifier outside a record body its specifiers define that
+  declares itself, with every typedef its tokens name; an array's or a
+  function's adjusted type, which keeps none) (`struct main()::L::(unnamed)`,
   `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
   function has none.
 - **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool

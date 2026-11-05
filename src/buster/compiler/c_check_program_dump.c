@@ -160,6 +160,57 @@ static uint32_t check_lower_dump_spelling(const CheckProgram* program, uint32_t 
     return known ? check_input_typedef_spelling(input, program->parser, token) : 0;
 }
 
+// The token of the typedef name that declaration token `token`'s type specifier spells, as check_input_typedef_spelling
+// finds it (its declaration is that one's answer), or 0.
+static uint32_t check_lower_dump_typedef_use(const CheckProgram* program, uint32_t token)
+{
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const uint32_t spelling = check_lower_dump_spelling(program, token);
+    uint32_t result = 0;
+    for (uint32_t t = token; spelling != 0 && result == 0 && t-- > 0;)
+    {
+        result = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && input->declarations[t] == spelling ? t : 0;
+    }
+    return result;
+}
+
+// The alias of a typedef named at `use`, declared at `declaration` (TypeNames.alias_types, alias_covered): its type,
+// unqualified, matched under its own qualifiers and any the declaration adds; its name covers its own qualifiers but
+// those the declaration writes with it (`const CI`, `CI const`, `volatile CI` of a const int's CI), which clang prints
+// before the name as the declaration writes them.
+// A qualifier keyword's qualifier (const, volatile, restrict and their underscored forms), or 0.
+static uint32_t check_lower_dump_qualifier(const CheckProgram* program, uint32_t token)
+{
+    const Parser* parser = program->parser;
+    const uint32_t identifier = parser->tokens.kinds[token] == PARSE_KIND_QUALIFIER ? parser->tokens.names[token] : 0;
+    const char* spelling = identifier != 0 && identifier < program->identifiers->count ? (const char*)intern_bytes(program->identifiers, identifier) : "";
+    return strstr(spelling, "const") != NULL ? BUSTER_TYPE_CONST : strstr(spelling, "volatile") != NULL ? BUSTER_TYPE_VOLATILE :
+           strstr(spelling, "restrict") != NULL ? BUSTER_TYPE_RESTRICT : 0;
+}
+
+static TypeId check_lower_dump_alias(const CheckProgram* program, uint32_t use, uint32_t declaration, uint32_t* covered)
+{
+    const Parser* parser = program->parser;
+    uint32_t written = 0;
+    // The specifiers before the name, back to the first that is no qualifier, storage class, typedef or calling
+    // convention, then the qualifiers after it.
+    bool scanning = true;
+    for (uint32_t t = use; scanning && t-- > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        written |= check_lower_dump_qualifier(program, t);
+        scanning = kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_CALLING_CONVENTION;
+    }
+    for (uint32_t t = use + 1; t < parser->tokens.count && parser->tokens.kinds[t] == PARSE_KIND_QUALIFIER; t += 1)
+    {
+        written |= check_lower_dump_qualifier(program, t);
+    }
+    const TypeId declared = type_strip_aligned(program->types, program->input->declared_types[declaration]);
+    *covered = type_qualifiers(declared) & ~written;
+    return type_unqualified(declared);
+}
+
 // The name of `type`, a member's declared one as its declaration at `token` spells it (its typedef specifier's name kept,
 // as clang's sugared type prints), or with `token` 0 its canonical type, as clang's TypePrinter prints it.
 static uint32_t check_lower_dump_type(CheckLowerDumpBuilder* builder, TypeId type, uint32_t token)
@@ -168,14 +219,18 @@ static uint32_t check_lower_dump_type(CheckLowerDumpBuilder* builder, TypeId typ
     const uint32_t spelling = check_lower_dump_spelling(program, token);
     TypeNames names = builder->names;
     TypeId alias_type = 0;
+    uint32_t alias_covered = 0;
     String8 alias_name = { 0 };
     if (spelling != 0 && program->parser->tokens.names[spelling] < program->identifiers->count)
     {
         const uint32_t identifier = program->parser->tokens.names[spelling];
-        alias_type = type_unqualified(type_strip_aligned(program->types, program->input->declared_types[spelling]));
+        const uint32_t use = check_lower_dump_typedef_use(program, token);
+        alias_type = use != 0 ? check_lower_dump_alias(program, use, spelling, &alias_covered) :
+                                type_strip_aligned(program->types, program->input->declared_types[spelling]);
         alias_name = (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
         names.alias_types = &alias_type;
         names.alias_names = &alias_name;
+        names.alias_covered = &alias_covered;
         names.alias_count = 1;
     }
     const uint64_t mark = builder->scratch->length;
@@ -240,7 +295,8 @@ static bool check_lower_dump_typedef(const Parser* parser, uint32_t token)
 
 // A function scope's parameter `parameter` (its type in the function's type), as its declaration from `begin` to `end`
 // (a segment of the definition's parameter list) spells it, which clang prints (ParmVarDecl::getType's): its declarator's
-// declared type, qualifiers kept, every typedef its tokens name printed for the type it names; an array's or a function's
+// declared type, qualifiers kept, every typedef its tokens name printed for the type it names (check_lower_dump_alias);
+// an array's or a function's
 // adjusted type, which keeps none, as the function's type has it.
 static String8 check_lower_dump_parameter(CheckLowerDumpBuilder* builder, uint32_t begin, uint32_t end, TypeId parameter)
 {
@@ -251,17 +307,22 @@ static String8 check_lower_dump_parameter(CheckLowerDumpBuilder* builder, uint32
     const TypeId adjusted = type_unqualified(type_strip_aligned(types, parameter));
     const bool known = input->declarations != NULL && input->declaration_kinds != NULL && input->declared_types != NULL;
     TypeId alias_types[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
+    uint32_t alias_covered[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
     String8 alias_names[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
     uint32_t aliases = 0;
     TypeId printed = parameter;
     bool named = false;
+    uint32_t braces = 0;
     for (uint32_t t = begin; known && t < end && t < input->token_count; t += 1)
     {
-        const uint32_t resolved = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? input->declarations[t] : BUSTER_CHECK_NONE;
+        const uint8_t kind_of = parser->tokens.kinds[t];
+        braces = kind_of == PARSE_KIND_L_BRACE ? braces + 1 : kind_of == PARSE_KIND_R_BRACE && braces != 0 ? braces - 1 : braces;
+        const uint32_t resolved = kind_of == PARSE_KIND_IDENTIFIER ? input->declarations[t] : BUSTER_CHECK_NONE;
         const uint32_t identifier = parser->tokens.names[t];
-        if (resolved == t && !named)
+        if (resolved == t && !named && braces == 0)
         {
-            // The parameter's own declarator, the first identifier of its declaration of its type that declares itself.
+            // The parameter's own declarator: the first identifier outside a record body its specifiers define (whose
+            // members declare themselves too) that declares itself, of its type.
             const TypeId declared = input->declared_types[t];
             const TypeId bare = type_is_valid(types, declared) ? type_unqualified(type_strip_aligned(types, declared)) : 0;
             const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
@@ -271,13 +332,14 @@ static String8 check_lower_dump_parameter(CheckLowerDumpBuilder* builder, uint32
         else if (resolved != BUSTER_CHECK_NONE && resolved != t && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF &&
                  aliases < BUSTER_CHECK_DUMP_PARAMETER_ALIASES && identifier < program->identifiers->count && check_lower_dump_typedef(parser, resolved))
         {
-            alias_types[aliases] = type_unqualified(type_strip_aligned(types, input->declared_types[resolved]));
+            alias_types[aliases] = check_lower_dump_alias(program, t, resolved, &alias_covered[aliases]);
             alias_names[aliases++] = (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
         }
     }
     TypeNames names = builder->names;
     names.alias_types = alias_types;
     names.alias_names = alias_names;
+    names.alias_covered = alias_covered;
     names.alias_count = aliases;
     return type_print(types, builder->scratch, printed, (String8){ 0 }, &names, builder->options);
 }
