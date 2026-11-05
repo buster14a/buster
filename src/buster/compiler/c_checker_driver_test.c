@@ -1072,8 +1072,9 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
 // __builtin_dump_struct by the driver (#148): a program of clang's dumps of records (every kind of field: the integer types,
 // bool and the character types as numbers, size_t's, ptrdiff_t's and intmax_t's typedefs, enums, the floating types,
 // strings, pointers, arrays, bit-fields and unnamed ones, anonymous members, nested and unnamed records with their
-// scopes, those of records in functions, of parameters, of no written prototype, unions, vectors, a packed record,
-// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs), through printf, a variadic
+// scopes (a pointer member's record's too), those of records in functions, of parameters, of no written prototype,
+// unions, vectors, a packed record, _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its
+// typedefs), through printf, a variadic
 // printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer through a
 // pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls, the rest of the
 // arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and without it, each
@@ -1169,6 +1170,7 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __builtin_dump_struct(&r.in, printf);\n"
                                   "}\n"
                                   "static void old_style(a) int a; { struct Old { struct { int k; } in; } r = { { a } }; __builtin_dump_struct(&r.in, printf); }\n"
+                                  "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
                                   "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
                                   "static struct S s;\n"
                                   "static struct Packed packed = { 'z', -5, 99999, -77 };\n"
@@ -1217,6 +1219,10 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    struct Top2 top2 = { { { 7 } }, { 8 } };\n"
                                   "    __builtin_dump_struct(&top2.m.u, printf);\n"
                                   "    __builtin_dump_struct(&top2.y, printf);\n"
+                                  "    struct Pointee pointee;\n"
+                                  "    __typeof__(*pointee.p) pointed = { 42 };\n"
+                                  "    pointee.p = &pointed;\n"
+                                  "    __builtin_dump_struct(pointee.p, printf);\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];

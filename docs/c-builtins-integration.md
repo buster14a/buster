@@ -1903,7 +1903,8 @@ record dump, as `BuiltinDumpStruct` checks it.
   (`check_input_typedef_spelling`) gives the alias `type_print` prints. An
   unnamed record's canonical name has its scope, as clang's
   `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
-  it, up to a named one (C's named tags belong to no record), then the
+  it, whatever declarator it is part of (an array's, a pointer's, a
+  function's: `check_lower_dump_parent`), up to a named one (C's named tags belong to no record), then the
   function whose body holds the outermost, with its parameters' types where
   it has a written prototype (`struct main()::L::(unnamed)`,
   `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
