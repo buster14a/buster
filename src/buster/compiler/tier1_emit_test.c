@@ -394,7 +394,7 @@ static uint64_t tier1_emit_test_save_row(const Tier1EmitResult* emitted, uint32_
         *load = form == X86_FORM_MOV_R64_RM64;
     }
     const uint32_t vector_row = emitted->general && reg < 16 && ((prepared->vector_save_mask >> reg) & 1) != 0 ? tier1_emit_cfg_vector_save_row(emitted, reg) : UINT32_MAX;
-    const Tier1SelectFloatForms* wide = prepared->vector_bytes != 0 ? tier1_select_class_forms(prepared->vector_bytes, prepared->vex) : NULL;
+    const Tier1SelectFloatForms* wide = prepared->vector_bytes != 0 ? tier1_select_class_forms(prepared->vector_bytes, tier1_emit_encoding(prepared)) : NULL;
     const uint16_t vector_store = wide != NULL ? wide->store : X86_FORM_MOVSD_XM64_X;
     const uint16_t vector_load = wide != NULL ? wide->load : X86_FORM_MOVSD_X_XM64;
     if (memory && vector_row < emitted->frame.count && (form == vector_store || form == vector_load) && record->displacement == emitted->frame.offset[vector_row])
@@ -442,6 +442,22 @@ static bool tier1_emit_test_saves_seen(const Tier1EmitResult* emitted)
     const bool vectors = emitted->prepared.vector_save_mask == 0 || ((seen >> 16) & 0xffff) != 0;
     const bool masks = emitted->prepared.mask_save_mask == 0 || ((seen >> 32) & 0xff) != 0;
     return !emitted->general || (vectors && masks);
+}
+
+// Whether the general registers' call-save rows are exactly those the records store to (#177): each row the frame has is
+// one a call or a fixed register's sequence stores a value in, and none goes unused, where every caller-saved register's
+// had a row in every function that calls. A store to a register with no row the emitter refuses itself
+// (TIER1_EMIT_ALLOCATION).
+static bool tier1_emit_test_general_rows_used(const Tier1EmitResult* emitted)
+{
+    uint64_t stored = 0;
+    for (uint32_t r = 0; r < emitted->code.count; r += 1)
+    {
+        bool load = false;
+        const uint64_t row = tier1_emit_test_save_row(emitted, r, &load);
+        stored |= !load && row < (1ull << 16) ? row : 0;
+    }
+    return stored == emitted->prepared.call_save_mask;
 }
 
 // Whether every call-save store is loaded back (#1116), of a general, an xmm or an opmask register: a call owes its

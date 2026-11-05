@@ -491,6 +491,31 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     return status;
 }
 
+// A call that passes a static chain (#148, __builtin_call_with_static_chain's): its argument 0's record in r10, which
+// isn't a C parameter. The call is taken without it, its ABI records kept past the chain's (*skipped 1, which the records'
+// readers add: the others' sizes, places and extension flags), the chain's value into *chain for a native callee's r10
+// (an interpreted one can't read r10), and an undefined chain INTERPRETER_UNDEFINED where `check_undefined` asks, as an
+// argument's is. Any other call is returned as it is, *skipped 0.
+static IrCall ir_interpreter_unchained(const IrFunction* function, IrCall call, const InterpreterValue* values, const uint8_t* defined, bool check_undefined,
+                                       uint64_t* chain, uint32_t* skipped, InterpreterStatus* status)
+{
+    const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+    const AbiLocation first = records != 0 && call.argument_count != 0 ? function->passed[records->passed].location : (AbiLocation){ 0 };
+    *skipped = 0;
+    if (first.kind == BUSTER_ABI_LOCATION_REGISTERS && first.registers[0] == BUSTER_ABI_R10)
+    {
+        const uint32_t id = function->extra[call.argument_first];
+        *status = check_undefined && defined[id] == 0 ? INTERPRETER_UNDEFINED : *status;
+        *chain = values[id].low;
+        *skipped = 1;
+        call.argument_first += 1;
+        call.argument_count -= 1;
+        call.parameter_count -= call.parameter_count != 0 ? 1 : 0;
+        call.type_first += 1;
+    }
+    return call;
+}
+
 // A call's arguments as its interpreted callee takes them (#131, #148), as both functions' records have them: a named
 // aggregate's size alike in each (a callee's IGNOREd one, an empty record's, takes a fresh object of its own, whatever the
 // call passes, as no bytes pass), and a result's kind; a hidden pointer, the call's destination, as the callee's parameter
@@ -500,9 +525,11 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
 // argument's place, its records' or worked out as LLVM's assignment places a scalar, whose register counts must be its
 // incoming frame's, and the argument area's alignment. INTERPRETER_INVALID for a call its callee can't take, or whose
 // argument area is aligned past BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2.
-static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
+static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, uint32_t skipped, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
 {
     const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+    // The arguments' records past a static chain's (ir_interpreter_unchained's `skipped`).
+    const uint32_t records_first = records != 0 ? records->passed + skipped : 0;
     const uint32_t own = target->parameter_passed;
     const uint32_t result_size = records != 0 ? records->result_size : 0;
     const bool hidden = own != 0 && target->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
@@ -528,7 +555,7 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
     valid = valid && (!hidden || target->parameter_types[0] == IR_I64 || target->parameter_types[0] == IR_PTR);
     for (uint32_t p = 0; valid && p < call.argument_count; p += 1)
     {
-        const uint32_t size = records != 0 ? function->passed[records->passed + p].size : 0;
+        const uint32_t size = records != 0 ? function->passed[records_first + p].size : 0;
         const IrPassed parameter = p < named && own != 0 ? target->passed[own - 1 + hidden + p] : (IrPassed){ 0 };
         const uint16_t type = types[p];
         const bool ignored = parameter.size != 0 && parameter.location.kind == BUSTER_ABI_LOCATION_IGNORE;
@@ -579,7 +606,7 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
         *incoming = (IrInterpreterIncoming){
             .values = passed,
             .types = types,
-            .places = records != 0 ? &function->passed[records->passed] : places,
+            .places = records != 0 ? &function->passed[records_first] : places,
             .count = call.argument_count,
             .stack_bytes = records != 0 ? records->call.stack_bytes : (stack_bytes + 7) & ~7ull,
             .hidden = destination,
@@ -1058,7 +1085,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             {
                 // High mask bits outside the vector's lanes do not select a lane. An entirely inactive input may
                 // remain undefined, just as the unchosen input of scalar select may remain undefined.
-                const uint64_t lanes = (UINT64_C(1) << (ir_type_bits[type] / 32)) - 1;
+                const uint32_t count = ir_lane_count(type, function->flags[i]);
+                const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
                 operands = 1 | ((av.low & lanes) != 0 ? 2 : 0) | ((av.low & lanes) != lanes ? 4 : 0);
             }
             else if (op == IR_COPY || op == IR_BITCAST)
@@ -1246,7 +1274,10 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_CALL:
                 case IR_CALL_INDIRECT:
                 {
-                    const IrCall call = function->calls[b];
+                    // A static chain (#148, ir_interpreter_unchained): the call without it, its value for a native callee's r10.
+                    uint64_t chain = 0;
+                    uint32_t skipped = 0;
+                    const IrCall call = ir_interpreter_unchained(function, function->calls[b], frame->values, frame->defined, options->check_undefined, &chain, &skipped, &result.status);
                     const uint32_t callee = ir_interpreter_find_function(program, a, av.low, op == IR_CALL_INDIRECT);
                     const InterpreterNativeBinding* native = callee == UINT32_MAX ? ir_interpreter_find_native(program, a, av.low, op == IR_CALL_INDIRECT) : 0;
                     // A call with ABI records (#131): an aggregate result's destination is c.
@@ -1302,7 +1333,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         }
                         if (result.status == INTERPRETER_OK)
                         {
-                            result.status = ir_interpreter_arguments(function, call, target, passed, types, destination, depth + 1, &runtime, arena, parameters, &incoming);
+                            result.status = ir_interpreter_arguments(function, call, skipped, target, passed, types, destination, depth + 1, &runtime, arena, parameters, &incoming);
                         }
                         if (result.status == INTERPRETER_OK)
                         {
@@ -1349,9 +1380,10 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             .variadic = call.variadic,
                             .runtime = &runtime,
                             .abi = records != 0 ? &records->call : 0,
-                            .passed = records != 0 ? &function->passed[records->passed] : 0,
+                            .passed = records != 0 ? &function->passed[records->passed + skipped] : 0,
                             .destination = destination,
                             .result_size = result_size,
+                            .chain = chain,
                         };
                         const bool invoked = interpreter_native_invoke(&request, &value);
                         if (!invoked)

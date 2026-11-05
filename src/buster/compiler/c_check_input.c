@@ -687,12 +687,11 @@ struct CheckInput
     CheckInputMarkedMember* marked_members;
     uint32_t marked_member_count;
     uint32_t marked_member_capacity;
-    // Each record member's declarator name token, by its index in the type table (0 for an unnamed member, and past
-    // member_token_count for a record a deferred body's lane completes): __builtin_dump_struct's type names print a
-    // member's type as its declaration spells it, its typedef specifier's name kept (#148, check_lower_dump_prepare).
-    uint32_t* member_tokens;
-    uint32_t member_token_count;
-    uint32_t member_token_capacity;
+    // The overloadable functions' declarations a deprecated attribute marks (by them or an earlier redeclaration), in
+    // ascending order of their tokens (CheckInputMarkedMember.member), for their calls' warnings after checking
+    // (check_input_overload_uses, #147).
+    CheckInputMarkedMember* marked_overloads;
+    uint32_t marked_overload_count;
     uint8_t* availability_contexts;
     CheckWarningEvents warning_events;
     // Directive-only warnings survive parser recovery independently of expression facts.
@@ -1344,6 +1343,12 @@ struct CheckInputReader
     // During check_input_deprecated_uses (#147), each token's mark as a marked member's name (CheckInput.marked_members),
     // as context bits (BUSTER_CHECK_CONTEXT_*): check_input_declarator_mark's lookup. Null outside it.
     const uint8_t* member_marks;
+    // The marked members' accesses the reader's evaluator reads (#147, check_input_evaluated_member): pairs of the member's
+    // name's token and the member's index, which check_input_deprecated_uses diagnoses where the graph has no node for
+    // them (`typeof`'s operand, a file-scope array bound). Repeats are kept, and dropped there.
+    uint32_t* evaluated_members;
+    uint32_t evaluated_member_count;
+    uint32_t evaluated_member_capacity;
     // An independently checked array bound is a semantic unevaluation barrier, even inside sizeof/typeof.
     uint32_t warning_bound_open;
     Arena* warning_query_arena;
@@ -2442,6 +2447,23 @@ static bool check_input_function_type_name(CheckInputReader* reader, const Check
     return result;
 }
 
+// check_input_attribute_function_types' warning of `attribute`, completing before `earliest` where that is before it.
+static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, uint32_t name, uint32_t earliest)
+{
+    const CheckWarningEvent event =
+    {
+        .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+        .kind = CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
+        .token = attribute->first,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = earliest < attribute->first ? earliest : attribute->first + 1,
+        .payload = { .first_type = type, .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                     .data = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0 },
+    };
+    check_input_warning_event(reader, &event, NULL, 0);
+}
+
 // clang's warning for a function type's attribute (a calling convention, GNU's noreturn, regparm) on a declarator whose
 // type is no function's and no pointer's, array's or aligned typedef's to one (#147): "'X' only applies to function types;
 // type here is 'T'" at its first token (a C23 one's scope), the attribute named as written without its scope and the type
@@ -2457,28 +2479,25 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
         function = reader->types->types.base[type_index(function)];
         kind = type_kind(reader->types, function);
     }
-    for (uint32_t i = 0; kind != BUSTER_TYPE_KIND_FUNCTION && attributes != NULL && i < attributes->count; i += 1)
+    // clang reads a declarator's type, and warns of its attributes, before the declaration's attributes (#147): its
+    // warnings complete no later than the list's first other attribute, whose subject's warning comes after them. The
+    // first pass finds that one, the second warns.
+    uint32_t earliest = UINT32_MAX;
+    for (uint32_t pass = 0; pass < 2; pass += 1)
     {
-        const CheckInputAttribute* attribute = attributes->records + i;
-        // (A GPU kernel's convention is a declaration's attribute, whose subject's error comes instead.)
-        // (ns_returns_retained, a generic attribute, is a function type's too.)
-        const bool function_type = (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute)) ||
-                                   attribute->kind == CHECK_ATTRIBUTE_REGPARM || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword) ||
-                                   (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && check_input_function_type_name(reader, attribute));
-        if (function_type)
+        for (uint32_t i = 0; kind != BUSTER_TYPE_KIND_FUNCTION && attributes != NULL && i < attributes->count; i += 1)
         {
-            const CheckWarningEvent event =
+            const CheckInputAttribute* attribute = attributes->records + i;
+            // (A GPU kernel's convention is a declaration's attribute, whose subject's error comes instead.)
+            // (ns_returns_retained, a generic attribute, is a function type's too.)
+            const bool function_type = (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute)) ||
+                                       attribute->kind == CHECK_ATTRIBUTE_REGPARM || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword) ||
+                                       (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && check_input_function_type_name(reader, attribute));
+            earliest = pass == 0 && !function_type && attribute->first < earliest ? attribute->first : earliest;
+            if (pass == 1 && function_type)
             {
-                .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
-                .kind = CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
-                .token = attribute->first,
-                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = attribute->first + 1,
-                .payload = { .first_type = type, .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
-                             .data = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0 },
-            };
-            check_input_warning_event(reader, &event, NULL, 0);
+                check_input_attribute_function_type_warning(reader, attribute, type, name, earliest);
+            }
         }
     }
 }
@@ -5289,41 +5308,6 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
     }
 }
 
-// A completed record's member `index`'s declarator name token (CheckInput.member_tokens): the column grows by doubling,
-// in the output arena, and members between the last recorded and `index` read 0.
-static void check_input_member_token(CheckInputReader* reader, uint32_t index, uint32_t token)
-{
-    CheckInput* input = reader->output;
-    if (index >= input->member_token_capacity && !input->resource)
-    {
-        uint32_t capacity = input->member_token_capacity != 0 ? input->member_token_capacity : 64;
-        while (capacity <= index && capacity < UINT32_MAX / 2)
-        {
-            capacity *= 2;
-        }
-        uint32_t* grown = capacity > index ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
-        input->resource |= grown == NULL;
-        if (grown != NULL)
-        {
-            if (input->member_token_count != 0)
-            {
-                memcpy(grown, input->member_tokens, (uint64_t)input->member_token_count * sizeof(*grown));
-            }
-            input->member_tokens = grown;
-            input->member_token_capacity = capacity;
-        }
-    }
-    if (index < input->member_token_capacity)
-    {
-        for (uint32_t gap = input->member_token_count; gap < index; gap += 1)
-        {
-            input->member_tokens[gap] = 0;
-        }
-        input->member_tokens[index] = token;
-        input->member_token_count = index >= input->member_token_count ? index + 1 : input->member_token_count;
-    }
-}
-
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
 #include "c_check_counted_by_input.c"
@@ -5504,10 +5488,6 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     if (members[member].mark != 0)
                     {
                         check_input_mark_member(reader, position, members + member);
-                    }
-                    if (!reader->lane)
-                    {
-                        check_input_member_token(reader, position, members[member].member.name != 0 ? members[member].token : 0);
                     }
                     position += 1;
                 }

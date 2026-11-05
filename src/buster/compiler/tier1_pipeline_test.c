@@ -1471,6 +1471,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
                         tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots + ((emitted->cfg.temp_slots & 1u) != 0), "spill values, caller-save values and the temporary slot have complete frame rows");
+                        tier1_pipeline_expect(test, tier1_emit_test_general_rows_used(emitted), "the CFG consumer's call-save rows are those its calls and fixed registers' sequences store to (#177)");
                         test->general += 1;
                         test->edge_moves += emitted->edge_moves;
                         test->edge_stubs += emitted->edge_stubs;
@@ -1492,6 +1493,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         tier1_pipeline_expect(test, tier1_allocation_verify(&emitted->prepared.allocation, &emitted->allocation), "independent allocation verifier accepts actual fragments");
                         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted->prepared.call_save_mask);
                         tier1_pipeline_expect(test, emitted->frame.count == emitted->allocation.spill_count + call_slots, "spill values and reserved caller-save values have complete frame rows");
+                        tier1_pipeline_expect(test, tier1_emit_test_general_rows_used(emitted), "the straight-line consumer's call-save rows are those its calls and fixed registers' sequences store to (#177)");
                     }
                     if (ok)
                     {

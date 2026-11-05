@@ -195,6 +195,48 @@ asks for no probes; `test-emitted-code` proves and runs such frames in isolation
 The plan has bounded step arrays and no instruction positions. Spill
 loads/stores belong to the instruction consumer.
 
+### The frame pointer on request
+
+`-fno-omit-frame-pointer` (the last of it and `-fomit-frame-pointer`) keeps a
+frame pointer in every function, and with `-momit-leaf-frame-pointer` (the last
+of it and `-mno-omit-leaf-frame-pointer`) in every function that calls, as
+clang's driver reads them (`predefines_frame_pointer`); without the option
+neither tier keeps one where its frame doesn't need one, at every `-O`, where
+clang keeps it at `-O0`. The checked program carries the choice
+(`CheckProgramOptions.frame_pointer`, from the predefines through
+`check_request_program_options`) into each function's `Tier0Function.frame_pointer`:
+
+- Tier 1's frame takes `KEEP_POINTER` (`Tier1EmitOptions.frame_flags`), and
+  with the leaf rule `Tier1EmitOptions.omit_leaf_frame_pointer`, which drops it
+  for a function without calls to functions, a machine row's none
+  (`tier1_emit_frame_flags`, both consumers).
+- Tier 0's frame keeps one as a frame that moves rsp has, though its rsp stays
+  put (`tier0_kept_pointer`, `tier0_frame_registers`): rbp no depth's register
+  (`tier0_integer_depth_count`'s, and the u64 conversions' scratch registers by
+  it), its places from rbp, its outgoing area at rsp. Its calls are its CALL
+  entries, as its selection counts them.
+
+Both publish the frame (`Tier0Code.frame_pointer`), so the unwind tables
+describe rbp's CFA. `test-checker-driver`'s frame pointer fixture
+(`c_check_frame_pointer_driver_test.c`) builds a chain of three functions (a
+frame object, a variadic definition, a 64-byte-aligned local and a double live
+across a call) between clang's main and a clang walker that follows rbp from
+its own frame. It checks each return address is in the function it expects and
+the chain ends at main's frame. That runs by Tier 0 and by `--tier1` with and
+without rematerialization, by each path, with the leaf rule and without, and
+each object starts each chain function with `push rbp; mov rbp, rsp`, the leaf
+function under the leaf rule never. `test-tier0` runs a quarter of its random
+programs with every frame's pointer and a quarter with the leaf rule's, against
+the same oracle.
+
+`-fstack-clash-protection` stays refused (`check_request_codegen_option`): the
+option is admitted only where every function's frame probes, and Tier 0's
+don't. Its prologue is fixed records, its pushes first, which its unwind
+derivation reads by position, with no branch, and its `ALLOCA` is four
+straight-line records, where a probe of a dynamic size needs a loop. Tier 1's
+prologue probes (`PROBE_STACK`, above) are proved and run in isolation; its
+dynamic allocations (`TIER1_RULE_ALLOCA`) don't probe yet either.
+
 ## Slot sharing between objects
 
 Tier 1's frame lets objects that are never live at once share a slot (#177's

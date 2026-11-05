@@ -22,10 +22,10 @@ struct CheckLowerDumpBuilder
     const CheckProgram* program;
     Arena* scratch;
     TypeNames names;
-    // Each unnamed tag's record of a member of its type (BUSTER_CHECK_NONE for none) and whether that member is an
-    // anonymous one: an unnamed record's scope, which its canonical name prints.
-    uint32_t* parents;
-    uint8_t* anonymous_members;
+    // Each record's body, its `{` and `}` (BUSTER_CHECK_NONE where it has none: check_lower_dump_body), which give an
+    // unnamed record's scope (check_lower_dump_parent).
+    uint32_t* opens;
+    uint32_t* closes;
     uint32_t options;
     bool c99;
     uint8_t* image;
@@ -104,6 +104,70 @@ static uint32_t check_lower_dump_indent(CheckLowerDumpBuilder* builder, uint32_t
     return check_lower_dump_string(builder, spaces, length);
 }
 
+// The body of record `tag`'s definition, its `{` and its `}`, from its completion (CheckGraph.tag_completions, the
+// token past its `}`, which the deferred reader's merge maps as source order makes it), or false.
+static bool check_lower_dump_body(const CheckProgram* program, uint32_t tag, uint32_t* open, uint32_t* close)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const Parser* parser = program->parser;
+    const uint32_t completion = graph->tag_completions != NULL && tag < graph->tag_completion_count ? graph->tag_completions[tag] : BUSTER_CHECK_NONE;
+    const bool braced = completion != BUSTER_CHECK_NONE && completion > 0 && completion <= parser->tokens.count &&
+                        parser->tokens.kinds[completion - 1] == PARSE_KIND_R_BRACE;
+    uint32_t depth = 0;
+    uint32_t i = braced ? completion - 1 : 0;
+    bool scanning = braced;
+    while (scanning && i > 0)
+    {
+        const uint8_t kind = parser->tokens.kinds[i];
+        depth = kind == PARSE_KIND_R_BRACE ? depth + 1 : kind == PARSE_KIND_L_BRACE ? depth - 1 : depth;
+        scanning = depth != 0;
+        i -= scanning ? 1 : 0;
+    }
+    const bool found = braced && !scanning && parser->tokens.kinds[i] == PARSE_KIND_L_BRACE;
+    *open = found ? i : BUSTER_CHECK_NONE;
+    *close = found ? completion - 1 : BUSTER_CHECK_NONE;
+    return found;
+}
+
+// The next declarator of a member named `name` in a record's body, from `*cursor` (past which it moves) to its `}`,
+// `close`: an identifier at the body's own depth that declares itself, of the kind byte a member's declarator leaves 0
+// (TYPEDEF's; a parameter of a member's declarator is an OBJECT), or 0 where the body has none.
+static uint32_t check_lower_dump_member(const CheckProgram* program, uint32_t* cursor, uint32_t close, uint32_t name)
+{
+    const Parser* parser = program->parser;
+    const CheckInput* input = program->input;
+    const uint32_t end = close < input->token_count && close < parser->tokens.count ? close : 0;
+    const bool known = input->declarations != NULL && input->declaration_kinds != NULL;
+    uint32_t result = 0;
+    uint32_t depth = 0;
+    for (uint32_t t = *cursor; known && name != 0 && result == 0 && t < end; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        depth = kind == PARSE_KIND_L_BRACE ? depth + 1 : kind == PARSE_KIND_R_BRACE && depth != 0 ? depth - 1 : depth;
+        result = depth == 0 && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[t] == name && input->declarations[t] == t &&
+                 input->declaration_kinds[t] == C_BINDING_TYPEDEF ? t : 0;
+    }
+    *cursor = result != 0 ? result + 1 : *cursor;
+    return result;
+}
+
+// Whether declaration token `token` is a typedef's name: the typedef keyword among its declaration's specifiers, before
+// it at its own brace depth (a record's body skipped), where a member's declaration meets its record's `{` first.
+static bool check_lower_dump_typedef(const Parser* parser, uint32_t token)
+{
+    uint32_t depth = 0;
+    bool found = false;
+    bool open = true;
+    for (uint32_t t = token; open && !found && t-- > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        found = depth == 0 && kind == PARSE_KIND_TYPEDEF;
+        open = !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE));
+        depth = kind == PARSE_KIND_R_BRACE ? depth + 1 : kind == PARSE_KIND_L_BRACE && depth != 0 ? depth - 1 : depth;
+    }
+    return found;
+}
+
 // The typedef whose name declaration token `token`'s type specifier spells (check_input_typedef_spelling), or 0.
 static uint32_t check_lower_dump_spelling(const CheckProgram* program, uint32_t token)
 {
@@ -111,6 +175,238 @@ static uint32_t check_lower_dump_spelling(const CheckProgram* program, uint32_t 
     const bool known = token != 0 && token < input->token_count && input->declarations != NULL && input->declaration_kinds != NULL &&
                        input->declared_types != NULL;
     return known ? check_input_typedef_spelling(input, program->parser, token) : 0;
+}
+
+// The token of the typedef name that declaration token `token`'s type specifier spells, as check_input_typedef_spelling
+// finds it (its declaration is that one's answer), or 0.
+static uint32_t check_lower_dump_typedef_use(const CheckProgram* program, uint32_t token)
+{
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const uint32_t spelling = check_lower_dump_spelling(program, token);
+    uint32_t result = 0;
+    for (uint32_t t = token; spelling != 0 && result == 0 && t-- > 0;)
+    {
+        result = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && input->declarations[t] == spelling ? t : 0;
+    }
+    return result;
+}
+
+// The alias of a typedef named at `use`, declared at `declaration` (TypeNames.alias_types, alias_covered): its type,
+// unqualified, matched under its own qualifiers and any the declaration adds; its name covers its own qualifiers but
+// those the declaration writes with it (`const CI`, `CI const`, `volatile CI` of a const int's CI), which clang prints
+// before the name as the declaration writes them.
+// A qualifier keyword's qualifier (const, volatile, restrict and their underscored forms), or 0.
+static uint32_t check_lower_dump_qualifier(const CheckProgram* program, uint32_t token)
+{
+    const Parser* parser = program->parser;
+    const uint32_t identifier = parser->tokens.kinds[token] == PARSE_KIND_QUALIFIER ? parser->tokens.names[token] : 0;
+    const char* spelling = identifier != 0 && identifier < program->identifiers->count ? (const char*)intern_bytes(program->identifiers, identifier) : "";
+    return strstr(spelling, "const") != NULL ? BUSTER_TYPE_CONST : strstr(spelling, "volatile") != NULL ? BUSTER_TYPE_VOLATILE :
+           strstr(spelling, "restrict") != NULL ? BUSTER_TYPE_RESTRICT : 0;
+}
+
+static TypeId check_lower_dump_alias(const CheckProgram* program, uint32_t use, uint32_t declaration, uint32_t* covered)
+{
+    const Parser* parser = program->parser;
+    uint32_t written = 0;
+    // The specifiers before the name, back to the first that is no qualifier, storage class, typedef or calling
+    // convention, then the qualifiers after it.
+    bool scanning = true;
+    for (uint32_t t = use; scanning && t-- > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        written |= check_lower_dump_qualifier(program, t);
+        scanning = kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_CALLING_CONVENTION;
+    }
+    for (uint32_t t = use + 1; t < parser->tokens.count && parser->tokens.kinds[t] == PARSE_KIND_QUALIFIER; t += 1)
+    {
+        written |= check_lower_dump_qualifier(program, t);
+    }
+    const TypeId declared = type_strip_aligned(program->types, program->input->declared_types[declaration]);
+    *covered = type_qualifiers(declared) & ~written;
+    return type_unqualified(declared);
+}
+
+// The aliases by place of one declaration's types (TypeNames.alias_order, check_lower_dump_places): each typedef it
+// spells, and an entry a specifier sequence, in the order a C declaration writes them and type_print prints them, the
+// declaration's own specifiers' then each nested parameter's, the alias of the typedef among them or UINT32_MAX.
+#define BUSTER_CHECK_DUMP_PLACES 32u
+typedef struct CheckLowerDumpPlaces CheckLowerDumpPlaces;
+struct CheckLowerDumpPlaces
+{
+    TypeId types[BUSTER_CHECK_DUMP_PLACES];
+    uint32_t covered[BUSTER_CHECK_DUMP_PLACES];
+    String8 names[BUSTER_CHECK_DUMP_PLACES];
+    uint32_t count;
+    uint32_t order[BUSTER_CHECK_DUMP_PLACES];
+    uint32_t order_count;
+    bool valid;
+};
+
+// Whether token `t` starts a declaration's specifiers, a parameter's after a `(` or a `,`: a type keyword, a tag, a
+// qualifier, a storage class, _Atomic, typeof, _Alignas or an attribute, or a typedef's name.
+static bool check_lower_dump_specifier_start(const CheckProgram* program, uint32_t t)
+{
+    const Parser* parser = program->parser;
+    const CheckInput* input = program->input;
+    const uint8_t kind = t < parser->tokens.count ? parser->tokens.kinds[t] : PARSE_KIND_END;
+    const uint32_t resolved = kind == PARSE_KIND_IDENTIFIER && t < input->token_count ? input->declarations[t] : BUSTER_CHECK_NONE;
+    return kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STORAGE ||
+           kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATTRIBUTE ||
+           (resolved != BUSTER_CHECK_NONE && resolved != t && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF &&
+            check_lower_dump_typedef(parser, resolved));
+}
+
+// The places of the declaration from `begin` to `end` (CheckLowerDumpPlaces): a `(` that starts a parameter's specifiers
+// opens a parameter list, whose `,`s start more (a `(void)` and `...` none); any other `(` groups, but an attribute's,
+// _Alignas's and typeof's, whose tokens are skipped; a record body its specifiers define is skipped; a `,` outside every
+// parenthesis starts a sibling declarator, whose places aren't this one's. Invalid where it holds more than the room.
+static void check_lower_dump_places(const CheckProgram* program, uint32_t begin, uint32_t end, CheckLowerDumpPlaces* places)
+{
+    const Parser* parser = program->parser;
+    const CheckInput* input = program->input;
+    uint8_t groups[BUSTER_CHECK_DUMP_PLACES];
+    uint32_t lists[BUSTER_CHECK_DUMP_PLACES];
+    uint32_t group_depth = 0;
+    uint32_t list_depth = 0;
+    uint32_t braces = 0;
+    uint32_t skipped = 0;
+    uint32_t top = 0;
+    *places = (CheckLowerDumpPlaces){ .order = { UINT32_MAX }, .order_count = 1, .valid = input->declarations != NULL && input->declaration_kinds != NULL };
+    for (uint32_t t = begin; places->valid && t < end && t < parser->tokens.count && t < input->token_count; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint8_t previous = t > begin ? parser->tokens.kinds[t - 1] : PARSE_KIND_END;
+        if (braces != 0 || kind == PARSE_KIND_L_BRACE)
+        {
+            braces = kind == PARSE_KIND_L_BRACE ? braces + 1 : kind == PARSE_KIND_R_BRACE ? braces - 1 : braces;
+        }
+        else if (skipped != 0 || (kind == PARSE_KIND_L_PAREN && (previous == PARSE_KIND_ATTRIBUTE || previous == PARSE_KIND_ALIGNAS || previous == PARSE_KIND_TYPEOF)))
+        {
+            skipped = kind == PARSE_KIND_L_PAREN ? skipped + 1 : kind == PARSE_KIND_R_PAREN ? skipped - 1 : skipped;
+        }
+        else if (kind == PARSE_KIND_L_PAREN)
+        {
+            const bool none = t + 2 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_TYPE && parser->tokens.kinds[t + 2] == PARSE_KIND_R_PAREN &&
+                              parser->tokens.names[t + 1] < program->identifiers->count &&
+                              strcmp((const char*)intern_bytes(program->identifiers, parser->tokens.names[t + 1]), "void") == 0;
+            const bool list = previous != PARSE_KIND_ATOMIC && !none && check_lower_dump_specifier_start(program, t + 1);
+            places->valid = group_depth < BUSTER_CHECK_DUMP_PLACES && (!list || (list_depth < BUSTER_CHECK_DUMP_PLACES && places->order_count < BUSTER_CHECK_DUMP_PLACES));
+            if (places->valid)
+            {
+                groups[group_depth++] = list;
+            }
+            if (places->valid && list)
+            {
+                lists[list_depth++] = top;
+                top = places->order_count;
+                places->order[places->order_count++] = UINT32_MAX;
+            }
+        }
+        else if (kind == PARSE_KIND_R_PAREN && group_depth != 0)
+        {
+            group_depth -= 1;
+            if (groups[group_depth] && list_depth != 0)
+            {
+                top = lists[--list_depth];
+            }
+        }
+        else if (kind == PARSE_KIND_COMMA && group_depth == 0)
+        {
+            // A sibling declarator's: its places are dropped, the shared specifiers' kept.
+            places->order_count = 1;
+            top = 0;
+        }
+        else if (kind == PARSE_KIND_COMMA && groups[group_depth - 1])
+        {
+            places->valid = places->order_count < BUSTER_CHECK_DUMP_PLACES;
+            top = places->order_count;
+            places->order[places->valid ? places->order_count++ : 0] = UINT32_MAX;
+        }
+        else if (kind == PARSE_KIND_ELLIPSIS && top == places->order_count - 1 && places->order[top] == UINT32_MAX)
+        {
+            // `...` is no parameter's specifiers.
+            places->order_count -= 1;
+            top = UINT32_MAX;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER && top < places->order_count && places->order[top] == UINT32_MAX && check_lower_dump_specifier_start(program, t))
+        {
+            const uint32_t resolved = input->declarations[t];
+            const uint32_t identifier = parser->tokens.names[t];
+            places->valid = places->count < BUSTER_CHECK_DUMP_PLACES && identifier < program->identifiers->count;
+            if (places->valid)
+            {
+                places->types[places->count] = check_lower_dump_alias(program, t, resolved, &places->covered[places->count]);
+                places->names[places->count] = (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier),
+                                                          .length = intern_length(program->identifiers, identifier) };
+                places->order[top] = places->count++;
+            }
+        }
+    }
+}
+
+// `type` printed with the aliases by place of its declaration (check_lower_dump_places), or with `fallback`'s where the
+// places aren't valid or don't match the specifiers the printer prints: into the builder's scratch.
+static String8 check_lower_dump_print_placed(CheckLowerDumpBuilder* builder, TypeId type, const CheckLowerDumpPlaces* places, const TypeNames* fallback)
+{
+    String8 result = { 0 };
+    uint32_t printed = UINT32_MAX;
+    if (places->valid)
+    {
+        TypeNames names = builder->names;
+        names.alias_types = places->types;
+        names.alias_names = places->names;
+        names.alias_covered = places->covered;
+        names.alias_count = places->count;
+        names.alias_order = places->order;
+        names.alias_order_count = places->order_count;
+        names.alias_order_printed = &printed;
+        const uint64_t mark = builder->scratch->length;
+        result = type_print(builder->program->types, builder->scratch, type, (String8){ 0 }, &names, builder->options);
+        if (printed != places->order_count)
+        {
+            arena_pop_to(builder->scratch, mark);
+        }
+    }
+    if (printed != places->order_count)
+    {
+        result = type_print(builder->program->types, builder->scratch, type, (String8){ 0 }, fallback, builder->options);
+    }
+    return result;
+}
+
+// The declaration of member declarator `token`: back to the `;` or `{` before its specifiers, forward to the `,`, `;`,
+// `:` or `}` after its declarator, outside the brackets after them (the parentheses that group its declarator, which
+// hold it, are crossed).
+static void check_lower_dump_declaration(const Parser* parser, uint32_t token, uint32_t* begin, uint32_t* end)
+{
+    uint32_t depth = 0;
+    bool scanning = true;
+    uint32_t t = token;
+    while (scanning && t > 0)
+    {
+        const uint8_t kind = parser->tokens.kinds[t - 1];
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        scanning = !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE));
+        depth = closer ? depth + 1 : opener && depth != 0 ? depth - 1 : depth;
+        t -= scanning ? 1 : 0;
+    }
+    *begin = t;
+    depth = 0;
+    scanning = true;
+    t = token;
+    while (scanning && t < parser->tokens.count)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        scanning = !(depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_COLON || kind == PARSE_KIND_R_BRACE));
+        depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+        t += scanning ? 1 : 0;
+    }
+    *end = t;
 }
 
 // The name of `type`, a member's declared one as its declaration at `token` spells it (its typedef specifier's name kept,
@@ -121,18 +417,32 @@ static uint32_t check_lower_dump_type(CheckLowerDumpBuilder* builder, TypeId typ
     const uint32_t spelling = check_lower_dump_spelling(program, token);
     TypeNames names = builder->names;
     TypeId alias_type = 0;
+    uint32_t alias_covered = 0;
     String8 alias_name = { 0 };
     if (spelling != 0 && program->parser->tokens.names[spelling] < program->identifiers->count)
     {
         const uint32_t identifier = program->parser->tokens.names[spelling];
-        alias_type = type_unqualified(type_strip_aligned(program->types, program->input->declared_types[spelling]));
+        const uint32_t use = check_lower_dump_typedef_use(program, token);
+        alias_type = use != 0 ? check_lower_dump_alias(program, use, spelling, &alias_covered) :
+                                type_strip_aligned(program->types, program->input->declared_types[spelling]);
         alias_name = (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
         names.alias_types = &alias_type;
         names.alias_names = &alias_name;
+        names.alias_covered = &alias_covered;
         names.alias_count = 1;
     }
+    // By place where the declaration's places match the printer's specifiers (`int (*)(I)`), else the typedef of its
+    // own specifiers wherever its type is.
+    CheckLowerDumpPlaces places = { .valid = false };
+    if (token != 0)
+    {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        check_lower_dump_declaration(program->parser, token, &begin, &end);
+        check_lower_dump_places(program, begin, end, &places);
+    }
     const uint64_t mark = builder->scratch->length;
-    const String8 printed = type_print(program->types, builder->scratch, type, (String8){ 0 }, &names, builder->options);
+    const String8 printed = check_lower_dump_print_placed(builder, type, &places, &names);
     if (printed.length == 0 && builder->refusal == NULL)
     {
         builder->refusal = "__builtin_dump_struct of a type whose name this compiler doesn't print";
@@ -142,28 +452,184 @@ static uint32_t check_lower_dump_type(CheckLowerDumpBuilder* builder, TypeId typ
     return result;
 }
 
+// The scope of unnamed record `tag` (clang's DeclContext of it): the innermost struct or union whose body holds its body,
+// whatever declarator of its members the record is part of (an array's, a pointer's, a function's), or BUSTER_CHECK_NONE
+// for one at file or function scope; and with `anonymous`, whether it is that record's anonymous member's type. A named
+// tag's scope is never a record's: C's tags aren't members of their records (clang puts them in the scope around).
+static uint32_t check_lower_dump_parent(const CheckLowerDumpBuilder* builder, uint32_t tag, bool* anonymous)
+{
+    const TypeTable* types = builder->program->types;
+    const uint32_t open = builder->opens[tag];
+    const uint32_t close = builder->closes[tag];
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t t = 0; types->tags.name[tag] == 0 && open != BUSTER_CHECK_NONE && t < types->tags.count; t += 1)
+    {
+        const uint8_t kind = type_is_valid(types, types->tags.type[t]) ? type_kind(types, types->tags.type[t]) : BUSTER_TYPE_KIND_NONE;
+        const bool holds = t != tag && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && builder->opens[t] != BUSTER_CHECK_NONE &&
+                           builder->opens[t] < open && close < builder->closes[t];
+        result = holds && (result == BUSTER_CHECK_NONE || builder->opens[result] < builder->opens[t]) ? t : result;
+    }
+    *anonymous = false;
+    for (uint32_t m = 0; result != BUSTER_CHECK_NONE && m < types->tags.member_count[result]; m += 1)
+    {
+        const uint32_t member = types->tags.member_begin[result] + m;
+        const TypeId bare = type_unqualified(type_strip_aligned(types, types->members.type[member]));
+        const uint8_t kind = type_kind(types, bare);
+        *anonymous |= types->members.name[member] == 0 && (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
+                      (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && types->types.index[type_index(bare)] == tag;
+    }
+    return result;
+}
+
+// The most typedefs a parameter's spelling keeps (check_lower_dump_parameter).
+#define BUSTER_CHECK_DUMP_PARAMETER_ALIASES 16u
+
+// A function scope's parameter `parameter` (its type in the function's type), as its declaration from `begin` to `end`
+// (a segment of the definition's parameter list) spells it, which clang prints (ParmVarDecl::getType's): its declarator's
+// declared type, qualifiers kept, every typedef its tokens name printed for the type it names (check_lower_dump_alias);
+// an array's or a function's
+// adjusted type, which keeps none, as the function's type has it.
+static String8 check_lower_dump_parameter(CheckLowerDumpBuilder* builder, uint32_t begin, uint32_t end, TypeId parameter)
+{
+    const CheckProgram* program = builder->program;
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const TypeTable* types = program->types;
+    const TypeId adjusted = type_unqualified(type_strip_aligned(types, parameter));
+    const bool known = input->declarations != NULL && input->declaration_kinds != NULL && input->declared_types != NULL;
+    TypeId alias_types[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
+    uint32_t alias_covered[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
+    String8 alias_names[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
+    uint32_t aliases = 0;
+    TypeId printed = parameter;
+    bool named = false;
+    uint32_t braces = 0;
+    for (uint32_t t = begin; known && t < end && t < input->token_count; t += 1)
+    {
+        const uint8_t kind_of = parser->tokens.kinds[t];
+        braces = kind_of == PARSE_KIND_L_BRACE ? braces + 1 : kind_of == PARSE_KIND_R_BRACE && braces != 0 ? braces - 1 : braces;
+        const uint32_t resolved = kind_of == PARSE_KIND_IDENTIFIER ? input->declarations[t] : BUSTER_CHECK_NONE;
+        const uint32_t identifier = parser->tokens.names[t];
+        if (resolved == t && !named && braces == 0)
+        {
+            // The parameter's own declarator: the first identifier outside a record body its specifiers define (whose
+            // members declare themselves too) that declares itself, of its type.
+            const TypeId declared = input->declared_types[t];
+            const TypeId bare = type_is_valid(types, declared) ? type_unqualified(type_strip_aligned(types, declared)) : 0;
+            const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+            named = bare == adjusted || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION;
+            printed = named && bare == adjusted ? declared : parameter;
+        }
+        else if (resolved != BUSTER_CHECK_NONE && resolved != t && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF &&
+                 aliases < BUSTER_CHECK_DUMP_PARAMETER_ALIASES && identifier < program->identifiers->count && check_lower_dump_typedef(parser, resolved))
+        {
+            alias_types[aliases] = check_lower_dump_alias(program, t, resolved, &alias_covered[aliases]);
+            alias_names[aliases++] = (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
+        }
+    }
+    TypeNames names = builder->names;
+    names.alias_types = alias_types;
+    names.alias_names = alias_names;
+    names.alias_covered = alias_covered;
+    names.alias_count = aliases;
+    // By place (`int (*)(I)`), else every typedef its tokens name wherever its type is.
+    CheckLowerDumpPlaces places = { .valid = false };
+    check_lower_dump_places(program, begin, end, &places);
+    return check_lower_dump_print_placed(builder, printed, &places, &names);
+}
+
+// The scope a function gives the record whose body opens at `open` (NamedDecl::printNestedNameSpecifier's): the function
+// whose body holds it, as its name and, with a prototype, its parameters' types (and "..."), then "::"; nothing outside
+// a function. Writes it to `text`, of `room` bytes, and returns its length (`room` or more where it doesn't fit).
+static uint64_t check_lower_dump_function_scope(CheckLowerDumpBuilder* builder, uint32_t open, char* text, uint64_t room)
+{
+    const CheckProgram* program = builder->program;
+    const Parser* parser = program->parser;
+    const TypeTable* types = program->types;
+    uint32_t body = BUSTER_CHECK_NONE;
+    for (uint32_t b = 0; open != BUSTER_CHECK_NONE && b < program->body_count; b += 1)
+    {
+        const uint32_t opening = program->bodies[b].opening;
+        const uint32_t closing = opening < parser->tokens.count ? parser->tree.parents[opening] : 0;
+        body = opening < open && open < closing && closing <= parser->tokens.count ? b : body;
+    }
+    uint64_t length = 0;
+    const uint32_t declaration = body != BUSTER_CHECK_NONE ? program->bodies[body].declaration : BUSTER_CHECK_NONE;
+    const TypeId function = declaration < program->input->token_count ? type_strip_aligned(types, program->input->declared_types[declaration]) : 0;
+    const uint32_t identifier = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+    if (function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION && identifier != 0 && identifier < program->identifiers->count)
+    {
+        // A K&R definition's parameters' declarations end in a `;` before its body: it has no written prototype, whose
+        // types clang prints.
+        const uint32_t opening = program->bodies[body].opening;
+        const bool written = opening == 0 || parser->tokens.kinds[opening - 1] != PARSE_KIND_SEMI;
+        const uint8_t flags = types->types.flags[type_index(function)];
+        uint32_t count = 0;
+        const TypeId* parameters = written && (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? type_parameters(types, function, &count) : NULL;
+        count = parameters != NULL ? count : 0;
+        length += (uint64_t)snprintf(text, room, "%s(", (const char*)intern_bytes(program->identifiers, identifier));
+        // The parameters' declarations: the list after the name, cut at its own commas (a parameter's segment is
+        // empty where the list isn't found, whose parameter prints as the function's type has it).
+        const uint32_t list = declaration + 1 < parser->tokens.count && parser->tokens.kinds[declaration + 1] == PARSE_KIND_L_PAREN ? declaration + 1 : 0;
+        uint32_t cursor = list + 1;
+        for (uint32_t p = 0; p < count && length < room; p += 1)
+        {
+            uint32_t end = cursor;
+            uint32_t depth = 0;
+            bool open_list = list != 0;
+            while (open_list && end < parser->tokens.count)
+            {
+                const uint8_t kind = parser->tokens.kinds[end];
+                const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+                const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+                open_list = !(depth == 0 && (closer || kind == PARSE_KIND_COMMA));
+                depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+                end += open_list ? 1 : 0;
+            }
+            const uint64_t mark = builder->scratch->length;
+            const String8 printed = check_lower_dump_parameter(builder, list != 0 ? cursor : 0, list != 0 ? end : 0, parameters[p]);
+            length += (uint64_t)snprintf(text + length, room - length, "%s%.*s", p != 0 ? ", " : "", (int)printed.length, printed.pointer);
+            arena_pop_to(builder->scratch, mark);
+            cursor = end + 1;
+        }
+        const bool variadic = parameters != NULL && (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        length += length < room ? (uint64_t)snprintf(text + length, room - length, "%s)::", variadic ? count != 0 ? ", ..." : "..." : "") : 0;
+    }
+    return length;
+}
+
 // The canonical name of a record's type (clang's getCanonicalTagType's, AnonymousTagMode::Plain): a named one's, or its
-// typedef's, or an unnamed one's scope (the records whose members it is the type of, each a name, a typedef's, or
-// "(unnamed struct)", "(anonymous struct)" for an anonymous member's, then "::"), then "(unnamed)".
+// typedef's, or an unnamed one's scope (NamedDecl::printNestedNameSpecifier's: the records whose bodies hold it
+// (check_lower_dump_parent), each a
+// name, a typedef's, or "(unnamed struct)", "(anonymous struct)" for an anonymous member's, each then "::", after the
+// function whose body holds them), then "(unnamed)".
 static uint32_t check_lower_dump_canonical(CheckLowerDumpBuilder* builder, TypeId record)
 {
     const TypeTable* types = builder->program->types;
     const uint32_t tag = types->types.index[type_index(record)];
     uint32_t result = 0;
-    if (types->tags.name[tag] != 0 || builder->names.anonymous[tag].length != 0 || builder->parents[tag] == BUSTER_CHECK_NONE)
+    bool anonymous = false;
+    const uint32_t scope = types->tags.name[tag] == 0 && builder->names.anonymous[tag].length == 0 ? check_lower_dump_parent(builder, tag, &anonymous) : BUSTER_CHECK_NONE;
+    if (scope == BUSTER_CHECK_NONE)
     {
         result = check_lower_dump_type(builder, record, 0);
     }
     else
     {
+        // The scopes outward, each with whether it is its own scope's anonymous member's type.
         uint32_t chain[BUSTER_CHECK_DUMP_DEPTH];
+        bool anonymous_members[BUSTER_CHECK_DUMP_DEPTH];
         uint32_t depth = 0;
-        for (uint32_t parent = builder->parents[tag]; parent != BUSTER_CHECK_NONE && depth < BUSTER_CHECK_DUMP_DEPTH; parent = builder->parents[parent])
+        for (uint32_t parent = scope; parent != BUSTER_CHECK_NONE && depth < BUSTER_CHECK_DUMP_DEPTH;)
         {
-            chain[depth++] = parent;
+            chain[depth] = parent;
+            parent = check_lower_dump_parent(builder, parent, &anonymous_members[depth]);
+            depth += 1;
         }
         char text[4096];
         uint64_t length = (uint64_t)snprintf(text, sizeof(text), "%s ", type_kind(types, record) == BUSTER_TYPE_KIND_UNION ? "union" : "struct");
+        length += check_lower_dump_function_scope(builder, depth != 0 ? builder->opens[chain[depth - 1]] : BUSTER_CHECK_NONE, text + length,
+                                                  sizeof(text) - length);
         for (uint32_t c = depth; c-- > 0 && length < sizeof(text);)
         {
             const uint32_t context = chain[c];
@@ -174,7 +640,7 @@ static uint32_t check_lower_dump_canonical(CheckLowerDumpBuilder* builder, TypeI
                                             builder->names.anonymous[context];
             length += own.length != 0 ? (uint64_t)snprintf(text + length, sizeof(text) - length, "%.*s::", (int)own.length, own.pointer) :
                                         (uint64_t)snprintf(text + length, sizeof(text) - length, "(%s %s)::",
-                                                           builder->anonymous_members[context] != 0 ? "anonymous" : "unnamed", kind);
+                                                           anonymous_members[c] ? "anonymous" : "unnamed", kind);
         }
         length += length < sizeof(text) ? (uint64_t)snprintf(text + length, sizeof(text) - length, "(unnamed)") : 0;
         if (length >= sizeof(text) && builder->refusal == NULL)
@@ -296,23 +762,6 @@ static TypeId check_lower_dump_promoted(const TypeTable* types, TypeId type, uin
     return result;
 }
 
-// Whether declaration token `token` is a typedef's name: the typedef keyword among its declaration's specifiers, before
-// it at its own brace depth (a record's body skipped), where a member's declaration meets its record's `{` first.
-static bool check_lower_dump_typedef(const Parser* parser, uint32_t token)
-{
-    uint32_t depth = 0;
-    bool found = false;
-    bool open = true;
-    for (uint32_t t = token; open && !found && t-- > 0;)
-    {
-        const uint8_t kind = parser->tokens.kinds[t];
-        found = depth == 0 && kind == PARSE_KIND_TYPEDEF;
-        open = !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE));
-        depth = kind == PARSE_KIND_R_BRACE ? depth + 1 : kind == PARSE_KIND_L_BRACE && depth != 0 ? depth - 1 : depth;
-    }
-    return found;
-}
-
 // The lines of a dump of a record of `record` (dumpUnnamedRecord and dumpRecordValue's), by an explicit stack of the
 // records being dumped: a nested record's fields one level deeper, an anonymous member's at its record's level.
 static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId record)
@@ -327,6 +776,9 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
         // anonymous member's, which has no lines of its own.
         uint32_t indent;
         bool anonymous;
+        // Its body's `}` and the place its next member's declarator is looked for from (check_lower_dump_member).
+        uint32_t close;
+        uint32_t cursor;
     } Frame;
     const CheckProgram* program = builder->program;
     const TypeTable* types = program->types;
@@ -335,7 +787,8 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
     const CheckLowerDumpOperand header = check_lower_dump_operand_string(check_lower_dump_canonical(builder, record));
     check_lower_dump_line(builder, "%s", &header, 1);
     check_lower_dump_line(builder, " {\n", NULL, 0);
-    stack[depth++] = (Frame){ .tag = types->types.index[type_index(record)], .indent = BUSTER_CHECK_NONE };
+    const uint32_t first_tag = types->types.index[type_index(record)];
+    stack[depth++] = (Frame){ .tag = first_tag, .indent = BUSTER_CHECK_NONE, .close = builder->closes[first_tag], .cursor = builder->opens[first_tag] + 1 };
     while (depth != 0 && builder->refusal == NULL)
     {
         Frame* top = stack + depth - 1;
@@ -365,14 +818,14 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
             const uint8_t kind = type_kind(types, bare);
             const bool record_kind = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
             const uint64_t offset = top->offset + types->members.offset[member];
-            // The member's declarator, where the column has it (a record a deferred body's lane completes has none there,
-            // or another's): its name is the member's.
-            const uint32_t recorded = program->input->member_tokens != NULL && member < program->input->member_token_count ? program->input->member_tokens[member] : 0;
-            const uint32_t token = recorded != 0 && recorded < program->parser->tokens.count && program->parser->tokens.names[recorded] == name ? recorded : 0;
+            // The member's declarator, in its record's body (none for a record without one: its types print canonical).
+            const uint32_t token = top->close != BUSTER_CHECK_NONE ? check_lower_dump_member(program, &top->cursor, top->close, name) : 0;
+            const uint32_t inner = record_kind ? types->types.index[type_index(bare)] : 0;
             if (name == 0 && !bits && record_kind && depth < BUSTER_CHECK_DUMP_DEPTH)
             {
                 // An anonymous struct or union: its fields, at this record's level.
-                stack[depth++] = (Frame){ .tag = types->types.index[type_index(bare)], .offset = offset, .depth = top->depth, .indent = top->indent, .anonymous = true };
+                stack[depth++] = (Frame){ .tag = inner, .offset = offset, .depth = top->depth, .indent = top->indent, .anonymous = true,
+                                          .close = builder->closes[inner], .cursor = builder->opens[inner] + 1 };
             }
             else if (name == 0 && !bits && record_kind)
             {
@@ -399,7 +852,8 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
                 {
                     check_lower_dump_line(builder, format, operands, count);
                     check_lower_dump_line(builder, " {\n", NULL, 0);
-                    stack[depth++] = (Frame){ .tag = types->types.index[type_index(bare)], .offset = offset, .depth = field_depth, .indent = indent };
+                    stack[depth++] = (Frame){ .tag = inner, .offset = offset, .depth = field_depth, .indent = indent, .close = builder->closes[inner],
+                                              .cursor = builder->opens[inner] + 1 };
                 }
                 else if (record_kind)
                 {
@@ -589,44 +1043,31 @@ static bool check_lower_dump_prepare(CheckLowerInitializers* pools, const CheckP
         const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, name_count);
         uint32_t* lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, name_count);
         String8* anonymous = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)types->tags.count + 1);
-        builder.parents = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)types->tags.count + 1);
-        builder.anonymous_members = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)types->tags.count + 1);
+        builder.opens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)types->tags.count + 1);
+        builder.closes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)types->tags.count + 1);
         builder.image = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, BUSTER_CHECK_DUMP_IMAGE);
         builder.strings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DUMP_LINES * 6);
         builder.lines = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDumpLine, BUSTER_CHECK_DUMP_LINES);
         builder.operands = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDumpOperand, BUSTER_CHECK_DUMP_LINES * 5);
         CheckLowerInitPool* items = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerInitPool, (uint64_t)pools->count + dumps);
         pools->dumps = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerDump, dumps);
-        valid = bytes != NULL && lengths != NULL && anonymous != NULL && builder.parents != NULL && builder.anonymous_members != NULL && builder.image != NULL && builder.strings != NULL && builder.lines != NULL &&
+        valid = bytes != NULL && lengths != NULL && anonymous != NULL && builder.opens != NULL && builder.closes != NULL && builder.image != NULL && builder.strings != NULL && builder.lines != NULL &&
                 builder.operands != NULL && items != NULL && pools->dumps != NULL;
         if (valid)
         {
             memset(bytes, 0, (uint64_t)name_count * sizeof(*bytes));
             memset(lengths, 0, (uint64_t)name_count * sizeof(*lengths));
             memset(anonymous, 0, ((uint64_t)types->tags.count + 1) * sizeof(*anonymous));
-            memset(builder.parents, 0xff, ((uint64_t)types->tags.count + 1) * sizeof(uint32_t));
-            memset(builder.anonymous_members, 0, (uint64_t)types->tags.count + 1);
+            for (uint32_t tag = 0; tag <= types->tags.count; tag += 1)
+            {
+                if (tag == types->tags.count || !check_lower_dump_body(program, tag, builder.opens + tag, builder.closes + tag))
+                {
+                    builder.opens[tag] = BUSTER_CHECK_NONE;
+                    builder.closes[tag] = BUSTER_CHECK_NONE;
+                }
+            }
             for (uint32_t tag = 0; tag < types->tags.count; tag += 1)
             {
-                // The unnamed records of its members' types (through arrays), whose scope it is.
-                const uint8_t own = type_is_valid(types, types->tags.type[tag]) ? type_kind(types, types->tags.type[tag]) : BUSTER_TYPE_KIND_NONE;
-                const uint32_t members = own == BUSTER_TYPE_KIND_STRUCT || own == BUSTER_TYPE_KIND_UNION ? types->tags.member_count[tag] : 0;
-                for (uint32_t m = 0; m < members; m += 1)
-                {
-                    const uint32_t member = types->tags.member_begin[tag] + m;
-                    TypeId inner = type_unqualified(type_strip_aligned(types, types->members.type[member]));
-                    for (uint32_t guard = 0; guard < 64 && type_kind_is_array(type_kind(types, inner)); guard += 1)
-                    {
-                        inner = type_unqualified(type_strip_aligned(types, types->types.base[type_index(inner)]));
-                    }
-                    const uint8_t kind = type_kind(types, inner);
-                    const uint32_t child = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(inner)] : tag;
-                    if (child != tag && child < types->tags.count && types->tags.name[child] == 0 && builder.parents[child] == BUSTER_CHECK_NONE)
-                    {
-                        builder.parents[child] = tag;
-                        builder.anonymous_members[child] = types->members.name[member] == 0 && (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0;
-                    }
-                }
                 const uint32_t name = types->tags.name[tag];
                 if (name != 0 && name < name_count)
                 {

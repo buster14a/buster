@@ -237,28 +237,35 @@ expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
 
 # Landed merges, documentation-only revisions and direct pushes all get full hosted CI in either nightly mode (#1271).
-# Each checkout and GITHUB_SHA must agree, as the workflow's do. Pushes always run their own native correctness (#1272).
+# Each checkout and GITHUB_SHA must agree, as the workflow's do. In the nightly mode a push keeps off the 9700X, its
+# native correctness and measurements deferred to the window; before it, a push qualifies on hardware (#1272).
 for revision in "$merge" "$docs" "$head"; do
     git -C "$history" worktree add -q --detach "$work/main-push" "$revision"
-    for mode in on ''; do
-        GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=$mode run_evidence "$work/main-push"
-        expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a main push qualifies on hardware'
-    done
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=on run_evidence "$work/main-push"
+    expect_line "$GITHUB_OUTPUT" 'scope=full' 'a main push runs every hosted row in the nightly mode'
+    expect_line "$GITHUB_OUTPUT" 'hosted=run' 'its own'
+    expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'and keeps off the 9700X'
+    expect_line "$GITHUB_OUTPUT" 'hardware_reason=deferred' 'deferring it to the window'
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY='' run_evidence "$work/main-push"
+    expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a main push qualifies on hardware'
     git -C "$history" worktree remove "$work/main-push"
 done
 
-# A push to main runs its own native correctness, needing no pull request's native evidence, and reads no API.
+# A push to main needs no pull request's native evidence, and reads no API: before the nightly mode it runs its own
+# native correctness; in it, none here.
 tree=$(git -C "$history" rev-parse "$head^{tree}")
 other=$(printf 'other' | sha1sum | cut -c 1-40)
 now=$(madrid '2026-11-04 12:00')
 export NIGHTLY_NOW=$now
 : > "$fixtures/calls.log"
-for nightly in on ''; do
-    GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=$nightly run_evidence "$history"
-    expect_line "$GITHUB_OUTPUT" 'native=run' "a push runs native correctness (nightly mode '$nightly')"
-    expect_line "$GITHUB_OUTPUT" 'hardware=admit' "and is admitted (nightly mode '$nightly')"
-    expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
-done
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=run' 'before the nightly mode a push runs native correctness'
+expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
+expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=-' 'in the nightly mode a push runs no native correctness here'
+expect_line "$GITHUB_OUTPUT" 'measurement=-' 'and no measurements'
+expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run either'
 expect_no_match "$fixtures/calls.log" 'pulls|actions/' 'a push looks up no pull request run'
 
 # A nightly backlog dispatch: its commit's push run passed the plain rows, and the window decides.
@@ -279,11 +286,11 @@ expect_line "$GITHUB_OUTPUT" 'hosted=reused' 'a backlog run reuses its commit'"'
 expect_line "$GITHUB_OUTPUT" 'hosted_source=800' 'naming the run'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'inside the window it is admitted'
 expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a backlog run is in the plain scope'
-expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 04:00')" 'the cycle'"'"'s window opens at 04:00 Madrid'
-expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 07:00')" 'and closes at 07:00'
+expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 02:00')" 'the cycle'"'"'s window opens at 02:00 Madrid'
+expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 08:00')" 'and closes at 08:00'
 expect_line "$GITHUB_OUTPUT" 'window_override=false' 'without an override'
-NIGHTLY_NOW=$(madrid '2026-11-04 06:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 07:00, it is not'
+NIGHTLY_NOW=$(madrid '2026-11-04 07:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 08:00, it is not'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=window' 'and says why'
 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head EVIDENCE_OVERRIDE='manual check' run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'an override admits outside the window'
@@ -316,19 +323,19 @@ window_case()
     : > "$GITHUB_OUTPUT"
     FAKE_NOW=$1 WINDOW_START=$2 WINDOW_DEADLINE=$3 WINDOW_OVERRIDE=$4 BOUND=$5 PATH="$work/clock:$PATH" bash "$window_step" > /dev/null
 }
-start_epoch=$(madrid '2026-11-04 04:00')
-deadline_epoch=$(madrid '2026-11-04 07:00')
+start_epoch=$(madrid '2026-11-04 02:00')
+deadline_epoch=$(madrid '2026-11-04 08:00')
 window_case $((start_epoch + 600)) "$start_epoch" "$deadline_epoch" false 25 || fail 'the window step admits inside the window'
 expect_line "$GITHUB_OUTPUT" 'window=open' 'and says so'
 if window_case $((deadline_epoch - 20 * 60)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken at 06:40 admitted a 25-minute bound'
+    fail 'a lock taken at 07:40 admitted a 25-minute bound'
 fi
 expect_line "$GITHUB_OUTPUT" 'window=closed' 'a lock taken too late closes the window'
 if window_case $((deadline_epoch + 3600)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken after 07:00 admitted'
+    fail 'a lock taken after 08:00 admitted'
 fi
 if window_case $((start_epoch - 60)) "$start_epoch" "$deadline_epoch" false 25; then
-    fail 'a lock taken before 04:00 admitted'
+    fail 'a lock taken before 02:00 admitted'
 fi
 if window_case $((start_epoch + 600)) '' '' false 25; then
     fail 'missing instants admitted'
@@ -481,7 +488,7 @@ sequence_case()
     done
 }
 sequence_case $((deadline_epoch + 600))
-expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 07:00 refuses'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 08:00 refuses'
 test ! -s "$sequence/work.log" || { cat "$sequence/work.log" >&2; fail 'and queries no package and hashes nothing first'; }
 expect_no_match "$GITHUB_OUTPUT" '^host=' 'nor records an identity'
 sequence_case $((start_epoch + 600))
@@ -605,6 +612,30 @@ expect_match "$work/window/ledger.tsv" "^run	900	.*	ok	skip	full	blocked-hosted	
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'the comprehensive run is admitted first'
 test "$(grep -E -c '^workflow run .*hardware=admit' "$fixtures/calls.log")" -eq 1 || fail 'one hardware run at a time'
 expect_line "$work/window/ledger.tsv" "cycle	2026-11-04	$head	9200	$(madrid '2026-11-03 22:10')" 'the window keeps the prepare job'"'"'s pin'
+expect_line "$GITHUB_OUTPUT" 'continue=closed' 'a window job with time left hands over nothing'
+# The night the clocks go back, the window is 7 hours: longer than one job's 345 minutes, within two.
+autumn=$("$work/nightly" window-times --now 1792886400)
+autumn_length=$(( $(awk -F '\t' '$1 == "deadline" { print $2 }' <<< "$autumn") - $(awk -F '\t' '$1 == "start" { print $2 }' <<< "$autumn") ))
+test "$autumn_length" -eq 25200 || fail "the fall-back night's window is 7 hours ($autumn_length s)"
+test "$autumn_length" -gt 20700 && test "$autumn_length" -le $((2 * 20700)) || fail 'it needs one continuation job, and one is enough'
+# A window job out of time (345 minutes since its start) while it still waits inside the window hands over: the pin and
+# its pending dispatches, as the prepare job does, and the continuation job, with requests from 20001, repeats none.
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_STARTED=$(( $(madrid '2026-11-04 04:10') - 20700 )) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$prepared run_coordinator "$work/window-out" window run
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'a window job out of time hands over to its continuation'
+expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'with the pin'
+expect_match "$work/coordinate.log" 'the continuation job takes over' 'and says so'
+continued=$(handed)
+pending_count=$(awk '{ print $2 }' <<< "$continued")
+[[ "$continued" == "buster-nightly-pending-1 "* ]] && test "$pending_count" -ge 1 || fail "and its pending dispatches: $continued"
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*-f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'it admitted the comprehensive run before handing over'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:11') NIGHTLY_SEQUENCE=20001 NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$continued run_coordinator "$work/window-continued" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'the continuation repeats no dispatch the runs don'"'"'t show yet'
+expect_no_match "$fixtures/calls.log" 'request=20261104\.9200\.100' 'and makes none with the window job'"'"'s request numbers'
+# Out of time after the window closed: nothing to hand over.
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 08:10') NIGHTLY_STARTED=$(( $(madrid '2026-11-04 08:10') - 20700 )) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$none_pending run_coordinator "$work/window-late" window run
+expect_line "$GITHUB_OUTPUT" 'continue=closed' 'after 08:00 there is nothing to continue'
 # A manual run's override admits outside the window, through the coordinator and its dispatch, and says so.
 : > "$fixtures/calls.log"
 GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_OVERRIDE='validating the coordinator' run_coordinator "$work/override-prepare" prepare run

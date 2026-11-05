@@ -486,6 +486,8 @@ struct CheckLowerAbi
     uint32_t argument_count;
     uint32_t capacity;
     uint32_t argument_capacity;
+    // The static chains among the arguments (#148): each a void argument, which check_lower_chain_location puts in r10.
+    uint32_t chains;
 };
 
 // A jump table's most entries (check_lower_switch_table). clang -O0 builds one of any size (LLVM's limit is UINT_MAX
@@ -630,6 +632,9 @@ struct CheckLowerWriter
     // check_lower_call_body makes a TAIL_CALL.
     uint32_t tail;
     bool tails;
+    // __builtin_call_with_static_chain's node while its call lowers (#148): check_lower_call_body passes its chain, the
+    // builtin's second argument, as the call's argument 0 in r10 (check_lower_chain_location).
+    uint32_t chain;
     CBuiltinLowerCall* builtins;
     CheckLowerBuiltinOperands* builtin_operands;
     CBuiltinLowerScratch builtin_scratch;
@@ -711,6 +716,10 @@ struct CheckLowerWriter
     // Whether the body calls __builtin_setjmp, whose function keeps nothing in a callee-saved register
     // (Tier0Function.returns_twice).
     bool returns_twice;
+    // Whether the body calls __builtin_eh_return (#148, Tier0Function.eh_return), whose TAIL_CALL rows are its; and the
+    // node of the expression statement being lowered (BUSTER_CHECK_NONE for another control), the only place of one.
+    bool eh_return;
+    uint32_t statement;
     bool vectors;
     // Whether the function's x86 builtins take or give masks in Tier 0's mask class (Tier0Function.masks, #179).
     bool masks;
@@ -5612,6 +5621,80 @@ static void check_lower_transparent_value(CheckLowerWriter* writer, uint32_t nod
 
 static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime runtime);
 
+// The arguments in registers of their own (#148), each a void one, which abi_assign ignores, as it takes no register
+// (CheckLowerAbi.chains): a static chain's (check_lower_call_body's) in r10, the SysV x86-64 static chain register (LLVM's
+// `nest`), where clang passes it; and __builtin_eh_return's offset (check_lower_eh_return's, a const void) in rcx, where
+// its unwinding reads it (Tier0Function.eh_return). Out of line: only a unit with one has one.
+static __attribute__((noinline)) void check_lower_chain_location(const CheckLowerAbi* abi, AbiLocation* locations)
+{
+    for (uint32_t i = 0; i < abi->argument_count; i += 1)
+    {
+        if (type_index(abi->arguments[i]) == type_index(BUSTER_TYPE_VOID))
+        {
+            const uint8_t reg = abi->arguments[i] == BUSTER_TYPE_VOID ? BUSTER_ABI_R10 : BUSTER_ABI_RCX;
+            locations[i] = (AbiLocation){ .registers = { reg, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        }
+    }
+}
+
+// __builtin_eh_return(offset, handler) (#148), as LLVM's EH_RETURN unwinds: a TAIL_CALL of a row of the function's own
+// (Tier0Function.eh_return's BUSTER_TIER0_TAIL_EH), indirect, the handler its callee, and the offset, converted to size_t,
+// its one argument, in rcx (check_lower_chain_location, from its const void abi type), the row's result the function's
+// own. The offset runs first, into a temporary, then the handler, as clang's arguments run. One that isn't an expression
+// statement of its own (a TAIL_CALL leaves nothing under its operands), a variadic function's, and a function's that makes
+// a musttail call too, are refused by name. The tasks run in reverse.
+static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckGraph* graph = &writer->program->input->graph;
+    const CheckStream* stream = writer->program->stream;
+    const TypeTable* types = writer->program->types;
+    CheckLowerAbi* abi = writer->abi;
+    // The statement's node, or its conversion (to void) or cast of the call.
+    const uint32_t root = writer->statement;
+    const bool alone = node == root || (root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) && graph->operand0[root] == node);
+    // A musttail call's tail, not an earlier __builtin_eh_return's (#1420's review): a function may have several.
+    const bool musttail = writer->tails && !writer->eh_return;
+    if (!alone || writer->variadic || musttail)
+    {
+        check_lower_unsupported(writer, !alone ? "__builtin_eh_return within an expression, not a statement of its own" :
+                                        writer->variadic        ? "__builtin_eh_return in a variadic function" :
+                                                                  "__builtin_eh_return in a function that makes a musttail call");
+    }
+    else if (abi->count >= abi->capacity || abi->argument_count >= abi->argument_capacity)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    else
+    {
+        const uint32_t call = writer->call_count++;
+        writer->call_targets[call] = 0;
+        writer->call_first[call] = writer->argument_count;
+        writer->call_counts[call] = 1;
+        writer->call_variadic[call] = false;
+        writer->call_result_objects[call] = 0;
+        writer->tails = true;
+        writer->eh_return = true;
+        abi->first[abi->count] = abi->argument_count;
+        abi->results[abi->count] = writer->result;
+        abi->counts[abi->count] = 1;
+        abi->named[abi->count] = 1;
+        abi->variadic[abi->count++] = false;
+        abi->arguments[abi->argument_count++] = BUSTER_TYPE_VOID | BUSTER_TYPE_CONST;
+        abi->chains += 1;
+        writer->argument_sizes[writer->argument_count] = 0;
+        writer->argument_classes[writer->argument_count++] = BUSTER_TYPED_CLASS_U64;
+        const uint32_t offset = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t first = graph->argument_offsets[node];
+        const TypeId handler_type = check_stream_type(stream, graph->argument_nodes[first + 1]);
+        const bool handler_address = check_action_kind(types, type_strip_aligned(types, handler_type)) != BUSTER_TYPE_KIND_POINTER;
+        check_lower_instruction(writer, BUSTER_TYPED_TAIL_CALL, BUSTER_TYPED_CLASS_VOID, call);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, offset);
+        check_lower_operand(writer, node, 4, handler_address, handler_address ? 0 : handler_type);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, offset);
+        check_lower_operand(writer, node, 3, false, BUSTER_TYPE_ULONG);
+    }
+}
+
 // A call's entries, as check_lower_call_to and check_lower_call_halves compile them: a normal source call, or an exactly
 // typed fortified libc call (`runtime`), with `halves` one that passes a half-precision argument, in an XMM register's low
 // 16 bits (a float's, its bits moved there as it is passed: check_lower_half_entry's CONVERT); without, any other, whose
@@ -5629,6 +5712,11 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const uint32_t callee = builtin ? node : graph->operand0[node];
     // A musttail return's call (check_lower_tail_return): a TAIL_CALL, whose result is the function's own, with no object.
     const bool tail = node == writer->tail;
+    // A static chain's call (#148, CBUILTIN_CALL_WITH_STATIC_CHAIN): the builtin's node, whose second argument is the chain,
+    // passed as the call's argument 0, a pointer in r10. Its abi type is void, which no argument has and abi_assign gives no
+    // register (check_lower_chain_location puts it in r10).
+    const uint32_t chain = writer->chain != BUSTER_CHECK_NONE && graph->argument_nodes[graph->argument_offsets[writer->chain]] == node ? writer->chain : BUSTER_CHECK_NONE;
+    const uint32_t chained = chain != BUSTER_CHECK_NONE ? 1 : 0;
     // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
     // parenthesis, which a call across lines ends on).
     check_lower_source(writer, graph->tokens[callee]);
@@ -5693,18 +5781,22 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0);
-    if (passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
+    const bool unwinding = tail && writer->eh_return;
+    if (passed != NULL || count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL || (tail && chained != 0) || unwinding)
     {
         // A half-precision argument (the first type it finds of the parameters' and the arguments'): the call is
         // check_lower_call_halves', which checks them all again.
-        retry = !halves && passed == check_lower_half_passed && count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS && returned == NULL;
+        retry = !halves && passed == check_lower_half_passed && count + chained <= BUSTER_TIER0_MAX_CALL_ARGUMENTS && returned == NULL && !(tail && chained != 0) &&
+                !unwinding;
         if (!retry)
         {
-            check_lower_unsupported(writer, count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
+            check_lower_unsupported(writer, count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
+                                            tail && chained != 0 ? "a musttail call with a static chain" :
+                                            unwinding ? "a musttail call in a function that calls __builtin_eh_return" :
                                             passed != NULL && passed != check_lower_half_passed ? passed : returned);
         }
     }
-    else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
+    else if (abi->count >= abi->capacity || count + chained > abi->argument_capacity - abi->argument_count)
     {
         check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
     }
@@ -5723,16 +5815,23 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
                                                    check_lower_temporary_of(writer, result);
         writer->call_targets[call] = builtin ? check_lower_runtime(writer, runtime) : direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
-        writer->call_counts[call] = count;
+        writer->call_counts[call] = count + chained;
         writer->call_variadic[call] = variadic;
         writer->call_result_objects[call] = object_result ? object + 1 : 0;
         writer->aggregates |= object_result;
         writer->tails |= tail;
         abi->first[abi->count] = abi->argument_count;
         abi->results[abi->count] = result;
-        abi->counts[abi->count] = count;
-        abi->named[abi->count] = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters - omitted : count;
+        abi->counts[abi->count] = count + chained;
+        abi->named[abi->count] = ((flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters - omitted : count) + chained;
         abi->variadic[abi->count++] = variadic;
+        if (chained != 0)
+        {
+            abi->arguments[abi->argument_count++] = BUSTER_TYPE_VOID;
+            abi->chains += 1;
+            writer->argument_sizes[writer->argument_count] = 0;
+            writer->argument_classes[writer->argument_count++] = BUSTER_TYPED_CLASS_U64;
+        }
         // Whether an argument is a transparent union's, which the operands' loop asks again only then.
         bool transparent = false;
         // A plain call's arguments: each its own type, a value of its class.
@@ -5831,6 +5930,14 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
                 }
                 check_lower_operand(writer, node, a + 3, false, argument);
             }
+        }
+        if (chained != 0)
+        {
+            // The chain, after the callee and before the arguments: a pointer's value, or an array's or a function's address.
+            const TypeId chain_type = check_stream_type(stream, graph->argument_nodes[graph->argument_offsets[chain] + 1]);
+            const uint8_t chain_kind = check_action_kind(types, type_strip_aligned(types, chain_type));
+            const bool chain_address = chain_kind != BUSTER_TYPE_KIND_POINTER;
+            check_lower_operand(writer, chain, 4, chain_address, chain_address ? 0 : chain_type);
         }
         if (!direct)
         {
@@ -8282,7 +8389,11 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     }
     else if (runtime == CBUILTIN_CALL_WITH_STATIC_CHAIN)
     {
-        check_lower_unsupported(writer, "__builtin_call_with_static_chain, whose chain this compiler's calls don't pass in r10");
+        // Its call, with the chain passed in r10 (#148), as clang's code makes it: the callee, then the chain, then the
+        // arguments (check_lower_call_body).
+        writer->chain = node;
+        check_lower_call(writer, graph->argument_nodes[first]);
+        writer->chain = BUSTER_CHECK_NONE;
     }
     else if (runtime == CBUILTIN_INFER_ALLOC_TOKEN)
     {
@@ -8317,7 +8428,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     }
     else if (runtime == CBUILTIN_EH_RETURN)
     {
-        check_lower_unsupported(writer, "__builtin_eh_return, whose unwinding to a handler this compiler doesn't make");
+        check_lower_eh_return(writer, node);
     }
     else if (runtime == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || runtime == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
     {
@@ -12581,6 +12692,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
             check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32,
                                     control.target);
         }
+        writer->statement = control.kind == CHECK_CONTROL_EVALUATE ? control.node : BUSTER_CHECK_NONE;
         if (control.node != BUSTER_CHECK_NONE)
         {
             check_lower_expression(writer, control.node, false, control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0);
@@ -13688,6 +13800,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->label_symbol_capacity = shared->label_symbol_capacity + lowered->case_symbol_count - writer->label_symbol_used;
     abi->count = 0;
     abi->argument_count = 0;
+    abi->chains = 0;
     memset(writer->runtime_mask, 0, sizeof(writer->runtime_mask));
     writer->runtime_count = 0;
     part->stage = CHECK_LOWER_STAGE_NONE;
@@ -13745,6 +13858,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->aggregates = false;
         writer->tails = false;
         writer->tail = BUSTER_CHECK_NONE;
+        writer->chain = BUSTER_CHECK_NONE;
         writer->track = body.count != body.entry_count || shared->terminal;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
@@ -13763,6 +13877,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->int128 = false;
         writer->unwind_init = false;
         writer->returns_twice = false;
+        writer->eh_return = false;
+        writer->statement = BUSTER_CHECK_NONE;
         writer->vectors = false;
         writer->masks = false;
         writer->operation_count = 0;
@@ -14235,7 +14351,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 {
                     if (writer->kinds[e] == BUSTER_TYPED_TAIL_CALL && writer->values[e] < writer->call_count)
                     {
-                        tails[writer->values[e]] = 1;
+                        tails[writer->values[e]] = writer->eh_return ? BUSTER_TIER0_TAIL_EH : BUSTER_TIER0_TAIL_CALL;
                     }
                 }
                 function->call_tails = tails;
@@ -14254,6 +14370,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->int128 = writer->int128;
         function->unwind_init = writer->unwind_init;
         function->returns_twice = writer->returns_twice;
+        function->eh_return = writer->eh_return;
         function->vectors = writer->vectors;
         function->masks = writer->masks;
         if (writer->vectors)
@@ -14351,6 +14468,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         else
         {
             abi_assign(table, signature, locations, calls);
+        }
+        if (abi->chains != 0)
+        {
+            check_lower_chain_location(abi, locations);
         }
         for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
         {

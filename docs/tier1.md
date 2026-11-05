@@ -304,13 +304,18 @@ for one). The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and
-64-bit integers, which `__m512i`'s intrinsics are) and the x86 builtins' rows of
-vectors are the IR's machine rows (#141, [the IR guide](ir.md)'s "Machine rows"),
+64-bit integers, which `__m512i`'s intrinsics are) are the IR's operations of
+their lanes where C's operators make them (#141, [the SIMD IR guide](ir-simd.md)'s
+"Lanes"), and the x86 builtins' other rows of vectors are the IR's machine rows
+([the IR guide](ir.md)'s "Machine rows"),
 which Tier 1 places as Tier 0 does ([the selection guide](tier1-selection.md)'s
 "Machine rows"); a vector of 4 or 8 bytes (an SSE carrier, #1280: the operand of
 `_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. Functions with
-what the IR doesn't represent stop before Tier 1, at the lowering to the IR: any
-vector at a target without AVX (#775), and a 64-byte one without AVX512F. At a
+what the IR doesn't represent stop before Tier 1, at the lowering to the IR: a 32-
+or 64-byte vector or an SSE carrier at a target without AVX (#775), and a 64-byte
+vector without AVX512F; at a target without AVX a 16-byte vector is Tier 1's by
+legacy SSE's forms (#141, [the selection guide](tier1-selection.md)'s "At targets
+without AVX"). At a
 target with AVX but without AVX512VL, such as x86-64-v3, Tier 1 takes 16- and
 32-byte vectors by VEX forms in xmm0 to xmm15, and places machine rows' roles
 below 16 (#1281, [the selection guide](tier1-selection.md)'s "At targets without

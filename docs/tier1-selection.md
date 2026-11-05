@@ -925,6 +925,7 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
 | `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
 | `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
 
@@ -956,7 +957,7 @@ are:
 | `SPLAT` | `mov r11d, imm32`, `vmovd x, r11d`, then `vpshufd x, x, 0` (16 bytes) or `vpbroadcastd y, x` (32 bytes) |
 | `CONSTANT`, loads, stores, spills, reloads, call saves | `vmovdqu` at the width |
 | `COPY`, edge moves | `vmovdqa` of a ymm register (`movaps` for 16 bytes) |
-| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor` |
+| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor`, and at other lanes AVX's and AVX2's (`tier1_select_lane_forms`' VEX column: no 16-bit shift and no 64-bit arithmetic right shift, which VEX hasn't) |
 
 At a target with AVX but not AVX2 (Sandy Bridge's, `Tier1EmitPrepared.avx2`
 from the allow-list's `vpcmpeqd` of a ymm register), a ymm register's integer
@@ -995,6 +996,48 @@ phis swap through xmm15; seventeen 32-byte vectors live at once, spilled and
 reloaded; and vectors of both widths live across two calls. One more is emitted
 for x86-64-v2 with AVX, Sandy Bridge's target: 32-byte bitwise operations and
 constants of every kind by AVX's forms, beside 16-byte arithmetic.
+
+### At targets without AVX (#141's SSE targets)
+
+At the x86-64 baseline and x86-64-v2, which have no AVX, the vector registers
+are xmm0 to xmm15 and every form is legacy SSE's, whose destination is its first
+operand. The lowering admits a 16-byte vector there with no feature past the
+target's (`ir_typed_vector_moves`), and still refuses a 32- or 64-byte one, which
+such a target computes in halves (Tier 0's), and an SSE carrier, whose zeroing
+moves are AVX's. The decoder takes the typed stream's legacy rows
+(`c_check_program_vectors_baseline.c`'s `op v0, v1`) into the IR's operations of
+their lanes: every element type's `paddb`/`w`/`d`/`q` and `psubb`/`w`/`d`/`q`,
+`pmullw` and SSE4.1's `pmulld`, `pand`, `por`, `pxor` and the packed singles'
+`andps`, `orps` and `xorps`, and `addps` to `divpd`; the comparisons (`pcmpeq`
+and `pcmpgt` sequences, `cmpps`), complements and splats stay machine rows. The
+CFG consumer's encoding level is legacy SSE's there (`Tier1EmitPrepared.sse`,
+from the target's allow-list: whether it allows `vmovdqu` of an xmm register;
+`BUSTER_TIER1_ENCODING_SSE`, `Tier1SelectHoles.sse`):
+
+| Kind | Records |
+| --- | --- |
+| `ZERO`, `ONES` | `pxor x, x`, `pcmpeqd x, x` |
+| `SPLAT` | `mov r11d, imm32`, `movd x, r11d`, `pshufd x, x, 0` |
+| `CONSTANT`, loads, stores, spills, reloads, call saves | `movups` |
+| `COPY`, edge moves | `movaps` |
+| `BINARY` | the lanes' legacy form (`tier1_select_lane_forms`' SSE column) after `movaps x, left` where the destination isn't the left operand: a commutative integer operation's operands swapped where the right one is in the destination, and any other's right operand copied into xmm15 first, a floating one's too, so that a NaN result is its first operand's, as the IR's is |
+| `NOT` | `pcmpeqd x, x` and `pxor x, operand` where the operand is elsewhere; `pcmpeqd xmm15, xmm15` and `pxor x, xmm15` where it is the destination (#1425's review) |
+
+`COMPARE` and `SELECT` have no SSE records: their masks are opmasks, which no SSE
+target has. They take AVX-512's forms, which the target's allow-list refuses at
+emission (`TIER1_EMIT_TARGET`), as at a VEX target, so a function the decoder
+didn't give them (an IR client's) goes to Tier 0 rather than lose them.
+
+A machine row's roles are placed below 16 as at a VEX target, moved by `movaps`.
+`test-tier1-masks` runs two fixtures natively, at x86-64-v2 and at the baseline
+(without `pmulld`), of every lane's legacy operation in every operand order,
+against the interpreter; their records must all be the target's (its
+allow-list). A third, at the baseline, complements a vector into another register
+and in place, and a comparison and selection there must be refused at emission;
+`test-tier1-select` checks those records directly. `test-checker-driver`'s SSE fixture compiles C's operators on
+16-byte vectors of every element type by `--tier1 -march=x86-64` and
+`-march=x86-64-v2`, every function Tier 1's, by both paths and with and without
+rematerialization, and matches clang -O0's output.
 
 ## Machine rows (#141)
 

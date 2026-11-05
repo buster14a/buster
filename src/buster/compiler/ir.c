@@ -467,6 +467,14 @@ static const char* const ir_type_names[IR_TYPE_COUNT] = {
     "m32",
     "m64",
 };
+// A vector operation's lanes' names (#141's element types), by IrSimdLane, and its vector type's, by its width (16, 32 or
+// 64 bytes) and lanes: `add.v16i8` is an add of v4i32's 16 bytes as 8-bit lanes, its flags I8.
+static const char* const ir_lane_names[IR_SIMD_LANE_COUNT] = { "i32", "i8", "i16", "i64", "f32", "f64" };
+static const char* const ir_lane_type_names[3][IR_SIMD_LANE_COUNT] = {
+    { "v4i32", "v16i8", "v8i16", "v2i64", "v4f32", "v2f64" },
+    { "v8i32", "v32i8", "v16i16", "v4i64", "v8f32", "v4f64" },
+    { "v16i32", "v64i8", "v32i16", "v8i64", "v16f32", "v8f64" },
+};
 static const char* const ir_op_names[IR_OP_COUNT] = {
     "invalid",
     "const",
@@ -766,15 +774,15 @@ typedef enum IrRule
     X(IR_AND,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
     X(IR_OR,            3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
     X(IR_XOR,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
-    X(IR_SHL,           3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
-    X(IR_LSHR,          3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
-    X(IR_ASHR,          3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
+    X(IR_SHL,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SHIFT, 0) \
+    X(IR_LSHR,          3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SHIFT, 0) \
+    X(IR_ASHR,          3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SHIFT, 0) \
     X(IR_NEG,           1, 1, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
     X(IR_NOT,           1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
-    X(IR_FADD,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
-    X(IR_FSUB,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
-    X(IR_FMUL,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
-    X(IR_FDIV,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
+    X(IR_FADD,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_FSUB,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_FMUL,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_FDIV,          3, 3, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
     X(IR_FNEG,          1, 1, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
     X(IR_ICMP,          3, 7, 1u << IR_I1, IR_RULE_ICMP, 0) \
     X(IR_FCMP,          3, 7, 1u << IR_I1, IR_RULE_FCMP, 0) \
@@ -860,6 +868,57 @@ static IrSimdShape ir_simd_shape(uint32_t type)
 {
     const IrSimdShape result = type >= IR_V4I32 && type <= IR_M64 ? (IrSimdShape)(type - IR_V4I32 + IR_SIMD_V4I32) : IR_SIMD_NONE;
     return result;
+}
+
+// A vector operation's lanes (#141's element types), its `flags`: an IrSimdLane. The IR's vector types are containers of
+// 16, 32 or 64 bytes whatever their elements (the typed stream's VECTOR class is bytes alone, so loads, stores, copies,
+// phis, selects and calls carry a vector as its bytes), and each operation that reads its operands as elements names
+// them: add, sub, mul and the shifts integer lanes of 8, 16, 32 or 64 bits, fadd, fsub, fmul and fdiv floats or doubles,
+// and vcmp and vselect any of them. I32 (0) is the default, so that the v4i32, v8i32 and v16i32 operations before the
+// lanes keep their meaning; every other operation's flags stay 0 (a load's and a store's are their access's).
+static IrSimdOperation ir_lane_operation(uint32_t op)
+{
+    IrSimdOperation result = IR_SIMD_OPERATION_COUNT;
+    switch (op)
+    {
+        case IR_ADD: result = IR_SIMD_ADD; break;
+        case IR_SUB: result = IR_SIMD_SUB; break;
+        case IR_MUL: result = IR_SIMD_MUL; break;
+        case IR_SHL: result = IR_SIMD_SHL; break;
+        case IR_LSHR: result = IR_SIMD_LSHR; break;
+        case IR_ASHR: result = IR_SIMD_ASHR; break;
+        case IR_FADD: result = IR_SIMD_FADD; break;
+        case IR_FSUB: result = IR_SIMD_FSUB; break;
+        case IR_FMUL: result = IR_SIMD_FMUL; break;
+        case IR_FDIV: result = IR_SIMD_FDIV; break;
+        case IR_VCMP: result = IR_SIMD_COMPARE; break;
+        case IR_VSELECT: result = IR_SIMD_SELECT; break;
+        default: break;
+    }
+    return result;
+}
+
+// Whether instruction flags `lane` are valid lanes of `op` on a vector: lanes its operation reads (ir_simd_lane_valid).
+static bool ir_lane_valid(uint32_t op, uint32_t lane)
+{
+    const IrSimdOperation operation = ir_lane_operation(op);
+    return operation != IR_SIMD_OPERATION_COUNT && lane < IR_SIMD_LANE_COUNT && ir_simd_lane_valid(operation, (IrSimdLane)lane);
+}
+
+// The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
+// for a type that isn't a vector.
+static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
+{
+    const IrSimdShape shape = lane < IR_SIMD_LANE_COUNT ? ir_simd_lane_mask(ir_simd_shape(type), (IrSimdLane)lane) : IR_SIMD_NONE;
+    const uint32_t result = shape == IR_SIMD_NONE ? IR_VOID : IR_M8 + (uint32_t)(shape - IR_SIMD_M8);
+    return result;
+}
+
+// How many lanes `lane` vector type `type` has.
+static uint32_t ir_lane_count(uint32_t type, uint32_t lane)
+{
+    const uint32_t bits = lane < IR_SIMD_LANE_COUNT ? ir_simd_lane_bits((IrSimdLane)lane) : 0;
+    return ir_vector_type(type) && bits != 0 ? ir_type_bits[type] / bits : 0;
 }
 
 // How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
@@ -1198,7 +1257,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && (f->flags[i] != 0 || f->alignment_log2[i] != 0)))
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -1232,8 +1291,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_NONE: break;
             case IR_RULE_CONSTANT: valid = a < f->constant_count && ir_constant_fits(f->constants[a], (uint8_t)type); break;
             case IR_RULE_PARAMETER: valid = a < f->parameter_count && f->parameter_types[a] == type; break;
-            case IR_RULE_SAME: valid = ta == type && ((ir_operand_table[op] & 2) == 0 || tb == type); break;
-            case IR_RULE_SHIFT: valid = ta == type && ir_integer(tb); break;
+            // A vector's arithmetic reads lanes its operation takes (ir_lane_valid: fadd's floats or doubles, never the
+            // default I32), and the bitwise operations none; a scalar's, none.
+            case IR_RULE_SAME:
+                valid = ta == type && ((ir_operand_table[op] & 2) == 0 || tb == type) &&
+                        (ir_vector_type(type) && ir_lane_operation(op) != IR_SIMD_OPERATION_COUNT ? ir_lane_valid(op, f->flags[i]) : f->flags[i] == 0);
+                break;
+            // A vector's shift (#141's element types) is each lane's by the same lane of b, a vector of its type.
+            case IR_RULE_SHIFT: valid = ta == type && (ir_vector_type(type) ? tb == type : ir_integer(tb) && f->flags[i] == 0); break;
             case IR_RULE_ICMP: valid = ta == tb && c < IR_PREDICATE_COUNT && (ir_integer(ta) || (ta == IR_PTR && c <= IR_NE)); break;
             case IR_RULE_FCMP: valid = ta == tb && ir_floating(ta) && c <= IR_GE; break;
             case IR_RULE_SELECT: valid = ta == IR_I1 && tb == type && operand_types[2] == type; break;
@@ -1251,8 +1316,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         ((!ir_mask_type(ta) && !ir_mask_type(type)) || ta == type || (ir_mask_type(ta) && ir_integer(type)) || (ir_integer(ta) && ir_mask_type(type)));
                 break;
             case IR_RULE_VECTOR_CONSTANT: valid = a < f->vector_constant_count && ir_simd_value_valid(f->vector_constants + a, ir_simd_shape(type)); break;
-            case IR_RULE_VECTOR_COMPARE: valid = ir_vector_type(ta) && ta == tb && c < IR_PREDICATE_COUNT && type == (ta == IR_V16I32 ? IR_M16 : IR_M8); break;
-            case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
+            // A mask of a bit per lane (ir_lane_mask); floating lanes' predicates C's alone (eq to ge), as fcmp's.
+            case IR_RULE_VECTOR_COMPARE:
+                valid = ir_vector_type(ta) && ta == tb && c < (ir_simd_lane_floating((IrSimdLane)f->flags[i]) ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) &&
+                        type == ir_lane_mask(ta, f->flags[i]);
+                break;
+            case IR_RULE_VECTOR_SELECT: valid = ir_vector_type(type) && ta == ir_lane_mask(type, f->flags[i]) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
             case IR_RULE_INTRINSIC: valid = ta == type && tb == type && c < BUSTER_IR_INTRINSIC_COUNT && (c != BUSTER_IR_INTRINSIC_MULHU || type == IR_I64); break;
@@ -1444,6 +1513,10 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     const __mmask16 intrinsic = _mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_INTRINSIC));
     const __mmask16 mulhu = _mm512_cmpeq_epi32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_MULHU)) & _mm512_cmpneq_epi32_mask(type, _mm512_set1_epi32(IR_I64));
     bad |= intrinsic & (_mm512_cmpneq_epi32_mask(ta, type) | _mm512_cmpneq_epi32_mask(tb, type) | _mm512_cmpge_epu32_mask(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT)) | mulhu);
+    // A vector's floating arithmetic (#141's element types) reads the lanes its flags name, which the scalar oracle checks
+    // (a nonzero flag is deferred above; this is fadd's default I32, which no lanes are).
+    const __mmask16 vector_result = _mm512_cmpge_epu32_mask(type, _mm512_set1_epi32(IR_V4I32)) & _mm512_cmple_epu32_mask(type, _mm512_set1_epi32(IR_V16I32));
+    bad |= vector_result & _mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(IR_FADD)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(IR_FDIV));
     const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | intrinsic | no_rule);
     return active & (bad | defer);
 }
@@ -2221,7 +2294,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                 const uint32_t a = f->a[i];
                 const uint32_t b = f->b[i];
                 const uint32_t c = f->c[i];
-                fprintf(output, "  %%%" PRIu32 " = %s.%s", i, ir_op_names[op], ir_type_names[f->type[i]]);
+                // A vector operation's lanes (#141's element types) in its type's name, but a comparison's, whose type is
+                // its mask: `lanes=` after its predicate.
+                const bool laned = op != IR_VCMP && ir_vector_type(f->type[i]) && f->flags[i] != 0 && f->flags[i] < IR_SIMD_LANE_COUNT && ir_lane_operation(op) != IR_SIMD_OPERATION_COUNT;
+                fprintf(output, "  %%%" PRIu32 " = %s.%s", i, ir_op_names[op],
+                        laned ? ir_lane_type_names[f->type[i] - IR_V4I32][f->flags[i]] : ir_type_names[f->type[i]]);
                 switch (op)
                 {
                     case IR_CONST:
@@ -2337,6 +2414,10 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 "uge",
                             };
                             fprintf(output, " %s", predicates[c]);
+                            if (op == IR_VCMP && f->flags[i] != 0)
+                            {
+                                fprintf(output, " lanes=%s", f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
+                            }
                         }
                         if (op == IR_INTRINSIC)
                         {
