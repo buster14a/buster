@@ -58,10 +58,16 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                 for (uint32_t pressure = 0; pressure < 2; pressure += 1)
                 {
                     const uint64_t output_mark = test->output.length;
+                    IrDominance dominance;
+                    const bool dominated = tier1_terminal_dominance(test, &function, path != 0, &dominance);
                     Tier1SelectPlan plan;
                     uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, path != 0, &plan, &failed);
+                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "guarded induction selects by both paths");
+                    if (selected != TIER1_SELECT_OK && test->failures < 20)
+                    {
+                        fprintf(stderr, "  induction selection error=%u node=%u shape=%u path=%u\n", selected, failed, shape, path);
+                    }
                     if (selected == TIER1_SELECT_OK)
                     {
                         tier1_emit_test_expect(test, plan.patterns[10].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
