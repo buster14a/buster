@@ -220,6 +220,11 @@ typedef enum CheckInputMessage
     // An attribute's argument's error as clang's handler words it (#147, c_check_attribute.c's CheckAttributeArgumentError
     // in `detail`'s low byte, a number above it), the attribute named by its first token (the report's attribute).
     CHECK_INPUT_ATTRIBUTE_ARGUMENT,
+    CHECK_INPUT_BREAK,
+    CHECK_INPUT_CONTINUE,
+    CHECK_INPUT_INCOMPLETE_TENTATIVE,
+    CHECK_INPUT_ENUMERATOR_REDEFINITION,
+    CHECK_INPUT_CONFLICTING_TYPES,
     // A declaration of no declarator (#147, clang's ParsedFreeStandingDeclSpec): restrict, at its first; and inline and
     // _Noreturn, at theirs. Each is clang's error, after which it goes on to
     // its warning that the declaration declares nothing.
@@ -340,6 +345,14 @@ static const char* const check_input_messages[] =
     "attribute requires parameter 1 to be int or bool",
     "attribute parameter is out of bounds",
     "invalid attribute argument",
+    "'break' statement not in loop or switch statement",
+    "'continue' statement not in loop statement",
+    "tentative definition has incomplete type",
+    "redefinition of enumerator",
+    "conflicting types",
+    "restrict requires a pointer or reference",
+    "'inline' can only appear on functions",
+    "'_Noreturn' can only appear on functions",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -394,7 +407,7 @@ struct CheckInputReport
     uint32_t pragma;
     // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
     uint32_t completion;
-    // The declaration a message located elsewhere names (an attribute's, #147), plus one; 0 for none.
+    // The declaration a message located elsewhere names, or a redeclaration's prior declaration, plus one; 0 for none.
     uint32_t subject;
     // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.
     uint32_t attribute;
@@ -2158,7 +2171,7 @@ static void check_input_report_multiversion(CheckInputReader* reader, uint32_t t
     if (input->multiversion_report_count == input->multiversion_report_capacity)
     {
         const uint64_t capacity = input->multiversion_report_capacity != 0 ? (uint64_t)input->multiversion_report_capacity * 2 : 4;
-        CheckInputReport* records = capacity <= UINT32_MAX ? arena_push_array(reader->arena, capacity, sizeof(CheckInputReport), _Alignof(CheckInputReport)) : 0;
+        CheckInputReport* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputReport, capacity) : 0;
         if (records == NULL)
         {
             input->resource = true;
@@ -7394,7 +7407,9 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) ||
             check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
         {
-            check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+            const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
+                                              CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
+            check_input_report_subject(reader, token, message, previous);
         }
         else
         {
@@ -7442,7 +7457,9 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 (reader->definition_origins[token] && reader->definition_origins[previous]) ||
                 check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
             {
-                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
+                                                  CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
+                check_input_report_subject(reader, token, message, previous);
             }
             else
             {
@@ -8252,7 +8269,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 if (!loop)
                 {
                     const uint32_t first = reader->output->report_count;
-                    check_input_report(reader, i, CHECK_INPUT_DECLARATION);
+                    check_input_report(reader, i, kind == PARSE_KIND_BREAK ? CHECK_INPUT_BREAK : CHECK_INPUT_CONTINUE);
                     if (!reader->output->resource && reader->output->report_count > first)
                     {
                         reader->output->reports[first].completion = i + 1u;
@@ -9898,7 +9915,7 @@ static void check_input_complete_use(CheckInputReader* reader, uint32_t token)
         token < check_input_expression_limit(reader, token))
     {
         const uint32_t first = reader->output->report_count;
-        check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+        check_input_report(reader, token, CHECK_INPUT_INCOMPLETE_TENTATIVE);
         if (reader->output->report_count > first)
         {
             reader->output->reports[first].completion = reader->parser->tokens.count + 1u;
@@ -10522,7 +10539,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         reader.predefined_names[i] = intern_find(pp->table, (const uint8_t*)parse_predeclared_typedefs[i], (uint32_t)strlen(parse_predeclared_typedefs[i]));
     }
     input->report_capacity = count + 1;
-    input->reports = valid ? arena_push_array(arena, input->report_capacity, sizeof(CheckInputReport), _Alignof(CheckInputReport)) : 0;
+    input->reports = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputReport, input->report_capacity) : 0;
     input->declarations = input->reports != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
     input->declared_types = input->declarations != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(TypeId), 4) : 0;
     input->declaration_kinds = input->declared_types != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1) : 0;
