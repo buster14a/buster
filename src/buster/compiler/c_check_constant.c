@@ -144,6 +144,21 @@ struct CheckConstantAttributes
 
 typedef struct CheckConstantInput CheckConstantInput;
 typedef struct CheckConstantRange CheckConstantRange;
+// Optional evidence for an attribute argument's parser diagnostics. Other constant/type queries keep their existing
+// reporting owner; this record contains no borrowed operand arrays and survives the evaluator's scratch rollback.
+typedef struct CheckConstantFailure CheckConstantFailure;
+struct CheckConstantFailure
+{
+    CheckDiagnostic diagnostic;
+    CheckOp op;
+    TypeId type;
+    uint32_t token;
+    uint32_t callee;
+    uint32_t name;
+    uint32_t expected;
+    uint32_t actual;
+    bool variadic;
+};
 struct CheckConstantRange
 {
     uint32_t first;
@@ -184,6 +199,7 @@ struct CheckConstantInput
     uint32_t* tag_next;
     uint32_t* prototype_marks;
     uint32_t* failed_token;
+    CheckConstantFailure* diagnosed;
     bool raw;
     bool cached;
     bool deferred_tags;
@@ -2427,6 +2443,34 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             *checked = (CheckActionResult){ .diagnostic = reader->output->resource ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE };
         }
     }
+    if (input->diagnosed != NULL && input->diagnosed->diagnostic == CHECK_DIAG_NONE && checked->diagnostic != CHECK_DIAG_NONE)
+    {
+        TypeId type = action->type != 0 ? action->type : action->operands[0].type;
+        uint32_t expected = 0;
+        bool variadic = false;
+        if (action->op == CHECK_OP_CALL && type != 0)
+        {
+            type = type_strip_aligned(reader->types, type);
+            type = type_kind(reader->types, type) == BUSTER_TYPE_KIND_POINTER ? type_element(reader->types, type) : type;
+            if (type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION)
+            {
+                type_parameters(reader->types, type, &expected);
+                variadic = (reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+            }
+        }
+        *input->diagnosed = (CheckConstantFailure)
+        {
+            .diagnostic = checked->diagnostic,
+            .op = action->op,
+            .type = type,
+            .token = action->node,
+            .callee = callee,
+            .name = action->member,
+            .expected = expected,
+            .actual = action->argument_count,
+            .variadic = variadic,
+        };
+    }
     const uint32_t warning = checked->warnings & CHECK_WARNING_KR_CALLS;
     if (warning != 0)
     {
@@ -3352,6 +3396,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
     uint32_t token = first;
     while (valid && token < end)
     {
+        const uint32_t current = token;
         const uint8_t kind = parser->tokens.kinds[token];
         bool argument_separator = false;
         if (kind == PARSE_KIND_COMMA)
@@ -3679,6 +3724,10 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             operand = true;
             token += 1;
         }
+        if (!valid && input->failed_token != NULL)
+        {
+            *input->failed_token = current;
+        }
     }
     valid &= !operand;
     while (valid && operator_count != 0)
@@ -3850,6 +3899,10 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) != 0;
                 reader->output->resource |= !valid;
             }
+        }
+        if (!valid && input->failed_token != NULL)
+        {
+            *input->failed_token = token;
         }
     }
     if (valid && input->pending_tag == BUSTER_CHECK_NONE)
@@ -4184,12 +4237,13 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
 }
 
 static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached,
-                                      CheckValue* value, TypeId* type, uint32_t* failed_token)
+                                      CheckValue* value, TypeId* type, uint32_t* failed_token, CheckConstantFailure* diagnosed)
 {
     const uint64_t mark = reader->scratch->length;
     CheckConstantInput input;
     reader->constant_abi_origin = 0;
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
+    input.diagnosed = diagnosed;
     if (valid)
     {
         if (input.raw)
@@ -4222,19 +4276,19 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
 static bool check_input_evaluate(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, false, value, &unused, 0);
+    return check_input_constant_read(reader, first, end, false, false, value, &unused, 0, NULL);
 }
 
 static __attribute__((unused)) bool check_input_evaluate_cached(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, true, value, &unused, 0);
+    return check_input_constant_read(reader, first, end, false, true, value, &unused, 0, NULL);
 }
 
 static __attribute__((unused)) bool check_input_evaluate_cached_at(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value, uint32_t* failed_token)
 {
     TypeId unused = 0;
-    return check_input_constant_read(reader, first, end, false, true, value, &unused, failed_token);
+    return check_input_constant_read(reader, first, end, false, true, value, &unused, failed_token, NULL);
 }
 
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
@@ -4288,6 +4342,6 @@ static __attribute__((unused)) TypeId check_input_constant_type(CheckInputReader
 {
     CheckValue unused = { 0 };
     TypeId type = 0;
-    const bool valid = check_input_constant_read(reader, first, end, true, false, &unused, &type, 0);
+    const bool valid = check_input_constant_read(reader, first, end, true, false, &unused, &type, 0, NULL);
     return valid ? type : 0;
 }

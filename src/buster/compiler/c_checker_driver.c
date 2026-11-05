@@ -352,6 +352,30 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_NOT_BOOL: snprintf(text, capacity, "value of type %.*s is not contextually convertible to 'bool'", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_VEC_TYPE_HINT: snprintf(text, capacity, "a non-vector or non-vectorizable scalar type is an invalid argument to attribute '%s'", parsed); break;
         case CHECK_ARGUMENT_INCOMPLETE_TYPE: snprintf(text, capacity, "incomplete type %.*s where a complete type is required", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_EXPECTED_EXPRESSION: snprintf(text, capacity, "expected expression"); break;
+        case CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE:
+            snprintf(text, capacity, "member reference base type %.*s is not a structure or union", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME:
+            snprintf(text, capacity, "no member named '%.*s' in %.*s", (int)intern_length(pp->table, (uint32_t)value), intern_bytes(pp->table, (uint32_t)value),
+                     (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_EXPRESSION_SIZEOF:
+            snprintf(text, capacity, "invalid application of 'sizeof' to an incomplete type %.*s", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_EXPRESSION_CALL_COUNT:
+            snprintf(text, capacity, "too %s arguments to function call, expected %s%u, have %u", (uint32_t)value < number ? "few" : "many",
+                     value >> 32 ? "at least " : "", number, (uint32_t)value);
+            break;
+        case CHECK_ARGUMENT_ANNOTATE_CONSTANT:
+            snprintf(text, capacity, "'%s' attribute requires parameter %u to be a constant expression", parsed, number);
+            break;
+        case CHECK_ARGUMENT_TARGET_CLONES_DEFAULT:
+            snprintf(text, capacity, "'target_clones' multiversioning requires a default target");
+            break;
+        case CHECK_ARGUMENT_SELECTANY_LINKAGE:
+            snprintf(text, capacity, "'selectany' can only be applied to data items with external linkage");
+            break;
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
@@ -2002,7 +2026,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint64_t type_mark = scratch->length;
                             // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
                             const bool typed = ((report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED || (report->detail & 0xffu) == CHECK_ARGUMENT_PRECISE_LIFETIME ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL || (report->detail & 0xffu) == CHECK_ARGUMENT_INCOMPLETE_TYPE) &&
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL || (report->detail & 0xffu) == CHECK_ARGUMENT_INCOMPLETE_TYPE ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF) &&
                                                report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
@@ -2033,11 +2060,21 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                           (String8){ "", 0 };
                             char declared[192];
                             snprintf(declared, sizeof(declared), "forward declaration of %.*s", (int)tag.length, tag.pointer);
-                            const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE || forward) &&
+                            const bool function = report->note_kind == CHECK_INPUT_NOTE_FUNCTION_DECLARATION;
+                            if (function && report->note_token < count)
+                            {
+                                const String8 name = check_driver_attribute_spelling(parser, pp, report->note_token, false);
+                                snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)name.length, name.pointer);
+                            }
+                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION;
+                            const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ||
+                                                  forward || function || constant) &&
                                                  report->note_token < count;
                             const PPOutputDiagnosticNote note = {
                                 .token = matched ? parser->tokens.sources[report->note_token] : 0,
-                                .message = forward ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" : "to match this '('",
+                                .message = forward || function ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ? "division by zero" :
+                                           constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
                             arena_pop_to(scratch, type_mark);

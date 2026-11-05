@@ -116,6 +116,7 @@ typedef enum CheckInputAttributeKind
     // An attribute of clang's thread-safety analysis (#147, check_input_thread_attribute), which changes nothing here past
     // its handler's checks.
     CHECK_ATTRIBUTE_THREAD_SAFETY,
+    CHECK_ATTRIBUTE_SELECTANY,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -200,6 +201,8 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
+    // A C23 type attribute immediately after the declaration specifiers applies to that base alone.
+    bool specifier_type;
     // Ignored by the subject check (check_input_attribute_subjects) of the declarator that read it last: a record that
     // declaration specifiers' attributes share among their declarators is checked again by each.
     bool subject_ignored;
@@ -218,6 +221,9 @@ struct CheckInputAttribute
     // as BUSTER_CHECK_COUNT_* and the bound.
     uint8_t count_check;
     uint32_t count_bound;
+    // A wrong-count list whose expressions still need the declaration evaluator before the handler's count check.
+    bool parse_arguments;
+    uint8_t parsed_schema;
     // A generic attribute's integer arguments (xray_log_args's, the function effects', the GPU kernels' sizes), evaluated
     // where its attributes are read (check_input_read_attributes), not where its handler checks them, which a tag's subjects
     // reach from the constant evaluator: whether the first is an integer constant (its value in `value`), and bit N of
@@ -320,6 +326,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "device_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "nvptx_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "regparm", CHECK_ATTRIBUTE_REGPARM, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
+    { "selectany", CHECK_ATTRIBUTE_SELECTANY, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "noreturn", CHECK_ATTRIBUTE_NORETURN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "_Noreturn", CHECK_ATTRIBUTE_NORETURN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "returns_twice", CHECK_ATTRIBUTE_RETURNS_TWICE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -370,7 +377,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "flag_enum", CHECK_ATTRIBUTE_FLAG_ENUM, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "enum_extensibility", CHECK_ATTRIBUTE_ENUM_EXTENSIBILITY, CHECK_ATTRIBUTE_IDENTIFIER, 1, 1 },
     { "target", CHECK_ATTRIBUTE_TARGET, CHECK_ATTRIBUTE_STRING, 1, 1 },
-    { "target_clones", CHECK_ATTRIBUTE_TARGET_CLONES, CHECK_ATTRIBUTE_STRING_LIST, 1, 255 },
+    { "target_clones", CHECK_ATTRIBUTE_TARGET_CLONES, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
     // clang's CPU dispatch multiversioning. Its code generation isn't supported yet, but retaining it lets the checker
     // report clang's attribute-compatibility errors at -fsyntax-only, as #839 requires.
     { "cpu_specific", CHECK_ATTRIBUTE_CPU_SPECIFIC, CHECK_ATTRIBUTE_IDENTIFIER_LIST, 1, 255 },
@@ -605,6 +612,14 @@ typedef enum CheckAttributeArgumentError
     // (CheckInputReport.type), at the type, with a tag's note at its declaration (CHECK_INPUT_NOTE_FORWARD_DECLARATION).
     CHECK_ARGUMENT_VEC_TYPE_HINT,
     CHECK_ARGUMENT_INCOMPLETE_TYPE,
+    CHECK_ARGUMENT_EXPECTED_EXPRESSION,
+    CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE,
+    CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME,
+    CHECK_ARGUMENT_EXPRESSION_SIZEOF,
+    CHECK_ARGUMENT_EXPRESSION_CALL_COUNT,
+    CHECK_ARGUMENT_ANNOTATE_CONSTANT,
+    CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
+    CHECK_ARGUMENT_SELECTANY_LINKAGE,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -1423,7 +1438,14 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             }
             else if (!valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT)
             {
+                const CheckInputAttributeError saved = attributes->error;
+                const uint32_t saved_first = attributes->error_first;
+                const uint32_t saved_end = attributes->error_end;
+                const uint32_t before = reader->output->report_count;
                 check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, argument + 1);
+                // This is handleFormatAttr's check, after the subject, rather than a parser constraint. A variable's
+                // format(1, 2, 3) therefore gets only the subject warning, just as format(printf, 2, 3) does.
+                valid = check_input_attribute_defer(reader, attributes, attribute, before, saved, saved_first, saved_end);
             }
         }
         else if (valid && string)
@@ -1868,6 +1890,8 @@ static const CheckInputClangAttribute check_input_clang_scopes[] =
 // A variable's declaration that defines it, tentatively or not (#147): no table row's subject, but weak_import's handler's
 // (clang's canBeWeakImported).
 #define BUSTER_CHECK_SUBJECT_DEFINITION 0x1000000u
+// An object with external linkage, including a block-scope extern declaration.
+#define BUSTER_CHECK_SUBJECT_EXTERNAL_OBJECT 0x2000000u
 
 typedef struct CheckInputSubjectRow CheckInputSubjectRow;
 struct CheckInputSubjectRow
@@ -2683,7 +2707,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
         // A bit-field's preferred type, whose type check_input_attribute_annotations checks; MSVC's forceinline and
         // forceinline_calls, which it ignores off MSVC's ABI.
-        "preferred_type", "forceinline", "forceinline_calls",
+        "preferred_type", "forceinline", "forceinline_calls", "noderef",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -2818,6 +2842,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool specifiers = place == BUSTER_CHECK_PLACE_SPECIFIERS;
         const bool nocf = specifiers && check_input_attribute_equal(name, "nocf_check");
         const bool typed = fact != NULL && (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0 && !nocf;
+        attribute.specifier_type = standard && specifiers && typed;
         const bool chunk = place == BUSTER_CHECK_PLACE_CHUNK || place == BUSTER_CHECK_PLACE_FUNCTION;
         const bool chunk_gnu = valid && chunk && gnu_scope;
         const bool ignored_type = known && ((clang_scope && check_input_attribute_equal(name, "noderef")) || (specifiers && check_input_attribute_equal(name, "vector_size")));
@@ -2848,7 +2873,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
             const bool identifier = lone && ((index == 0 && (arguments->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (arguments->flags & identifiers) != 0);
             const bool string = index < 32 && ((arguments->strings >> index) & 1u) != 0 && (arguments->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
-            literal = string && !identifier && !strings ? argument : BUSTER_CHECK_NONE;
+            literal = string && !identifier && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
@@ -2980,9 +3005,19 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // subject's already (check_input_cleanup_declaration).
             uint32_t bound = 0;
             const CheckInputFactRow* counted = standard ? fact : check_input_fact_row((String8){ "", 0 }, name, false, false);
-            const uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
-                                        rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
-                                        check_input_attribute_count_check(counted, check_input_attribute_count(parser, &attribute), &bound);
+            const uint32_t count = check_input_attribute_count(parser, &attribute);
+            uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
+                                  rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
+                                  check_input_attribute_count_check(counted, count, &bound);
+            // Attr.td leaves these variadic lists' minimum at zero; the handlers call checkAtLeastNumArgs(1).
+            // Keep that constraint after the subject, with the same diagnostic as a generated minimum.
+            const bool least_one = rule->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || rule->kind == CHECK_ATTRIBUTE_CPU_DISPATCH ||
+                                   (rule->kind == CHECK_ATTRIBUTE_NO_SANITIZE && rule->schema == CHECK_ATTRIBUTE_STRING_LIST);
+            if (count_check == BUSTER_CHECK_COUNT_NONE && count == 0 && least_one)
+            {
+                count_check = BUSTER_CHECK_COUNT_LEAST;
+                bound = 1;
+            }
             // The count's error comes after its subject's check (check_input_attribute_subjects), as clang's
             // handleCommonAttributeFeatures has it: `cold(1)` or `format(printf)` on a variable is the subject's warning
             // alone. Its arguments aren't read then, but clang's parser's errors of them come first
@@ -2998,8 +3033,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             {
                 valid = false;
             }
-            else if (parsed == BUSTER_CHECK_PARSED_CLEAN)
+            else if (parsed == BUSTER_CHECK_PARSED_CLEAN || (count_check != BUSTER_CHECK_COUNT_NONE && !type_attribute))
             {
+                attribute.parse_arguments = parsed == BUSTER_CHECK_PARSED_UNSURE;
+                attribute.parsed_schema = (uint8_t)attribute.schema;
                 attribute.kind = CHECK_ATTRIBUTE_UNKNOWN;
                 attribute.schema = CHECK_ATTRIBUTE_NO_ARGUMENTS;
                 attribute.argument_count = check_input_attribute_count(parser, &attribute);
@@ -5322,6 +5359,17 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             valid = check_input_thread_attribute(reader, attribute, declaration, type);
         }
+        else if (kept && attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && attribute->argument_count == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_TARGET_CLONES_DEFAULT, 0);
+            valid = false;
+        }
+        else if (kept && attribute->kind == CHECK_ATTRIBUTE_SELECTANY && (declaration & (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION)) != 0 &&
+                 (declaration & BUSTER_CHECK_SUBJECT_EXTERNAL_OBJECT) == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SELECTANY_LINKAGE, 0);
+            valid = false;
+        }
         else if (kept && attribute->deferred != NULL)
         {
             // Its argument's error, its handler's once its subject takes it (check_input_attribute_defer).
@@ -5825,7 +5873,11 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
             "NSString", "CFString", "scanf", "printf", "printf0", "strfmon", "gnu_scanf", "gnu_printf", "gnu_strfmon", "cmn_err",
             "vcmn_err", "zcmn_err", "kprintf", "syslog", "freebsd_kprintf", "os_trace", "os_log",
         };
-        bool recognized_format = attribute->kind != CHECK_ATTRIBUTE_FORMAT || strftime;
+        // A malformed format kind is its handler's deferred error, once its subject is known. It must neither become
+        // an unknown format warning here nor make the parameter-index reader report a replacement error.
+        const bool identifier_error = attribute->kind == CHECK_ATTRIBUTE_FORMAT && attribute->deferred != NULL &&
+                                      reader->parser->tokens.kinds[attribute->argument_first] != PARSE_KIND_IDENTIFIER;
+        bool recognized_format = attribute->kind != CHECK_ATTRIBUTE_FORMAT || strftime || identifier_error;
         for (uint32_t k = 0; !recognized_format && k < BUSTER_ARRAY_LENGTH(format_kinds); k += 1)
         {
             recognized_format = check_input_attribute_equal(kind_name, format_kinds[k]);
@@ -5848,7 +5900,7 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         {
             attribute->ignored = true;
         }
-        else if (allocation || nonnull || format)
+        else if ((allocation || nonnull || format) && attribute->deferred == NULL)
         {
             uint32_t begin = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1 : 0;
             uint32_t end = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 2 : attribute->argument_count;

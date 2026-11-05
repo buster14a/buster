@@ -56,9 +56,8 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
-// The text of the string literal at parser token `token` as written, between its quotes (past an encoding prefix), in
-// `scratch`; empty for none.
-static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+// A string token's complete spelling in scratch, including its quotes and encoding prefix.
+static String8 check_warning_string_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
     String8 result = { 0 };
     const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : UINT32_MAX;
@@ -69,15 +68,33 @@ static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp,
         uint8_t* buffer = capacity < (UINT64_C(1) << 20) ? arena_push(scratch, capacity, 1) : NULL;
         const uint8_t* bytes = NULL;
         const uint32_t length = buffer != NULL ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
-        uint32_t open = 0;
-        while (open < length && bytes[open] != '"')
-        {
-            open += 1;
-        }
-        const bool quoted = open + 1 < length && bytes[length - 1] == '"';
-        result = quoted ? (String8){ (char*)bytes + open + 1, length - open - 2 } : result;
+        result = (String8){ (char*)bytes, length };
     }
     return result;
+}
+
+// The text of the string literal as written, between its quotes (past an encoding prefix); empty for none.
+static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+    uint64_t open = 0;
+    while (open < spelling.length && spelling.pointer[open] != '"')
+    {
+        open += 1;
+    }
+    const bool quoted = open + 1 < spelling.length && spelling.pointer[spelling.length - 1] == '"';
+    return quoted ? (String8){ spelling.pointer + open + 1, spelling.length - open - 2 } : (String8){ 0 };
+}
+
+// Attribute handlers classify decoded bytes, so their diagnostic excerpts must use the same bytes. An escape's
+// source width is unrelated to the offsets retained in CHECK_WARNING_EVENT_TARGET_UNSUPPORTED's payload.
+static String8 check_warning_string_value(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+    const CheckStringPart part = { .bytes = (const uint8_t*)spelling.pointer, .length = spelling.length };
+    const CheckStringLiteral decoded = spelling.length != 0 ? check_literal_strings(&part, 1, pp->options.language.standard >= 2023, scratch) :
+                                                             (CheckStringLiteral){ 0 };
+    return decoded.valid && decoded.byte_count != 0 ? (String8){ (char*)decoded.bytes, decoded.byte_count - 1 } : (String8){ 0 };
 }
 
 // One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
@@ -729,7 +746,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                  token += 1)
             {
                 const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING;
-                const String8 text = string ? check_warning_string_text(parser, pp, token, scratch) :
+                const String8 text = string ? (target ? check_warning_string_value(parser, pp, token, scratch) : check_warning_string_text(parser, pp, token, scratch)) :
                                               check_warning_attribute_normalized(check_driver_warning_name(pp, parser->tokens.names[token]));
                 const uint32_t copied = text.length < sizeof(argument) - 1 - length ? (uint32_t)text.length : (uint32_t)(sizeof(argument) - 1 - length);
                 memcpy(argument + length, text.pointer, copied);

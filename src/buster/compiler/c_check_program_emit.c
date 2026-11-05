@@ -2764,6 +2764,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
+                    if (symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SELECTANY)
+                    {
+                        // Weak binding alone cannot give a selectany definition COMDAT's section and relocation
+                        // selection. Keep syntax checking independent of this object-writer boundary.
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "a 'selectany' definition requiring ELF COMDAT section groups";
+                        result->token = attribute->first;
+                        valid = false;
+                    }
                     // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
                     // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
                     // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).

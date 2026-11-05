@@ -384,6 +384,9 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE,
     // An incomplete tag's declaration (#147, preferred_type's type): "forward declaration of 'struct S'", the report's type.
     CHECK_INPUT_NOTE_FORWARD_DECLARATION,
+    CHECK_INPUT_NOTE_FUNCTION_DECLARATION,
+    CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION,
+    CHECK_INPUT_NOTE_CONSTANT_DIVISION,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -2516,7 +2519,7 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
         for (uint32_t i = 0; kind != BUSTER_TYPE_KIND_FUNCTION && attributes != NULL && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + i;
-            const bool function_type = check_input_attribute_function_typed(reader, attribute);
+            const bool function_type = !attribute->ignored && check_input_attribute_function_typed(reader, attribute);
             earliest = pass == 0 && !function_type && attribute->first < earliest ? attribute->first : earliest;
             if (pass == 1 && function_type)
             {
@@ -3797,6 +3800,24 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         // (_Alignas against the declarator's type, not the specifiers': check_input_alignas_underaligned.)
         base = check_input_attribute_type(reader, attributes, base, false, true);
+        // A C23 list after the specifiers belongs to their base, before the declarator constructs a function around it.
+        // The ordinary GNU spelling still distributes its function attributes over the completed declarator.
+        attributes->calling_convention = CHECK_CALL_DEFAULT;
+        for (uint32_t a = 0; base != 0 && a < attributes->count; a += 1)
+        {
+            CheckInputAttribute* attribute = attributes->records + a;
+            if (!attribute->ignored && attribute->specifier_type && check_input_attribute_function_typed(reader, attribute) &&
+                type_kind(reader->types, type_strip_aligned(reader->types, base)) != BUSTER_TYPE_KIND_FUNCTION)
+            {
+                check_input_attribute_function_type_warning(reader, attribute, type_qualify(reader->types, base, qualifiers), BUSTER_CHECK_NONE, attribute->first + 1);
+                attribute->ignored = true;
+            }
+            if (!attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value != CHECK_CALL_IGNORED_X86_32 &&
+                attributes->calling_convention == CHECK_CALL_DEFAULT)
+            {
+                attributes->calling_convention = (CheckInputCallingConvention)attribute->value;
+            }
+        }
     }
     if (auto_type != BUSTER_CHECK_NONE && valid)
     {
@@ -4106,6 +4127,7 @@ static const CheckConstexprValue* check_input_constexpr_find(const CheckInputRea
 }
 
 #include "c_check_constant.c"
+#include "c_check_attribute_expression.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
 #include "c_check_cleanup_input.c"
@@ -4166,6 +4188,16 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     for (uint32_t i = 0; valid && i < parsed.count; i += 1)
     {
         CheckInputAttribute* attribute = &parsed.records[i];
+        const bool expressions = attribute->parse_arguments || attribute->schema == CHECK_ATTRIBUTE_INTEGER ||
+                                 attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
+        if (expressions && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS)
+        {
+            valid = check_input_attribute_expressions(reader, &parsed, attribute);
+            if (!valid)
+            {
+                break;
+            }
+        }
         // (constructor's, destructor's and assume_aligned's argument errors come after their subject's check:
         // check_input_attribute_defer.)
         const CheckInputAttributeError saved = parsed.error;
@@ -4173,10 +4205,16 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
         const uint32_t saved_end = parsed.error_end;
         const uint32_t before = reader->output->report_count;
         const bool deferring = attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
-                               attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED;
+                               attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE ||
+                               attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT;
         const bool tag_type = reader->tag_attributes && (attribute->kind == CHECK_ATTRIBUTE_REGPARM || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE);
         attribute->ignored |= tag_type;
-        if (!attribute->resolved && attribute->schema == CHECK_ATTRIBUTE_INTEGER && !tag_type)
+        if (attribute->deferred != NULL)
+        {
+            // Its earlier handler error wins once the declaration accepts the attribute. In particular a malformed
+            // format kind must not be replaced by an integer-argument error before the subject is available.
+        }
+        else if (!attribute->resolved && attribute->schema == CHECK_ATTRIBUTE_INTEGER && !tag_type)
         {
             int64_t value = 0;
             const bool type_argument = attribute->kind == CHECK_ATTRIBUTE_ALIGNAS &&
@@ -4199,6 +4237,11 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             {
                 check_input_attribute_constant_error(reader, &parsed, attribute, 0, attribute->argument_first, attribute->argument_end);
             }
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 &&
+                 check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate"))
+        {
+            valid = check_input_attribute_annotate(reader, &parsed, attribute);
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 && attribute->argument_count <= 8 &&
                  check_input_ownership_indices(reader, attribute))
@@ -4426,6 +4469,7 @@ struct CheckDeclaratorPart
     uint64_t extent;
     uint8_t kind;
     uint8_t flags;
+    bool atomic;
     // A function's K&R identifier list (C17 6.7.6.3p3, 6.9.1): its names, whose types a definition's declaration list
     // gives (check_input_kr_declarations), and no parameter types, so no prototype.
     bool identifier_list;
@@ -4717,7 +4761,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         for (uint32_t i = 0; list != NULL && i < list->count; i += 1)
         {
             const CheckInputAttribute* attribute = list->records + i;
-            const bool placed = specifiers || (chunks ? attribute->first < split : attribute->first >= split);
+            const bool placed = !attribute->ignored && (specifiers || (chunks ? attribute->first < split : attribute->first >= split));
             if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
                 !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
             {
@@ -4774,10 +4818,16 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 const uint32_t token = i;
                 reader->ignored[i++] = true;
                 uint32_t qualifiers = 0;
+                bool atomic = false;
                 while (valid && i < frame->end)
                 {
                     if (check_input_qualifier(parser->tokens.names[i], &qualifiers))
                     {
+                        reader->ignored[i++] = true;
+                    }
+                    else if (parser->tokens.kinds[i] == PARSE_KIND_ATOMIC && (i + 1 == frame->end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
+                    {
+                        atomic = true;
                         reader->ignored[i++] = true;
                     }
                     else if (check_input_attribute_starts(parser, i, frame->end))
@@ -4795,6 +4845,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     .token = token,
                     .qualifiers = qualifiers,
                     .kind = BUSTER_TYPE_KIND_POINTER,
+                    .atomic = atomic,
                 };
                 frame->pointers = part_count++;
             }
@@ -5103,6 +5154,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             check_input_report(reader, part->token, CHECK_INPUT_DECLARATION);
                         }
                         type = restrict_function ? 0 : check_input_type_result(reader, type_pointer(reader->types, type));
+                        type = type != 0 && part->atomic ? check_input_type_result(reader, type_atomic(reader->types, type)) : type;
                         type = type != 0 ? type_qualify(reader->types, type, part->qualifiers) : 0;
                     }
                     else if (part->kind == BUSTER_TYPE_KIND_FUNCTION)
@@ -6978,8 +7030,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             // A variable's definition, tentative or not, as clang's attributes see it, before its initializer: all but an
             // extern one's.
             const bool variable_definition = !is_typedef && !function && storage != C_NAME_EXTERN;
+            const bool external_object = !is_static && (file || storage == C_NAME_EXTERN) &&
+                                         !(storage == C_NAME_EXTERN && previous_declaration < parser->tokens.count &&
+                                           check_input_linkage(reader->declaration_bits, previous_declaration) == 1);
             const uint32_t variable_subjects = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_NON_PARAMETER_VARIABLE |
                                                (variable_definition ? BUSTER_CHECK_SUBJECT_DEFINITION : 0) |
+                                               (external_object ? BUSTER_CHECK_SUBJECT_EXTERNAL_OBJECT : 0) |
                                                (global ? BUSTER_CHECK_SUBJECT_GLOBAL | (thread_local ? BUSTER_CHECK_SUBJECT_THREAD_LOCAL : BUSTER_CHECK_SUBJECT_SHARED) |
                                                              (file && !is_static ? BUSTER_CHECK_SUBJECT_EXTERNAL_GLOBAL : 0)
                                                        : BUSTER_CHECK_SUBJECT_LOCAL);
