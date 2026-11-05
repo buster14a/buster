@@ -14,6 +14,10 @@ file-or-directory...`
 checks each file as the driver does and compares it with
 `clang -fsyntax-only` on the same options: acceptance, the first error's
 presumed file and line, and the scalar and vector paths, column by column.
+After a missing declaration semicolon, it uses the driver's `check_prefix_resume`
+view before making a prefix or repair. Later declarations are checked in that
+view, while the original parse rejection remains final. Diagnostic ordering uses
+the shared preprocessor positions so inserted tokens cannot reorder errors.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
 names the checked source makes; a difference must have one of three documented
