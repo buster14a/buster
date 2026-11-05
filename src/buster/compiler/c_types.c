@@ -623,6 +623,14 @@ struct TypeNames
     // Optional, per alias: the qualifiers its name covers where it matches a level unqualified, which then print only
     // the level's others (__builtin_dump_struct's `volatile CI` of a const int's CI, #148); null prints them all.
     const uint32_t* alias_covered;
+    // Optional: the aliases by place, as a declaration spells its types (__builtin_dump_struct's, #148): entry k the alias
+    // (UINT32_MAX for none) of the k-th specifier the printer prints, a typedef's or a type's own, in the order a C
+    // declaration writes them (the outer specifiers, then each nested parameter's). A level then takes no alias but its
+    // place's, so a typedef names only the occurrence it spells (`int (*)(I)`). The printer writes the specifiers it
+    // printed to `alias_order_printed`, which its caller compares with its count.
+    const uint32_t* alias_order;
+    uint32_t alias_order_count;
+    uint32_t* alias_order_printed;
     const String8* anonymous;
     uint32_t anonymous_count;
 };
@@ -5443,6 +5451,11 @@ struct TypePrinter
     uint64_t capacity;
     uint64_t depth;
     Arena* scratch;
+    // By place (TypeNames.alias_order): the specifiers printed so far, and the levels an alias named, which their
+    // suffixes' frames ask after.
+    uint32_t occurrence;
+    TypeId aliased[16];
+    uint32_t aliased_count;
 };
 
 // The output's bytes, pushed in order so that they stay contiguous.
@@ -5555,6 +5568,47 @@ static uint32_t type_print_alias(const TypeNames* names, TypeId type)
     return result;
 }
 
+// The alias a level takes (`whole` where it matches the level with its qualifiers), or UINT32_MAX: by type, or by place
+// (TypeNames.alias_order), the alias of the specifier the printer prints next.
+static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32_t* whole)
+{
+    const TypeNames* names = printer->names;
+    const TypeId unqualified = type_unqualified(type);
+    uint32_t sugar = UINT32_MAX;
+    *whole = UINT32_MAX;
+    if (names != 0 && names->alias_order != 0)
+    {
+        const uint32_t candidate = printer->occurrence < names->alias_order_count ? names->alias_order[printer->occurrence] : UINT32_MAX;
+        *whole = candidate < names->alias_count && names->alias_types[candidate] == type ? candidate : UINT32_MAX;
+        sugar = candidate < names->alias_count && (names->alias_types[candidate] == type || names->alias_types[candidate] == unqualified) ? candidate : UINT32_MAX;
+    }
+    else
+    {
+        *whole = type_print_alias(names, type);
+        sugar = *whole != UINT32_MAX ? *whole : type_print_alias(names, unqualified);
+    }
+    return sugar;
+}
+
+// Whether an alias named a level, which then has no suffix of its own: by type, or by place, one whose BEFORE took one.
+static bool type_print_aliased(const TypePrinter* printer, TypeId type)
+{
+    const TypeNames* names = printer->names;
+    bool result = false;
+    if (names != 0 && names->alias_order != 0)
+    {
+        for (uint32_t a = 0; a < printer->aliased_count; a += 1)
+        {
+            result |= printer->aliased[a] == type_unqualified(type);
+        }
+    }
+    else
+    {
+        result = type_print_alias(names, type) != UINT32_MAX || type_print_alias(names, type_unqualified(type)) != UINT32_MAX;
+    }
+    return result;
+}
+
 // The specifiers, and printBefore of each kind; `type` is unqualified and not ALIGNED.
 static void type_print_before_kind(TypePrinter* printer, TypeId type)
 {
@@ -5567,6 +5621,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         const bool c23_bool = type == BUSTER_TYPE_BOOL && (printer->options & BUSTER_TYPE_PRINT_C23) != 0;
         type_print_text(printer, c23_bool ? "bool" : type_builtins[index].name);
         type_print_space(printer);
+        printer->occurrence += 1;
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
@@ -5574,6 +5629,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         type_print_number(printer, table->types.extent[index]);
         type_print_text(printer, ")");
         type_print_space(printer);
+        printer->occurrence += 1;
     }
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
@@ -5617,6 +5673,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
             type_print_text(printer, "(unnamed)");
         }
         type_print_space(printer);
+        printer->occurrence += 1;
     }
     else if (kind == BUSTER_TYPE_KIND_POINTER)
     {
@@ -5665,8 +5722,7 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
         const TypeId pointee = type_strip_aligned(table, base);
-        if (type_kind_is_array(type_kind(table, pointee)) && type_print_alias(printer->names, pointee) == UINT32_MAX &&
-            type_print_alias(printer->names, type_unqualified(pointee)) == UINT32_MAX)
+        if (type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee))
         {
             type_print_text(printer, ")");
         }
@@ -5735,10 +5791,15 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     {
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        const uint32_t whole = type_print_alias(printer->names, type);
-        const uint32_t sugar = whole != UINT32_MAX ? whole : type_print_alias(printer->names, unqualified);
+        uint32_t whole = UINT32_MAX;
+        const uint32_t sugar = type_print_sugar(printer, type, &whole);
         if (sugar != UINT32_MAX)
         {
+            printer->occurrence += 1;
+            if (printer->aliased_count < 16)
+            {
+                printer->aliased[printer->aliased_count++] = unqualified;
+            }
             // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
             const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] : 0;
@@ -5787,7 +5848,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         // including under another level's qualifiers (#992).
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        if (type_print_alias(printer->names, type) == UINT32_MAX && type_print_alias(printer->names, unqualified) == UINT32_MAX)
+        if (!type_print_aliased(printer, type))
         {
             type_print_after_kind(printer, unqualified);
         }
@@ -5795,8 +5856,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)
     {
         const TypeId pointee = type_strip_aligned(table, table->types.base[type_index(frame.type)]);
-        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && type_print_alias(printer->names, pointee) == UINT32_MAX &&
-                             type_print_alias(printer->names, type_unqualified(pointee)) == UINT32_MAX;
+        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee);
         type_print_text(printer, wrapped ? "(*" : "*");
         printer->empty = frame.saved;
     }
@@ -5899,6 +5959,10 @@ static String8 type_print(const TypeTable* table, Arena* arena, TypeId type, Str
             .pointer = printer.begin,
             .length = printer.length,
         };
+    }
+    if (names != 0 && names->alias_order_printed != 0)
+    {
+        *names->alias_order_printed = printer.occurrence;
     }
     scratch_end(scratch);
     return result;

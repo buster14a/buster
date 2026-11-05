@@ -1904,7 +1904,14 @@ record dump, as `BuiltinDumpStruct` checks it.
   typedef's name covers its own qualifiers but those its declaration writes
   with it, which print before it as clang prints them (`CI`, `const CI`,
   `volatile CI` of a `const int`'s `CI`: `TypeNames.alias_covered`,
-  `check_lower_dump_alias`). An
+  `check_lower_dump_alias`). Each typedef names the place it is written
+  alone: the declaration's specifier sequences, its own then each nested
+  parameter's, are listed in source order with the typedef among each
+  (`check_lower_dump_places`), the order `type_print` prints its specifiers
+  in, which takes the k-th one's alias for the k-th it prints
+  (`TypeNames.alias_order`), so `int (*)(I)` keeps its `int`. Where the
+  counts differ (a declaration its walk doesn't model), the typedefs apply by
+  type, as before. An
   unnamed record's canonical name has its scope, as clang's
   `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
   it, whatever declarator it is part of (an array's, a pointer's, a
