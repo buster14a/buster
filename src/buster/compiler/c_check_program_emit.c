@@ -23,6 +23,9 @@
 #include "worker_budget.c"
 #include "c_check_tier1_outcome.c"
 
+// The class constant CFStrings point to (#148), clang's global of this name.
+static const char check_program_cfstring_class_name[] = "__CFConstantStringClassReference";
+
 // What an executable's link binds against (the direct path, #157): the C runtime, which bind_begin joins between the
 // program's symbols and its atoms, its arrays from `arena` and its atoms' bytes copied into the emission's byte arena.
 // check_program_emit makes room for it in the link and calls bind_begin; its caller adds the static data and calls
@@ -1570,13 +1573,14 @@ static void check_program_emit_admitted(CheckEmitRun* run)
     }
 }
 
-// The flow's other lanes: each round's bodies' parts on its lanes, until lane 0 ends the flow.
+// The flow's other lanes: each round's part on its lanes, until lane 0 ends the flow: the checker's deferred bodies and
+// its merge's pass (check_deferred_follow, #151), or the emission's bodies' parts.
 static void check_program_emit_follow(LaneFlow* flow)
 {
     void* argument = NULL;
     for (uint32_t round = lane_flow_next(flow, &argument); round != 0; round = lane_flow_next(flow, &argument))
     {
-        CheckEmitRun* run = argument;
+        CheckEmitRun* run = check_deferred_follow(round, argument) ? NULL : argument;
         if (run != NULL && run->growth != NULL)
         {
             check_program_emit_admitted(run);
@@ -3003,6 +3007,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                                                                               (String8){ .pointer = (char*)intern_bytes(identifiers, identifier),
                                                                                          .length = intern_length(identifiers, identifier) };
         }
+        else if (program->cfstring_class_own && object == program->cfstring_class)
+        {
+            // The class the unit's constant CFStrings point to (#148), which it doesn't declare.
+            externals[external_count++] = (String8){ .pointer = (char*)check_program_cfstring_class_name, .length = sizeof(check_program_cfstring_class_name) - 1 };
+        }
     }
     for (uint32_t r = 0; valid && externals != 0 && r < result->lowered.runtime_symbol_count; r += 1)
     {
@@ -3215,6 +3224,23 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // it makes a literal's.
             char spelling[48];
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
+            name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        }
+        else if (program->cfstring_class_own && object == program->cfstring_class)
+        {
+            // The class the unit's constant CFStrings point to (#148, check_data_cfstring_keys), which the unit doesn't
+            // declare: clang's external global of its name, undefined here.
+            name = link_add_name(&result->link, (const uint8_t*)check_program_cfstring_class_name, (uint32_t)(sizeof(check_program_cfstring_class_name) - 1));
+            flags = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
+        }
+        else if (object != 0 && object - 1 < parser->tokens.count && program->cfstring_count != 0 &&
+                 (parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL || parser->tree.roles[object - 1] == PARSE_ROLE_OPEN_CALL))
+        {
+            // A constant CFString's record (at its call's `)`) or its UTF-16 characters (at its `(`), #148: private, as
+            // clang's .L_unnamed_cfstring_ and its characters' constant are.
+            char spelling[48];
+            const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
+            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
@@ -3934,7 +3960,8 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     Link* link = &code->link;
     *table = 0;
     bool valid = true;
-    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0)
+    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0 ||
+        program->cfstring_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -4041,6 +4068,20 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 }
                 descriptors[atom] = descriptor;
                 valid = valid && link_set_atom_section(link, atom, descriptor.name);
+            }
+        }
+        // The constant CFStrings' records (#148, check_data_cfstring_keys) are in cfstring, writable data, as clang's.
+        for (uint32_t k = 0; valid && refused == BUSTER_CHECK_NONE && k < program->cfstring_count; k += 1)
+        {
+            const CheckDataCFString* call = program->cfstrings + k;
+            const SymbolId taken = call->canonical == call->object && call->object < program->object_count ? program->object_symbols[call->object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == call->object ? taken : 0;
+            const AtomId atom = symbol != 0 && symbol < link->symbols.count ? link->symbols.atom[symbol] : 0;
+            if (atom != 0)
+            {
+                const ObjectSectionFormat* format = &object_class_sections[link->atoms.class[atom]];
+                descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = (char*)"cfstring", .length = 8 }, .type = format->type, .flags = format->flags };
+                valid = link_set_atom_section(link, atom, descriptors[atom].name);
             }
         }
         // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its

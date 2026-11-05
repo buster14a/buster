@@ -1701,14 +1701,11 @@ alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
 compile, and this compiler doesn't yet:
 
 - `__builtin_eh_return`, whose unwinding to a handler;
-- `__builtin___CFStringMakeConstantString` and
-  `__builtin___NSStringMakeConstantString`, whose `cfstring` object;
+- `__builtin___NSStringMakeConstantString` of no string literal, whose
+  object clang's code makes from what isn't one;
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns;
-- `__builtin_call_with_static_chain`, whose chain register (`r10`);
-- `__builtin_os_log_format` of data its items take again across side
-  effects, or of a `__float128` or a 2-byte vector;
-- `__builtin_dump_struct`, whose generated calls.
+- `__builtin_call_with_static_chain`, whose chain register (`r10`).
 
 `__builtin_available` with an empty version (`0.0.0`) is refused too, as
 clang's code generation refuses it, and so is `__builtin_counted_by_ref` of a
@@ -1742,16 +1739,45 @@ scope `sizeof`'s).
   `pp_utf8_sequence`) is clang's `-WCFString-literal`, "input conversion
   stopped due to an input byte that does not belong to the input codeset
   UTF-8", at the literal (`check_input_cfstring_literal`).
-- **Code.** Clang makes a `cfstring` section object pointing at
-  `__CFConstantStringClassReference` and the literal; this compiler refuses
-  either call by name ("unsupported: a constant CFString or NSString, whose
-  object this compiler doesn't make").
-- **Difference.** Clang's evaluator takes either call as an address constant
-  (`IsOpaqueConstantCall`), so a static initializer of one (`static const void
-  *p = __builtin___CFStringMakeConstantString("x");`, cast to `long` or
-  `_Bool` too, or plus an offset) is accepted. This checker's isn't, and
-  refuses it as "initializer is not a constant expression": it has no object
-  to give the address of, as its code generation doesn't.
+- **The value.** Of a literal, either call is an address constant, as clang's
+  evaluator takes it (`IsOpaqueConstantCall`): the address of its call's own
+  object (its `)`'s token plus one, `CheckBuiltinMiscAction.cfstring_object`),
+  a static one. So a static initializer of one (`static const void *p =
+  __builtin___CFStringMakeConstantString("x");`, cast to `long` or plus an
+  offset) is accepted, and its code is the object's address: no operand runs.
+- **The objects.** `check_data_cfstring_keys` (`c_check_data_input.c`) makes what
+  clang's `GetAddrOfConstantCFString` makes:
+  - **The record:** one `__NSConstantString` record of 32 bytes of each
+    literal's characters, writable data in the section `cfstring`, 8-aligned.
+    Its fields are `__CFConstantStringClassReference`'s address, its flags
+    (`0x7c8`, or `0x7d0` for UTF-16), its characters' address and their
+    length.
+  - **Its characters:** an ASCII literal's (no byte past `0x7f` and no NUL) are
+    its own string literal. Any other's are the UTF-16 units of LLVM's strict
+    conversion, which stops at the first byte that begins no sequence, then a
+    NUL unit. They go in a constant array of their own, 2-aligned (at the
+    call's `(`), and the length counts the units.
+  - **One per literal:** each call's object takes the symbol of the lowest
+    object of its characters, as weakrefs take their targets' at numbering
+    (`check_program_alias_number`). So two calls of one literal, a CFString's
+    and an NSString's among them, have one address, as clang's.
+  - **The class:** the unit's file-scope declaration of
+    `__CFConstantStringClassReference` (`check_input_cfstring_class`), or else
+    an undefined global of that name, the program's own.
+- **Code of no literal.** An NSString of what isn't a literal stays a value:
+  clang's code makes its object from the literal its argument isn't (a
+  `cast<StringLiteral>` of another expression), and `-c` refuses it by name
+  ("unsupported: an NSString of no string literal, whose object clang's code
+  makes from the literal its argument isn't").
+- **Differences.**
+  - Clang's evaluator takes an NSString of no literal as an address constant
+    too, and accepts a static initializer of one; this checker refuses it as
+    "initializer is not a constant expression".
+  - A static `_Bool` of one is refused, as one of any address is
+    (`static _Bool b = &x;`).
+  - Clang's ELF object also has an `objc_imageinfo` section where it makes a
+    CFString, and keeps the characters in `.rodata`, which this compiler's
+    string pool (`.rodata.str1.1`) holds.
 
 A miscellaneous builtin's argument of the other signedness of a `char`
 pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
@@ -1823,22 +1849,21 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   - It writes the summary byte (0x1 for private items, 0x2 for items other
     than scalars), the items' count, then each item's descriptor
     (`kind << 4 | privacy`), its size and its data.
-  - clang evaluates each item's data when it stores it, in the items' order,
-    so positions reorder the data's side effects, and data no item takes
-    isn't evaluated. Here each argument is evaluated once, at its first
-    item, into a temporary. That is clang's result where an argument taken
-    again has no side effects and none ran since its first item (a field
-    width's argument that a precision takes too). Other data taken again is
-    refused by name.
+  - As clang's `emitBuiltinOSLogFormat`, each item's data is evaluated when
+    the item is collected, in the items' order, into a temporary of the
+    item's: an argument that several items take is evaluated again for each,
+    so positions reorder and repeat the data's side effects, and data no item
+    takes isn't evaluated. The stores follow, after every item's data.
   - Each item's data is an unsigned integer of its size, as clang's helper
     takes it. A signed `_BitInt` narrower than its class is zero-extended
     from its width, and a `long double`'s 10 bytes are followed by 6 zeros.
     Data of 16 bytes (a `long double`, an `__int128`, a `_BitInt(65)` to
-    `_BitInt(128)`, a 16-byte vector) and of 2 (`_Float16`, `__bf16`) is
-    stored.
-  - A `__float128` and a 2-byte vector are refused by name, and so are a
-    32- or 64-byte vector and a `_BitInt` past 128 bits, on which clang's
-    code generation crashes.
+    `_BitInt(128)`, a 16-byte vector, a `__float128`) and of 2 (`_Float16`,
+    `__bf16`, a 2-byte vector) is stored. A `__float128`'s and a 2-byte
+    vector's value is its object's address here, whose bytes are read into
+    the item's temporaries as it is evaluated.
+  - A 32- or 64-byte vector and a `_BitInt` past 128 bits are refused by
+    name: clang's code generation crashes on them.
 - **Limits.** At most 31 arguments are taken, and clang takes up to the
   format's plus 255.
 
@@ -1853,9 +1878,50 @@ record dump, as `BuiltinDumpStruct` checks it.
   call. It is variadic, with no more parameters than the rest and the
   format, and the rest and the format (a `char *`) convert to those
   parameters. An unprototyped printer takes any calls.
-- **Code.** clang's code is those calls, with each field's value or address
-  and type names it prints. This compiler doesn't make them, so `-c` refuses
-  the call by name.
+- **Bit-fields no format prints.** A named bit-field of a `_BitInt` or a
+  128-bit integer type, which clang's dump would print by its address, is
+  refused as clang's Sema refuses it ("address of bit-field requested").
+- **Code.** The calls are planned before the function lanes run
+  (`c_check_program_dump.c`, `check_lower_dump_prepare`), as clang's
+  `BuiltinDumpStructGenerator` builds them, and made by `check_lower_dump_struct`:
+  - the record's canonical name (`"%s"`), then `" {\n"`; an unnamed record's
+    is `struct (unnamed)`, its typedef's name, or with the records whose
+    member's type it is, its scope (`struct O::(unnamed)`,
+    `(unnamed struct)::`, `(anonymous struct)::`);
+  - a line per field, `"%s%s %s "` of its indent (two spaces a level), its
+    type's name and its name, `": %zu "` and its width for a bit-field, then
+    `"="`; a struct or union field's fields follow one level deeper, between
+    `" {\n"` and `"%s}\n"` of its indent, and any other's value: `" "`, its
+    format and `"\n"`, or `" *%p\n"` of its address where no format fits;
+  - unnamed bit-fields are skipped, anonymous members' fields flattened, and
+    the record's last line is `"}\n"`.
+- **Type names.** A field's type prints as its declaration spells it: the
+  type table has no typedef sugar, so the input records each member's
+  declarator (`CheckInput.member_tokens`), whose typedef specifier
+  (`check_input_typedef_spelling`) gives the alias `type_print` prints. A
+  record a deferred body's lane completes has no such row, and prints its
+  canonical types.
+- **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool
+  `%d`, plain char `%hhd` (`%hhu` with `-funsigned-char`), signed char
+  `%hhd`, unsigned char `%hhu`; a pointer to a character type
+  `"\"%.32s\""`, any other pointer `%p`; an enum its underlying type's; the
+  integer and floating types with their length modifiers, a `size_t`,
+  `ssize_t`, `ptrdiff_t`, `intmax_t` or `uintmax_t` typedef of file scope
+  `z`, `t` or `j` from C99; a vector of a builtin type with its count
+  (`%v4d`, `%v4hlf`, `%v16c`). `__int128`, the half-precision types,
+  `__float128`, `_BitInt`, arrays, complex and `_Atomic` types have none.
+- **Operands.** The printer and the rest of the arguments are evaluated
+  again for each call, as clang's are, the rest converted to the printer's
+  parameters or promoted; the pointer is evaluated once, after the first
+  call. The strings are a read-only pool of the call's
+  (`CheckLowerInitializers.dumps`), each string once. A field's value is
+  read through the record's address (a bit-field's from its first byte) and
+  promoted as a variadic argument; a vector passes as a call's does. A
+  call's result is discarded.
+- **Refusals.** A printer that returns an aggregate, a 128-bit or a
+  half-precision value, or takes such values, rest arguments with a
+  statement expression or more than 4096 nodes, and records of more than
+  4096 lines, 1 MiB of strings or 64 levels are refused by name.
 
 `__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
 a keyword whose specs are no expressions: each a `*`, or a platform's name and

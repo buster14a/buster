@@ -3614,6 +3614,9 @@ struct CheckDriverCommand
     bool quiet;
     bool lazy_system_headers;
     bool lower_all;
+    // --deferred-bodies: a unit's function bodies read apart, on the command's lanes (#151, check_input_deferred_compile);
+    // --no-deferred-bodies reads them in source order.
+    bool deferred_bodies;
     // -Wreturn-type's: whether to warn, whether -Werror promotes it, and -Werror=return-type's (1) or
     // -Wno-error=return-type's (-1) say.
     bool return_warning;
@@ -3667,6 +3670,53 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
+// A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
+// worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
+typedef struct CheckDriverDeferred CheckDriverDeferred;
+struct CheckDriverDeferred
+{
+    CheckProgramLanes* lanes;
+    WorkerBudgetLease lease;
+    bool return_failed;
+};
+
+// The lanes a unit's reading may give its deferred bodies: the command's (its CPUs, --lanes N and --worker-budget N), no
+// more than the reader has. Of those, its grant (check_driver_deferred_grant) takes what the session and the worker budget
+// give, once the reader has counted the bodies' tokens: a small unit's never waits for the session's lanes.
+static uint32_t check_driver_deferred_lanes(const CheckProgramLanes* lanes)
+{
+    const uint32_t result = lanes->lanes < BUSTER_CHECK_DEFERRED_MAX_LANES ? lanes->lanes : BUSTER_CHECK_DEFERRED_MAX_LANES;
+    return result != 0 ? result : 1;
+}
+
+// CheckDeferredFlow.grant: of the `wanted` lanes, no more than the session asks for, by default one per core
+// (lane_session_asked), those it started (lane_flow_lanes), and those the worker budget gives, whose slots it takes without
+// waiting, as the emission takes its own (worker_budget_acquire).
+static uint32_t check_driver_deferred_grant(void* context, uint32_t wanted)
+{
+    CheckDriverDeferred* deferred = context;
+    CheckProgramLanes* lanes = deferred->lanes;
+    const uint32_t most = check_driver_deferred_lanes(lanes);
+    const uint32_t asked = lane_session_asked();
+    uint32_t result = wanted < most ? wanted : most;
+    result = asked < result ? asked : result;
+    const uint32_t started = result > 1 ? lane_flow_lanes(lanes->flow) : 1;
+    result = started < result ? started : result;
+    deferred->lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
+    if (result > 1 && lanes->budget != NULL)
+    {
+        result = worker_budget_acquire(lanes->budget, result, &deferred->lease);
+    }
+    return result;
+}
+
+// CheckDeferredFlow.give_back: the slots the grant took, once the bodies' lanes have met.
+static void check_driver_deferred_give_back(void* context)
+{
+    CheckDriverDeferred* deferred = context;
+    deferred->return_failed |= !worker_budget_release(&deferred->lease);
+}
+
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
 // `errors`; then, as the command says, its object written, its executable linked or, with `kept` (#152: one of several
@@ -3674,10 +3724,13 @@ static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 // caller initialized (null if it couldn't), `pp` and `parser` its state, and `arena`, `scratch` and `output_arena` its
 // memory; its functions compile on `lanes`. The preprocessor's phases' ticks go to `pp_ticks`, and with `stage_clock`
 // (--time-stages), each stage's time. With `release`, it releases the parser's, the preprocessor's and the type table's
-// memory before it returns. Returns the command's exit status: 0 for a unit without errors whose outputs were written.
+// memory before it returns. With `deferred` (--deferred-bodies, one source file's), the unit's reading reads its bodies
+// apart on the command's lanes, with that state, which the caller keeps until the unit is done (check_deferred_release).
+// Returns the command's exit status: 0 for a unit without errors whose outputs were written.
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
-                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena)
+                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+                             CheckDeferred* deferred)
 {
     int result = 1;
     Arena type_arena = { 0 };
@@ -3818,11 +3871,42 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         {
             CheckInput input;
             // A repaired fragment (check_input_fragment), a prefix (check_input_prefix), a unit with its system headers'
-            // bodies deferred (check_input_selected) or the whole unit (check_input).
-            const bool input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
-                                                         repairing ? repair.original_end : checking->tokens.count,
-                                                         lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0);
+            // bodies deferred (check_input_selected) or the whole unit (check_input). A whole unit's bodies are read apart
+            // on the command's lanes (#151) where it asks for that and has more than one lane.
+            const uint8_t* selected = lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0;
+            const bool deferring = deferred != NULL && lanes != NULL && lanes->flow != NULL && !prefix_only && selected == NULL;
+            const uint32_t deferred_lanes = deferring ? check_driver_deferred_lanes(lanes) : 1;
+            CheckDriverDeferred grants = { .lanes = lanes };
+            bool input_valid = false;
+            if (deferred_lanes > 1)
+            {
+                const CheckDeferredFlow flow = {
+                    .flow = lanes->flow,
+                    .grant = check_driver_deferred_grant,
+                    .give_back = check_driver_deferred_give_back,
+                    .context = &grants,
+                };
+                deferred->flow = &flow;
+                deferred->every_lane = lanes->every_lane;
+                input_valid = check_input_deferred_compile(deferred, &input, checking, checking_pp, &types, arena, scratch, deferred_lanes);
+                deferred->flow = NULL;
+            }
+            else
+            {
+                input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
+                                                  repairing ? repair.original_end : checking->tokens.count, selected);
+            }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
+            if (stage_clock != NULL && deferring)
+            {
+                stage_clock->deferred = true;
+                stage_clock->deferred_lanes = deferred_lanes > 1 && !deferred->unsupported ? deferred->active : 0;
+                stage_clock->deferred_reason = deferred_lanes <= 1 ? "one lane" : deferred->unsupported ? deferred->reason : NULL;
+            }
+            if (grants.return_failed)
+            {
+                fprintf(errors, "fatal error: could not return GNU make worker slots\n");
+            }
             if (stage_clock != NULL)
             {
                 _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
@@ -3841,7 +3925,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             // A rejected reader may retain complete earlier expressions solely for diagnostics. Their typed
             // reports share source order with declaration reports, but this fragment can never be emitted.
-            if (input_valid || input.diagnostic_graph)
+            if (grants.return_failed)
+            {
+                result = 1;
+            }
+            else if (input_valid || input.diagnostic_graph)
             {
                 const CheckOptions check_options = {
                     .scalar = scalar,
@@ -4241,10 +4329,14 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
+    // The deferred bodies' state (#151), which the process's commands take in turn too: its lanes' memory stays in place
+    // from one command's unit to the next, and the unit's input points into it until the unit is done.
+    static CheckDeferred deferred;
     const bool interned = intern_initialize(&identifiers);
     DependencyOutput dependency = { 0 };
     int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena);
+                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
+                                  run->command->deferred_bodies ? &deferred : NULL);
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
@@ -4252,6 +4344,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     if (run->release)
     {
         intern_release(&identifiers);
+        check_deferred_release(&deferred);
     }
     return result;
 }
@@ -4416,6 +4509,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool warning_errors = false;
     int32_t return_error = 0;
     bool lazy_system_headers = false;
+    // --deferred-bodies reads a unit's function bodies apart, on the command's lanes (#151); --no-deferred-bodies, the
+    // default, reads them in source order.
+    bool deferred_bodies = false;
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
     bool lower_all = false;
@@ -4700,6 +4796,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lazy_system_headers = true;
         }
+        else if (strcmp(arguments[i], "--deferred-bodies") == 0 || strcmp(arguments[i], "--no-deferred-bodies") == 0)
+        {
+            deferred_bodies = arguments[i][2] == 'd';
+        }
         else if (strcmp(arguments[i], "--lower-all") == 0)
         {
             lower_all = true;
@@ -4869,6 +4969,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .quiet = quiet,
         .lazy_system_headers = lazy_system_headers,
         .lower_all = lower_all,
+        // The scalar path keeps source order's reader, the twin the deferred one is checked against.
+        .deferred_bodies = deferred_bodies && !scalar,
         .return_warning = return_warning,
         .warning_errors = warning_errors,
         .return_error = return_error,
@@ -4923,7 +5025,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

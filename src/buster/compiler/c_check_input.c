@@ -692,6 +692,12 @@ struct CheckInput
     // (check_input_overload_uses, #147).
     CheckInputMarkedMember* marked_overloads;
     uint32_t marked_overload_count;
+    // Each record member's declarator name token, by its index in the type table (0 for an unnamed member, and past
+    // member_token_count for a record a deferred body's lane completes): __builtin_dump_struct's type names print a
+    // member's type as its declaration spells it, its typedef specifier's name kept (#148, check_lower_dump_prepare).
+    uint32_t* member_tokens;
+    uint32_t member_token_count;
+    uint32_t member_token_capacity;
     uint8_t* availability_contexts;
     CheckWarningEvents warning_events;
     // Directive-only warnings survive parser recovery independently of expression facts.
@@ -2733,6 +2739,25 @@ static TypeId check_input_ns_constant_string(CheckInputReader* reader)
 {
     reader->output->graph.ns_constant_string = check_input_predefined_type(reader, reader->predefined_names[2]);
     return reader->output->graph.ns_constant_string;
+}
+
+// The object of the unit's own declaration of __CFConstantStringClassReference (#148, CheckGraph.cfstring_class), the
+// class its constant CFStrings point to, as clang's code takes the unit's global of that name: a file-scope object's of
+// external linkage, its first declaration's. Read once, in a unit with a CFString call, after its declarations.
+static void check_input_cfstring_class(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    static const char spelling[] = "__CFConstantStringClassReference";
+    const uint32_t name = intern_find(reader->pp->table, (const uint8_t*)spelling, (uint32_t)(sizeof(spelling) - 1));
+    uint32_t object = 0;
+    for (uint32_t t = 0; name != 0 && object == 0 && t < parser->tokens.count; t += 1)
+    {
+        const bool declares = parser->tokens.names[t] == name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_OBJECT &&
+                              check_input_linkage(input->declaration_bits, t) == 2 && check_sparse_get(input->declaration_bodies, t) >= input->token_count;
+        object = declares ? input->objects[t] : 0;
+    }
+    reader->output->graph.cfstring_class = object;
 }
 
 #include "c_check_declspec.c"
@@ -5289,6 +5314,41 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
     }
 }
 
+// A completed record's member `index`'s declarator name token (CheckInput.member_tokens): the column grows by doubling,
+// in the output arena, and members between the last recorded and `index` read 0.
+static void check_input_member_token(CheckInputReader* reader, uint32_t index, uint32_t token)
+{
+    CheckInput* input = reader->output;
+    if (index >= input->member_token_capacity && !input->resource)
+    {
+        uint32_t capacity = input->member_token_capacity != 0 ? input->member_token_capacity : 64;
+        while (capacity <= index && capacity < UINT32_MAX / 2)
+        {
+            capacity *= 2;
+        }
+        uint32_t* grown = capacity > index ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+        input->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (input->member_token_count != 0)
+            {
+                memcpy(grown, input->member_tokens, (uint64_t)input->member_token_count * sizeof(*grown));
+            }
+            input->member_tokens = grown;
+            input->member_token_capacity = capacity;
+        }
+    }
+    if (index < input->member_token_capacity)
+    {
+        for (uint32_t gap = input->member_token_count; gap < index; gap += 1)
+        {
+            input->member_tokens[gap] = 0;
+        }
+        input->member_tokens[index] = token;
+        input->member_token_count = index >= input->member_token_count ? index + 1 : input->member_token_count;
+    }
+}
+
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
 #include "c_check_counted_by_input.c"
@@ -5469,6 +5529,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     if (members[member].mark != 0)
                     {
                         check_input_mark_member(reader, position, members + member);
+                    }
+                    if (!reader->lane)
+                    {
+                        check_input_member_token(reader, position, members[member].member.name != 0 ? members[member].token : 0);
                     }
                     position += 1;
                 }
@@ -9515,6 +9579,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                         const uint32_t end = check_constant_punctuation(parser, begin, token, PARSE_KIND_COMMA);
                         CheckBuiltinCall* evidence = &graph->builtin_calls[graph->builtin_count++];
                         *evidence = (CheckBuiltinCall){ .node = node };
+                        const bool cfstring = reader->builtins[token] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || reader->builtins[token] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING;
+                        evidence->cfstring_name = cfstring && keyword < token ? keyword : 0;
                         if (op == CHECK_OP_BUILTIN_VECTOR)
                         {
                             check_input_shuffle_evidence(reader, keyword, token, count, evidence);
@@ -10135,6 +10201,15 @@ static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static void check_input_warning_policy(CheckInput* input, const PPOptions* options);
 
+// The target's facts a reading's table carries, which every phase after the reader reads from the table too: plain char's
+// signedness, and whether the target inlines 16-byte atomics (cx16), which the lock-free queries read. check_input_run
+// sets them on the table it reads with, and #113's deferred reader on the caller's, into which it merges (#1403's review).
+static void check_input_target_table(TypeTable* types, const Preprocessor* pp)
+{
+    types->char_unsigned = pp->options.predefines.char_unsigned;
+    types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
+}
+
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
                             CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
@@ -10154,10 +10229,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_function_system = pp->options.implicit_function_system,
                          .fatal_errors = pp->options.fatal_errors };
     check_input_warning_policy(input, &pp->options);
-    // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
-    // inlines 16-byte atomics (cx16), which the lock-free queries read.
-    types->char_unsigned = pp->options.predefines.char_unsigned;
-    types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
+    check_input_target_table(types, pp);
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     const char* const vararg_spellings[] =
@@ -10790,6 +10862,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_fallthrough_placements(&reader);
             }
             check_input_diagnostic_recover(&reader, resolved);
+            if (input->graph.ns_constant_string != 0 && !input->resource)
+            {
+                check_input_cfstring_class(&reader);
+            }
             if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
             {
                 check_input_deprecated_uses(&reader);

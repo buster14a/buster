@@ -1683,6 +1683,8 @@ static void tier1_pipeline_clang(Tier1PipelineTest* test, const char* clang)
     }
 }
 
+#include "buster/compiler/tier1_pipeline_boundary_test.c"
+
 static int run_tier1_pipeline_tests(int argc, char** argv)
 {
     uint64_t seed = UINT64_C(0xb138134177);
@@ -1741,6 +1743,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_mutation_regression(&test);
             tier1_pipeline_deadline_regression(&test);
             tier1_pipeline_supported(&test);
+            tier1_pipeline_boundaries(&test);
             if (cross_check && test.failures == 0)
             {
                 tier1_pipeline_clang(&test, clang);

@@ -397,6 +397,38 @@ duplicates. A step whose run listing fails, even partly, plans nothing until a
 full listing succeeds; otherwise a run in flight it hid would be dispatched
 again. An admitted run older than two hours is cancelled.
 
+**Refused branches.** GitHub refuses (HTTP 403, "Resource not accessible by
+integration") to let the workflow token create some states' `nightly/SHA`
+branches. In the 2026-11-05 cycle it refused all four merges it was asked for
+whose pull request's head lacked a workflow change main already had, and none
+of the three other states (two merges whose heads had main's workflow files, one
+commit with a single parent). By that pattern, 27 of the cycle's 49 states would
+be refused. The token can't take the `workflows` permission that GitHub asks
+for to create such refs. A refused branch warns, the state is skipped for the
+rest of that coordinator job, and the job plans again at once: nothing was
+launched, so it doesn't wait as for a run in flight. The state neither keeps a
+preparation slot nor stays the oldest ready state while later states wait. Each
+job tries it once again. Any other failure to create a branch (a timeout, a 429
+or 5xx, a failed lookup) is not a refusal: it warns, and a later step tries
+again. A branch that another step made meanwhile is used. A `nightly/SHA`
+branch that already points at another commit is never dispatched; it is an
+error, and the state is skipped for the job as a refused one is, since it stays
+wrong until a person fixes it. The report counts
+and names the skipped states, with an alert. A refused snapshot is replaced by
+the newest eligible earlier state, as an ineligible one is. With the `nightly-ledger` environment's `BUSTER_NIGHTLY_BRANCH_TOKEN`, the
+coordinator creates and deletes the `nightly/SHA` branches with it instead. That
+token is a fine-grained token with only `Contents: Read and write` and
+`Workflows: Read and write` on this repository. Dispatches, cancellations
+and reads keep the workflow's token. Without the secret, the refused states are
+skipped as above. A token GitHub rejects as a credential (expired, revoked, or
+without access to this repository) is warned about once and dropped for the
+rest of the job, which then makes the branches with the workflow token, as
+without one. A 404 alone doesn't reject it: a branch someone else deleted
+before the prune is a 404 to a valid token too. The token is rejected only if
+it can't read the repository itself either. Branches created with it trigger workflows,
+unlike the workflow token's, but every workflow's `push` trigger is limited to
+`main`.
+
 **Time.** The tz database's Europe/Madrid is checked at three points:
 
 - at dispatch, by the coordinator's planner;

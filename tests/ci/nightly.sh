@@ -25,17 +25,30 @@ cat > "$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURES/calls.log"
+printf '%s %s\n' "${GH_TOKEN:-none}" "$*" >> "$FIXTURES/tokens.log"
+# An expired branch token: GitHub rejects every call made with it. One without access to the repository: every call,
+# the repository's own included, is a 404.
+if [ "${GH_TOKEN:-}" = expired-token ]; then
+    printf '{"message":"Bad credentials","status":"401"}\n'
+    printf 'gh: Bad credentials (HTTP 401)\n' >&2
+    exit 1
+fi
+if [ "${GH_TOKEN:-}" = outsider-token ]; then
+    printf '{"message":"Not Found","status":"404"}\n'
+    printf 'gh: Not Found (HTTP 404)\n' >&2
+    exit 1
+fi
 if [ "$1" = workflow ]; then
     exit 0
 fi
 [ "$1" = api ]
 shift
-method=GET jq_filter='' endpoint=''
+method=GET jq_filter='' endpoint='' fields=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --paginate) shift ;;
         -X) method=$2; shift 2 ;;
-        -f) shift 2 ;;
+        -f) fields="$fields $2"; shift 2 ;;
         --jq) jq_filter=$2; shift 2 ;;
         *) endpoint=$1; shift ;;
     esac
@@ -69,7 +82,35 @@ case "$method $endpoint" in
         fixture="$FIXTURES/refs.json"; empty='[]' ;;
     "GET repos/buster14a/buster/git/ref/heads/nightly/"*)
         fixture="$FIXTURES/ref-${endpoint##*/}.json" ;;
-    "POST repos/buster14a/buster/git/refs"|"POST repos/buster14a/buster/actions/runs/"*/cancel|"DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+    "POST repos/buster14a/buster/git/refs")
+        # $FIXTURES/refuse-SHA: the workflow token may not create that commit's branch, as GitHub refused some on
+        # 2026-11-05.
+        sha=${fields##* sha=}
+        if [ -f "$FIXTURES/refuse-${sha%% *}" ] && [ "${GH_TOKEN:-}" != branch-token ]; then
+            printf '{"message":"Resource not accessible by integration","status":"403"}\n'
+            printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
+            exit 1
+        fi
+        # $FIXTURES/flaky-SHA: one transient failure, then success.
+        if [ -f "$FIXTURES/flaky-${sha%% *}" ]; then
+            rm -f "$FIXTURES/flaky-${sha%% *}"
+            printf '{"message":"Server Error","status":"502"}\n'
+            printf 'gh: Server Error (HTTP 502)\n' >&2
+            exit 1
+        fi
+        printf '{}\n'; exit 0 ;;
+    "GET repos/buster14a/buster")
+        printf '{"id":1421805693}\n' > "$FIXTURES/repository.json"
+        answer "$FIXTURES/repository.json"; exit 0 ;;
+    "DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+        # $FIXTURES/gone-SHA: someone else deleted that branch first.
+        if [ -f "$FIXTURES/gone-${endpoint##*/}" ]; then
+            printf '{"message":"Not Found","status":"404"}\n'
+            printf 'gh: Not Found (HTTP 404)\n' >&2
+            exit 1
+        fi
+        printf '{}\n'; exit 0 ;;
+    "POST repos/buster14a/buster/actions/runs/"*/cancel)
         printf '{}\n'; exit 0 ;;
     *)
         printf 'fake gh: unexpected %s %s\n' "$method" "$endpoint" >&2; exit 1 ;;
@@ -102,6 +143,8 @@ SH
 chmod +x "$work/bin/gh"
 export FIXTURES="$work/fixtures"
 export NIGHTLY_GH="$work/bin/gh"
+# The workflow's own token, as the fake gh logs it beside each call (the branch token's calls log theirs).
+export GH_TOKEN=workflow-token
 export GITHUB_REPOSITORY=buster14a/buster
 fixtures="$work/fixtures"
 : > "$fixtures/calls.log"
@@ -608,6 +651,95 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epo
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9600\.3\.defer$" 'the next step refills the slot its completion freed'
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and the job still waits for the window'
 rm -f "$fixtures/runs-workflow_dispatch.json.2" "$fixtures"/count-*
+# A branch the workflow token may not create (GitHub refused those of merges whose pull request's head lacked main's
+# workflow changes): it warns, dispatches nothing for that state, and the job plans again at once, without the wait
+# (a `sleep` on PATH logs any), giving the slot to the next state.
+mkdir -p "$work/sleeping"
+printf '#!/bin/sh\necho "sleep $*" >> "$FIXTURES/calls.log"\n' > "$work/sleeping/sleep"
+chmod +x "$work/sleeping/sleep"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9650 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/refused-branch" prepare run
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::GitHub refused the workflow token nightly/$epoch" 'a refused branch warns'
+expect_no_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch " 'and nothing is dispatched for its state'
+test "$(grep -c "^api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 1 || fail 'its branch is tried once a job'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9650\.3\.defer$" 'the next step prepares the next state in its place'
+expect_no_match "$fixtures/calls.log" '^sleep ' 'and plans it at once, without waiting'
+expect_match "$work/refused-branch/report.md" 'Branch refused' 'and the report names the skipped state'
+rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# Any other failure to create a branch (here a 502) is not a refusal: the state isn't skipped, the next step, after the
+# usual wait, tries again, and dispatches it.
+: > "$fixtures/flaky-$epoch"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9660 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/flaky-branch" prepare run
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::nightly/$epoch could not be created \\(gh: Server Error \\(HTTP 502\\)\\); a later step tries again" 'a transient failure warns, with its reason'
+test "$(grep -c "^api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 2 || fail 'and its branch is tried again'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'and its state is dispatched once it is made'
+expect_match "$fixtures/calls.log" '^sleep 300$' 'after the usual wait'
+expect_no_match "$work/flaky-branch/report.md" 'Branch refused' 'and it is not reported as refused'
+rm -f "$fixtures/flaky-$epoch" "$fixtures"/count-*
+# A nightly branch that already points at another commit is never dispatched, and the state is skipped for the job
+# (it stays wrong until a person fixes it), at once: the next state is prepared without the wait.
+printf '{"object":{"sha":"%s"}}\n' "$merge" > "$fixtures/ref-$epoch.json"
+: > "$fixtures/calls.log"
+PATH="$work/sleeping:$PATH" GITHUB_RUN_ID=9665 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/mispointed-branch" prepare run
+expect_match "$work/coordinate.log" "::error title=Nightly branch::nightly/$epoch points at $merge; refusing to dispatch it" 'a branch at another commit is an error'
+expect_no_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch |-X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'and is neither dispatched nor made again'
+test "$(grep -c "^api repos/buster14a/buster/git/ref/heads/nightly/$epoch " "$fixtures/calls.log")" -eq 1 || fail 'it is looked up once a job'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9665\.3\.defer$" 'the next state is prepared in its place'
+expect_no_match "$fixtures/calls.log" '^sleep ' 'at once'
+rm -f "$fixtures/ref-$epoch.json" "$fixtures"/count-*
+# With the nightly-ledger environment's branch token, the branches are made and deleted with it, and a state the
+# workflow token was refused is dispatched; every other call keeps the workflow's token.
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=branch-token GITHUB_RUN_ID=9668 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=1 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/branch-token" prepare run
+expect_match "$fixtures/tokens.log" "^branch-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'the branch token makes the branches'
+expect_no_match "$fixtures/tokens.log" '^branch-token (workflow|api repos|api --paginate|api -X POST repos/buster14a/buster/actions)' 'and nothing else'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'so the state the workflow token was refused is dispatched'
+expect_no_match "$work/coordinate.log" "Nightly branch::" 'without a warning'
+rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# An expired branch token is rejected once, warned about once, and the job makes its branches with the workflow
+# token, as without one: a branch the workflow token may have is made and dispatched, one it is refused is skipped.
+: > "$fixtures/refuse-$merge"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+PATH="$work/sleeping:$PATH" NIGHTLY_BRANCH_TOKEN=expired-token GITHUB_RUN_ID=9669 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=3 run_coordinator "$work/expired-token" prepare run
+test "$(grep -c '^expired-token ' "$fixtures/tokens.log")" -eq 1 || { cat "$fixtures/tokens.log" >&2; fail 'an expired branch token is tried once a job'; }
+test "$(grep -c '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (gh: Bad credentials (HTTP 401))' "$work/coordinate.log")" -eq 1 || fail 'and warned about once'
+expect_match "$fixtures/tokens.log" "^workflow-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'the workflow token makes the branches instead'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'a branch it may have is dispatched'
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::GitHub refused the workflow token nightly/$merge" 'one it is refused is skipped, as without a branch token'
+rm -f "$fixtures/refuse-$merge" "$fixtures"/count-*
+# A branch someone else deleted before the prune: a 404 to a valid branch token, which keeps it, so the next branch
+# the workflow token would be refused is still made with it and dispatched. A token without access to the repository
+# (a 404 there too) is rejected, as an expired one is.
+gone=1111111111111111111111111111111111111111
+printf '[{"ref":"refs/heads/nightly/%s"}]\n' "$gone" > "$fixtures/refs.json"
+: > "$fixtures/gone-$gone"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=branch-token GITHUB_RUN_ID=9671 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/pruned-404" prepare run
+expect_match "$fixtures/tokens.log" "^branch-token api -X DELETE repos/buster14a/buster/git/refs/heads/nightly/$gone$" 'the prune of a branch already gone is a 404'
+expect_no_match "$work/coordinate.log" 'Nightly branch token::' 'which doesn'"'"'t reject a valid branch token'
+expect_match "$fixtures/tokens.log" "^branch-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'so a later branch is still made with it'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'and its state dispatched'
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=outsider-token GITHUB_RUN_ID=9672 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/outsider-token" prepare run
+test "$(grep -c '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (gh: Not Found (HTTP 404))' "$work/coordinate.log")" -eq 1 || fail 'a branch token without access to the repository is rejected once'
+expect_match "$fixtures/tokens.log" "^workflow-token api -X DELETE repos/buster14a/buster/git/refs/heads/nightly/$gone$" 'and the workflow token takes over'
+rm -f "$fixtures/refs.json" "$fixtures/gone-$gone" "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# A branch another step made meanwhile (the POST fails, the branch is then there at the commit) is used as it is.
+printf '{"object":{"sha":"%s"}}\n' "$epoch" > "$fixtures/ref-$epoch.json.2"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9670 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=1 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/raced-branch" prepare run
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'a branch made meanwhile is dispatched'
+expect_no_match "$work/coordinate.log" "Nightly branch::" 'without a warning'
+rm -f "$fixtures/refuse-$epoch" "$fixtures/ref-$epoch.json.2" "$fixtures"/count-*
 # The handoff from the prepare job to the window job: a prepare step inside the window admits no hardware, and the
 # window job, handed the prepare job's pending dispatches as its output, repeats none that aren't visible yet, whether
 # or not the ledger's artifact can be read.
@@ -672,4 +804,4 @@ git -C "$history" -c push.negotiate=false push -q "$remote" main
 GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/moved" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
 expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, the prepare-to-window handoff and a pin that main moved past checked\n'
+printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, the prepare-to-window handoff and a pin that main moved past checked\n'
