@@ -985,7 +985,7 @@ static void check_debug_test_read(CheckDebugTestTally* tally, const char* progra
     const String8 traced = check_debug_test_gdb(program, report, functions, BUSTER_ARRAY_LENGTH(functions), arena);
     const char* scale = traced.pointer != 0 ? strstr(traced.pointer, "Breakpoint 1, scale") : 0;
     const char* header = scale != 0 ? strstr(scale, "Breakpoint 2, header_add") : 0;
-    check_debug_test_expect(tally, scale != 0 && header != 0 && strstr(scale, "dbg_rows.c:6") != 0 && strstr(scale, "main () at") != 0 && strstr(scale, "dbg_rows.c:42") != 0,
+    check_debug_test_expect(tally, scale != 0 && header != 0 && strstr(scale, "dbg_rows.c:6") != 0 && strstr(scale, " in main (") != 0 && strstr(scale, "dbg_rows.c:42") != 0,
                             "gdb stops at a function's breakpoint on its first statement, and its backtrace gives the caller's line", report);
     check_debug_test_expect(tally, header != 0 && strstr(header, "dbg_rows.h:3") != 0 && strstr(header, "dbg_rows.c:43") != 0,
                             "the header's function stops in the header, called from its callee's line (the call's first)", report);
