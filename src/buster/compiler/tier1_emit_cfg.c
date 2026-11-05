@@ -2888,7 +2888,7 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
     return error;
 }
 
-static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function)
+static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool probe)
 {
     uint64_t records = function->parameter_passed != 0 ? 2u * (uint64_t)function->parameter_count + 2 : 0;
     for (uint32_t node = 0; node < function->instruction_count; node += 1)
@@ -2902,13 +2902,13 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function)
         records += op == IR_VCONST ? 17u : 0;
         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
-        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's.
-        records += op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
+        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, in a probed frame alone.
+        records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
     }
     return records;
 }
 
-// The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), two each.
+// The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), three each.
 static uint64_t tier1_emit_cfg_probe_branches(const IrFunction* function)
 {
     uint64_t branches = 0;
@@ -2966,7 +2966,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t base = 2 * added;
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
-    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function) +
+    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function, emitted->frame.probe_stack) +
                               tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + tier1_emit_cfg_x87_node_records(plan, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count +
                                      (emitted->frame.probe_stack ? tier1_emit_cfg_probe_branches(function) : 0);

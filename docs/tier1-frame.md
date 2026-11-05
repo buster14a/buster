@@ -273,7 +273,8 @@ grow.
   (`emitted_tier0_probe_rows`), r11's CFA from the bound's subtraction and
   rsp's at the loop's exit, and the rows resolve into a row program.
 - **Tier 0's `ALLOCA`** (`tier0_emit_probed_allocation`) is Tier 1's loop in its
-  count's register, which the entry's address then takes: 14 records and
+  count's register, which the entry's address then takes: 13 records (its
+  rounding's two, the loop's ten, the address's one) and
   three branches. It takes no other register, since every other one may hold
   a deeper value (r11 is depth 8's) or a local's home. A deferred entry's
   branches are now counted and kept in entry order outside deep entries too,

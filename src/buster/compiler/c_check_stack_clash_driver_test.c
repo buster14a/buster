@@ -18,7 +18,8 @@
 // without rematerialization), by each path, with a frame pointer and without, under --verify, every function Tier 1's but
 // the page-aligned one, which Tier 1's selection refuses with or without probes and Tier 0 compiles. The probes fixture
 // computes through frames of pages, variable-length arrays and allocas in loops, an allocation of none, one of a page and
-// one of a constant, recursion through two-page frames and a realigned frame, printing clang -O0's line. A probed
+// one of a constant, recursion through two-page frames, a realigned frame and 24 allocations in a straight line (Tier 1's
+// capacity for their probes, which its emission checks), printing clang -O0's line. A probed
 // frame's function starts with the loop of tier0_emit_probed_reservation's records (its touch and its backward jne), an
 // unprobed one with none; and the last of -fstack-clash-protection and -fno-stack-clash-protection wins: without the
 // option, with it then -fno-, the objects are byte for byte the same.
@@ -217,9 +218,66 @@ static const char check_test_stack_clash_probes_source[] =
     "    return block[1199] + (int)((unsigned long)block & 63);\n"
     "}\n"
     "\n"
+    "// Allocations in a straight line, nothing else between them: the probed capacity of an allocation\n"
+    "// each, which a short one would refuse.\n"
+    "static unsigned long many(int n)\n"
+    "{\n"
+    "    unsigned char* p0 = alloca((size_t)(n + 0));\n"
+    "    unsigned char* p1 = alloca((size_t)(n + 700));\n"
+    "    unsigned char* p2 = alloca((size_t)(n + 1400));\n"
+    "    unsigned char* p3 = alloca((size_t)(n + 2100));\n"
+    "    unsigned char* p4 = alloca((size_t)(n + 2800));\n"
+    "    unsigned char* p5 = alloca((size_t)(n + 3500));\n"
+    "    unsigned char* p6 = alloca((size_t)(n + 4200));\n"
+    "    unsigned char* p7 = alloca((size_t)(n + 4900));\n"
+    "    unsigned char* p8 = alloca((size_t)(n + 5600));\n"
+    "    unsigned char* p9 = alloca((size_t)(n + 6300));\n"
+    "    unsigned char* p10 = alloca((size_t)(n + 7000));\n"
+    "    unsigned char* p11 = alloca((size_t)(n + 7700));\n"
+    "    unsigned char* p12 = alloca((size_t)(n + 8400));\n"
+    "    unsigned char* p13 = alloca((size_t)(n + 9100));\n"
+    "    unsigned char* p14 = alloca((size_t)(n + 9800));\n"
+    "    unsigned char* p15 = alloca((size_t)(n + 10500));\n"
+    "    unsigned char* p16 = alloca((size_t)(n + 11200));\n"
+    "    unsigned char* p17 = alloca((size_t)(n + 11900));\n"
+    "    unsigned char* p18 = alloca((size_t)(n + 12600));\n"
+    "    unsigned char* p19 = alloca((size_t)(n + 13300));\n"
+    "    unsigned char* p20 = alloca((size_t)(n + 14000));\n"
+    "    unsigned char* p21 = alloca((size_t)(n + 14700));\n"
+    "    unsigned char* p22 = alloca((size_t)(n + 15400));\n"
+    "    unsigned char* p23 = alloca((size_t)(n + 16100));\n"
+    "    unsigned long sum = 0;\n"
+    "    p0[0] = (unsigned char)1;\n"
+    "    p1[0] = (unsigned char)2;\n"
+    "    p2[0] = (unsigned char)3;\n"
+    "    p3[0] = (unsigned char)4;\n"
+    "    p4[0] = (unsigned char)5;\n"
+    "    p5[0] = (unsigned char)6;\n"
+    "    p6[0] = (unsigned char)7;\n"
+    "    p7[0] = (unsigned char)8;\n"
+    "    p8[0] = (unsigned char)9;\n"
+    "    p9[0] = (unsigned char)10;\n"
+    "    p10[0] = (unsigned char)11;\n"
+    "    p11[0] = (unsigned char)12;\n"
+    "    p12[0] = (unsigned char)13;\n"
+    "    p13[0] = (unsigned char)14;\n"
+    "    p14[0] = (unsigned char)15;\n"
+    "    p15[0] = (unsigned char)16;\n"
+    "    p16[0] = (unsigned char)17;\n"
+    "    p17[0] = (unsigned char)18;\n"
+    "    p18[0] = (unsigned char)19;\n"
+    "    p19[0] = (unsigned char)20;\n"
+    "    p20[0] = (unsigned char)21;\n"
+    "    p21[0] = (unsigned char)22;\n"
+    "    p22[0] = (unsigned char)23;\n"
+    "    p23[0] = (unsigned char)24;\n"
+    "    sum += p0[0] + p1[0] + p2[0] + p3[0] + p4[0] + p5[0] + p6[0] + p7[0] + p8[0] + p9[0] + p10[0] + p11[0] + p12[0] + p13[0] + p14[0] + p15[0] + p16[0] + p17[0] + p18[0] + p19[0] + p20[0] + p21[0] + p22[0] + p23[0];\n"
+    "    return sum;\n"
+    "}\n"
+    "\n"
     "int main(void)\n"
     "{\n"
-    "    printf(\"%lu %lu %lu %d %lu %d\\n\", table_sum(5), array_sum(9), allocation_chain(12), edges(0), deep(20), aligned(77));\n"
+    "    printf(\"%lu %lu %lu %d %lu %d %lu\\n\", table_sum(5), array_sum(9), allocation_chain(12), edges(0), deep(20), aligned(77), many(3000));\n"
     "    return 0;\n"
     "}\n";
 
@@ -256,7 +314,7 @@ static bool check_test_stack_clash_build(const char* executable, const char* sou
     arguments[count] = NULL;
     char* text = NULL;
     const int status = check_test_driver_spawn(arguments, &text);
-    static const char* const names[] = { "frame", "allocation", "array", "aligned", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep" };
+    static const char* const names[] = { "frame", "allocation", "array", "aligned", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many" };
     const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
     if ((status != 0 || !taken) && text != NULL)
     {
