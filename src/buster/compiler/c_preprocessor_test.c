@@ -1455,12 +1455,12 @@ static const PPTestCase pp_test_cases[] = {
       "#if 1 ? (0 ? (-1 > 0u) : (-2 > 0u)) : (-3 > 0u)\ncase_5\n#endif\n#if (1 || (-1 > 0u)) && (0u < -2)\ncase_6\n#endif\n"
       "#if ((0u < -1) ? -2 : 3) > 0u\ncase_7\n#endif\n#if (-1 > 0u) && (-2 > 0u)\ncase_8\n#endif\n#if -'A' > 0u\ncase_9\n#endif\n",
       0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\n", false, 12 },
-    { "#if negative conversions become errors", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", 0, true, 0, "-Werror", .errors = 2 },
+    { "#if negative conversions become errors", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "", true, 0, "-Werror", .errors = 2 },
     { "#if negative conversion warnings are suppressed by -w", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 0, "-w -Werror", .errors = 0 },
     { "#if negative conversion warnings can be demoted", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Werror -Wno-error", .errors = 0 },
     { "#if negative conversions are not sign-compare warnings", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Wno-sign-compare -Wno-sign-conversion", .errors = 0 },
     { "#if conversion macros and evaluated #elif", "#define NEG (-1)\n#define GT >\n#define COMPARE(a,b) ((a) > (b))\n#if NEG GT 0u\nmacro_left\n#endif\n#if COMPARE(0u, -2)\nmacro_right\n#endif\n#if 0\n#if -3 > 0u\nskipped\n#endif\n#elif 0u < -4\nelif_taken\n#elif -5 > 0u\nskipped_elif\n#endif\n", 0, "c17", "macro_left\nelif_taken\n", false, 3 },
-    { "#if dead conversion operand still checks syntax", "#if 0 && (-1 > 0u + )\nwrong\n#endif\n", 0, "c17", 0, true, 0 },
+    { "#if dead conversion operand still checks syntax", "#if 0 && (-1 > 0u + )\nwrong\n#endif\n", 0, "c17", "", true, 0 },
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
     // placemarkers, and variadic macros (the expected text is clang's output).
     { "rescanning, redefinitions and painting", "#define n 4\n#define twice(v) twice(n + (v))\n#undef n\n#define n 5\n#define alias twice\n#define box box{1}\n#define open alias(-\n#define call(f) f(k)\n#define k 7,8\n#define id(v) v\n#define kw() long\n#define one(v) v\n#define join(p,q) p ## q\n#define quote(v) # v\ntwice(a-1) * twice(twice(box)) + id(id(alias)(2) - id)(3);\nalias(n*(9,10)-k) & open 6) | call\n(twice)^call(call);\nkw() arr[one()] = { one(4), join(5,6), join(7,), join(,8), join(,) };\nchar s[2][4] = { quote(abc), quote() };\n",
