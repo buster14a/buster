@@ -507,6 +507,7 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
             const bool bounded = (shape >= 2 && shape <= 4) || shape == 9;
             const uint32_t limit = shape == 8 ? 1 : bounded || shape == 5 || shape >= 12 ? 4 : 2;
             const bool proven = shape < 7 || shape == 12 || shape == 14 || shape == 16 || shape == 17;
+            const bool copied = proven || shape == 11;
             const uint32_t source = shape >= 14 ? 3 : 5;
             function.parameter_types[0] = IR_I32;
             function.parameter_types[1] = IR_I32;
@@ -553,14 +554,17 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
                     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "scoped conversions select");
                     if (selected == TIER1_SELECT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[8].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
-                                               "only a dominating nonnegative edge and real zero storage remove the signed conversion");
-                        if (plan.patterns[8].rule != (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND))
+                        tier1_emit_test_expect(test, plan.patterns[8].rule == (copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND) &&
+                                               (shape != 11 || plan.patterns[0].sign_result),
+                                               "a guarded zero representation or an explicit shared signed entry representation removes the conversion");
+                        if (plan.patterns[8].rule != (copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND))
                         {
                             fprintf(stderr, "  scoped conversion shape=%u path=%u pressure=%u rule=%u expected=%u\n", shape, path, pressure,
-                                    plan.patterns[8].rule, proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND);
+                                    plan.patterns[8].rule, copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND);
                         }
+                        Tier1EmitDiagnostic diagnostic = { 0 };
                         const Tier1EmitOptions options = {
+                            .diagnostic = &diagnostic,
                             .certify = true,
                             .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
                             .vector = path != 0,
@@ -785,7 +789,9 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                                                plan.patterns[values[3]].rule == TIER1_RULE_COPY && plan.patterns[values[4]].rule == TIER1_RULE_COPY &&
                                                plan.patterns[values[6]].rule == TIER1_RULE_SIGN_EXTEND,
                                                "two widening roots share an explicit entry conversion while a single use remains local");
+                        Tier1EmitDiagnostic diagnostic = { 0 };
                         const Tier1EmitOptions options = {
+                            .diagnostic = &diagnostic,
                             .certify = true,
                             .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
                             .vector = path != 0,
@@ -794,10 +800,32 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                         Tier1EmitResult emitted;
                         const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
                         tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "shared signed parameter allocation and code certify");
+                        if (error != TIER1_EMIT_OK)
+                        {
+                            fprintf(stderr, "  signed parameter shape=%u path=%u pressure=%u error=%u node=%u cause=%u detail=%u\n", shape, path, pressure,
+                                    (unsigned)error, failed, (unsigned)diagnostic.cause, diagnostic.error);
+                        }
                         if (error == TIER1_EMIT_OK)
                         {
                             tier1_emit_test_expect(test, emitted.prepared.sizes[0] == 8 && emitted.prepared.sizes[second] == 8 && emitted.prepared.sizes[1] == 4,
                                                    "shared signed parameters preserve eight-byte storage without widening the single-use control");
+                            uint32_t conversions = 0;
+                            for (uint32_t r = 0; emitted.general && r < emitted.code.count; r += 1)
+                            {
+                                const X86Instruction record = emitted.code.records[r];
+                                if (record.form == X86_FORM_MOVSXD_R64_RM32 && emitted.origin_values[r] < parameters &&
+                                    (emitted.origin_values[r] == 0 || emitted.origin_values[r] == second))
+                                {
+                                    X86Instruction wrong_width = record;
+                                    wrong_width.form = X86_FORM_MOV_R64_RM64;
+                                    tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, wrong_width, UINT32_MAX),
+                                                           "signed entry certificate refuses reading the caller's unspecified upper bytes");
+                                    tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, (X86Instruction){ .form = X86_FORM_NOP }, UINT32_MAX),
+                                                           "signed entry certificate refuses an omitted conversion");
+                                    conversions += 1;
+                                }
+                            }
+                            tier1_emit_test_expect(test, !emitted.general || conversions == 2, "both shared signed entry conversions are independently decoded and mutated");
                             void* executable = MAP_FAILED;
                             uint64_t bytes = 0;
                             if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
