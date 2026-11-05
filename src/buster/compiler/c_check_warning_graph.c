@@ -155,40 +155,63 @@ static void check_input_member_uses(CheckInputReader* reader, const CheckStream*
                                     type_lookup_member(types, record, graph->members[node], &offset, &qualifiers) : 0;
             const CheckInputMarkedMember* marked = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN ?
                                                    check_marked_member(input->marked_members, input->marked_member_count, member) : NULL;
-            const uint8_t context = input->availability_contexts != NULL ? input->availability_contexts[name] : 0;
-            const bool dropped = marked != NULL && check_marked_dropped(marked, context);
-            if (marked != NULL && !dropped && marked->unavailable)
+            // Once: the uses' pass gave a use the evaluator read too (a variable length array's bound) its diagnostic.
+            bool reported = false;
+            const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_DEPRECATED_USE << 32 | ((uint64_t)name + 1);
+            for (uint32_t r = 0; marked != NULL && marked->unavailable && !reported && r < reader->output->report_count; r += 1)
             {
-                const uint32_t before = reader->output->report_count;
-                check_input_report(reader, name, CHECK_INPUT_UNAVAILABLE_USE);
-                if (reader->output->report_count > before)
-                {
-                    reader->output->reports[before].note_token = marked->name;
-                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
-                    reader->output->reports[before].detail = marked->message != BUSTER_CHECK_WARNING_NO_SOURCE ? marked->message + 1 : 0;
-                }
+                reported = reader->output->reports[r].token == name && reader->output->reports[r].message == CHECK_INPUT_UNAVAILABLE_USE;
             }
-            else if (marked != NULL && !dropped)
+            reported |= marked != NULL && !marked->unavailable && check_warning_set_contains(&reader->source_warning_keys, key);
+            if (marked != NULL && !reported)
             {
-                const CheckWarningEvent event =
-                {
-                    .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
-                    .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
-                    .token = name,
-                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                    .completion = name + 1,
-                    .payload = { .name = parser->tokens.names[name], .token = marked->message },
-                };
-                const CheckWarningNote note =
-                {
-                    .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
-                    .token = marked->attribute,
-                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
-                };
-                check_input_warning_event(reader, &event, &note, 1);
+                check_input_marked_member_use(reader, name, marked, 0);
             }
+        }
+    }
+}
+
+// clang's warning at a call that resolves to an overloadable function's overload a deprecated attribute marks (#147,
+// DiagnoseUseOfDecl's of the selected overload): "'f' is deprecated" (-Wdeprecated-declarations) at the callee's name,
+// with the attribute's message and the note at it, where the name's context doesn't drop it
+// (CheckInput.availability_contexts). The selections are the stream's (CheckStream.overloads), and an address taken
+// through the overload set isn't one, as clang doesn't warn of it.
+static void check_input_overload_uses(CheckInputReader* reader, const CheckStream* stream)
+{
+    const CheckInput* input = reader->output;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t i = 0; i < stream->overload_count && stream->overloads != NULL; i += 1)
+    {
+        const uint32_t node = stream->overloads[i].node;
+        const CheckOverloadResult* selected = &stream->overloads[i].selected;
+        const uint32_t callee = node < graph->count && graph->ops[node] == CHECK_OP_CALL ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        const uint32_t name = callee < graph->count ? graph->tokens[callee] : count;
+        const CheckInputMarkedMember* marked = selected->status == CHECK_OVERLOAD_OK && stream->diagnostics[node] == CHECK_DIAG_NONE && name < count &&
+                                               parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ?
+                                               check_marked_member(input->marked_overloads, input->marked_overload_count, selected->declaration) : NULL;
+        const uint8_t context = marked != NULL && input->availability_contexts != NULL ? input->availability_contexts[name] : 0;
+        if (marked != NULL && !check_marked_dropped(marked, context))
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+                .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+                .token = name,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = name + 1,
+                .payload = { .name = parser->tokens.names[name], .token = marked->message },
+            };
+            const CheckWarningNote note =
+            {
+                .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+                .token = marked->attribute,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, &note, 1);
         }
     }
 }
@@ -300,6 +323,11 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     if (valid && input->marked_member_count != 0)
     {
         check_input_member_uses(&reader, stream);
+        valid = !staged.resource;
+    }
+    if (valid && input->marked_overload_count != 0)
+    {
+        check_input_overload_uses(&reader, stream);
         valid = !staged.resource;
     }
     if (valid)

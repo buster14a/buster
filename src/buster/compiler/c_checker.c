@@ -203,6 +203,9 @@ struct CheckInputMarkedMember
 // diagnostic (a deprecated context a deprecated use's, an unavailable one either's).
 #define BUSTER_CHECK_CONTEXT_DEPRECATED 0x01
 #define BUSTER_CHECK_CONTEXT_UNAVAILABLE 0x02
+// A deprecated use's or note's payload.data where its name is its payload.first_type's spelling (an anonymous tag's,
+// `struct (unnamed at FILE:LINE:COL)` or its typedef's name), not payload.name.
+#define BUSTER_CHECK_DEPRECATED_TYPE_NAME 1u
 
 // The marked member of the type table's member `member` among `members` (`count`, ascending by index), or null.
 static __attribute__((unused)) const CheckInputMarkedMember* check_marked_member(const CheckInputMarkedMember* members, uint32_t count, uint32_t member)

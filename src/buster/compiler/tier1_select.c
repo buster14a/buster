@@ -227,6 +227,30 @@ typedef enum Tier1SelectRule
 // - COMPARE of values[0] and values[1] into a mask, `condition` its IR predicate: vpcmpd, or vpcmpud for an unsigned
 //   one, into the mask's opmask register (the destination's low three bits, class 2's);
 // - SELECT of values[1] where the mask values[0] is set and of values[2] where it isn't: vpblendmd under the mask.
+// A vector's encoding level (#141): EVEX's at a target with AVX512VL, VEX's at one with AVX but without it (#1281), and
+// legacy SSE's at one without AVX (the x86-64 baseline and x86-64-v2), whose vectors are 16 bytes alone. The helpers
+// take it where they took `vex` (BUSTER_TIER1_ENCODING_VEX is `vex`'s true), from Tier1EmitPrepared's vex and sse.
+#define BUSTER_TIER1_ENCODING_EVEX 0u
+#define BUSTER_TIER1_ENCODING_VEX 1u
+#define BUSTER_TIER1_ENCODING_SSE 2u
+
+// BINARY's operations, its pattern's `operation`, of the lanes its `source_width` holds (#141's element types, the IR's
+// flags: an IrSimdLane): the integer arithmetic and the bitwise operations, each lane's shift by the other operand's
+// same lane, and the floating arithmetic (tier1_select_lane_form).
+#define BUSTER_TIER1_VECTOR_ADD 0
+#define BUSTER_TIER1_VECTOR_SUB 1
+#define BUSTER_TIER1_VECTOR_MUL 2
+#define BUSTER_TIER1_VECTOR_AND 3
+#define BUSTER_TIER1_VECTOR_OR 4
+#define BUSTER_TIER1_VECTOR_XOR 5
+#define BUSTER_TIER1_VECTOR_SHL 6
+#define BUSTER_TIER1_VECTOR_LSHR 7
+#define BUSTER_TIER1_VECTOR_ASHR 8
+#define BUSTER_TIER1_VECTOR_FADD 9
+#define BUSTER_TIER1_VECTOR_FSUB 10
+#define BUSTER_TIER1_VECTOR_FMUL 11
+#define BUSTER_TIER1_VECTOR_FDIV 12
+#define BUSTER_TIER1_VECTOR_OPERATIONS 13
 #define BUSTER_TIER1_VECTOR_ZERO 0
 #define BUSTER_TIER1_VECTOR_ONES 1
 #define BUSTER_TIER1_VECTOR_SPLAT 2
@@ -598,6 +622,9 @@ struct Tier1SelectHoles
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
     // (tier1_select_vector_forms, tier1_select_class_forms). The CFG consumer sets it (Tier1EmitPrepared.vex).
     bool vex;
+    // The target has no AVX either (the x86-64 baseline, x86-64-v2: #141's SSE targets): its 16-byte vectors take legacy
+    // SSE's forms, two operands the destination's the first (Tier1EmitPrepared.sse; `vex` is set too).
+    bool sse;
     // The target has AVX2 (Tier1EmitPrepared.avx2): without it, a VEX target's 32-byte vectors take AVX's forms alone.
     bool avx2;
 };
@@ -739,7 +766,7 @@ struct Tier1SelectFloatForms
     uint16_t resize;
 };
 
-static const Tier1SelectFloatForms tier1_select_float_forms_table[8] =
+static const Tier1SelectFloatForms tier1_select_float_forms_table[9] =
 {
     {
         X86_FORM_MOVSS_X_XM32, X86_FORM_MOVSS_XM32_X, { X86_FORM_ADDSS_X_XM32, X86_FORM_SUBSS_X_XM32, X86_FORM_MULSS_X_XM32, X86_FORM_DIVSS_X_XM32 }, X86_FORM_UCOMISS_X_XM32,
@@ -778,6 +805,12 @@ static const Tier1SelectFloatForms tier1_select_float_forms_table[8] =
         X86_FORM_VMOVDQU_Y_YM256, X86_FORM_VMOVDQU_YM256_Y, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
         { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
     },
+    // A 16-byte vector's at a target without AVX (#141's SSE targets): legacy movups, which leaves no upper half to keep
+    // there (a target without AVX has no ymm register).
+    {
+        X86_FORM_MOVUPS_X_XM, X86_FORM_MOVUPS_XM_X, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
 };
 
 static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
@@ -787,9 +820,12 @@ static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
 
 // The vector class's loads, stores, spills and reloads of a value of `width` bytes: a floating value's movss or movsd, and
 // a vector's vmovdqu32 at its width, or where `vex` (a target without AVX512VL, #1281) a 16- or 32-byte one's vmovdqu.
-static const Tier1SelectFloatForms* tier1_select_class_forms(uint32_t width, bool vex)
+static const Tier1SelectFloatForms* tier1_select_class_forms(uint32_t width, uint32_t encoding)
 {
-    return vex && (width == 16 || width == 32) ? &tier1_select_float_forms_table[width == 16 ? 6 : 7] : tier1_select_float_forms(width);
+    // At a legacy SSE target (#141) a 16-byte vector's movups, and no 32-byte vector, which the IR has none of there.
+    return encoding == BUSTER_TIER1_ENCODING_SSE && (width == 16 || width == 32) ? &tier1_select_float_forms_table[width == 16 ? 8 : 2] :
+           encoding != BUSTER_TIER1_ENCODING_EVEX && (width == 16 || width == 32) ? &tier1_select_float_forms_table[width == 16 ? 6 : 7] :
+                                                                                  tier1_select_float_forms(width);
 }
 
 // A vector's EVEX forms at its width (#141, TIER1_RULE_VECTOR's): xmm's, ymm's and zmm's, each AVX512F's and the narrower
@@ -813,7 +849,7 @@ struct Tier1SelectVectorForms
     uint16_t ones;
 };
 
-static const Tier1SelectVectorForms tier1_select_vector_forms_table[6] =
+static const Tier1SelectVectorForms tier1_select_vector_forms_table[7] =
 {
     {
         X86_FORM_VMOVDQA64_X_XM128,
@@ -869,13 +905,135 @@ static const Tier1SelectVectorForms tier1_select_vector_forms_table[6] =
         X86_FORM_VPBROADCASTD_Y_XM32,
         X86_FORM_VPCMPEQD_Y_Y_YM256,
     },
+    // A 16-byte vector's at a target without AVX (#141's SSE targets): legacy SSE2's, two operands, the destination's the
+    // first (movaps, pxor's zero, pcmpeqd's ones, pshufd's splat); no ternary logic, compare into a mask or blend.
+    {
+        X86_FORM_MOVAPS_X_XM,
+        { X86_FORM_PADDD_X_XM128, X86_FORM_PSUBD_X_XM128, X86_FORM_PMULLD_X_XM128, X86_FORM_PAND_X_XM128, X86_FORM_POR_X_XM128, X86_FORM_PXOR_X_XM128 },
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        X86_FORM_PSHUFD_X_XM128_IMM8,
+        X86_FORM_PCMPEQD_X_XM128,
+    },
 };
 
 // A width no vector has gets no form (X86_FORM_NONE), which no target allows, rather than another width's; a 64-byte
 // vector's are EVEX's whatever `vex` is (only AVX512F has zmm registers).
-static const Tier1SelectVectorForms* tier1_select_vector_forms(uint32_t width, bool vex)
+static const Tier1SelectVectorForms* tier1_select_vector_forms(uint32_t width, uint32_t encoding)
 {
-    return &tier1_select_vector_forms_table[vex && width == 16 ? 4 : vex && width == 32 ? 5 : width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3];
+    const bool vex = encoding != BUSTER_TIER1_ENCODING_EVEX;
+    const bool sse = encoding == BUSTER_TIER1_ENCODING_SSE;
+    return &tier1_select_vector_forms_table[sse && width == 16 ? 6 : sse && width == 32 ? 3 : vex && width == 16 ? 4 : vex && width == 32 ? 5 : width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3];
+}
+
+// A hole's encoding level (BUSTER_TIER1_ENCODING_*), from its vex and sse.
+static uint32_t tier1_select_holes_encoding(const Tier1SelectHoles* holes)
+{
+    return holes->sse ? BUSTER_TIER1_ENCODING_SSE : holes->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX;
+}
+
+// A vector operation's forms at its lanes (#141's element types), three operands (reg, vvvv, rm) at 16, 32 and 64
+// bytes: EVEX's of AVX-512 ([0], the rows' own, c_check_program_vectors.c), and VEX's of AVX and AVX2 at 16 and 32 ([1],
+// c_check_program_vectors_baseline.c's), X86_FORM_NONE where x86 has none (bytes' products and shifts, VEX's 16-bit
+// shifts and its 64-bit arithmetic right shift). The bitwise operations are I32's alone, which any lanes' bits are.
+#define BUSTER_TIER1_LANE_EVEX(name) { X86_FORM_##name##_X_X_XM128_EVEX, X86_FORM_##name##_Y_Y_YM256_EVEX, X86_FORM_##name##_Z_Z_ZM512 }
+#define BUSTER_TIER1_LANE_PACKED(name) { X86_FORM_##name##_X_X_XM128, X86_FORM_##name##_Y_Y_YM256, X86_FORM_##name##_Z_Z_ZM512 }
+#define BUSTER_TIER1_LANE_VEX(name) { X86_FORM_##name##_X_X_XM128, X86_FORM_##name##_Y_Y_YM256, X86_FORM_NONE }
+#define BUSTER_TIER1_LANE_SSE(name) { X86_FORM_##name##_X_XM128, X86_FORM_NONE, X86_FORM_NONE }
+static const uint16_t tier1_select_lane_forms[3][BUSTER_TIER1_VECTOR_OPERATIONS][IR_SIMD_LANE_COUNT][3] = {
+    {
+        [BUSTER_TIER1_VECTOR_ADD] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_EVEX(VPADDD), [IR_SIMD_LANE_I8] = BUSTER_TIER1_LANE_EVEX(VPADDB),
+                                      [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_EVEX(VPADDW), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_EVEX(VPADDQ) },
+        [BUSTER_TIER1_VECTOR_SUB] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_EVEX(VPSUBD), [IR_SIMD_LANE_I8] = BUSTER_TIER1_LANE_EVEX(VPSUBB),
+                                      [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_EVEX(VPSUBW), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_EVEX(VPSUBQ) },
+        [BUSTER_TIER1_VECTOR_MUL] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_EVEX(VPMULLD), [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_EVEX(VPMULLW),
+                                      [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_PACKED(VPMULLQ) },
+        [BUSTER_TIER1_VECTOR_AND] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_PACKED(VPANDQ) },
+        [BUSTER_TIER1_VECTOR_OR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_PACKED(VPORQ) },
+        [BUSTER_TIER1_VECTOR_XOR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_PACKED(VPXORD) },
+        [BUSTER_TIER1_VECTOR_SHL] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_EVEX(VPSLLVD), [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_PACKED(VPSLLVW),
+                                      [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_EVEX(VPSLLVQ) },
+        [BUSTER_TIER1_VECTOR_LSHR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_EVEX(VPSRLVD), [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_PACKED(VPSRLVW),
+                                       [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_EVEX(VPSRLVQ) },
+        [BUSTER_TIER1_VECTOR_ASHR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_EVEX(VPSRAVD), [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_PACKED(VPSRAVW),
+                                       [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_PACKED(VPSRAVQ) },
+        [BUSTER_TIER1_VECTOR_FADD] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_EVEX(VADDPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_EVEX(VADDPD) },
+        [BUSTER_TIER1_VECTOR_FSUB] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_EVEX(VSUBPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_EVEX(VSUBPD) },
+        [BUSTER_TIER1_VECTOR_FMUL] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_EVEX(VMULPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_EVEX(VMULPD) },
+        [BUSTER_TIER1_VECTOR_FDIV] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_EVEX(VDIVPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_EVEX(VDIVPD) },
+    },
+    {
+        [BUSTER_TIER1_VECTOR_ADD] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPADDD), [IR_SIMD_LANE_I8] = BUSTER_TIER1_LANE_VEX(VPADDB),
+                                      [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_VEX(VPADDW), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_VEX(VPADDQ) },
+        [BUSTER_TIER1_VECTOR_SUB] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPSUBD), [IR_SIMD_LANE_I8] = BUSTER_TIER1_LANE_VEX(VPSUBB),
+                                      [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_VEX(VPSUBW), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_VEX(VPSUBQ) },
+        [BUSTER_TIER1_VECTOR_MUL] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPMULLD), [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_VEX(VPMULLW) },
+        [BUSTER_TIER1_VECTOR_AND] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPAND) },
+        [BUSTER_TIER1_VECTOR_OR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPOR) },
+        [BUSTER_TIER1_VECTOR_XOR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPXOR) },
+        [BUSTER_TIER1_VECTOR_SHL] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPSLLVD), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_VEX(VPSLLVQ) },
+        [BUSTER_TIER1_VECTOR_LSHR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPSRLVD), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_VEX(VPSRLVQ) },
+        [BUSTER_TIER1_VECTOR_ASHR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_VEX(VPSRAVD) },
+        [BUSTER_TIER1_VECTOR_FADD] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_VEX(VADDPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_VEX(VADDPD) },
+        [BUSTER_TIER1_VECTOR_FSUB] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_VEX(VSUBPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_VEX(VSUBPD) },
+        [BUSTER_TIER1_VECTOR_FMUL] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_VEX(VMULPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_VEX(VMULPD) },
+        [BUSTER_TIER1_VECTOR_FDIV] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_VEX(VDIVPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_VEX(VDIVPD) },
+    },
+    // Legacy SSE's ([2]), of an xmm register alone: SSE2's, and SSE4.1's pmulld (the decoder admits a row's form only at a
+    // target that has it). Two operands, the destination's the first (TIER1_RULE_VECTOR's two-operand expansion); no
+    // shift by each lane's count, which is AVX2's.
+    {
+        [BUSTER_TIER1_VECTOR_ADD] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_SSE(PADDD), [IR_SIMD_LANE_I8] = BUSTER_TIER1_LANE_SSE(PADDB),
+                                      [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_SSE(PADDW), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_SSE(PADDQ) },
+        [BUSTER_TIER1_VECTOR_SUB] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_SSE(PSUBD), [IR_SIMD_LANE_I8] = BUSTER_TIER1_LANE_SSE(PSUBB),
+                                      [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_SSE(PSUBW), [IR_SIMD_LANE_I64] = BUSTER_TIER1_LANE_SSE(PSUBQ) },
+        [BUSTER_TIER1_VECTOR_MUL] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_SSE(PMULLD), [IR_SIMD_LANE_I16] = BUSTER_TIER1_LANE_SSE(PMULLW) },
+        [BUSTER_TIER1_VECTOR_AND] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_SSE(PAND) },
+        [BUSTER_TIER1_VECTOR_OR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_SSE(POR) },
+        [BUSTER_TIER1_VECTOR_XOR] = { [IR_SIMD_LANE_I32] = BUSTER_TIER1_LANE_SSE(PXOR) },
+        [BUSTER_TIER1_VECTOR_FADD] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_SSE(ADDPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_SSE(ADDPD) },
+        [BUSTER_TIER1_VECTOR_FSUB] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_SSE(SUBPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_SSE(SUBPD) },
+        [BUSTER_TIER1_VECTOR_FMUL] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_SSE(MULPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_SSE(MULPD) },
+        [BUSTER_TIER1_VECTOR_FDIV] = { [IR_SIMD_LANE_F32] = BUSTER_TIER1_LANE_SSE(DIVPS), [IR_SIMD_LANE_F64] = BUSTER_TIER1_LANE_SSE(DIVPD) },
+    },
+};
+// A comparison's into an opmask register at its lanes, signed ([0]) and unsigned ([1]), vpcmp[u]b to vpcmp[u]q and
+// vcmpps and vcmppd (floating lanes: [0] alone), and a selection's blend under one, vpblendmb to vpblendmq by the lanes'
+// width (a float's lanes are doublewords). EVEX's alone: VEX has no comparison into a mask.
+static const uint16_t tier1_select_lane_compares[IR_SIMD_LANE_COUNT][2][3] = {
+    [IR_SIMD_LANE_I32] = { { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPD_K_Z_ZM512_IMM8 },
+                           { X86_FORM_VPCMPUD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_I8] = { { X86_FORM_VPCMPB_K_X_XM128_IMM8, X86_FORM_VPCMPB_K_Y_YM256_IMM8, X86_FORM_VPCMPB_K_Z_ZM512_IMM8 },
+                          { X86_FORM_VPCMPUB_K_X_XM128_IMM8, X86_FORM_VPCMPUB_K_Y_YM256_IMM8, X86_FORM_VPCMPUB_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_I16] = { { X86_FORM_VPCMPW_K_X_XM128_IMM8, X86_FORM_VPCMPW_K_Y_YM256_IMM8, X86_FORM_VPCMPW_K_Z_ZM512_IMM8 },
+                           { X86_FORM_VPCMPUW_K_X_XM128_IMM8, X86_FORM_VPCMPUW_K_Y_YM256_IMM8, X86_FORM_VPCMPUW_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_I64] = { { X86_FORM_VPCMPQ_K_X_XM128_IMM8, X86_FORM_VPCMPQ_K_Y_YM256_IMM8, X86_FORM_VPCMPQ_K_Z_ZM512_IMM8 },
+                           { X86_FORM_VPCMPUQ_K_X_XM128_IMM8, X86_FORM_VPCMPUQ_K_Y_YM256_IMM8, X86_FORM_VPCMPUQ_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_F32] = { { X86_FORM_VCMPPS_K_X_XM128_IMM8, X86_FORM_VCMPPS_K_Y_YM256_IMM8, X86_FORM_VCMPPS_K_Z_ZM512_IMM8 } },
+    [IR_SIMD_LANE_F64] = { { X86_FORM_VCMPPD_K_X_XM128_IMM8, X86_FORM_VCMPPD_K_Y_YM256_IMM8, X86_FORM_VCMPPD_K_Z_ZM512_IMM8 } },
+};
+static const uint16_t tier1_select_lane_blends[IR_SIMD_LANE_COUNT][3] = {
+    [IR_SIMD_LANE_I32] = { X86_FORM_VPBLENDMD_X_X_XM128, X86_FORM_VPBLENDMD_Y_Y_YM256, X86_FORM_VPBLENDMD_Z_Z_ZM512 },
+    [IR_SIMD_LANE_I8] = { X86_FORM_VPBLENDMB_X_X_XM128, X86_FORM_VPBLENDMB_Y_Y_YM256, X86_FORM_VPBLENDMB_Z_Z_ZM512 },
+    [IR_SIMD_LANE_I16] = { X86_FORM_VPBLENDMW_X_X_XM128, X86_FORM_VPBLENDMW_Y_Y_YM256, X86_FORM_VPBLENDMW_Z_Z_ZM512 },
+    [IR_SIMD_LANE_I64] = { X86_FORM_VPBLENDMQ_X_X_XM128, X86_FORM_VPBLENDMQ_Y_Y_YM256, X86_FORM_VPBLENDMQ_Z_Z_ZM512 },
+    [IR_SIMD_LANE_F32] = { X86_FORM_VPBLENDMD_X_X_XM128, X86_FORM_VPBLENDMD_Y_Y_YM256, X86_FORM_VPBLENDMD_Z_Z_ZM512 },
+    [IR_SIMD_LANE_F64] = { X86_FORM_VPBLENDMQ_X_X_XM128, X86_FORM_VPBLENDMQ_Y_Y_YM256, X86_FORM_VPBLENDMQ_Z_Z_ZM512 },
+};
+#undef BUSTER_TIER1_LANE_EVEX
+#undef BUSTER_TIER1_LANE_PACKED
+#undef BUSTER_TIER1_LANE_VEX
+#undef BUSTER_TIER1_LANE_SSE
+
+// A BINARY's form (tier1_select_lane_forms) of operation `operation` (BUSTER_TIER1_VECTOR_*), lanes `lane` and `width`
+// 16, 32 or 64 bytes, at `encoding` (BUSTER_TIER1_ENCODING_*: a 64-byte vector's is EVEX's whatever it is):
+// X86_FORM_NONE for one x86 hasn't.
+static uint16_t tier1_select_lane_form(uint32_t operation, uint32_t lane, uint32_t width, uint32_t encoding)
+{
+    const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+    const uint32_t level = width < 64 && encoding <= BUSTER_TIER1_ENCODING_SSE ? encoding : BUSTER_TIER1_ENCODING_EVEX;
+    return operation < BUSTER_TIER1_VECTOR_OPERATIONS && lane < IR_SIMD_LANE_COUNT && index < 3 ? tier1_select_lane_forms[level][operation][lane][index] : (uint16_t)X86_FORM_NONE;
 }
 
 // movaps between two xmm registers: a whole register's copy, which unlike movss's and movsd's doesn't merge into its
@@ -888,9 +1046,9 @@ static X86Instruction tier1_select_float_move(uint8_t destination, uint8_t sourc
 // A copy of the vector class's value of `width` bytes between two of its registers (#141): a floating value's and a
 // 16-byte vector's movaps, and a wider vector's vmovdqa64 of its ymm or zmm register; where `vex` (a target without
 // AVX512VL, #1281) a 32-byte vector's vmovdqa of its ymm register.
-static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width, bool vex)
+static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width, uint32_t encoding)
 {
-    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width, vex)->move, destination, source);
+    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width, encoding)->move, destination, source);
 }
 
 // A copy of an SSE carrier (#1280), a vector of 4 or 8 bytes, between two of the 32 vector registers, zeros past its
@@ -899,8 +1057,10 @@ static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t sourc
 // EVEX forms, as the vector class's moves, or at a target without AVX512VL (`vex`, #1281) their VEX twins, AVX's, which
 // name registers below 16 alone, as such a target's rows' roles are (an SSE carrier is admitted as any narrower vector,
 // ir_typed_vector_moves).
-static X86Instruction tier1_select_carrier_move(uint8_t destination, uint8_t source, uint32_t bytes, bool vex)
+static X86Instruction tier1_select_carrier_move(uint8_t destination, uint8_t source, uint32_t bytes, uint32_t encoding)
 {
+    // A carrier needs AVX's moves at least (ir_typed_vector_moves): a legacy SSE target has none.
+    const bool vex = encoding != BUSTER_TIER1_ENCODING_EVEX;
     const X86Instruction result = bytes == 8 ? tier1_select_register_record(vex ? X86_FORM_VMOVQ_X_XM64 : X86_FORM_VMOVQ_X_XM64_EVEX, destination, source) :
                                                (X86Instruction){
                                                    .form = vex ? X86_FORM_VINSERTPS_X_X_XM32_IMM8 : X86_FORM_VINSERTPS_X_X_XM32_IMM8_EVEX,
@@ -932,6 +1092,68 @@ static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
         .rm = deposit ? holes->right : holes->left,
         .mode = BUSTER_X86_REGISTER_DIRECT,
     };
+}
+
+// A 16-byte vector's records at a target without AVX (#141's SSE targets, Tier1SelectHoles.sse): legacy SSE2's
+// two-operand forms, the destination's the first operand. Zeros by pxor and every bit by pcmpeqd of the destination with
+// itself, a splat's lane by mov into the scratch general register, movd and pshufd, a copy by movaps, and a BINARY by its
+// form (tier1_select_lane_form's legacy column) after its left operand's copy into the destination: a commutative
+// integer operation's operands swapped where the right one is in the destination, and any other's right one copied into
+// xmm15, the class's scratch, first. A floating operation is never swapped, so that a NaN result is its first operand's,
+// as the IR's is (ir_simd_float_operation). A NOT is pxor with pcmpeqd's every bit, in the destination where the operand
+// is elsewhere, in xmm15 where it is the destination (#1425's review). COMPARE and SELECT aren't here: their masks are
+// opmasks, which no SSE target has, so they take AVX-512's forms, which the target's allow-list refuses at emission
+// (TIER1_EMIT_TARGET), as at a VEX target.
+static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    uint8_t left = holes->left & 15;
+    uint8_t right = holes->right & 15;
+    const uint32_t kind = holes->scale;
+    if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
+    {
+        tier1_select_append(result, tier1_select_register_record(kind == BUSTER_TIER1_VECTOR_ZERO ? X86_FORM_PXOR_X_XM128 : X86_FORM_PCMPEQD_X_XM128, x, x));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_SPLAT)
+    {
+        tier1_select_request(result, X86_OPERATION_MOV, 4, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(uint32_t)holes->immediate, 0);
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_MOVD_X_RM32, x, BUSTER_TIER1_SELECT_SCRATCH));
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_PSHUFD_X_XM128_IMM8, x, x));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_COPY && x != left)
+    {
+        tier1_select_append(result, tier1_select_float_move(x, left));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_NOT)
+    {
+        const uint8_t ones = x != left ? x : BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_PCMPEQD_X_XM128, ones, ones));
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_PXOR_X_XM128, x, x != left ? left : ones));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_BINARY)
+    {
+        const uint32_t operation = holes->operation;
+        const bool commutative = operation == BUSTER_TIER1_VECTOR_ADD || operation == BUSTER_TIER1_VECTOR_MUL ||
+                                 (operation >= BUSTER_TIER1_VECTOR_AND && operation <= BUSTER_TIER1_VECTOR_XOR);
+        if (x == right && left != right)
+        {
+            if (commutative)
+            {
+                right = left;
+                left = x;
+            }
+            else
+            {
+                tier1_select_append(result, tier1_select_float_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, right));
+                right = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+        }
+        if (x != left)
+        {
+            tier1_select_append(result, tier1_select_float_move(x, left));
+        }
+        tier1_select_append(result, tier1_select_register_record(tier1_select_lane_form(operation, holes->source_width, 16, BUSTER_TIER1_ENCODING_SSE), x, right));
+    }
 }
 
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
@@ -1320,7 +1542,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint8_t left = holes->left & 15;
         const uint8_t right = holes->right & 15;
         const uint32_t kind = holes->scale;
-        if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
+        if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
+        {
+            tier1_select_sse_vector(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
         {
             // VEX's zero is vpxor of the xmm register, which zeroes the ymm one's upper half too; its ones vpcmpeqd.
             const bool ones = kind == BUSTER_TIER1_VECTOR_ONES;
@@ -1360,9 +1586,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         else if (kind == BUSTER_TIER1_VECTOR_BINARY || kind == BUSTER_TIER1_VECTOR_NOT)
         {
+            // A BINARY's form at its lanes (#141's element types, `source_width`), its bitwise operations' AVX forms at
+            // a target without AVX2.
             const bool complement = kind == BUSTER_TIER1_VECTOR_NOT;
+            const bool bitwise = holes->operation >= BUSTER_TIER1_VECTOR_AND && holes->operation <= BUSTER_TIER1_VECTOR_XOR;
             const X86Instruction record = {
-                .form = complement ? forms->ternary : avx && holes->operation >= 3 && holes->operation < 6 ? avx_bitwise[holes->operation - 3] : forms->binary[holes->operation < 6 ? holes->operation : 0],
+                .form = complement ? forms->ternary : avx && bitwise ? avx_bitwise[holes->operation - BUSTER_TIER1_VECTOR_AND] : tier1_select_lane_form(holes->operation, holes->source_width, width, vex),
                 .reg = x,
                 .vvvv = left,
                 .rm = complement ? left : right,
@@ -1373,24 +1602,32 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         else if (kind == BUSTER_TIER1_VECTOR_COMPARE)
         {
-            // vpcmp's predicates: 0 ==, 1 <, 2 <=, 4 !=, 5 >= (not <) and 6 > (not <=); vpcmpud's the unsigned ones.
+            // vpcmp's predicates: 0 ==, 1 <, 2 <=, 4 !=, 5 >= (not <) and 6 > (not <=); vpcmpu's the unsigned ones; at
+            // floating lanes (#141's element types) vcmpps's and vcmppd's, the typed stream's rows' (EQ_OQ, NEQ_UQ,
+            // LT_OS, LE_OS, GT_OS and GE_OS: C's comparisons, NaNs and all).
             static const uint8_t predicates[IR_PREDICATE_COUNT] = { [IR_EQ] = 0, [IR_NE] = 4, [IR_LT] = 1, [IR_LE] = 2, [IR_GT] = 6, [IR_GE] = 5, [IR_ULT] = 1, [IR_ULE] = 2, [IR_UGT] = 6, [IR_UGE] = 5 };
-            const uint32_t condition = holes->condition < IR_PREDICATE_COUNT ? holes->condition : IR_EQ;
+            static const uint8_t floating[IR_GE + 1] = { [IR_EQ] = 0x00, [IR_NE] = 0x04, [IR_LT] = 0x01, [IR_LE] = 0x02, [IR_GT] = 0x0e, [IR_GE] = 0x0d };
+            const uint32_t lane = holes->source_width < IR_SIMD_LANE_COUNT ? holes->source_width : IR_SIMD_LANE_I32;
+            const bool real = ir_simd_lane_floating((IrSimdLane)lane);
+            const uint32_t condition = holes->condition < (real ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) ? holes->condition : IR_EQ;
+            const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : 2;
             const X86Instruction record = {
-                .form = forms->compare[condition >= IR_ULT],
+                .form = tier1_select_lane_compares[lane][!real && condition >= IR_ULT][index],
                 .reg = (uint8_t)(destination & 7),
                 .vvvv = left,
                 .rm = right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
-                .immediate = predicates[condition],
+                .immediate = real ? floating[condition] : predicates[condition],
             };
             tier1_select_append(&result, record);
         }
         else if (kind == BUSTER_TIER1_VECTOR_SELECT)
         {
-            // vpblendmd's destination is its third operand (rm) where the mask is set, its second (vvvv) where it isn't.
+            // vpblendmd's destination is its third operand (rm) where the mask is set, its second (vvvv) where it isn't;
+            // vpblendmb to vpblendmq at its lanes' width (#141's element types), whose mask has a bit per lane.
+            const uint32_t lane = holes->source_width < IR_SIMD_LANE_COUNT ? holes->source_width : IR_SIMD_LANE_I32;
             const X86Instruction record = {
-                .form = forms->blend,
+                .form = tier1_select_lane_blends[lane][width == 16 ? 0 : width == 32 ? 1 : 2],
                 .reg = x,
                 .vvvv = (uint8_t)(holes->third & 15),
                 .rm = right,
@@ -1484,7 +1721,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = destination & 15;
-        record.form = tier1_select_class_forms(width, holes->vex)->load;
+        record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
         tier1_select_append(&result, record);
         break;
     }
@@ -1493,7 +1730,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = holes->right & 15;
-        record.form = tier1_select_class_forms(width, holes->vex)->store;
+        record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->store;
         tier1_select_append(&result, record);
         break;
     }
@@ -2797,8 +3034,11 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // registers its arguments take (tier1_emit_call). A call with ABI records (#789) passes each argument where its
         // record says: its aggregates' bytes in registers or in its stack slots, and its aggregate result's into the frame
         // object its into operand is the address of, as parts or through the hidden pointer (tier1_emit_call).
+        // A chained indirect variadic call (#148) isn't one (#1411's review): its callee would wait in rax
+        // (tier1_select_callee_register), which its al then overwrites; the typed stream's adapter refuses it too (ir_lower).
+        const bool clobbered = function->op[node] == IR_CALL_INDIRECT && call.variadic && tier1_select_call_chained(function, &call);
         supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_call_arity(&call) && tier1_select_call_result(function->type[node]) &&
-                    tier1_select_call_abi(function, node, &call);
+                    tier1_select_call_abi(function, node, &call) && !clobbered;
         // The aggregates' parts in registers wait in the red zone's staging slots, a 64-byte one in zmm16 and on instead
         // (tier1_select_argument_slots).
         uint32_t staged = 0;
@@ -3189,7 +3429,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t class_width = float_width != 0 ? float_width : vector_width;
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
-                                                   op == IR_OR || op == IR_XOR || op == IR_VSELECT)) ||
+                                                   op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
+                                                   op == IR_VSELECT)) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -3225,16 +3466,28 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
-        else if (vector_width != 0 && (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR))
+        else if (vector_width != 0 && (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR ||
+                                       op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV)))
         {
+            // Its operation (BUSTER_TIER1_VECTOR_ADD ...) and its lanes, the IR's flags, in `source_width` (#141's
+            // element types), which a form exists for at its width or it has no candidate (tier1_select_lane_form).
+            const uint32_t operation = op == IR_ADD ? BUSTER_TIER1_VECTOR_ADD : op == IR_SUB ? BUSTER_TIER1_VECTOR_SUB : op == IR_MUL ? BUSTER_TIER1_VECTOR_MUL :
+                                       op == IR_AND ? BUSTER_TIER1_VECTOR_AND : op == IR_OR ? BUSTER_TIER1_VECTOR_OR : op == IR_XOR ? BUSTER_TIER1_VECTOR_XOR :
+                                       op == IR_SHL ? BUSTER_TIER1_VECTOR_SHL : op == IR_LSHR ? BUSTER_TIER1_VECTOR_LSHR : op == IR_ASHR ? BUSTER_TIER1_VECTOR_ASHR :
+                                                      BUSTER_TIER1_VECTOR_FADD + (uint32_t)(op - IR_FADD);
+            const uint32_t lane = function->flags[node];
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_BINARY;
-            base.operation = (uint8_t)(op == IR_ADD ? 0 : op == IR_SUB ? 1 : op == IR_MUL ? 2 : op == IR_AND ? 3 : op == IR_OR ? 4 : 5);
+            base.operation = (uint8_t)operation;
+            base.source_width = (uint8_t)lane;
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
-            tier1_select_add_candidate(forest, node, &candidates, base);
+            if (tier1_select_lane_form(operation, lane, vector_width, false) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
         }
         else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
         {
@@ -3242,6 +3495,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.width = (uint8_t)compare_width;
             base.scale = BUSTER_TIER1_VECTOR_COMPARE;
             base.condition = (uint8_t)c;
+            base.source_width = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
@@ -3252,6 +3506,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_SELECT;
+            base.source_width = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;
             base.values[2] = c;

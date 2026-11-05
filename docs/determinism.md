@@ -68,13 +68,15 @@ symbol-name references, rebuild preparation that caches those IDs, and preserve
 those ranges. The object tests freeze the reference bytes before any
 permutation, for both section modes.
 
-Future literal pooling must first find each value's earliest source use and
+Literal pooling must first find each value's earliest source use and
 place distinct values by that position, with an explicit source-order tie
 break. Content equality and hashes can deduplicate; they cannot determine
 placement. Jobs producing symbols, sections and relocations likewise count,
 place and fill canonical ranges before those records reach the writer. The
-existing generated-program tests cover string-pool bytes and their fixups;
-they do not stand in for an unimplemented C literal-pooling frontend.
+generated-program tests cover string-pool bytes and their fixups. The source
+programs in `test-check-lanes` and `test-check-units` additionally cover actual
+C emission, including each multi-file unit's object compared with its own
+standalone compile, across lane counts and changed identifier assignments.
 
 Foreign resolution keeps hash-partition name IDs for lookup. Its separate
 publication permutation orders each name by its first ordinary object symbol:
@@ -159,6 +161,27 @@ that occurs after the initial global symbols have been created.
   reader must merge each fixture as before. `test-checker-corpus --id-order N`
   checks a corpus so, which the workflow does for c-testsuite's programs with
   `--deferred 8`.
+- `test-check-units`: #152's multi-file driver. Generated programs' objects
+  and executables at 1/2/3/8 lanes, by each kernel path, must match their
+  one-lane or standalone bytes; debug sections and unwind tables are included.
+  The poisoned repeats and debug-object compile also use `--id-order 153`.
+  A slow earlier warning, two fatal units and a trailing warning test the
+  canonical diagnostic prefix for syntax checking, objects and linking, by
+  both paths at 1/2/3/8 lanes with changed IDs and poisoned arenas. Missing
+  nested includes and `-Wfatal-errors` must retain the earlier unit and the
+  first fatal's complete notes and summary, even when source-size scheduling
+  runs the later fatal first. An injected type-table reservation failure also
+  checks driver-level fatals, which do not set the preprocessor's fatal flag;
+  that case runs the reusable driver in a child with its failure target fixed
+  before any workers start. Multi-input `-E` is currently sequential; both
+  marker modes and kernels must concatenate the valid units' standalone
+  output and diagnostics, preserving macro isolation.
+- `tests/driver/multicore.c`: the shared correctness suite compiles single-
+  and multi-file mixed Tier 1/Tier 0 programs at every available count 1–8.
+  Each kernel path has its own one-lane byte reference and must report the
+  requested/actual command team and unchanged Tier 1 outcomes, then execute
+  against an independent arithmetic result. Every repeat changes identifier
+  assignments; multi-file repeats also poison reusable arenas.
 
 The C driver's `--id-order N` (`check_driver_id_order`) is the test option for
 a whole compile: it preprocesses the unit once, printing nothing, into a table
@@ -168,6 +191,12 @@ of the first table, in reverse from a place N picks). The compile finds those
 and numbers the others after them, so that its IDs are neither the ones it
 gives alone nor in their first occurrences' order. Nothing it writes may
 change.
+
+Multi-file commands accept the same option: each unit primes its lane-owned
+table before compiling, without sharing the preparatory table's cache. The
+predefined IDs remain fixed and any names retained from earlier units keep
+their lane's existing IDs. This tests both reordered priming and the naturally
+different table histories produced by scheduling units on different lanes.
 
 The four output test commands, `test-preprocessor`, `test-files`,
 `test-check-lanes`, `test-checker-deferred` and `test-c-testsuite` accept
@@ -211,8 +240,8 @@ or a claim that radix wins on every already ordered input.
 ## Integration boundary
 
 The property tests above cover the currently callable preprocessor and
-output writers, and `diagnostic.c` supplies the diagnostic buffer API. #153's
-independent dependencies each add their own integration check:
+output writers, and `diagnostic.c` supplies the diagnostic buffer API. The
+source drivers are now implemented, with these integration checks:
 
 - #150's shared file cache must exercise its own `test-files` output with
   changed intern assignments, preserving the same spellings and locations.
@@ -235,21 +264,27 @@ independent dependencies each add their own integration check:
   1, 2, 3 and 8 lanes, and at 8 with the IDs in another order.
 - link-foreign (#86, #594), which resolves, converts and writes on lanes:
   `test-foreign` and `test-foreign-corpus` compare its outputs at 1, 2, 3 and
-  8 lanes. It adds the global names to its link in its name IDs' order, which
-  its hash partitions decide, so the symbols' order, the GOT slots and the code
-  that reaches them change with the partition count: its ID-order property
-  waits for [#734](https://github.com/buster14a/buster/issues/734).
-- #152's multi-file driver must route jobs' diagnostic groups through the
-  merge, finish the earlier jobs before applying fatal cutoff, and compare
-  its final objects, executable, `-E` text and diagnostic stream.
-- #86/#594's foreign-input conversion has its own first-record publication
+  8 lanes. Done: foreign-input conversion has its own first-record publication
   order and partition/ID perturbation property checks in `test-foreign`
   ([#734](https://github.com/buster14a/buster/issues/734)). Hash partitioning
   and lookup IDs do not determine emitted globals, GOT slots or export order.
+- #152's multi-file driver: done in `test-check-units` and the mixed-tier
+  driver matrix above. Each unit renders its source-ordered groups into its
+  own stream; after every job finishes, the driver concatenates those streams
+  in command-line input order through the first fatal unit. This preserves
+  the lexicographic unit/source/job order without sorting already ordered
+  unit streams again. The fatal state is retained explicitly before the
+  preprocessor is released and includes direct driver capacity/setup failures
+  and failure to retain a unit's link; diagnostic text is never parsed to
+  discover it.
+  Final objects, executables, debug information, preprocessed text and
+  diagnostics have their actual driver checks, including changed IDs.
 
-The others' integration checks belong in each stage's test command as it lands.
-Passing the current tests is not proof of those future pipelines, and #153
-must retain that distinction when its overall completion is assessed.
+These checks belong to the stages' normal commands in the shared correctness
+inventory, which hosted builds and main/scheduled 9700X correctness runs use.
+The mixed-tier matrix reports its actual maximum lane count; a smaller hosted
+runner does not establish an eight-core native result. Performance curves and
+serial-share qualification remain the separate acceptance work of #149.
 
 ## Boundary audit #298
 
@@ -290,10 +325,13 @@ output ranges are disjoint; barrier state is not permission for two lanes to
 mutate the same append-only table. Count/overflow/failure handling stays part of
 the producing stage's contract.
 
-Disposition: retain explicit identity and publication rules. `test-diagnostics`
-checks this standalone buffer/merge API; it is not a connected multi-unit source
-driver at the pin. No new global sorting/batching layer is proposed. [#151](https://github.com/buster14a/buster/issues/151)/[#152](https://github.com/buster14a/buster/issues/152)/[#153](https://github.com/buster14a/buster/issues/153) retain the complete
+Disposition at the audit pin: retain explicit identity and publication rules.
+`test-diagnostics` checks this standalone buffer/merge API; it was not a connected
+multi-unit source driver at the pin. No new global sorting/batching layer was
+proposed. [#151](https://github.com/buster14a/buster/issues/151)/[#152](https://github.com/buster14a/buster/issues/152)/[#153](https://github.com/buster14a/buster/issues/153) then retained the complete
 per-function/multi-unit source driver, ordered diagnostics and final binary
 comparison. Existing generated-link/per-file schedule tests establish their
 own paths only; they do not measure absent source compilation, nor justify
 charging synchronization or output reordering outside a future benchmark.
+The current source-driver integration and its tests are recorded above; this
+historical audit does not describe the current implementation boundary.

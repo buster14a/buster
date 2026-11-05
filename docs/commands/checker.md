@@ -229,10 +229,13 @@ The `compatible` table is an exact-spelling list, not a family-prefix escape:
   `-mred-zone`, `-mno-ms-bitfields`, `-mno-rtd` and `-mno-iamcu`.
 - Existing integer/aliasing behavior and permissions that do not require an
   optimization: `-fwrapv`, `-fno-wrapv`, `-fstrict-overflow`,
-  `-fno-strict-overflow`, `-fstrict-aliasing`, `-fno-strict-aliasing`,
-  `-fno-semantic-interposition` and `-fomit-frame-pointer`. These flags do not
-  promise that an optimization will be performed. `-mtune=` is a validated
-  scheduling preference, not a promise of target-specific scheduling.
+  `-fno-strict-overflow`, `-fstrict-aliasing`, `-fno-strict-aliasing` and
+  `-fno-semantic-interposition`. These flags do not promise that an
+  optimization will be performed. `-mtune=` is a validated scheduling
+  preference, not a promise of target-specific scheduling. The frame pointer's
+  `-f[no-]omit-frame-pointer` and `-m[no-]omit-leaf-frame-pointer` are
+  `handled` (#177): both tiers' frames take them ([the driver
+  guide](driver.md)).
 - Presentation and C-inapplicable controls: `-frtti`, `-fno-rtti`,
   `-fdwarf2-cfi-asm`, `-fno-dwarf2-cfi-asm`, `-fdiagnostics-color`,
   `-fno-diagnostics-color`, its exact `=always`, `=never`, `=auto` forms,

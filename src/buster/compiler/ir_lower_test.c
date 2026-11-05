@@ -1251,10 +1251,12 @@ static __attribute__((naked, noinline)) int64_t ir_lower_test_chain_plus(int64_t
     __asm__("leaq (%r10,%rdi), %rax\n\tret\n");
 }
 
-// The static chain's sum with its argument's low byte, sign-extended (#1411's review): r10 plus dil's.
+// The static chain's sum with its signed byte argument as the caller extended it (#1411's review): r10 plus edi's 32 bits
+// sign-extended, -3 where the caller sign-extended the byte. The typed stream's lowering widens it to 32 bits by its class
+// before the call (ir_typed_boundary_class); ir_interpreter_test.c's chained call of an i8 observes the record's flag.
 static __attribute__((naked, noinline)) int64_t ir_lower_test_chain_byte(int8_t x __attribute__((unused)))
 {
-    __asm__("movsbq %dil, %rax\n\taddq %r10, %rax\n\tret\n");
+    __asm__("movslq %edi, %rax\n\taddq %r10, %rax\n\tret\n");
 }
 
 // A call with a static chain (#148): its argument 0 in r10, which the IR keeps as its ABI record (ir_typed_aggregate_call)

@@ -961,10 +961,11 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .last_kind = CHECK_ATTRIBUTE_NODEBUG,
         },
         {
-            .name = "nodebug rejects arguments",
+            // Its count's error is its subject's check's, after the subject (#147, check_input_attribute_subjects).
+            .name = "nodebug keeps its argument count for its subject",
             .source = "void f(void) __attribute__((nodebug(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "nodebug",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_NODEBUG,
             .rejected = true,
         },
         {
@@ -980,10 +981,11 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .last_kind = CHECK_ATTRIBUTE_OVERLOADABLE,
         },
         {
-            .name = "overloadable rejects arguments",
+            // Its count's error is its subject's check's, after the subject (#147, check_input_attribute_subjects).
+            .name = "overloadable keeps its argument count for its subject",
             .source = "int f(int) __attribute__((overloadable(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "overloadable",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_OVERLOADABLE,
             .rejected = true,
         },
         {

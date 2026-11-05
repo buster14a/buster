@@ -11,7 +11,7 @@ on:
     branches: [main]
   # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
   # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
-  # against its first parent, or comprehensively, inside 04:00-07:00 Europe/Madrid unless `override` gives a reason.
+  # against its first parent, or comprehensively, inside 02:00-08:00 Europe/Madrid unless `override` gives a reason.
   workflow_dispatch:
     inputs:
       purpose:
@@ -33,14 +33,12 @@ on:
         type: string
         default: manual
       override:
-        description: 'backlog/snapshot with admit: why to measure outside 04:00-07:00 Europe/Madrid (reported); empty enforces the window'
+        description: 'backlog/snapshot with admit: why to measure outside 02:00-08:00 Europe/Madrid (reported); empty enforces the window'
         type: string
         default: ''
-  # Once a day, the measurements a push to main leaves out (`changes`), until the nightly mode (vars.BUSTER_NIGHTLY
-  # set to `on`) moves them to nightly-backfill.yml's comprehensive snapshot run: the `evidence` job then retires this
-  # schedule's runs, which run nothing.
-  schedule:
-    - cron: '23 7 * * *'
+  # No schedule: the daily `23 7 * * *` run is removed (the owner's choice on 2026-11-05). nightly-backfill.yml's
+  # comprehensive snapshot run is the daily run now, every hosted row, the fuzz campaigns and the full measurements;
+  # the `schedule` handling below stays for a run GitHub may still deliver, which the nightly mode retires.
   # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
   # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
   # the merge.
@@ -169,7 +167,7 @@ jobs:
   # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
   # correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
-  # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
+  # plain hosted rows of the commit's own earlier run, and the 02:00-08:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
   evidence:
     name: Reuse evidence and hardware admission
@@ -189,7 +187,7 @@ jobs:
       hardware: ${{ steps.decide.outputs.hardware }}
       hardware_reason: ${{ steps.decide.outputs.hardware_reason }}
       retired: ${{ steps.decide.outputs.retired }}
-      # A nightly dispatch's window as instants (the cycle's 04:00 and 07:00 Europe/Madrid), and whether an override
+      # A nightly dispatch's window as instants (the cycle's 02:00 and 08:00 Europe/Madrid), and whether an override
       # admits it anyway: the 9700X job compares them with its clock before any setup.
       window_start: ${{ steps.decide.outputs.window_start }}
       window_deadline: ${{ steps.decide.outputs.window_deadline }}
@@ -700,7 +698,7 @@ jobs:
         # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
         # may have waited past its window for it: right after the host's own check, before the host identity's package
         # queries and hashing and before any setup, the job's whole bound (its timeout and 5 minutes to clean up) must
-        # still end by 07:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
+        # still end by 08:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
         # override's reason. A refusal fails the job here, having done nothing else, which the record reads as a
         # deferral, not a failure; the job's timeout bounds the rest.
         id: window
@@ -2135,13 +2133,15 @@ jobs:
     # Preserve the existing required context: both hosted variants and the gated
     # 9700X job must pass on the same revision. On a ready pull request that job
     # measures without its native correctness step (#1272), and the context
-    # says so; on a push to main and on the daily and dispatched runs it runs
-    # native correctness before the measurements. A nightly dispatch reports
-    # through its coverage record instead, and a retired scheduled run (the
-    # nightly mode's) runs nothing, so neither has this context.
+    # says so; on the daily and dispatched runs, and on a push to main before
+    # the nightly mode, it runs native correctness before the measurements. A
+    # nightly dispatch reports through its coverage record instead; a retired
+    # scheduled run (the nightly mode's) runs nothing; and a push in the
+    # nightly mode defers its 9700X work to the window. None of the three has
+    # this context, so none can show a 9700X qualification that didn't run.
     name: Build and execute on Ryzen 7 9700X
     needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
-    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) }}
+    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:

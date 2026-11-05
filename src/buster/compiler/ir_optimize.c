@@ -1108,7 +1108,10 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
 }
 
 // 1 is an unconditional effect; 2 is a potential fault or floating-environment effect, discharged only by
-// a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof.
+// a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof. 3 is a
+// vector comparison (#141's element types), a floating-environment effect where its lanes are floating ones (a NaN
+// operand raises MXCSR's invalid flag, or traps where it is unmasked, as fcmp's does), whose mask is never a constant;
+// an integer one's is none, and it goes where its mask is unused.
 static const uint8_t ir_optimize_roots[64] = {
         [IR_LOAD] = 1,
         [IR_STORE] = 1,
@@ -1144,12 +1147,13 @@ static const uint8_t ir_optimize_roots[64] = {
         [IR_UITOFP] = 2,
         [IR_FPTOSI] = 2,
         [IR_FPTOUI] = 2,
+        [IR_VCMP] = 3,
 };
 
 static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
 {
     const uint32_t kind = ir_optimize_roots[work->function->op[i]];
-    const bool result = kind == 1 || (kind == 2 && work->states[i] != IROPT_CONSTANT);
+    const bool result = kind == 1 || (kind == 2 && work->states[i] != IROPT_CONSTANT) || (kind == 3 && work->function->flags[i] >= IR_SIMD_LANE_F32);
     return result;
 }
 
@@ -1224,7 +1228,11 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
                     const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + at);
                     const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), _mm512_loadu_si512(ir_optimize_roots)));
                     const __m128i states = _mm_maskz_loadu_epi8(valid, work->states + at);
-                    const __mmask16 roots = valid & (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmpneq_epi8_mask(states, _mm_set1_epi8(IROPT_CONSTANT))));
+                    // A vector comparison's (kind 3) floating lanes: its flags F32 or F64, which the verifier bounds.
+                    const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + at);
+                    const __mmask16 floating = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm_cmpge_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
+                    const __mmask16 roots = valid & (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmpneq_epi8_mask(states, _mm_set1_epi8(IROPT_CONSTANT))) |
+                                                floating);
                     _mm_mask_storeu_epi8(work->live + at, valid, _mm_maskz_set1_epi8(roots, 1));
                 }
             }

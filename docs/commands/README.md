@@ -84,7 +84,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
 | `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
 | `test-tier1-cfg, test-tier1-cfg-source` | `tier1_cfg.c` | [tier1-cfg](tier1-cfg.md) |
-| `test-tier1-frame, test-tier1-frame-execution` | `tier1_frame.c` | [tier1-frame](tier1-frame.md) |
+| `test-tier1-frame, test-tier1-frame-execution, measure-frames` | `tier1_frame.c`, `frame_measure.c` | [tier1-frame](tier1-frame.md) |
 | `test-tier1-schedule, benchmark-tier1-schedule` | `tier1_schedule.c` | [tier1-schedule](tier1-schedule.md) |
 | `test-check-units, benchmark-check-units` | `c_checker_units.c` | [translation-units](translation-units.md) |
 | `test-types, benchmark-types` | `c_types.c` | [types](types.md) |

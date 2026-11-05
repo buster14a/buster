@@ -598,9 +598,18 @@ struct Tier0Function
     const uint32_t* lifetime_entries;
     const uint32_t* lifetime_locals;
     uint32_t lifetime_count;
+    // The frame pointer the options ask for (#177, predefines_frame_pointer's BUSTER_TIER0_FRAME_POINTER_*): none (rbp
+    // set only where the function's entries move rsp or its frame is realigned), every frame's, or every frame's whose
+    // function calls (BUSTER_TIER0_FRAME_POINTER_NON_LEAF, -momit-leaf-frame-pointer's). A kept frame pointer is pushed
+    // first and set to rsp (tier0_frame_registers), so that rbp chains the frames, and is no depth's register. Tier 1's
+    // frame takes it too (c_check_tier1.c's Tier1EmitOptions.frame_flags).
+    uint8_t frame_pointer;
 };
 
 #define BUSTER_TIER0_LIFETIME_END 0x80000000u
+#define BUSTER_TIER0_FRAME_POINTER_NONE 0
+#define BUSTER_TIER0_FRAME_POINTER_ALL 1
+#define BUSTER_TIER0_FRAME_POINTER_NON_LEAF 2
 // A call_tails value: a musttail call's row, or __builtin_eh_return's (Tier0Function.eh_return).
 #define BUSTER_TIER0_TAIL_CALL 1
 #define BUSTER_TIER0_TAIL_EH 2
@@ -4091,13 +4100,23 @@ static bool tier0_value_object(const Tier0Function* function, uint64_t local, ui
            function->local_sizes[local] >= tier0_class_bytes(class) && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
 }
 
-// The frame's registers, once selection knows whether the entries move rsp (`moves`): a frame pointer where they do or
-// the frame is realigned, a realigned frame's base (r15) where both, and the integer depths they leave the stack.
-static void tier0_frame_registers(Tier0Frame* frame, bool moves, int32_t depth_count)
+// Whether a frame that neither moves rsp nor is realigned keeps a frame pointer all the same (#177): where the options
+// ask for one (Tier0Function.frame_pointer), every frame's, or with the leaf rule one whose function `calls`; and an
+// eh_return function's (#148, Tier0Function.eh_return), from which its unwinding finds the CFA.
+static bool tier0_kept_pointer(const Tier0Function* function, bool calls)
+{
+    return function->eh_return || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
+}
+
+// The frame's registers, once selection knows whether the entries move rsp (`moves`) and whether the options keep a
+// frame pointer (`kept`, tier0_kept_pointer): a frame pointer where either or where the frame is realigned, a realigned
+// frame's base (r15) where it moves rsp too, and the integer depths they leave the stack. A kept frame pointer is one as
+// a frame that moves rsp has, rbp no depth's: its places from rbp, its outgoing area at rsp, which stays put.
+static void tier0_frame_registers(Tier0Frame* frame, bool moves, bool kept, int32_t depth_count)
 {
     const bool realigned = frame->alignment_log2 != 0;
     frame->moves = moves;
-    frame->pointer = moves || realigned;
+    frame->pointer = moves || realigned || kept;
     frame->based = moves && realigned;
     frame->depth_count = depth_count;
 }
@@ -9078,8 +9097,11 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         }
         entries->templates[i] = entry;
     }
-    // The conversions' register forms' scratch registers, as the entries that move rsp decide them.
-    const Tier0Tops convert = convert_scratch[moves ? 1 : 0];
+    // The conversions' register forms' scratch registers, as the frame pointer decides them: the entries that move rsp,
+    // or the options' (`kept`, #177), whose rbp a frame that isn't realigned gives up as one that moves rsp does.
+    const bool kept = tier0_kept_pointer(function, calls);
+    const bool pointer_depths = moves || (kept && !realigned);
+    const Tier0Tops convert = convert_scratch[pointer_depths ? 1 : 0];
     integer_top = convert.integer > integer_top ? convert.integer : integer_top;
     floating_top = convert.floating > floating_top ? convert.floating : floating_top;
     // An aggregate's copies take each stack's first free register.
@@ -9089,9 +9111,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         integer_top = tops.integer;
         floating_top = tops.floating;
     }
-    // An eh_return function's frame has a frame pointer (Tier0Function.eh_return), from which its unwinding finds the CFA.
-    moves = moves || function->eh_return;
-    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, moves));
+    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, pointer_depths));
     *error = integer_top >= depth_count || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_top;
     frame->floating_top = floating_top;
@@ -9099,7 +9119,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
-    tier0_frame_registers(frame, moves, depth_count);
+    tier0_frame_registers(frame, moves, kept, depth_count);
     *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
     return unsupported;
 }
@@ -12446,7 +12466,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     {
         unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
     }
-    const Tier0Tops convert = convert_scratch[moves ? 1 : 0];
+    // The frame pointer's depths, as the scalar selection's (tier0_select_entries).
+    const bool kept = tier0_kept_pointer(function, calls);
+    const bool pointer_depths = moves || (kept && !realigned);
+    const Tier0Tops convert = convert_scratch[pointer_depths ? 1 : 0];
     deferred_integer_top = convert.integer > deferred_integer_top ? convert.integer : deferred_integer_top;
     deferred_floating_top = convert.floating > deferred_floating_top ? convert.floating : deferred_floating_top;
     if (function->argument_sizes != 0)
@@ -12461,9 +12484,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
     const int32_t floating_reached = vector_floating_top > deferred_floating_top ? (int32_t)vector_floating_top : deferred_floating_top;
     clobbers |= rdx ? 1u << X86_REGISTER_RDX : 0;
-    // An eh_return function's frame has a frame pointer (Tier0Function.eh_return), from which its unwinding finds the CFA.
-    moves = moves || function->eh_return;
-    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, moves));
+    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, pointer_depths));
     *error = integer_reached >= depth_count || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_reached;
     frame->floating_top = floating_reached;
@@ -12471,7 +12492,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
-    tier0_frame_registers(frame, moves, depth_count);
+    tier0_frame_registers(frame, moves, kept, depth_count);
     *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
     return unsupported;
 }

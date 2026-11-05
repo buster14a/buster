@@ -103,6 +103,9 @@ struct Tier1EmitOptions
     // The xmm registers the CFG consumer's floating values may take (#141), of xmm0 to xmm14; 0 for all of them.
     uint32_t vector_register_mask;
     uint32_t frame_flags;
+    // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
+    // (-momit-leaf-frame-pointer's leaf rule, #177; tier1_emit_frame_flags).
+    bool omit_leaf_frame_pointer;
     bool vector;
     bool rematerialize;
     // How each symbol below `symbol_count` is reached (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*: directly,
@@ -120,6 +123,14 @@ struct Tier1EmitOptions
     bool certify;
     Tier1EmitDiagnostic* diagnostic;
 };
+
+// The frame's flags from the options' (#177): BUSTER_TIER1_FRAME_KEEP_POINTER but in a function without `calls` where the
+// options omit a leaf function's frame pointer (Tier1EmitOptions.omit_leaf_frame_pointer). A call here is one to a
+// function, a machine row's none (tier1_select_function_call), as Tier 0's frame counts them (tier0_kept_pointer).
+static uint32_t tier1_emit_frame_flags(const Tier1EmitOptions* options, bool calls)
+{
+    return options->frame_flags & (options->omit_leaf_frame_pointer && !calls ? ~BUSTER_TIER1_FRAME_KEEP_POINTER : ~0u);
+}
 
 static void tier1_emit_diagnose(const Tier1EmitOptions* options, Tier1EmitCause cause, uint32_t error)
 {
@@ -171,6 +182,9 @@ struct Tier1EmitPrepared
     // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
     // (Tier1SelectHoles.avx2).
     bool avx2;
+    // The target has no AVX (#141's SSE targets: the x86-64 baseline and x86-64-v2; `vex` is set too): its 16-byte
+    // vectors move, spill and compute by legacy SSE's forms (Tier1SelectHoles.sse, BUSTER_TIER1_ENCODING_SSE).
+    bool sse;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other
@@ -180,6 +194,12 @@ struct Tier1EmitPrepared
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
 };
+
+// The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
+static uint32_t tier1_emit_encoding(const Tier1EmitPrepared* prepared)
+{
+    return prepared->sse ? BUSTER_TIER1_ENCODING_SSE : prepared->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX;
+}
 
 // A machine row's placement as the CFG consumer claims it (#1284, tier1_emit_cfg_row): each of its roles' register, by
 // role, and the registers its records name by number renamed (k's at k). Untrusted: the code's certificate places the
@@ -439,7 +459,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             },
             .calls = &prepared.call_abi,
             .call_count = prepared.call_count != 0,
-            .flags = options->frame_flags,
+            .flags = tier1_emit_frame_flags(options, prepared.call_count != 0),
         };
         Tier1FrameRequirements requirements;
         if (tier1_frame_requirements(&prospective, &requirements) != TIER1_FRAME_OK)
@@ -661,7 +681,7 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     const bool mask = class == BUSTER_TIER1_ALLOCATE_MASK;
     const bool vector = class == BUSTER_TIER1_ALLOCATE_VECTOR;
     const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
-    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, prepared->vex);
+    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, tier1_emit_encoding(prepared));
     const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],
@@ -1674,7 +1694,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
             },
             .calls = &emitted.prepared.call_abi,
             .call_count = emitted.prepared.call_count != 0,
-            .flags = options->frame_flags,
+            .flags = tier1_emit_frame_flags(options, emitted.prepared.call_count != 0),
         };
         if (error == TIER1_EMIT_OK)
         {
