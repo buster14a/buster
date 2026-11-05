@@ -5452,10 +5452,13 @@ struct TypePrinter
     uint64_t depth;
     Arena* scratch;
     // By place (TypeNames.alias_order): the specifiers printed so far, and the levels an alias named, which their
-    // suffixes' frames ask after.
+    // suffixes' frames ask after. A level is its TYPE frame's id (`frames_typed`, in the order they run) << 8 and its
+    // depth below it: its BEFORE, AFTER and POINTER_END frames carry it as their step, `step` the running one's.
     uint32_t occurrence;
-    TypeId aliased[16];
+    uint32_t aliased[32];
     uint32_t aliased_count;
+    uint32_t frames_typed;
+    uint32_t step;
 };
 
 // The output's bytes, pushed in order so that they stay contiguous.
@@ -5590,8 +5593,9 @@ static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32
     return sugar;
 }
 
-// Whether an alias named a level, which then has no suffix of its own: by type, or by place, one whose BEFORE took one.
-static bool type_print_aliased(const TypePrinter* printer, TypeId type)
+// Whether an alias named a level, which then has no suffix of its own: by type, or by place, the level `step` whose
+// BEFORE took one (another level of the same type may have taken none).
+static bool type_print_aliased(const TypePrinter* printer, TypeId type, uint32_t step)
 {
     const TypeNames* names = printer->names;
     bool result = false;
@@ -5599,7 +5603,7 @@ static bool type_print_aliased(const TypePrinter* printer, TypeId type)
     {
         for (uint32_t a = 0; a < printer->aliased_count; a += 1)
         {
-            result |= printer->aliased[a] == type_unqualified(type);
+            result |= printer->aliased[a] == step;
         }
     }
     else
@@ -5634,7 +5638,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
         type_print_text(printer, "_Complex ");
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_ATOMIC)
     {
@@ -5677,19 +5681,19 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     }
     else if (kind == BUSTER_TYPE_KIND_POINTER)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_POINTER_END, type, printer->empty, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_POINTER_END, type, printer->empty, false, printer->step);
         printer->empty = false;
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_END, type, printer->empty, false, 0);
         printer->empty = false;
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_VECTOR)
     {
@@ -5710,23 +5714,23 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
     const TypeId base = table->types.base[index];
     if (kind == BUSTER_TYPE_KIND_COMPLEX || kind == BUSTER_TYPE_KIND_VECTOR)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_EXT_VECTOR_END, type, false, false, 0);
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_POINTER)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
         const TypeId pointee = type_strip_aligned(table, base);
-        if (type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee))
+        if (type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, printer->step + 1))
         {
             type_print_text(printer, ")");
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (type_kind_is_array(kind))
     {
@@ -5740,7 +5744,7 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         {
             type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && table->types.extent[index] == 0 ? "[*]" : "[]");
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -5750,7 +5754,7 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         }
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, type, printer->empty, false, 0);
         printer->empty = false;
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
         if (type_function_abi_kind(table, type) != TYPE_FUNCTION_ABI_SYSV)
         {
             type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_ABI, type, false, false, 0);
@@ -5776,12 +5780,13 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         const bool named = frame.after && printer->name.length != 0;
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, frame.type, printer->empty, false, 0);
         printer->empty = !named;
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, frame.type, false, false, 0);
+        const uint32_t level = printer->frames_typed++ << 8;
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, frame.type, false, false, level);
         if (named)
         {
             type_print_push(printer, BUSTER_TYPE_PRINT_NAME, frame.type, false, false, 0);
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, frame.type, false, false, 0);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, frame.type, false, false, level);
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_RESTORE)
     {
@@ -5796,9 +5801,15 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         if (sugar != UINT32_MAX)
         {
             printer->occurrence += 1;
-            if (printer->aliased_count < 16)
+            if (printer->aliased_count < 32)
             {
-                printer->aliased[printer->aliased_count++] = unqualified;
+                printer->aliased[printer->aliased_count++] = frame.step;
+            }
+            else
+            {
+                // No room to remember the level: the places can't be followed, which the count the caller compares
+                // with says.
+                printer->occurrence = UINT32_MAX / 2;
             }
             // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
@@ -5827,6 +5838,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             {
                 printer->empty = false;
             }
+            printer->step = frame.step;
             type_print_before_kind(printer, unqualified);
         }
     }
@@ -5848,15 +5860,16 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         // including under another level's qualifiers (#992).
         const TypeId type = type_strip_aligned(table, frame.type);
         const TypeId unqualified = type_unqualified(type);
-        if (!type_print_aliased(printer, type))
+        if (!type_print_aliased(printer, type, frame.step))
         {
+            printer->step = frame.step;
             type_print_after_kind(printer, unqualified);
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)
     {
         const TypeId pointee = type_strip_aligned(table, table->types.base[type_index(frame.type)]);
-        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee);
+        const bool wrapped = type_kind_is_array(type_kind(table, pointee)) && !type_print_aliased(printer, pointee, frame.step + 1);
         type_print_text(printer, wrapped ? "(*" : "*");
         printer->empty = frame.saved;
     }

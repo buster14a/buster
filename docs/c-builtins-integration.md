@@ -1909,7 +1909,10 @@ record dump, as `BuiltinDumpStruct` checks it.
   parameter's, are listed in source order with the typedef among each
   (`check_lower_dump_places`), the order `type_print` prints its specifiers
   in, which takes the k-th one's alias for the k-th it prints
-  (`TypeNames.alias_order`), so `int (*)(I)` keeps its `int`. Where the
+  (`TypeNames.alias_order`), so `int (*)(I)` keeps its `int`; a level an
+  alias names has no suffix of its own, which its AFTER and POINTER_END frames
+  ask of that level alone (`TypePrinter.aliased`, by each TYPE frame's id and
+  depth), so `int (*(*)(FP))(int)` keeps its return's `(int)`. Where the
   counts differ (a declaration its walk doesn't model), the typedefs apply by
   type, as before. An
   unnamed record's canonical name has its scope, as clang's

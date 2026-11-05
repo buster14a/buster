@@ -1075,12 +1075,13 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
 // their scopes (a pointer member's record's too), those of records in functions, of parameters as their declarations
 // spell them (a record's array member among a parameter's tokens), of no written prototype, typedefs of qualified types
 // with and without qualifiers written with them, a typedef named in one place of a function pointer's types and not in
-// another of the same type (its return or its parameter, fields and parameters alike), unions, vectors, a packed
-// record, _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs), through
-// printf, a variadic printer of its own that prints each format's operands (a pointer as its offset from a record's), a
-// printer through a pointer that a call returns, an unprototyped one, one that takes a double and one that counts its
-// calls, the rest of the arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with
-// and without it, each printing what clang's build does.
+// another of the same type (its return or its parameter, fields and parameters alike), a typedef of a function pointer
+// or an array named where the same type is spelled out elsewhere in the declaration, unions, vectors, a packed record,
+// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs), through printf, a
+// variadic printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer
+// through a pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls,
+// the rest of the arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and
+// without it, each printing what clang's build does.
 static void check_test_driver_dump_struct(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char program[] =
@@ -1202,6 +1203,15 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    struct Outer2 { struct { int value; } inner; } r = { { 2 } };\n"
                                   "    __builtin_dump_struct(&r.inner, printf);\n"
                                   "}\n"
+                                  "typedef int (*FP)(int);\n"
+                                  "typedef int A4[4];\n"
+                                  "struct Repeated { int (*(*a)(FP))(int); FP (*b)(int (*)(int)); A4 *p; int (*q)[4]; A4 *(*r)(int (*)[4]); };\n"
+                                  "static void repeated(int (*(*cb)(FP))(int), int (*(*rev)(int (*)(int)))(FP))\n"
+                                  "{\n"
+                                  "    (void)cb; (void)rev;\n"
+                                  "    struct Outer3 { struct { int x; } inner; } r = { { 3 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
                                   "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
                                   "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
                                   "static struct S s;\n"
@@ -1263,6 +1273,9 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __builtin_dump_struct(&placed, printf);\n"
                                   "    placed_return(0);\n"
                                   "    placed_parameter(0, 0);\n"
+                                  "    struct Repeated repeated_fields = { 0 };\n"
+                                  "    __builtin_dump_struct(&repeated_fields, printf);\n"
+                                  "    repeated(0, 0);\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];
