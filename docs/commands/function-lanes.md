@@ -80,7 +80,16 @@ on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
 each (`run_check_command`'s collective call), each lane the same thread
 throughout, no thread created, each object `--lanes 1`'s; then the same on a
-lazy session. Then a growing team: the first program of 600 functions by
+lazy session. Then the driver's deferred bodies (`--deferred-bodies`,
+`check_input_deferred_compile`, whose walks and merge's pass are rounds of the
+command's flow, `CheckDeferredFlow`): the four programs by the vector path by
+`--lanes 1`, 2, 3, 8, by default and by `--lanes 8 --id-order N`, each object
+and executable source order's; the program of 600 functions read on lanes and
+merged by `--lanes 8`, in source order by `--lanes 1`, after a `#pragma clang
+section` line (before its top level's walk) and by `--no-deferred-bodies`, by
+`--time-stages`' `deferred-lanes` and `deferred-merged`, and with lanes that
+don't start; and the failing programs by `--lanes 2`, 3 and 8, `--lanes 1`'s
+diagnostics. Then a growing team: the first program of 600 functions by
 `--lanes 4` under a jobserver pipe of no token or one, its lane 0 writing none,
 2, 3 or 5 more after its first item (`BUSTER_TEST_WORKER_SUPPLY`): its
 `--time-stages` grant, team and growth, no more lanes taking parts than it
