@@ -1790,8 +1790,9 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
   - **The interpreters.** Both take the call without its chain
     (`tier0_call_chain`, `ir_interpreter_unchained`). A native callee gets
     the chain in `r10` from the bridge; an interpreted one, whose C
-    parameters don't include it, doesn't. The IR interpreter refuses a chain
-    beside a by-value aggregate (`INTERPRETER_UNSUPPORTED`).
+    parameters don't include it, doesn't. The IR interpreter keeps the other
+    arguments' ABI records past the chain's (their sizes, places and extension
+    flags) and checks the chain's definedness as an argument's.
   - **SSA promotion** sees calls as opaque values and needs nothing.
 - **Tests.** `test-checker-driver`'s static chain program runs naked
   callees that read `r10`, direct and indirect, of aggregate, floating and

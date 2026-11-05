@@ -1251,9 +1251,16 @@ static __attribute__((naked, noinline)) int64_t ir_lower_test_chain_plus(int64_t
     __asm__("leaq (%r10,%rdi), %rax\n\tret\n");
 }
 
+// The static chain's sum with its argument's low byte, sign-extended (#1411's review): r10 plus dil's.
+static __attribute__((naked, noinline)) int64_t ir_lower_test_chain_byte(int8_t x __attribute__((unused)))
+{
+    __asm__("movsbq %dil, %rax\n\taddq %r10, %rax\n\tret\n");
+}
+
 // A call with a static chain (#148): its argument 0 in r10, which the IR keeps as its ABI record (ir_typed_aggregate_call)
 // on both lowerings, and which both interpreters pass to a native callee in r10: f() returns chain_plus(2) with the
-// chain 40, 42.
+// chain 40, 42. And (#1411's review) the IR interpreter keeps the other arguments' records, a signed byte's extension
+// flag among them, with no extensions of the native's, and refuses an undefined chain where it checks definedness.
 static void ir_lower_test_chain(IrLowerTestTally* tally)
 {
     const uint8_t kinds[] = {
@@ -1324,6 +1331,56 @@ static void ir_lower_test_chain(IrLowerTestTally* tally)
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .natives = &native, .native_count = 1 };
         const InterpreterResult ir_result = ir_interpret(&program, symbol, 0, 0, 0, &execution);
         ir_lower_test_expect(tally, ir_result.status == INTERPRETER_OK && ir_result.value.low == 42, "the IR interpreter passes a static chain in r10", 0, 0);
+        // An undefined chain (#1411's review): its constant made IR_UNDEF.
+        const uint32_t chain = lowered_call != 0 ? lowered.extra[lowered_call->argument_first] : BUSTER_IR_NONE;
+        if (chain < lowered.instruction_count)
+        {
+            lowered.op[chain] = IR_UNDEF;
+            lowered.a[chain] = BUSTER_IR_NONE;
+            InterpreterOptions checked = interpreter_default_options();
+            checked.check_undefined = true;
+            const InterpreterResult undefined = ir_interpret(&program, symbol, 0, 0, &checked, &execution);
+            ir_lower_test_expect(tally, ir_verify(&lowered, &scratch, 0).error == IR_OK && undefined.status == INTERPRETER_UNDEFINED,
+                                 "the IR interpreter refuses an undefined static chain where it checks definedness", 0, 0);
+        }
+    }
+    // A signed byte's argument beside the chain: -3, sign-extended by its record's flag, 37.
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    const uint8_t byte_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint64_t byte_values[] = {
+        40,
+        (uint64_t)-3,
+        0,
+        0,
+    };
+    const uint8_t byte_arguments[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+    };
+    const AbiLocation byte_locations[] = {
+        locations[0],
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS, .flags = BUSTER_ABI_FLAG_SIGN },
+    };
+    Tier0Function bytes = function;
+    bytes.classes = byte_classes;
+    bytes.values = byte_values;
+    bytes.argument_classes = byte_arguments;
+    bytes.argument_locations = byte_locations;
+    const InterpreterNativeBinding byte_native = { .symbol = native_symbol, .address = (void*)ir_lower_test_chain_byte };
+    IrFunction byte_lowered = { 0 };
+    if (ir_lower_test_lower(tally, &bytes, IR_I64, 3, &output, &twin_output, &scratch, &byte_lowered, 0, 1))
+    {
+        const IrInterpreterFunction code = { .symbol = symbol, .function = &byte_lowered };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .natives = &byte_native, .native_count = 1 };
+        const InterpreterResult byte_result = ir_interpret(&program, symbol, 0, 0, 0, &execution);
+        ir_lower_test_expect(tally, byte_result.status == INTERPRETER_OK && byte_result.value.low == 37,
+                             "the IR interpreter keeps a chained call's other records: a signed byte's extension", 0, 1);
     }
     arena_release(&output);
     arena_release(&twin_output);
