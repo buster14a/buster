@@ -171,6 +171,9 @@ struct Tier1EmitPrepared
     // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
     // (Tier1SelectHoles.avx2).
     bool avx2;
+    // The target has no AVX (#141's SSE targets: the x86-64 baseline and x86-64-v2; `vex` is set too): its 16-byte
+    // vectors move, spill and compute by legacy SSE's forms (Tier1SelectHoles.sse, BUSTER_TIER1_ENCODING_SSE).
+    bool sse;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other
@@ -180,6 +183,12 @@ struct Tier1EmitPrepared
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
 };
+
+// The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
+static uint32_t tier1_emit_encoding(const Tier1EmitPrepared* prepared)
+{
+    return prepared->sse ? BUSTER_TIER1_ENCODING_SSE : prepared->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX;
+}
 
 // A machine row's placement as the CFG consumer claims it (#1284, tier1_emit_cfg_row): each of its roles' register, by
 // role, and the registers its records name by number renamed (k's at k). Untrusted: the code's certificate places the
@@ -661,7 +670,7 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     const bool mask = class == BUSTER_TIER1_ALLOCATE_MASK;
     const bool vector = class == BUSTER_TIER1_ALLOCATE_VECTOR;
     const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
-    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, prepared->vex);
+    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, tier1_emit_encoding(prepared));
     const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],

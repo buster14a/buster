@@ -888,7 +888,7 @@ static void tier1_select_test_lane_forms(Tier1SelectTest* test)
 {
     uint32_t forms = 0;
     uint32_t uncovered = 0;
-    for (uint32_t encoding = 0; encoding < 2; encoding += 1)
+    for (uint32_t encoding = 0; encoding < 3; encoding += 1)
     {
         for (uint32_t operation = 0; operation < BUSTER_TIER1_VECTOR_OPERATIONS; operation += 1)
         {

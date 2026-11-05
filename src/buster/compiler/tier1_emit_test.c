@@ -394,7 +394,7 @@ static uint64_t tier1_emit_test_save_row(const Tier1EmitResult* emitted, uint32_
         *load = form == X86_FORM_MOV_R64_RM64;
     }
     const uint32_t vector_row = emitted->general && reg < 16 && ((prepared->vector_save_mask >> reg) & 1) != 0 ? tier1_emit_cfg_vector_save_row(emitted, reg) : UINT32_MAX;
-    const Tier1SelectFloatForms* wide = prepared->vector_bytes != 0 ? tier1_select_class_forms(prepared->vector_bytes, prepared->vex) : NULL;
+    const Tier1SelectFloatForms* wide = prepared->vector_bytes != 0 ? tier1_select_class_forms(prepared->vector_bytes, tier1_emit_encoding(prepared)) : NULL;
     const uint16_t vector_store = wide != NULL ? wide->store : X86_FORM_MOVSD_XM64_X;
     const uint16_t vector_load = wide != NULL ? wide->load : X86_FORM_MOVSD_X_XM64;
     if (memory && vector_row < emitted->frame.count && (form == vector_store || form == vector_load) && record->displacement == emitted->frame.offset[vector_row])

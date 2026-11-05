@@ -3159,6 +3159,101 @@ static void check_test_driver_tier1_invalid(CheckTest* test, const char* executa
         unlink(program);
     }
     unlink(source);
+// The SSE targets' fixture (#141), for the x86-64 baseline and x86-64-v2, targets without AVX: C's operators on 16-byte
+// vectors of every element type, which the IR computes as its own operations of their lanes by legacy SSE's forms
+// (additions, subtractions, the bitwise operations, words' products and at x86-64-v2 doublewords', the floating
+// arithmetic, constants), and its comparisons, the rows' (pcmpeq and pcmpgt sequences, cmpps and cmppd), as machine
+// rows (but quadwords', which the baseline has no form for: the front end refuses them, as clang computes them a lane at
+// a time), every function Tier 1's. Each floating operation is a statement of its own, so that clang -O0 contracts none.
+static const char check_test_tier1_sse_header[] =
+    "#include <stdio.h>\n"
+    "#include <stdint.h>\n"
+    "#define S_INTEGERS(X) X(i8x16, int8_t, 1) X(u8x16, uint8_t, 1) X(i16x8, int16_t, 1) X(u16x8, uint16_t, 1) X(i32x4, int32_t, 1) X(u32x4, uint32_t, 1) X(i64x2, int64_t, 0) \\\n"
+    "    X(u64x2, uint64_t, 0)\n"
+    "#define S_FLOATS(X) X(f32x4, float, int32_t) X(f64x2, double, int64_t)\n"
+    "#define S_INTEGER_TYPE(n, t, cmp) typedef t n __attribute__((vector_size(16)));\n"
+    "#define S_FLOAT_TYPE(n, t, i) typedef t n __attribute__((vector_size(16))); typedef i n##_mask __attribute__((vector_size(16)));\n"
+    "S_INTEGERS(S_INTEGER_TYPE)\n"
+    "S_FLOATS(S_FLOAT_TYPE)\n"
+    "#define S_INTEGER_DECLARE(n, t, cmp) n s_##n(n x, n y);\n"
+    "#define S_FLOAT_DECLARE(n, t, i) n s_##n(n x, n y, n##_mask* compares);\n"
+    "S_INTEGERS(S_INTEGER_DECLARE)\n"
+    "S_FLOATS(S_FLOAT_DECLARE)\n"
+    "i16x8 s_words(i16x8 x, i16x8 y);\n"
+    "#if defined(__SSE4_1__)\n"
+    "u32x4 s_doublewords(u32x4 x, u32x4 y);\n"
+    "#endif\n";
+
+static const char check_test_tier1_sse_source[] =
+    "#include \"tier1-sse.h\"\n"
+    "#define S_INTEGER(n, t, cmp) n s_##n(n a, n b)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n d = a - b;\\\n"
+    "    n r = s ^ d;\\\n"
+    "    r = r + (s & d);\\\n"
+    "    r = r - (a | b);\\\n"
+    "    if (cmp)\\\n"
+    "    {\\\n"
+    "        r = r ^ (n)(a < b);\\\n"
+    "        r = r + (n)(a == s);\\\n"
+    "    }\\\n"
+    "    n k = { 3 };\\\n"
+    "    return r - k;\\\n"
+    "}\n"
+    "#define S_FLOAT(n, t, i) n s_##n(n a, n b, n##_mask* compares)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n p = s * a;\\\n"
+    "    n d = p - b;\\\n"
+    "    n q = d / b;\\\n"
+    "    n r = b - q;\\\n"
+    "    *compares = (a < b) + (a >= q) - (r != s);\\\n"
+    "    return r;\\\n"
+    "}\n"
+    "S_INTEGERS(S_INTEGER)\n"
+    "S_FLOATS(S_FLOAT)\n"
+    "i16x8 s_words(i16x8 a, i16x8 b) { i16x8 p = a * b; return p - (a * p); }\n"
+    "#if defined(__SSE4_1__)\n"
+    "u32x4 s_doublewords(u32x4 a, u32x4 b) { u32x4 p = a * b; return b * p + a; }\n"
+    "#endif\n";
+
+static const char check_test_tier1_sse_other_source[] =
+    "#include \"tier1-sse.h\"\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* q = p; for (unsigned i = 0; i < n; i++) { hash ^= q[i]; hash *= 1099511628211ull; } }\n"
+    "static uint32_t seed = 4321;\n"
+    "static uint32_t next(void) { seed = seed * 1103515245u + 12345u; return seed >> 8; }\n"
+    "static void fill(unsigned char* p) { for (unsigned i = 0; i < 16; i++) p[i] = (unsigned char)next(); }\n"
+    "#define S_INTEGER_RUN(n, t, cmp) { n a; n c; fill((unsigned char*)&a); fill((unsigned char*)&c); if (round % 4 == 0) c = a; n r = s_##n(a, c); mix(&r, 16); }\n"
+    "#define S_FLOAT_RUN(n, t, i) { n a; n c; for (unsigned e = 0; e < 16 / sizeof(t); e++) { a[e] = (t)((int)(next() % 4001) - 2000) / 16; c[e] = (t)((int)(next() % 4001) - 2001) / 8; } \\\n"
+    "    if (round % 4 == 1) c = a; n##_mask m; n r = s_##n(a, c, &m); mix(&r, 16); mix(&m, 16); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (unsigned round = 0; round < 64; round++)\n"
+    "    {\n"
+    "        S_INTEGERS(S_INTEGER_RUN)\n"
+    "        S_FLOATS(S_FLOAT_RUN)\n"
+    "        { i16x8 a; i16x8 c; fill((unsigned char*)&a); fill((unsigned char*)&c); i16x8 r = s_words(a, c); mix(&r, 16); }\n"
+    "#if defined(__SSE4_1__)\n"
+    "        { u32x4 a; u32x4 c; fill((unsigned char*)&a); fill((unsigned char*)&c); u32x4 r = s_doublewords(a, c); mix(&r, 16); }\n"
+    "#endif\n"
+    "        printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, at the x86-64 baseline and at x86-64-v2, each run on any x86-64 host, but x86-64-v2's only where the host
+// has its features.
+static void check_test_driver_tier1_sse(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v2 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v2", 9, &v2);
+    const bool host = parsed && (x86_target_native().features & v2.features) == v2.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-sse", "SSE targets' (x86-64)", check_test_tier1_sse_header, check_test_tier1_sse_source,
+                                  check_test_tier1_sse_other_source, "-march=x86-64", true, 0);
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-sse", "SSE targets' (x86-64-v2)", check_test_tier1_sse_header, check_test_tier1_sse_source,
+                                  check_test_tier1_sse_other_source, "-march=x86-64-v2", host, 0);
 }
 
 // The VEX fixture (#1281): x86-64-v3's AVX2 and F16C builtins and the vector operators, at a target without AVX-512,
