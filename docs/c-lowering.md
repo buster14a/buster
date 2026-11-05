@@ -674,11 +674,16 @@ A unit whose type table has a transport vector type (#137, a vector of `bool`,
 of 1 or 2 bytes or of more than 64 bytes: only a unit with a vector kind is
 scanned for one) takes the rules for every node too: such a node's operation,
 cast or element writes entries a piece, an element or a cleared byte at a
-time past a node's bounds (`check_lower_transport_room`: 20 entries for each
-16 bytes, 8 for each of a `bool` vector's bytes, and for an element-wise
-conversion, shuffle or reduction 32 an element, which a `bool` vector's maximum or
-minimum nearly fills). The intrinsics' headers have
-one, AMX's 1024-byte `_tile1024i`, whose nodes take about 900 entries each.
+time past a node's bounds (`check_lower_transport_room`: 48 entries for each
+16 bytes, including logical masks, blends and private operand copies, 8 for
+each of a `bool` vector's bytes, and for an element-wise conversion, shuffle,
+builtin, reduction or logical operation 32 an element, which a `bool` vector's
+maximum or minimum nearly fills). The node also reserves twelve temporaries
+for sources, results and scalar or vector intermediates. Ordinary extended
+vectors' logical operators and vector conditions use these counts too; the
+vector counting pass selects those nodes only in a unit with an extended-vector
+type. The intrinsics' headers have a transport type, AMX's 1024-byte
+`_tile1024i`, whose nodes take the same bounded accounting.
 
 After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
 take their targets: their labels' entries. The loop compared every entry's

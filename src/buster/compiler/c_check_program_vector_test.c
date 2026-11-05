@@ -110,6 +110,46 @@ static const char check_test_vector_transport[] =
     "w32 rev=__builtin_shufflevector(wb,wb,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);FOLD(rev);\n"
     "return (int)h;}\n";
 
+// The accepted extended-vector logical operators at ordinary, tiny and transport widths. Truth and selection differ:
+// every nonzero lane is true for !/&&/||, but ?: selects by its condition's sign bit. The source also observes both
+// arms' evaluation and keeps a transport condition's value across an arm that overwrites its original object.
+static const char check_test_vector_logical[] =
+    "typedef int I4 __attribute__((ext_vector_type(4)));typedef unsigned U4 __attribute__((ext_vector_type(4)));"
+    "typedef float F4 __attribute__((ext_vector_type(4)));typedef int I32 __attribute__((ext_vector_type(32)));"
+    "typedef float F32 __attribute__((ext_vector_type(32)));typedef signed char C2 __attribute__((ext_vector_type(2)));"
+    "typedef short S1 __attribute__((ext_vector_type(1)));typedef _Float16 H1 __attribute__((ext_vector_type(1)));"
+    "typedef _Bool B4 __attribute__((ext_vector_type(4)));typedef _Bool B32 __attribute__((ext_vector_type(32)));\n"
+    "static int seen;static I32 held;"
+    "static I4 mark4(int k){seen=seen*10+k;return (I4){0,1,-1,2};}"
+    "static int marks(int k){seen=seen*10+k;return k==1?0:1;}"
+    "static I32 mark32(int k){seen=seen*10+k;I32 v;for(int i=0;i<32;i++)v[i]=(i%4==0?0:i%4==1?1:i%4==2?-1:k);return v;}"
+    "static I32 overwrite(void){held=(I32)7;return (I32)11;}\n"
+    "int tested(int n){unsigned h=2166136261u;I4 a={n-3,0,1,-1},b={0,n,0,-7};"
+    "I4 r[]={!a,a&&b,a||b,a&&n,n&&b,a||n,n||b,a?b:17,a?19:b,a?b:a,a?:b};FOLD(r);"
+    "U4 u={0u,1u,0x80000000u,0xffffffffu};I4 ur=u?a:b;FOLD(ur);"
+    "unsigned bits[]={0,0x80000000u,0x7fc12345u,0xbf800000u};F4 f;__builtin_memcpy(&f,bits,16);"
+    "F4 g={(float)n,0.0f,-0.0f,2.0f};I4 ft[]={!f,f&&g,f||g,f&&1.0f,0.0f||f};FOLD(ft);"
+    "F4 fr[]={a?f:g,a?f:1.5f,n?f:g};FOLD(fr);B4 bc={1,0,(_Bool)(n&1),0};F4 br=bc?f:g;FOLD(br);"
+    "B4 ba={0,1,0,1},bb={1,0,1,0},bo=bc?ba:bb;unsigned packed=0;for(int i=0;i<4;i++)packed|=(unsigned)bo[i]<<i;FOLD(packed);"
+    "struct __attribute__((packed)) guard{unsigned char pre;C2 v;unsigned char post;};struct guard guard={0x31,{(signed char)n,0},0xd7};"
+    "C2 c={(signed char)(n-4),-1};C2 cr[]={!guard.v,guard.v&&c,guard.v||c,guard.v?c:(C2){9,8}};FOLD(cr);"
+    "guard.v=!guard.v;FOLD(guard);S1 s={(short)(n-3)},t={-1};S1 sr[]={!s,s&&t,s||t,s?t:(S1){7}};FOLD(sr);"
+    "unsigned short hb=(n&1)?0x8000u:0x7e11u;H1 hv,hs=(H1)(_Float16)n;__builtin_memcpy(&hv,&hb,2);S1 hm[]={!hv,hv&&hv,hv||(_Float16)0,!hs};FOLD(hm);"
+    "I32 x,y;F32 p,q;for(int i=0;i<32;i++){x[i]=(i%4==0?0:i%4==1?1:i%4==2?-1:n);y[i]=i-n;"
+    "p[i]=(i%4==0?0.0f:i%4==1?-0.0f:(float)(i-n));q[i]=(float)(n-i);}"
+    "I32 wr[]={!x,x&&y,x||y,x&&n,n||y,x?y:13,x?:y,!p,p&&q,p||q};FOLD(wr);"
+    "F32 wf[]={x?p:q,x?2.5f:q};FOLD(wf);B32 mask;for(int i=0;i<32;i++)mask[i]=(i+n)%3==0;F32 bw=mask?p:q;FOLD(bw);"
+    "held=x;I32 saved=held?overwrite():y;FOLD(saved);FOLD(held);"
+    "seen=0;I4 e1=mark4(1)&&mark4(2);FOLD(e1);FOLD(seen);seen=0;I4 e2=marks(1)&&mark4(2);FOLD(e2);FOLD(seen);"
+    "seen=0;I4 e3=marks(2)||mark4(3);FOLD(e3);FOLD(seen);seen=0;I4 e4=mark4(1)?mark4(2):mark4(3);FOLD(e4);FOLD(seen);"
+    "seen=0;I4 e5=mark4(1)?:mark4(2);FOLD(e5);FOLD(seen);seen=0;I32 e6=mark32(1)?mark32(2):mark32(3);FOLD(e6);FOLD(seen);\n"
+    "#ifdef __SSE4_2__\n"
+    "typedef double D16 __attribute__((ext_vector_type(16)));typedef long long L16 __attribute__((ext_vector_type(16)));"
+    "D16 da,db;L16 dc;for(int i=0;i<16;i++){da[i]=i%3?(double)(i-n):-0.0;db[i]=(double)(n-i);dc[i]=i%3?1:-1;}"
+    "L16 dl[]={!da,da&&db,da||db};D16 ds=dc?da:db;FOLD(dl);FOLD(ds);\n"
+    "#endif\n"
+    "return (int)h;}\n";
+
 // The programs run where the host has the target's features and saves their state (x86_target_native, CPUID and
 // XCR0, whatever ISA the host build selected); elsewhere they are compiled and linked, as clang's builds are, and not
 // run.
@@ -199,6 +239,10 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
         {
             "vector-transport-compute",
             check_test_vector_transport,
+        },
+        {
+            "vector-logical-and-conditions",
+            check_test_vector_logical,
         },
         {
             // The lowering's room for an element-wise reduction (check_lower_transport_room), in a unit with nothing
@@ -466,18 +510,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             1,
         },
         {
-            "vector-elementwise-of-2-bytes",
-            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n},b={2};a=__builtin_elementwise_max(a,b);return a[0];}",
-            "elementwise and floating vector builtins of vectors of 1 or 2 bytes",
-            2,
-        },
-        {
-            "vector-of-bool-logical-and",
-            "typedef _Bool b8 __attribute__((ext_vector_type(8)));int tested(int n){b8 a={(_Bool)n,1},b={1};return (a&&b)[0];}",
-            "vector logical operators and conditions",
-            2,
-        },
-        {
             "vector-divide-integers-past-64-bytes",
             "typedef int w32 __attribute__((vector_size(128)));int tested(int n){w32 a={n},b={2};a=a/b;return a[0];}",
             "vector division of integers",
@@ -486,7 +518,13 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
         {
             "vector-bf16-arithmetic-past-64-bytes",
             "typedef __bf16 w64 __attribute__((vector_size(128)));void tested(w64*p,w64*q){*p=*p+*q;}",
-            "arithmetic on vectors of bf16 elements of more than 64 bytes",
+            "vector arithmetic of bf16 elements without AVX512-BF16",
+            0,
+        },
+        {
+            "vector-logical-resource-bound",
+            "typedef int V __attribute__((ext_vector_type(1025)));void tested(V*p,V*q){*p=*p&&*q;}",
+            "logical operations of vectors of more than 1024 elements",
             0,
         },
         {
@@ -524,30 +562,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             "typedef int V __attribute__((vector_size(16)));V tested(_Atomic(V)*p,V v){return *p+=v;}",
             "updates of atomic vector values",
             0,
-        },
-        {
-            "vector-logical-not",
-            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2};return (!a)[0];}",
-            "vector logical operators and conditions",
-            1,
-        },
-        {
-            "vector-logical-and",
-            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2},b={1,n,0,1};return (a&&b)[0];}",
-            "vector logical operators and conditions",
-            2,
-        },
-        {
-            "vector-logical-or",
-            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2},b={1,n,0,1};return (a||b)[0];}",
-            "vector logical operators and conditions",
-            2,
-        },
-        {
-            "vector-condition",
-            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2},b={1,n,0,1};return (a?a:b)[0];}",
-            "vector logical operators and conditions",
-            2,
         },
         {
             "vector-bf16-arithmetic",
@@ -655,6 +669,25 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "b64 r;fill(&r,8,n+3);b64 s=back64(m,r,&k);FOLD(k);FOLD(s);w32 w;fill(&w,128,n+4);w32 x=backw(w,n);FOLD(x);return (int)h;}\n"
         },
         { "baseline-transport-compute", check_test_vector_transport },
+        { "baseline-logical-and-conditions", check_test_vector_logical },
+        { "baseline-transport-builtins",
+          "typedef unsigned char B1 __attribute__((vector_size(1)));typedef unsigned char B2 __attribute__((vector_size(2)));"
+          "typedef short H1 __attribute__((vector_size(2)));typedef unsigned char B128 __attribute__((vector_size(128)));"
+          "typedef short H64 __attribute__((vector_size(128)));typedef float F32 __attribute__((vector_size(128)));"
+          "typedef double D16 __attribute__((vector_size(128)));typedef float F31 __attribute__((ext_vector_type(31)));"
+          "int tested(int n){unsigned h=2166136261u;B1 b1={(unsigned char)n},c1={73};B2 b2={(unsigned char)n,219},c2={87,36};H1 w1={(short)n},x1={-97};"
+          "B1 r1[]={__builtin_elementwise_max(b1,c1),__builtin_elementwise_add_sat(b1,c1)};"
+          "B2 r2[]={__builtin_elementwise_min(b2,c2),__builtin_elementwise_sub_sat(b2,c2)};"
+          "H1 t1[]={__builtin_elementwise_min(w1,x1),__builtin_elementwise_add_sat(w1,x1)};FOLD(r1);FOLD(r2);FOLD(t1);"
+          "B128 b,c;H64 w,x;fill(&b,128,n);fill(&c,128,n+1);fill(&w,128,n+2);fill(&x,128,n+3);"
+          "B128 br[]={__builtin_elementwise_min(b,c),__builtin_elementwise_max(b,c),__builtin_elementwise_add_sat(b,c)};"
+          "H64 wr[]={__builtin_elementwise_min(w,x),__builtin_elementwise_max(w,x),__builtin_elementwise_sub_sat(w,x)};FOLD(br);FOLD(wr);"
+          "F32 f,g;D16 d,e;F31 p;for(int i=0;i<32;i++){f[i]=(float)(i+n)/17.0f;g[i]=(float)(i%3-1);if(i<31)p[i]=f[i];"
+          "if(i<16){d[i]=(double)(i+n)/23.0;e[i]=(double)(i%3-1);}}"
+          "F32 fr[]={__builtin_elementwise_sin(f),__builtin_elementwise_pow(f,g)};D16 dr[]={__builtin_elementwise_sin(d),__builtin_elementwise_pow(d,e)};"
+          "FOLD(fr);FOLD(dr);float fs=__builtin_reduce_in_order_fadd(f,-0.0f),ps=__builtin_reduce_in_order_fadd(p,1.25f);"
+          "double ds=__builtin_reduce_in_order_fadd(d,-0.0);FOLD(fs);FOLD(ps);FOLD(ds);return (int)h;}"
+        },
         // Three doubles' and three longs' extended vectors, whose elements LLVM returns a register each at 16 bytes (xmm0,
         // xmm1 and st0; rax, rdx and rcx: tier0_element_parts, #137), wider vectors' registers at the other levels.
         { "baseline-element-results",

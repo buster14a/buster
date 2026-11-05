@@ -266,7 +266,7 @@ static void check_vector_binary(TypeTable* table, const CheckAction* action, Che
     const bool compare = action->op >= CHECK_OP_LESS && action->op <= CHECK_OP_NOT_EQUAL;
     const bool logical = action->op == CHECK_OP_LOGICAL_AND || action->op == CHECK_OP_LOGICAL_OR;
     const bool boolean = (lv && le == BUSTER_TYPE_BOOL) || (rv && re == BUSTER_TYPE_BOOL);
-    const bool bool_allowed = compare || logical || action->op == CHECK_OP_BIT_AND || action->op == CHECK_OP_BIT_OR || action->op == CHECK_OP_BIT_XOR;
+    const bool bool_allowed = compare || action->op == CHECK_OP_BIT_AND || action->op == CHECK_OP_BIT_OR || action->op == CHECK_OP_BIT_XOR;
     if (integer && (!check_action_is_integer(table, le) || !check_action_is_integer(table, re)))
     {
         check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, !check_action_is_integer(table, le) ? 0 : 1);
@@ -275,8 +275,7 @@ static void check_vector_binary(TypeTable* table, const CheckAction* action, Che
     {
         check_action_diagnose(result, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
     }
-    else if (logical && ((boolean && (!lv || !rv || le != BUSTER_TYPE_BOOL || re != BUSTER_TYPE_BOOL)) ||
-                         (check_action_kind(table, left.type) != BUSTER_TYPE_KIND_EXT_VECTOR && check_action_kind(table, right.type) != BUSTER_TYPE_KIND_EXT_VECTOR)))
+    else if (logical && check_action_kind(table, left.type) != BUSTER_TYPE_KIND_EXT_VECTOR && check_action_kind(table, right.type) != BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         check_action_diagnose(result, CHECK_DIAG_SCALAR_REQUIRED, 0);
     }

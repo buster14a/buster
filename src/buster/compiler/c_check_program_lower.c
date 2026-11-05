@@ -10041,6 +10041,12 @@ static void check_lower_row_constants(CheckLowerWriter* writer, const Tier0Opera
     }
 }
 
+// Shared address/value handoff for ordinary and transport vectors, implemented in c_check_program_transport.c.
+#define BUSTER_CHECK_LOWER_TRANSPORT_LANES 1024u
+static void check_lower_transport_at(CheckLowerWriter* writer, uint32_t local, uint64_t offset);
+static void check_lower_transport_source(CheckLowerWriter* writer, TypeId type, uint32_t local);
+static uint32_t check_lower_transport_result(CheckLowerWriter* writer, TypeId type);
+
 // A floating elementwise builtin as the C library's function's calls (check_lower_libm_function), clang -O0's: of a
 // scalar (a float, a double or a long double), one call; of a vector of floats or doubles, a call an element, in element
 // order, each element read from a frame object the vector is stored into (one per operand) and each result written into
@@ -10056,18 +10062,23 @@ static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CB
     const TypeTable* types = program->types;
     const TypeId result = check_stream_type(stream, node);
     const uint32_t first = program->input->graph.argument_offsets[node];
-    const uint32_t bytes = check_lower_vector_of(writer, result);
+    const uint8_t kind = type_kind(types, type_conversion_operand(types, result));
+    const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
     const CheckVectorShape shape = check_vector_builtin_shape(types, result);
     const uint8_t class = check_lower_class(writer, result);
-    if (bytes != 0 && (!shape.floating || shape.bfloat || shape.element == 2))
+    if (vector && (!shape.floating || shape.bfloat || shape.element == 2))
     {
         check_lower_unsupported(writer, "elementwise vector builtins of half-precision or bf16 elements");
     }
-    else if (bytes == 0 && class != BUSTER_TYPED_CLASS_F32 && class != BUSTER_TYPED_CLASS_F64 && class != BUSTER_TYPED_CLASS_F80)
+    else if (!vector && class != BUSTER_TYPED_CLASS_F32 && class != BUSTER_TYPED_CLASS_F64 && class != BUSTER_TYPED_CLASS_F80)
     {
         check_lower_unsupported(writer, "elementwise builtins of half-precision, bf16 or __float128 values");
     }
-    else if (bytes != 0)
+    else if (vector && shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "elementwise vector builtins of more than 1024 elements");
+    }
+    else if (vector)
     {
         const bool d = shape.element == 8;
         const uint8_t element_class = d ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
@@ -10077,10 +10088,9 @@ static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CB
         uint32_t operands[2] = { 0, 0 };
         for (uint32_t a = 0; a < arguments && a < 2; a += 1)
         {
-            operands[a] = check_lower_temporary_of(writer, stream->argument_conversions[first + a].type);
+            operands[a] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         }
-        const uint32_t out = check_lower_temporary_of(writer, result);
-        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+        const uint32_t out = check_lower_transport_result(writer, result);
         // Pushed in the reverse of the calls' order: the last element's first.
         for (uint32_t i = shape.lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
@@ -10090,13 +10100,13 @@ static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CB
             for (uint32_t a = arguments; a-- > 0;)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, element_class, 0);
-                check_lower_element_address(writer, operands[a], i * shape.element);
+                check_lower_transport_at(writer, operands[a], i * shape.element);
             }
             check_lower_element_address(writer, out, i * shape.element);
         }
         for (uint32_t a = arguments; a-- > 0;)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, operands[a]);
+            check_lower_transport_source(writer, stream->argument_conversions[first + a].type, operands[a]);
             check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
         }
         writer->vectors = true;
@@ -10123,27 +10133,26 @@ static void check_lower_reduce_in_order(CheckLowerWriter* writer, uint32_t node)
     const uint32_t first = program->input->graph.argument_offsets[node];
     const TypeId source = stream->argument_conversions[first].type;
     const CheckVectorShape shape = check_vector_builtin_shape(program->types, source);
-    if (check_lower_vector_of(writer, source) == 0)
-    {
-        check_lower_unsupported(writer, check_lower_transport_type(program->types, source) ? check_lower_transport_refusal(program->types, source, CHECK_LOWER_TRANSPORT_BUILTIN) :
-                                                                                           "vector types of other than 4, 8, 16, 32 or 64 bytes");
-    }
-    else if (!shape.floating || shape.bfloat || shape.element == 2)
+    if (!shape.floating || shape.bfloat || shape.element == 2)
     {
         check_lower_unsupported(writer, "vector reductions of half-precision or bf16 elements");
+    }
+    else if (shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "vector reductions of more than 1024 elements");
     }
     else
     {
         const uint8_t class = shape.element == 8 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
-        const uint32_t vector = check_lower_temporary_of(writer, source);
+        const uint32_t vector = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         for (uint32_t i = shape.lanes; i-- > 0;)
         {
             check_lower_instruction(writer, BUSTER_TYPED_ADD, class, 0);
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
-            check_lower_element_address(writer, vector, i * shape.element);
+            check_lower_transport_at(writer, vector, i * shape.element);
         }
         check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
-        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector);
+        check_lower_transport_source(writer, source, vector);
         check_lower_operand(writer, node, 3, false, source);
         writer->vectors = true;
     }
@@ -10165,15 +10174,18 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
     const TypeId result = check_stream_type(stream, node);
     const uint32_t first = program->input->graph.argument_offsets[node];
     const CheckVectorShape shape = check_vector_builtin_shape(program->types, result);
-    if (check_lower_vector_of(writer, result) == 0)
+    const uint8_t kind = check_action_kind(program->types, result);
+    if (kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR)
     {
-        check_lower_unsupported(writer, check_lower_transport_type(program->types, result) ? check_lower_transport_refusal(program->types, result, CHECK_LOWER_TRANSPORT_BUILTIN) :
-                                        check_lower_class(writer, result) == BUSTER_TYPED_CLASS_VECTOR ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
-                                                                                                        "elementwise builtins of scalars");
+        check_lower_unsupported(writer, "elementwise builtins of scalars");
     }
     else if (!shape.integer || shape.element == 0)
     {
         check_lower_unsupported(writer, "elementwise vector builtins of elements of this size");
+    }
+    else if (shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "elementwise vector builtins of more than 1024 elements");
     }
     else if (builtin != CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
     {
@@ -10218,10 +10230,8 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
         row.operand_classes[1] = computed;
         row.result_class = computed;
         const uint32_t operation = check_lower_operation_index(writer, &row);
-        const uint32_t operands[2] = { check_lower_temporary_of(writer, stream->argument_conversions[first].type),
-                                       check_lower_temporary_of(writer, stream->argument_conversions[first + 1].type) };
-        const uint32_t out = check_lower_temporary_of(writer, result);
-        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+        const uint32_t operands[2] = { check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) };
+        const uint32_t out = check_lower_transport_result(writer, result);
         for (uint32_t i = shape.lanes; i-- > 0;)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET, stored, 0);
@@ -10237,13 +10247,13 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
                     check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computed, 0);
                 }
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored, 0);
-                check_lower_element_address(writer, operands[a], i * shape.element);
+                check_lower_transport_at(writer, operands[a], i * shape.element);
             }
             check_lower_element_address(writer, out, i * shape.element);
         }
         for (uint32_t a = 2; a-- > 0;)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, operands[a]);
+            check_lower_transport_source(writer, stream->argument_conversions[first + a].type, operands[a]);
             check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
         }
         writer->vectors = true;
@@ -10504,6 +10514,14 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             writer->vectors = true;
         }
     }
+    else if ((check_lower_transport_type(types, result) ||
+              (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && check_lower_transport_type(types, stream->argument_conversions[first + 1].type))) &&
+             (check_builtin_vector_elementwise(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP) &&
+             !check_lower_libm_builtin(builtin) && !check_lower_strict_round(graph, node, builtin) && builtin != CBUILTIN_ELEMENTWISE_PDEP &&
+             builtin != CBUILTIN_ELEMENTWISE_PEXT && builtin != CBUILTIN_ELEMENTWISE_CLMUL)
+    {
+        check_lower_transport_elementwise(writer, node, builtin, effect->evaluated_argument_count);
+    }
     else if (check_lower_libm_builtin(builtin) || check_lower_strict_round(graph, node, builtin))
     {
         check_lower_vector_calls(writer, node, builtin, effect->evaluated_argument_count);
@@ -10576,6 +10594,13 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         // A matrix builtin's call is an error before it: no unit has a matrix type.
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (((builtin >= CBUILTIN_REDUCE_MAXIMUM && builtin <= CBUILTIN_REDUCE_ASSOC_FADD) &&
+              check_lower_transport_type(types, stream->argument_conversions[first].type)) ||
+             ((builtin == CBUILTIN_REDUCE_MAX || builtin == CBUILTIN_REDUCE_MIN) &&
+              check_vector_builtin_shape(types, stream->argument_conversions[first].type).floating))
+    {
+        check_lower_transport_reduce_floating(writer, node, builtin);
     }
     else if (builtin >= CBUILTIN_REDUCE_MAXIMUM && builtin <= CBUILTIN_REDUCE_ASSOC_FADD)
     {
@@ -11252,6 +11277,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {
         check_lower_operand(writer, node, 0, false, value->type);
+    }
+    else if (((op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR) && check_lower_transport_is_vector(types, value->type)) ||
+             (op == CHECK_OP_CONDITIONAL && check_lower_transport_is_vector(types, type_a)))
+    {
+        check_lower_vector_logical(writer, node);
     }
     else if (((op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_LOGICAL_OR) || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
               (op == CHECK_OP_CONDITIONAL && check_lower_aggregate(writer, type_a))) &&
@@ -13289,18 +13319,19 @@ struct CheckLowerNodeCounts
 };
 
 // The entries a node of a transport vector's type `type` (check_lower_transport_type) may write past a node's bounds, or
-// none for another type: an operator's, a splat's or a cast's pieces of 16 bytes at least (20 entries each), and a vector
-// of bool's bytes past its elements cleared (8 each); with `lanes` (an element-wise conversion, shuffle or reduction),
+// none for another type: an operator's, a splat's or a cast's pieces of 16 bytes at least (48 entries each, including
+// a logical mask's compares, blends and private source copies), and a vector of bool's bytes past its elements cleared
+// (8 each); with `lanes` (an element-wise conversion, shuffle, builtin, reduction or logical operation),
 // 32 an element: a vector of bool's maximum or minimum takes the most, about 24 (its bit's address, load, shift and mask,
 // its conversions, and the mask's update), and as many tasks.
-static uint64_t check_lower_transport_room(const TypeTable* types, TypeId type, bool lanes)
+static uint64_t check_lower_transport_room(const TypeTable* types, TypeId type, bool lanes, bool logical)
 {
     const TypeId base = type != 0 ? type_conversion_operand(types, type) : 0;
     uint64_t room = 0;
-    if (base != 0 && check_lower_transport_type(types, base))
+    if (base != 0 && (check_lower_transport_type(types, base) || ((lanes || logical) && check_lower_transport_is_vector(types, base))))
     {
         const uint64_t bytes = type_size(types, base);
-        room = 20 * (bytes / 16 + 2) + (check_lower_bool_vector(types, base) ? 8 * bytes : 0) + (lanes ? 32 * (uint64_t)check_builtin_vector_lanes(types, base) : 0) + 64;
+        room = 48 * (bytes / 16 + 2) + (check_lower_bool_vector(types, base) ? 8 * bytes : 0) + (lanes ? 32 * (uint64_t)check_builtin_vector_lanes(types, base) : 0) + 64;
     }
     return room;
 }
@@ -13333,17 +13364,18 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         // An element at a time: a vector builtin's (a conversion, a shuffle or a reduction), or a conversion between vectors
         // of other elements (an extended vector's to one of bool).
         const TypeId from = (op == CHECK_OP_CONVERT || op == CHECK_OP_CAST) && left < node ? check_stream_type(program->stream, left) : 0;
-        const bool lanes = op == CHECK_OP_BUILTIN_VECTOR ||
+        const bool logical = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL;
+        const bool lanes = op == CHECK_OP_BUILTIN_VECTOR || logical ||
                            (from != 0 && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) &&
                             type_conversion_operand(types, from) != type_conversion_operand(types, type));
         uint64_t room = 0;
         for (uint32_t i = 0; i < 5; i += 1)
         {
-            const uint64_t here = check_lower_transport_room(types, candidates[i], lanes);
+            const uint64_t here = check_lower_transport_room(types, candidates[i], lanes, logical);
             room = here > room ? here : room;
         }
         counts->transport_entries += room;
-        counts->transport_locals += room != 0 ? 8 : 0;
+        counts->transport_locals += room != 0 ? 12 : 0;
     }
     if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
         (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
@@ -13380,6 +13412,7 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
     const CheckGraph* graph = program->input != NULL ? &program->input->graph : NULL;
     const uint32_t nodes = graph != NULL ? graph->count : 0;
     const bool atomic_types = nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_ATOMIC, types->types.count) != NULL;
+    const bool logical_types = nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_EXT_VECTOR, types->types.count) != NULL;
     // And so do a transport vector's nodes (check_lower_transport_room), which only a unit with a transport vector type
     // has: its vector types are few, and the intrinsics' headers have none.
     bool transport_types = false;
@@ -13405,6 +13438,10 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
         const __m512i floating = _mm512_set1_epi32(CHECK_OP_BUILTIN_FLOAT);
         const __m512i atomic = _mm512_set1_epi32(CHECK_OP_BUILTIN_ATOMIC);
         const __m512i vector = _mm512_set1_epi32(CHECK_OP_BUILTIN_VECTOR);
+        const __m512i logical_not = _mm512_set1_epi32(CHECK_OP_NOT);
+        const __m512i logical_and = _mm512_set1_epi32(CHECK_OP_LOGICAL_AND);
+        const __m512i logical_or = _mm512_set1_epi32(CHECK_OP_LOGICAL_OR);
+        const __m512i conditional = _mm512_set1_epi32(CHECK_OP_CONDITIONAL);
         for (uint32_t first = 0; first < nodes; first += 16)
         {
             const uint32_t left = nodes - first;
@@ -13415,7 +13452,9 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
             counts.integer_builtins += (uint32_t)__builtin_popcount(integer);
             counts.builtins += (uint32_t)__builtin_popcount(builtin);
             counts.atomics += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(active, ops, atomic));
-            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector); lanes != 0; lanes &= lanes - 1)
+            const __mmask16 logical = logical_types ? _mm512_mask_cmpeq_epi32_mask(active, ops, logical_not) | _mm512_mask_cmpeq_epi32_mask(active, ops, logical_and) |
+                                                       _mm512_mask_cmpeq_epi32_mask(active, ops, logical_or) | _mm512_mask_cmpeq_epi32_mask(active, ops, conditional) : 0;
+            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector) | logical; lanes != 0; lanes &= lanes - 1)
             {
                 check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
             }
