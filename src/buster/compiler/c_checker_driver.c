@@ -719,6 +719,28 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 }
             }
         }
+        else if (event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
+        {
+            // An unavailable member's use (check_init_member_use, #147): clang's error, whatever the warning options.
+            const CheckWarningNote* note = event->note_count == 1 && event->note_first < view->note_count ? view->notes + event->note_first : NULL;
+            valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count && note != NULL && note->token < parser->tokens.count;
+            if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
+            {
+                const uint64_t mark = scratch->length;
+                CheckWarningSpelling spell = { 0 };
+                const char* message = check_driver_warning_message(parser, pp, input, types, &spell, event, scratch);
+                const char* text = check_driver_warning_note(parser, pp, input, types, &spell, note, scratch);
+                valid = message != NULL && text != NULL;
+                if (valid)
+                {
+                    const PPOutputDiagnosticNote noted = { .token = parser->tokens.sources[note->token], .message = text };
+                    const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
+                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[event->token], publication, &noted, 1, "%s", message);
+                    valid = !pp->diagnostic_collection_failed;
+                }
+                arena_pop_to(scratch, mark);
+            }
+        }
         else
         {
             const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
@@ -1598,13 +1620,26 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
                             // attribute's message, and the note at it.
                             const CheckInputReport* report = input->reports + index;
-                            const uint32_t used = parser->tokens.names[token];
                             const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
-                            // The note names its declaration: an enumerator's enum's where the enum marks it.
-                            const uint32_t declared = report->note_token < count && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ?
-                                                      parser->tokens.names[report->note_token] : used;
-                            char noted[160];
-                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, declared), intern_bytes(pp->table, declared));
+                            // The names are the tokens' (the note's its declaration's: an enumerator's enum's where the enum
+                            // marks it), or at an anonymous tag's keyword its type's spelling, with its quotes.
+                            const bool typed = input->declared_types != NULL;
+                            const String8 used_type = parser->tokens.kinds[token] != PARSE_KIND_IDENTIFIER && typed ?
+                                                      check_driver_warning_type(parser, pp, input, types, &spell, scratch, input->declared_types[token], 0) : (String8){ 0 };
+                            const bool noted_token = report->note_token < count;
+                            const String8 note_type = noted_token && parser->tokens.kinds[report->note_token] != PARSE_KIND_IDENTIFIER && typed ?
+                                                      check_driver_warning_type(parser, pp, input, types, &spell, scratch, input->declared_types[report->note_token], 0) :
+                                                      (String8){ 0 };
+                            const uint32_t used = parser->tokens.names[token];
+                            const String8 used_name = { .pointer = (char*)intern_bytes(pp->table, used), .length = intern_length(pp->table, used) };
+                            const uint32_t declared = noted_token && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[report->note_token] : used;
+                            const String8 declared_name = { .pointer = (char*)intern_bytes(pp->table, declared), .length = intern_length(pp->table, declared) };
+                            const String8 used_text = used_type.length != 0 ? used_type : used_name;
+                            const String8 declared_text = note_type.length != 0 ? note_type : noted_token || used_type.length == 0 ? declared_name : used_type;
+                            const char* used_quote = used_type.length != 0 ? "" : "'";
+                            const char* note_quote = note_type.length != 0 || (!noted_token && used_type.length != 0) ? "" : "'";
+                            char noted[256];
+                            snprintf(noted, sizeof(noted), "%s%.*s%s has been explicitly marked unavailable here", note_quote, (int)declared_text.length, declared_text.pointer, note_quote);
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = noted,
@@ -1613,7 +1648,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             for (uint64_t copy = 0; copy <= report->value; copy += 1)
                             {
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
-                                                            "'%.*s' is unavailable%s%.*s", (int)intern_length(pp->table, used), intern_bytes(pp->table, used),
+                                                            "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
                                                             message.length != 0 ? ": " : "", (int)message.length, message.pointer);
                             }
                         }

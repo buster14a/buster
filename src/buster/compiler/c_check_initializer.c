@@ -268,18 +268,47 @@ static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarn
     }
 }
 
-// clang's warning at an initializer's use of a member that a deprecated attribute marks (#147, SemaInit's
-// DiagnoseUseOfDecl): at a designator's member name, or at the first token of the value a member takes by its position,
-// "'x' is deprecated" (-Wdeprecated-declarations) with its message and the note at the attribute, as a member access's
-// (check_input_member_uses), where the token's context doesn't drop it (CheckGraph.availability_contexts). An
-// unavailable member's use there gets no error yet.
+// clang's diagnostic at an initializer's use of a member that a deprecated or unavailable attribute marks (#147,
+// SemaInit's DiagnoseUseOfDecl): at a designator's member name, or at the first token of the value a member takes by its
+// position, "'x' is deprecated" (-Wdeprecated-declarations) with its message and the note at the attribute, or the error
+// "'x' is unavailable" with its note at the member's name, as a member access's (check_input_member_uses), where the
+// token's context doesn't drop it (CheckGraph.availability_contexts). The error is staged with the warnings, which the
+// driver gives it with (CHECK_WARNING_EVENT_UNAVAILABLE_USE); a walk whose warnings are quiet (`-w`) has no place for
+// it, and fails at it instead, as an invalid initializer.
 static void check_init_member_use(CheckInitWalker* walker, uint32_t member, uint32_t token)
 {
     const CheckGraph* graph = walker->graph;
     const CheckInputMarkedMember* marked = graph != NULL && graph->marked_member_count != 0 ?
                                            check_marked_member(graph->marked_members, graph->marked_member_count, member) : NULL;
     const uint8_t context = marked != NULL && graph->availability_contexts != NULL ? graph->availability_contexts[token] : 0;
-    if (marked != NULL && !marked->unavailable && !check_marked_dropped(marked, context))
+    const CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
+    if (marked != NULL && marked->unavailable && !check_marked_dropped(marked, context))
+    {
+        const Parser* parser = walker->parser;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .name = parser->tokens.names[marked->name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+            .token = marked->name,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        if (sink != NULL && sink->events == NULL)
+        {
+            check_init_fail(walker, CHECK_INIT_INVALID, token);
+        }
+        check_init_semantic_warning(walker, &event, &note, 1);
+    }
+    else if (marked != NULL && !check_marked_dropped(marked, context))
     {
         const Parser* parser = walker->parser;
         const CheckWarningEvent event =

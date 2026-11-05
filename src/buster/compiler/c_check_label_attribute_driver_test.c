@@ -1065,6 +1065,85 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "__attribute__((deprecated)) struct S g = { 1 };\n"
         "union U { int a [[deprecated]]; float b; } u = { 1 }, v = { .b = 1 };\n"
         "struct S h[2] = { [1].x = 1, [0] = { 2 } };\n",
+        // An unavailable member's use in an initializer is clang's error (check_init_member_use): a designator's, a value's by its
+        // position at each level, a union's first, a compound literal's, an array element's; none in an unavailable declaration's.
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct S a = { .u = 1 };\nstruct S b = { 2, 3 };\n"
+        "void f(void) { struct S c = { .w = 1, .u = 2 }; (void)c; }\n",
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct T { struct S s; int z; };\n"
+        "struct T a = { .s.u = 1 };\nstruct T b = { { 1, 2 }, 3 };\nunion U { int v __attribute__((unavailable)); int x; } c = { 1 };\n"
+        "__attribute__((unavailable)) struct S d = { .u = 1 };\n__attribute__((deprecated)) struct S e = { .u = 1 };\n"
+        "int f(void) { return (struct S){ .u = 2 }.w; }\nstruct S g[2] = { [1].u = 3 };\n",
+        // A marked member's access the evaluator alone reads (check_input_evaluated_members): `typeof`'s operand, a file-scope
+        // array bound, an enumerator's value, a static assertion's; once where the graph reads it too (a variable length array's
+        // bound); none in a marked declaration's specifiers.
+        "struct S { int x __attribute__((deprecated(\"old\"))); int u __attribute__((unavailable)); } s;\ntypeof(s.x) a;\n"
+        "int b[sizeof(s.x)];\nint c[sizeof(s.u)];\nvoid f(void) { typeof(s.x) d; (void)d; }\n",
+        "struct S { int x __attribute__((deprecated(\"old\"))); int y; struct { int z __attribute__((deprecated)); }; } s, *p;\n"
+        "typeof(p->x) a;\ntypeof(s.z) b;\nint c[sizeof(s.x) + sizeof(p->x)];\n__attribute__((deprecated)) typeof(s.x) d;\n"
+        "typeof(s.x) e __attribute__((deprecated));\n"
+        "int f(void) { typeof(p->x) g = 0; return sizeof(s.x) + g + (int)sizeof(typeof(s.y)); }\n"
+        "_Static_assert(sizeof(s.x) == 4, \"\");\nenum { E = sizeof(s.x) };\n"
+        "int h(int n) { int v[sizeof(s.x)]; int w[n + sizeof(p->x)]; return v[0] + w[0]; }\nstruct T { int m[sizeof(s.x)]; };\n",
+        "struct S { int x __attribute__((deprecated(\"old\"))); } *p;\nint h(int n) { int w[n + sizeof(p->x)]; return w[0]; }\n"
+        "int k(int n) { int w[n + p->x]; return w[0]; }\n",
+        // A call that resolves to a deprecated overloadable overload (check_input_overload_uses), through parentheses, a
+        // redeclaration and a block's; none at an address taken through the overload set, nor in a deprecated function.
+        "int f(int) __attribute__((overloadable, deprecated(\"old\")));\nint f(double) __attribute__((overloadable));\n"
+        "int f(int) __attribute__((overloadable));\nint g(void) { return (f)(1) + f(2.0) + f(3); }\n"
+        "__attribute__((deprecated)) int h(void) { return f(1); }\nint k(char) __attribute__((overloadable));\n"
+        "int k(long) __attribute__((overloadable, deprecated));\nint m(void) { int (*q)(long) = k; return k(1L) + q(0); }\n"
+        "void n(void) { int f(int) __attribute__((overloadable)); f(1); }\n",
+        // A member's own mark is its specifiers', parameter lists' and bounds' context (CheckInputReader.member_marks): a later
+        // declarator's isn't the first's, in a struct in a function too.
+        "typedef int D __attribute__((deprecated(\"old\")));\ntypedef int T __attribute__((unavailable(\"gone\")));\n"
+        "struct S { int (*m)(D) __attribute__((deprecated)); D n __attribute__((deprecated)); int (*o)(T) __attribute__((unavailable)); int (*q)(D); };\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\n"
+        "struct S { D a, b __attribute__((deprecated)); D c[sizeof(D)] __attribute__((deprecated)); int d[sizeof(D)] __attribute__((deprecated)); };\n"
+        "void f(void) { struct L { int (*m)(D) __attribute__((deprecated)); } l; (void)l; }\n",
+        // A deprecated anonymous struct's, union's or enum's use (its definition with declarators, a type name's, an anonymous
+        // member's) at its keyword, named `(unnamed at ...)` or `(anonymous at ...)` or by its typedef; an unavailable one's error.
+        "struct __attribute__((deprecated)) { int a; } x;\ntypedef struct __attribute__((deprecated)) { int a; } T;\nT y;\n"
+        "union __attribute__((deprecated(\"m\"))) { int a; } z, w;\n"
+        "void f(void) { struct __attribute__((deprecated)) { int a; } l; (void)l; }\n",
+        "typedef struct __attribute__((deprecated)) { int a; } T, U;\nT a, b;\nU c;\nstruct { int a; } __attribute__((deprecated)) d;\n"
+        "__attribute__((deprecated)) struct __attribute__((deprecated)) { int a; } e;\n"
+        "struct __attribute__((unavailable)) { int a; } *f;\nenum __attribute__((deprecated)) { E0 } g;\n"
+        "int h = sizeof(struct __attribute__((deprecated)) { int a; });\nstruct __attribute__((deprecated)) { int a; };\n"
+        "struct O { struct __attribute__((deprecated)) { int a; } m; struct __attribute__((deprecated)) { int b; }; };\ntypedef T V;\n"
+        "V v;\n",
+        // A typedef that names a marked struct, union or enum takes its mark (ShouldDiagnoseAvailabilityOfDecl): through qualifiers
+        // and typedefs, a definition's marks or a first declaration's own; a block's object's specifiers keep the use, a typedef's
+        // and a member's drop it.
+        "struct __attribute__((deprecated(\"s\"))) S { int a; };\ntypedef struct S T;\nT x, y;\nT *p;\ntypedef T W;\nW w;\n"
+        "typedef struct S *P;\nP q;\nvoid f(T a);\nint g(void) { return sizeof(T); }\n",
+        "struct __attribute__((unavailable(\"gone\"))) S { int a; };\ntypedef struct S T;\nT *p;\ntypedef const struct S CT;\nCT *q;\n"
+        "struct R;\ntypedef struct R TR;\nTR *r0;\nstruct __attribute__((deprecated(\"late\"))) R;\nTR *r1;\n"
+        "enum __attribute__((deprecated)) E { E0 };\ntypedef enum E TE;\nTE e;\n"
+        "typedef struct __attribute__((deprecated(\"m\"))) { int a; } A;\n__attribute__((deprecated)) A a1;\n"
+        "__attribute__((deprecated)) int f(A x) { A y; (void)y; return x.a; }\nint g(void) { return sizeof(A); }\n"
+        "typedef A B __attribute__((deprecated(\"b\")));\nB b;\ntypedef union __attribute__((unavailable)) { int a; } U;\nU *u;\n"
+        "struct H { struct __attribute__((unavailable)) { int z; }; union __attribute__((deprecated)) { int w; } k; };\n"
+        "void h(struct __attribute__((deprecated)) { int a; } *p);\n",
+        "typedef int D __attribute__((deprecated(\"d\")));\nstruct __attribute__((deprecated(\"s\"))) S { int a; };\n"
+        "typedef D X __attribute__((deprecated));\ntypedef int (*F)(D) __attribute__((deprecated));\n"
+        "typedef struct S Y __attribute__((deprecated));\ntypedef int Z[sizeof(D)] __attribute__((deprecated));\n"
+        "typedef D W, V __attribute__((deprecated));\ntypedef struct S Q, P __attribute__((deprecated));\n"
+        "void f(void) { typedef D L __attribute__((deprecated)); }\n",
+        "struct R;\ntypedef struct R TR;\nstruct __attribute__((deprecated(\"def\"))) R { int a; };\nTR x;\nstruct Q;\n"
+        "typedef struct Q TQ;\nstruct __attribute__((deprecated(\"fwd\"))) Q;\nstruct Q { int a; };\nTQ y;\n"
+        "void f(void) { __attribute__((deprecated)) TR z; (void)z; }\n",
+        "typedef int D __attribute__((deprecated(\"d\")));\nstruct __attribute__((deprecated(\"s\"))) S { int a; };\n"
+        "typedef struct S TS;\nvoid f(void) {\n  __attribute__((deprecated)) D a; (void)a;\n"
+        "  D b __attribute__((deprecated)); (void)b;\n  typedef D c __attribute__((deprecated));\n"
+        "  __attribute__((deprecated)) struct S d; (void)d;\n  __attribute__((deprecated)) TS e; (void)e;\n"
+        "  TS g __attribute__((deprecated)); (void)g;\n}\n__attribute__((deprecated)) TS h;\nTS i __attribute__((deprecated));\n",
+        // An attribute that takes no arguments is checked for its subject first (check_input_attribute_subjects' count), not a
+        // type's; and a declarator's type's convention warnings come before the declaration's attributes'
+        // (check_input_attribute_function_types).
+        "void f(void) __attribute__((cold(1)));\n",
+        "int e __attribute__((const(1)));\nint i __attribute__((always_inline(1)));\nint m __attribute__((returns_twice(1)));\n",
+        "int __attribute__((cold)) __stdcall x;\n__attribute__((cold)) int __stdcall y;\nint __stdcall __attribute__((cold)) z;\n"
+        "int __attribute__((unused, cold)) __fastcall w;\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

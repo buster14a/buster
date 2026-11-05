@@ -2868,7 +2868,18 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
                                         rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
                                         check_input_attribute_count_check(counted, check_input_attribute_count(parser, &attribute), &bound);
-            if (count_check != BUSTER_CHECK_COUNT_NONE)
+            // One that takes no arguments, which aren't read, keeps its count's error for after its subject's check
+            // (check_input_attribute_subjects), as clang's handleCommonAttributeFeatures has it: `cold(1)` on a variable
+            // is the subject's warning alone. Not a type's, whose count clang's type processing checks first.
+            const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
+                                        rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY;
+            const bool count_deferred = count_check == BUSTER_CHECK_COUNT_EXACT && bound == 0 && !type_attribute;
+            if (count_deferred)
+            {
+                attribute.count_check = count_check;
+                attribute.count_bound = bound;
+            }
+            else if (count_check != BUSTER_CHECK_COUNT_NONE)
             {
                 check_input_report_argument(reader, attribute.first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, count_check | bound << 8);
                 valid = false;
@@ -5163,6 +5174,12 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
             valid = false;
+            if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+            {
+                attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                attributes->error_first = attribute->first;
+                attributes->error_end = attribute->end;
+            }
         }
         else if (kept && attribute->kind == CHECK_ATTRIBUTE_THREAD_SAFETY)
         {
@@ -5954,6 +5971,23 @@ static uint32_t check_input_name_body(const Parser* parser, uint32_t name, uint3
     return check_input_enum_base_skip(parser, check_input_skip_attributes(parser, name + 1, end), end);
 }
 
+// Whether the token at `token` is a typedef's declarator's name (#147): C_BINDING_TYPEDEF is also every other token's
+// declaration kind, zero, so it is a typedef's where it declares itself and an object (a member doesn't).
+static bool check_input_typedef_declared(const CheckInputReader* reader, uint32_t token)
+{
+    const bool result = token < reader->parser->tokens.count && reader->parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                        reader->declaration_kinds[token] == C_BINDING_TYPEDEF && reader->output->declarations[token] == token && reader->objects != NULL &&
+                        reader->objects[token] != 0;
+    return result;
+}
+
+// Whether the token at `token` is a declarator's name: an object's, a function's, an enumerator's, a tag's or a typedef's.
+static bool check_input_declares(const CheckInputReader* reader, uint32_t token)
+{
+    const bool result = token < reader->parser->tokens.count && (reader->declaration_kinds[token] != 0 || check_input_typedef_declared(reader, token));
+    return result;
+}
+
 // The mark a declarator's name at `name` has: an object's by its declarations (check_input_availability_mark), or null;
 // and a member's, by the record that marks it, as context bits in `*member_bit` (CheckInputReader.member_marks, by its
 // name's token: one load, whatever the unit's marked members).
@@ -5961,7 +5995,7 @@ static const CheckInputAttribute* check_input_declarator_mark(const CheckInputRe
                                                               uint8_t* member_bit)
 {
     const uint32_t count = reader->parser->tokens.count;
-    const bool object = name < count && reader->declaration_kinds[name] != 0;
+    const bool object = name < count && check_input_declares(reader, name);
     const CheckInputAttribute* result = object ? check_input_availability_mark(reader, marks, chain, check_input_deprecated_key(reader, name), name, UINT32_MAX) : NULL;
     *member_bit = name < count && !object && reader->member_marks != NULL ? reader->member_marks[name] : 0;
     return result;
@@ -6127,8 +6161,10 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
             // A marked declarator's parameter lists and array bounds, at any scope, as clang reads their uses in the
             // declaration's context: those after its name, past its groups' `)` (a function pointer's, a function's that
             // returns one), nested lists within them.
-            const uint32_t key = kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] != 0 ? check_input_deprecated_key(reader, t) : count;
-            bool suffix = key < count && marks[key] != 0 && marks[key] - 1 <= t;
+            // A marked member's name is such a declarator too, by its own mark (CheckInputReader.member_marks).
+            const uint32_t key = kind == PARSE_KIND_IDENTIFIER && check_input_declares(reader, t) ? check_input_deprecated_key(reader, t) : count;
+            const uint8_t member_bit = kind == PARSE_KIND_IDENTIFIER && key == count && reader->member_marks != NULL ? reader->member_marks[t] : 0;
+            bool suffix = (key < count && marks[key] != 0 && marks[key] - 1 <= t) || member_bit != 0;
             for (uint32_t at = t + 1; suffix && at < count;)
             {
                 const uint8_t next = parser->tokens.kinds[at];
@@ -6138,7 +6174,11 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
                 const bool list = next == PARSE_KIND_L_PAREN && (next_role == PARSE_ROLE_OPEN_FUNCTION || next_role == PARSE_ROLE_OPEN_CALL) && closer < count &&
                                   closer > at;
                 const bool bound = next == PARSE_KIND_L_SQUARE && closer < count && closer > at;
-                if (list || bound)
+                if ((list || bound) && member_bit != 0)
+                {
+                    check_input_availability_fill_range(parser, contexts, member_bit, at, closer + 1, false);
+                }
+                else if (list || bound)
                 {
                     check_input_availability_fill(reader, contexts, marks, chain, key, t, at, closer + 1, false);
                 }
@@ -6148,6 +6188,144 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
         }
         reader->output->availability_contexts = contexts;
     }
+}
+
+// The tag index of the struct, union or enum `type` is, through qualifiers and alignment, or 0.
+static uint32_t check_input_tag_of(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type_is_valid(types, type) ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const bool tagged = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+    const uint32_t result = tagged ? types->types.index[type_index(bare)] : 0;
+    return result;
+}
+
+// An anonymous tag's deprecated or unavailable mark (#147): its keyword's attributes before `bound`, those after its
+// body among them, as check_input_tag_mark reads them.
+static const CheckInputAttribute* check_input_anonymous_mark(const CheckInputReader* reader, uint32_t keyword, uint32_t bound)
+{
+    const CheckInputAttribute* result = check_input_deprecated_record_before(check_input_attributes_at(reader->output, keyword), bound);
+    return result;
+}
+
+// The overloadable functions' declarations a deprecated attribute marks (#147, CheckInput.marked_overloads): each
+// candidate's by its declarations up to its own, as a redeclaration inherits its attributes, for the calls that select it
+// (check_input_overload_uses). An unavailable one is the selection's error already (BUSTER_CHECK_OVERLOAD_UNAVAILABLE).
+static void check_input_overload_marks(CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t candidates = input->graph.overload_candidate_count;
+    uint32_t marked = 0;
+    for (uint32_t pass = 0; pass < 2 && !input->resource; pass += 1)
+    {
+        // The first pass counts, the second records into the array the count sizes, in the candidates' token order.
+        if (pass == 1 && marked != 0)
+        {
+            input->marked_overloads = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputMarkedMember, marked);
+            input->resource |= input->marked_overloads == NULL;
+        }
+        uint32_t recorded = 0;
+        uint32_t last = 0;
+        for (uint32_t i = 0; i < candidates && (pass == 0 || input->marked_overloads != NULL) && !input->resource; i += 1)
+        {
+            const uint32_t declaration = input->graph.overload_candidates[i].declaration;
+            const CheckInputAttribute* mark = declaration < count ? check_input_availability_mark(reader, marks, chain, check_input_deprecated_key(reader, declaration),
+                                                                                                   declaration, UINT32_MAX) : NULL;
+            const bool deprecated = mark != NULL && mark->kind == CHECK_ATTRIBUTE_DEPRECATED && (recorded == 0 || declaration > last);
+            const bool message = deprecated && mark->argument_first < mark->argument_end && parser->tokens.kinds[mark->argument_first] == PARSE_KIND_STRING;
+            if (deprecated && pass == 1 && recorded < marked)
+            {
+                input->marked_overloads[recorded] = (CheckInputMarkedMember)
+                {
+                    .member = declaration,
+                    .name = declaration,
+                    .attribute = mark->first,
+                    .message = message ? mark->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE,
+                };
+            }
+            recorded += deprecated;
+            last = deprecated ? declaration : last;
+        }
+        marked = pass == 0 ? recorded : marked;
+        input->marked_overload_count = pass == 1 && input->marked_overloads != NULL ? recorded : 0;
+    }
+}
+
+// clang's diagnostic of a use of a marked member at its name `name` (#147, DiagnoseUseOfDecl's of a member expression):
+// "'x' is deprecated" (-Wdeprecated-declarations), with the attribute's message after a colon and a note at the
+// attribute, or the error "'x' is unavailable" (CHECK_INPUT_UNAVAILABLE_USE), with its note at the member's declaration,
+// unless the use's context drops it (CheckInput.availability_contexts, and `specified`, a marked declaration's whose
+// specifiers it is in).
+static void check_input_marked_member_use(CheckInputReader* reader, uint32_t name, const CheckInputMarkedMember* marked, uint8_t specified)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t context = (reader->output->availability_contexts != NULL ? reader->output->availability_contexts[name] : 0) | specified;
+    const bool dropped = check_marked_dropped(marked, context);
+    if (!dropped && marked->unavailable)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, name, CHECK_INPUT_UNAVAILABLE_USE);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = marked->name;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
+            reader->output->reports[before].detail = marked->message != BUSTER_CHECK_WARNING_NO_SOURCE ? marked->message + 1 : 0;
+        }
+    }
+    else if (!dropped)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+            .token = name,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = name + 1,
+            .payload = { .name = parser->tokens.names[name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+            .token = marked->attribute,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_event(reader, &event, &note, 1);
+    }
+}
+
+// The marked members' accesses only the reader's evaluator reads (#147, CheckInputReader.evaluated_members), by their
+// names' tokens: each one's member's index plus one, once, where the graph has no access for check_input_member_uses
+// (`typeof`'s operand, a file-scope array bound). Null for none; check_input_deprecated_uses diagnoses them in turn.
+static uint32_t* check_input_evaluated_members(CheckInputReader* reader)
+{
+    const CheckInput* input = reader->output;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = reader->parser->tokens.count;
+    uint32_t* result = reader->evaluated_member_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    reader->output->resource |= reader->evaluated_member_count != 0 && result == NULL;
+    if (result != NULL)
+    {
+        memset(result, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < reader->evaluated_member_count; i += 1)
+        {
+            const uint32_t name = reader->evaluated_members[i * 2];
+            result[name < count ? name : count] = reader->evaluated_members[i * 2 + 1] + 1;
+        }
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            const uint32_t name = graph->tokens[node] + 1;
+            if ((graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW) && name < count)
+            {
+                result[name] = 0;
+            }
+        }
+        result[count] = 0;
+    }
+    return result;
 }
 
 // clang's diagnostics of a use of what a deprecated or unavailable attribute marks (#147, DiagnoseUseOfDecl's): at each
@@ -6174,10 +6352,29 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
     uint32_t* latest = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
     // Each marked member's name's mark, once (check_input_declarator_mark's lookup, CheckInputReader.member_marks).
     uint8_t* member_marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count + 1);
-    const bool allocated = marks != NULL && chain != NULL && latest != NULL && member_marks != NULL;
+    // The levels and parameter lists open at each body the uses are in (a struct's or union's, a function's, a block's),
+    // innermost last, and whether it is a record's: a declaration's own level is its scope's body's.
+    int32_t* scope_levels = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, int32_t, (uint64_t)count + 1);
+    int32_t* scope_lists = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, int32_t, (uint64_t)count + 1);
+    bool* scope_records = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, bool, (uint64_t)count + 1);
+    // Each tag's first declaration plus one: its name's, or an anonymous one's keyword (a typedef's use reads its tag's
+    // marks by it).
+    const uint32_t tag_count = reader->types->tags.count;
+    uint32_t* tag_keys = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)tag_count + 1);
+    const bool allocated = marks != NULL && chain != NULL && latest != NULL && member_marks != NULL && scope_levels != NULL && scope_lists != NULL && scope_records != NULL &&
+                           tag_keys != NULL;
     reader->output->resource |= !allocated;
     if (allocated)
     {
+        memset(tag_keys, 0, ((uint64_t)tag_count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t tag = reader->declaration_kinds[i] == C_BINDING_TAG_KIND ? check_input_tag_of(reader->types, reader->declared_types[i]) : 0;
+            if (tag != 0 && tag < tag_count && tag_keys[tag] == 0)
+            {
+                tag_keys[tag] = i + 1;
+            }
+        }
         memset(marks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(chain, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(latest, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -6211,16 +6408,19 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             }
         }
         memset(latest, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        check_input_overload_marks(reader, marks, chain);
         // Each token's context (check_input_availability_contexts): a deprecated or unavailable function's body or
         // declaration's initializer, which drops its uses' diagnostics as clang's ShouldDiagnoseAvailabilityInContext does.
         check_input_availability_contexts(reader, marks, chain);
         const uint8_t* contexts = reader->output->availability_contexts;
+        const uint32_t* evaluated = check_input_evaluated_members(reader);
         // Where the function body a use is in ends.
         uint32_t body_end = 0;
         // The brackets open before a use (`(`, `[` and `{` less their closers): a file-scope declaration's own level is 0.
         // And of them, the parameter lists (a function declarator's parentheses, a call's to the vector parser).
         int32_t level = 0;
         int32_t lists = 0;
+        uint32_t scopes = 0;
         for (uint32_t t = 0; t < count; t += 1)
         {
             const uint8_t kind = parser->tokens.kinds[t];
@@ -6232,6 +6432,17 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                      (previous == PARSE_KIND_R_PAREN || previous == PARSE_KIND_R_SQUARE || previous == PARSE_KIND_R_BRACE);
             lists += (previous_role == PARSE_ROLE_OPEN_FUNCTION || previous_role == PARSE_ROLE_OPEN_CALL) -
                      (previous_role == PARSE_ROLE_CLOSE_FUNCTION || previous_role == PARSE_ROLE_CLOSE_CALL);
+            const bool scope_open = previous == PARSE_KIND_L_BRACE &&
+                                    (previous_role == PARSE_ROLE_OPEN_STRUCT || previous_role == PARSE_ROLE_OPEN_BODY || previous_role == PARSE_ROLE_OPEN_BLOCK);
+            scopes -= previous == PARSE_KIND_R_BRACE && scopes != 0 &&
+                      (previous_role == PARSE_ROLE_CLOSE_STRUCT || previous_role == PARSE_ROLE_CLOSE_BODY || previous_role == PARSE_ROLE_CLOSE_BLOCK);
+            if (scope_open)
+            {
+                scope_levels[scopes] = level;
+                scope_lists[scopes] = lists;
+                scope_records[scopes] = previous_role == PARSE_ROLE_OPEN_STRUCT;
+                scopes += 1;
+            }
             if (!inside && role == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
             {
                 body_end = parser->tree.parents[t];
@@ -6273,10 +6484,49 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                 key = check_input_deprecated_enum(reader, declared);
             }
             // The declarations a use's marks are by: those up to what its lookup finds, or a tag's (and attributes) before it.
-            const bool by_tag = tag || by_enum;
-            const uint32_t limit = by_tag ? t - 1 : declared;
+            bool by_tag = tag || by_enum;
+            uint32_t limit = by_tag ? t - 1 : declared;
             const uint32_t marking = key < count ? marks[key] : 0;
-            const bool marked = marking != 0 && marking - 1 <= limit && marking - 1 < t;
+            bool marked = marking != 0 && marking - 1 <= limit && marking - 1 < t;
+            // A typedef its own marks don't mark takes the marks of the struct, union or enum it names, as clang's
+            // ShouldDiagnoseAvailabilityOfDecl looks through an available typedef (and the typedefs it names) to its tag
+            // type: a named tag's by its first declaration, as a tag's use reads them, before the use; an anonymous
+            // one's by its keyword's (check_input_anonymous_mark), whose note names its type (`T` for its typedef).
+            const uint32_t typedef_tag = use && !tag && !marked && !by_enum && check_input_typedef_declared(reader, declared) ?
+                                         check_input_tag_of(reader->types, reader->declared_types[declared]) : 0;
+            const uint32_t typedef_first = typedef_tag != 0 && typedef_tag < tag_count && tag_keys[typedef_tag] != 0 ? tag_keys[typedef_tag] - 1 : count;
+            const bool typedef_anonymous = typedef_first < count && parser->tokens.kinds[typedef_first] != PARSE_KIND_IDENTIFIER;
+            // The tag type's declaration is its definition where one is before the use (which inherits its earlier
+            // declarations' marks), else its first declaration, by its own marks alone (clang's TagType::getDecl).
+            const uint32_t typedef_completion = typedef_first < count && reader->tag_completions != NULL ? reader->tag_completions[typedef_tag] : BUSTER_CHECK_NONE;
+            const bool typedef_defined = typedef_completion != BUSTER_CHECK_NONE && typedef_completion != 0 && typedef_completion <= t;
+            // A tag's attributes gather at its first declaration's name, each read before its bound
+            // (check_input_deprecated_record_before): the first declaration's own are those before its name's end.
+            uint32_t tag_bound = t;
+            if (typedef_first < count && !typedef_anonymous && marks[typedef_first] != 0 && marks[typedef_first] - 1 < t)
+            {
+                key = typedef_first;
+                by_tag = true;
+                limit = t - 1;
+                marked = true;
+                tag_bound = typedef_defined ? t : typedef_first + 1;
+            }
+            // An anonymous struct's, union's or enum's definition with declarators (or in a type name), at its keyword: a
+            // use of its type, as a named one's name is, by its keyword's marks, those after its body among them; and an
+            // anonymous member's, once (its record is "(anonymous at ...)", check_driver_spelling_build).
+            const uint32_t anonymous_body = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ? check_input_skip_attributes(parser, t + 1, count) : count;
+            const uint8_t anonymous_role = anonymous_body < count ? parser->tree.roles[anonymous_body] : PARSE_ROLE_NONE;
+            const uint32_t anonymous_closer = anonymous_body < count ? parser->tree.parents[anonymous_body] : count;
+            const bool anonymous_defines = anonymous_body < count && parser->tokens.kinds[anonymous_body] == PARSE_KIND_L_BRACE &&
+                                           (anonymous_role == PARSE_ROLE_OPEN_STRUCT || anonymous_role == PARSE_ROLE_OPEN_ENUM) && anonymous_closer < count &&
+                                           anonymous_closer > anonymous_body;
+            const uint32_t anonymous_end = anonymous_defines ? check_input_skip_attributes(parser, anonymous_closer + 1, count) : count;
+            const bool anonymous_member = anonymous_end < count && parser->tokens.kinds[anonymous_end] == PARSE_KIND_SEMI && scopes != 0 &&
+                                          scope_records[scopes - 1] && level == scope_levels[scopes - 1];
+            const bool anonymous_use = anonymous_end < count && (parser->tokens.kinds[anonymous_end] != PARSE_KIND_SEMI || anonymous_member);
+            const CheckInputAttribute* anonymous = anonymous_use ? check_input_anonymous_mark(reader, t, anonymous_end) :
+                                                   typedef_anonymous ? check_input_anonymous_mark(reader, typedef_first, t) : NULL;
+            marked |= anonymous != NULL;
             // A use in the specifiers of a declaration itself marked, which clang's delayed diagnostics read in that
             // declaration's context: one before its first declarator, which an attribute marks by its own token. Its worst
             // mark is a context as check_input_availability_contexts' are: a deprecated one drops a deprecated use, an
@@ -6290,14 +6540,18 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             // (check_input_enum_base_context), not the specifiers' scan's.
             const uint32_t base_colon = marked && !tag ? check_input_enum_base_colon(parser, t) : count;
             const bool based = base_colon < count;
-            uint32_t declarator = marked && !inside && !tag && !based ? t + 1 : count;
-            int32_t depth = level;
-            int32_t open_lists = lists;
+            // In a body (a record's, a function's, a block's), from its declaration's own level.
+            // A marked member's access the evaluator alone reads (check_input_evaluated_members) takes the specifiers' context too.
+            const uint32_t evaluated_member = evaluated != NULL ? evaluated[t] : 0;
+            uint32_t declarator = (marked || evaluated_member != 0) && !tag && !anonymous_use && !based ? t + 1 : count;
+            int32_t depth = scopes != 0 ? level - scope_levels[scopes - 1] : level;
+            int32_t open_lists = scopes != 0 ? lists - scope_lists[scopes - 1] : lists;
             // The braces the scan opened: a `}` beyond them closes one open at the use, and a tag's body there (an
             // enumerator's value, a member's bound) isn't the declarator's context; a compound literal's is.
             int32_t braces = 0;
             bool specifiers = true;
-            while (specifiers && declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI)
+            while (specifiers && declarator < count && !check_input_declares(reader, declarator) && member_marks[declarator] == 0 &&
+                   parser->tokens.kinds[declarator] != PARSE_KIND_SEMI)
             {
                 const uint8_t scanned = parser->tokens.kinds[declarator];
                 const uint8_t scanned_role = parser->tree.roles[declarator];
@@ -6313,23 +6567,38 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                 specifiers = !body && !tag_body && (depth > 0 || (scanned != PARSE_KIND_COMMA && scanned != PARSE_KIND_EQUAL));
                 declarator += specifiers;
             }
-            const uint32_t declarator_key = specifiers && open_lists == 0 && declarator < count && reader->declaration_kinds[declarator] != 0 ?
+            const uint32_t declarator_key = specifiers && open_lists == 0 && declarator < count && check_input_declares(reader, declarator) ?
                                             check_input_deprecated_key(reader, declarator) : count;
-            const CheckInputAttribute* enclosing = declarator_key < count ? check_input_availability_mark(reader, marks, chain, declarator_key, declarator, UINT32_MAX) : NULL;
-            const uint8_t specified = based ? check_input_enum_base_context(reader, marks, chain, t, base_colon) : enclosing == NULL ? 0 :
+            // In a function's body, only a typedef's mark is its specifiers' context, or a member's: a block's object's
+            // isn't, whose specifiers clang diagnoses as it reads them.
+            const bool block_object = inside && !(scopes != 0 && scope_records[scopes - 1]) && declarator < count && !check_input_typedef_declared(reader, declarator);
+            const CheckInputAttribute* enclosing = declarator_key < count && !block_object ?
+                                                   check_input_availability_mark(reader, marks, chain, declarator_key, declarator, UINT32_MAX) : NULL;
+            // A marked member's own mark, as an object's (check_input_declarator_mark).
+            const uint8_t member_specified = specifiers && open_lists == 0 && declarator < count && declarator_key == count ? member_marks[declarator] : 0;
+            const uint8_t specified = based ? check_input_enum_base_context(reader, marks, chain, t, base_colon) : member_specified != 0 ? member_specified :
+                                      enclosing == NULL ? 0 :
                                       enclosing->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
             // A definition's name reads the attributes after its body too, which apply to the type its declarators take.
-            const CheckInputAttribute* candidate = marked ? check_input_availability_mark(reader, marks, chain, key, limit, declares ? defined_end : by_tag ? t : UINT32_MAX) :
+            const CheckInputAttribute* candidate = anonymous != NULL ? anonymous :
+                                                   marked ? check_input_availability_mark(reader, marks, chain, key, limit, declares ? defined_end : by_tag ? tag_bound : UINT32_MAX) :
                                                    NULL;
             // A deprecated context drops a deprecated use's warning, an unavailable one an unavailable use's error too.
             const uint8_t context = (contexts != NULL ? contexts[t] : 0) | specified;
+            const CheckInputMarkedMember* evaluated_mark = evaluated_member != 0 ?
+                                                           check_marked_member(reader->output->marked_members, reader->output->marked_member_count, evaluated_member - 1) : NULL;
+            if (evaluated_mark != NULL)
+            {
+                check_input_marked_member_use(reader, t, evaluated_mark, specified);
+            }
             const bool unavailable = candidate != NULL && candidate->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
             // A tag's once for each declarator (check_input_tag_use_copies), anything else's once.
             uint8_t first_declarator = 0;
             bool no_declarator = false;
             const uint32_t copies = candidate == NULL ? 0 :
-                                    tag ? check_input_tag_use_copies(reader, marks, chain, t, contexts != NULL ? contexts[t] : 0, unavailable, &first_declarator,
-                                                                     &no_declarator) :
+                                    anonymous_member ? !check_input_availability_dropped(contexts != NULL ? contexts[t] : 0, unavailable) :
+                                    tag || anonymous_use ? check_input_tag_use_copies(reader, marks, chain, t, contexts != NULL ? contexts[t] : 0, unavailable,
+                                                                                      &first_declarator, &no_declarator) :
                                     !check_input_availability_dropped(context, unavailable);
             const CheckInputAttribute* attribute = copies != 0 ? candidate : NULL;
             // The attribute's message, its first argument's string.
@@ -6338,8 +6607,10 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE)
             {
                 // Its note is at the declaration, not the attribute: at the name of the one the use's lookup finds, or a
-                // tag's latest declaration, which an enumerator's note names.
-                const uint32_t noted = by_tag ? (key < count && latest[key] != 0 ? latest[key] - 1 : key) : declared;
+                // tag's latest declaration, which an enumerator's note names; an anonymous tag's keyword, whose type the
+                // report names.
+                const uint32_t noted = anonymous != NULL ? (anonymous_use ? t : typedef_first) :
+                                       by_tag ? (key < count && latest[key] != 0 ? latest[key] - 1 : key) : declared;
                 const uint32_t before = reader->output->report_count;
                 check_input_report(reader, t, CHECK_INPUT_UNAVAILABLE_USE);
                 if (reader->output->report_count > before)
@@ -6353,7 +6624,7 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             }
             else if (attribute != NULL)
             {
-                const CheckWarningEvent event =
+                CheckWarningEvent event =
                 {
                     .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
                     .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
@@ -6363,13 +6634,26 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
                     .completion = t + 1,
                     .payload = { .name = parser->tokens.names[t], .token = message },
                 };
-                const CheckWarningNote note =
+                // An anonymous tag's names are its type's spelling (BUSTER_CHECK_DEPRECATED_TYPE_NAME): its use's at its
+                // keyword, and its note's, a typedef's use naming the typedef.
+                const TypeId anonymous_type = anonymous != NULL ? reader->declared_types[anonymous_use ? t : typedef_first] : 0;
+                if (anonymous_use)
+                {
+                    event.payload.first_type = anonymous_type;
+                    event.payload.data = BUSTER_CHECK_DEPRECATED_TYPE_NAME;
+                }
+                CheckWarningNote note =
                 {
                     .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
                     .token = attribute->first,
                     .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .payload = { .name = parser->tokens.names[key], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                    .payload = { .name = parser->tokens.names[key < count ? key : t], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 };
+                if (anonymous != NULL)
+                {
+                    note.payload.first_type = anonymous_type;
+                    note.payload.data = BUSTER_CHECK_DEPRECATED_TYPE_NAME;
+                }
                 for (uint32_t copy = 0; copy < copies; copy += 1)
                 {
                     check_input_warning_event(reader, &event, &note, 1);
