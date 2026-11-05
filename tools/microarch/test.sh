@@ -503,6 +503,19 @@ first=$(git -C "$repository" rev-parse HEAD)
 echo second > "$repository/VERSION"
 git -C "$repository" -c user.name=test -c user.email=test@test commit -q -a -m second
 second=$(git -C "$repository" rev-parse HEAD)
+# A producer that fails after a complete archive must not commit the tree.
+real_git=$(command -v git)
+mkdir -p "$work/fakegit"
+cat > "$work/fakegit/git" <<EOF
+#!/usr/bin/env bash
+"$real_git" "\$@"
+status=\$?
+for arg in "\$@"; do [[ \$arg == archive ]] && exit 1; done
+exit \$status
+EOF
+chmod +x "$work/fakegit/git"
+PATH="$work/fakegit:$PATH" REPOSITORY=$repository run build-commit broken "$first" znver4
+expect '[[ $status -ne 0 && ! -f $ROOT/trees/broken/COMMIT && ! -f $ROOT/bin/compiler-broken-znver4 ]]' "build-commit: failed archive producer is refused"
 REPOSITORY=$repository run build-commit candidate "${first:0:8}" znver4
 expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-candidate-znver4") == first && $(cat "$ROOT/bin/compiler-candidate-znver4.commit") == "$first" ]]' "build-commit: builds the named commit, recorded by its full id"
 REPOSITORY=$repository run build-commit candidate "$second" znver4

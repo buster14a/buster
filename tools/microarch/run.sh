@@ -687,7 +687,7 @@ step_build_commit()
     fi
     if [[ ! -f $tree/COMMIT ]]; then
         mkdir -p "$tree"
-        git -C "$repository" archive "$commit" | tar -x -C "$tree" || exit 2
+        (set -o pipefail; git -C "$repository" archive "$commit" | tar -x -C "$tree") || exit 2
         echo "$commit" > "$tree/COMMIT"
     fi
     for arch in "$@"; do
