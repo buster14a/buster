@@ -5337,11 +5337,30 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
 - **Function types' attributes.** A calling convention, `regparm` or GNU's
   `noreturn` on a declarator whose type isn't a function's, or a pointer's,
   array's or aligned typedef's to one, gets clang's "'X' only applies to
-  function types; type here is 'T'" (`check_input_attribute_function_types`).
+  function types; type here is 'T'" (`check_input_attribute_type_warnings`).
   The warning is at the attribute's first token, a C23 one's scope; the name
   is written without its scope, and the type is as clang spells it, its
   typedef first ('T' (aka 'int')). This covers the specifiers' attributes too,
   for each declarator.
+- **Their order and their type.** clang warns of a declarator's function
+  types' attributes as `GetFullTypeForDeclarator` builds its type, before
+  `ProcessDeclAttributes` warns of the declaration's attributes. So
+  `__attribute__((noinline)) void (__stdcall *p)(void);` warns of `__stdcall`
+  first, wherever the type's attribute stands: among the specifiers, at a
+  group's start, after a `*`, or after the declarator. Among themselves:
+  - Where the type is or wraps a function, x86-64's "calling convention is
+    not supported" comes for the specifiers' and the trailing ones first,
+    which clang moves to the function's chunk, then for the chunks' own.
+  - Where it isn't, a chunk's attribute warns as clang meets it, of the type
+    built so far: the pointers before it and the suffixes after its group
+    (`int (__attribute__((regparm(2))) *r);` is 'int',
+    `int * __attribute__((regparm(1))) x;` 'int *'). The specifiers' and the
+    trailing ones warn after them, of the declarator's whole type.
+
+  All of them complete at the declaration's first attribute, an unknown
+  one's too, so they come before its attributes' own checks in this order.
+  The declarator's run keeps its parts' types for this, and its
+  specifiers' attributes (`CheckDeclaratorRun.common_attributes`).
 - **`nonstring`.** On a variable, parameter or field whose type is no pointer
   to a character type or array of one (through arrays of arrays), clang's
   handler warns "'X' attribute only applies to fields or variables of
