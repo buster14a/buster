@@ -212,8 +212,44 @@ static void asm_test_group_section_names(AsmTest* test, const char* directory, b
     }
 }
 
+// Section-symbol metadata cannot currently be represented faithfully in the shared writer. Exercise directives
+// both before and after declaration, for ordinary and dotted names, and require the specific diagnostic.
+static void asm_test_group_section_attributes(AsmTest* test)
+{
+    static const char* const names[] = {"section_name", ".section_name"};
+    static const struct { const char* directive; const char* suffix; } attributes[] = {
+        {".globl", ""}, {".global", ""}, {".local", ""}, {".weak", ""},
+        {".hidden", ""}, {".protected", ""}, {".internal", ""}, {".type", ",@function"}, {".size", ",4"},
+    };
+    for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+    {
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(attributes); a += 1)
+        {
+            for (uint32_t after = 0; after < 2; after += 1)
+            {
+                char section[128];
+                char directive[128];
+                char source[256];
+                const int sec = snprintf(section, sizeof(section), ".section %s,\"G\",@progbits,g,comdat\n", names[n]);
+                const int dir = snprintf(directive, sizeof(directive), "%s %s%s\n", attributes[a].directive, names[n], attributes[a].suffix);
+                const int length = sec > 0 && dir > 0 && (uint64_t)sec < sizeof(section) && (uint64_t)dir < sizeof(directive) ?
+                                   snprintf(source, sizeof(source), "%s%s", after ? section : directive, after ? directive : section) : -1;
+                const bool fits = length > 0 && (uint64_t)length < sizeof(source);
+                asm_test_check(test, fits, "section attribute fixture fits", 0);
+                if (fits)
+                {
+                    const AsmResult result = asm_test_pair(test, (String8){.pointer = source, .length = (uint64_t)length}, 0, X86_ARCH_BASELINE);
+                    asm_test_check(test, result.error != 0 && strcmp(result.error, "section symbol attributes are not supported") == 0,
+                                   "section attributes are diagnosed", result.error);
+                }
+            }
+        }
+    }
+}
+
 static void asm_test_groups(AsmTest* test, const char* directory, bool cross_check)
 {
+    asm_test_group_section_attributes(test);
     asm_test_group_section_names(test, directory, cross_check);
     // One grouped section with a unique name is unambiguous, including a reference before its declaration.
     static const char unique_name[] = ".long plain\n.section plain,\"G\",@progbits,g,comdat\n.long plain\n";

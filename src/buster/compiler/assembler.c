@@ -82,6 +82,8 @@ struct AsmSymbol
     // A mention outside a group declaration, and an expression use (including one cancelled by arithmetic).
     bool ordinary;
     bool referenced;
+    // An explicit binding, visibility, type or size directive named this symbol.
+    bool section_attributes;
     uint8_t flags;
     bool defined;
     bool absolute;
@@ -930,6 +932,10 @@ static void asm_bind_forward_section(AsmParser* parser, String8 name, uint32_t s
         {
             asm_fail(parser, symbol->location, "section name already defined as a symbol");
         }
+        else if (symbol->section_attributes)
+        {
+            asm_fail(parser, symbol->location, "section symbol attributes are not supported");
+        }
         else if (symbol->referenced && !symbol->defined && !symbol->alias && !symbol->section_start)
         {
             symbol->section_start = true;
@@ -944,6 +950,18 @@ static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
     const uint32_t result = asm_symbol_scoped(parser, name, location, false);
     parser->symbols[result].ordinary = true;
     return result;
+}
+
+// Section symbols have ELF attributes of their own, which the shared writer cannot currently preserve. Remember
+// directives before a section's declaration, too, so a later declaration cannot silently change their meaning.
+static void asm_section_attribute(AsmParser* parser, AsmSymbol* symbol, String8 name, uint32_t location)
+{
+    symbol->section_attributes = true;
+    const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+    if (section != 0)
+    {
+        asm_fail(parser, location, "section symbol attributes are not supported");
+    }
 }
 
 static uint32_t asm_numeric(AsmParser* parser, uint32_t digit, bool forward, bool definition, uint32_t location)
@@ -3341,7 +3359,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 asm_fail(parser, location, "binding directive requires a symbol name");
                 break;
             }
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
+            const String8 name = asm_name_text(parser, parser->at++);
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            asm_section_attribute(parser, symbol, name, location);
             symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | binding;
             symbol->explicit_binding = true;
         } while (asm_take(parser, ','));
@@ -3358,7 +3378,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 asm_fail(parser, location, "visibility directive requires a symbol name");
                 break;
             }
-            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, asm_name_text(parser, parser->at++), location)];
+            const String8 name = asm_name_text(parser, parser->at++);
+            AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            asm_section_attribute(parser, symbol, name, location);
             symbol->flags = (symbol->flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility;
         } while (asm_take(parser, ','));
     }
@@ -3372,6 +3394,10 @@ static void asm_directive(AsmParser* parser, uint32_t end)
         {
             const String8 name = asm_name_text(parser, parser->at++);
             AsmSymbol* symbol = &parser->symbols[asm_symbol(parser, name, location)];
+            if (asm_is(parser, token, ".type") || asm_is(parser, token, ".size"))
+            {
+                asm_section_attribute(parser, symbol, name, location);
+            }
             const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
             if (section != 0 && (asm_is(parser, token, ".equ") || asm_is(parser, token, ".equiv") || asm_is(parser, token, ".set")))
             {

@@ -319,7 +319,10 @@ groups. A uniquely named section can itself be a group signature; its section
 symbol is used. Attributed section signatures, other linkage spellings and changes
 to an existing group's flags are diagnosed. Bare section-name expressions
 are diagnosed once multiple section identities have that name: GNU as versions
-2.46 and 2.47 resolve those references differently.
+2.46 and 2.47 resolve those references differently. Binding, visibility, type
+and size directives naming a section are diagnosed before or after its
+declaration: the object writer does not yet preserve these section-symbol
+attributes.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its
