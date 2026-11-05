@@ -42,6 +42,8 @@ elseif(BUSTER_PRINT MATCHES "^(compile|sanitizer|assembly)-flags$")
         message(FATAL_ERROR "BusterPrint.cmake: BUSTER_C_COMPILER is required")
     endif()
     buster_settings_tools("${BUSTER_C_COMPILER}")
+    # The linker decides the static link, and with it the units' BUSTER_HOST_STATIC and the link's -static.
+    buster_settings_linker()
     if(BUSTER_PRINT_CONFIG STREQUAL "Debug")
         set(buster_debug ${BUSTER_DEBUG_CONFIGURATION_DEBUG})
         set(buster_optimization ${BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION})

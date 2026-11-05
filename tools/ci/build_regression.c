@@ -661,6 +661,38 @@ static void check_configurations(void)
         BUILD("build");
         pass("BUSTER_LINKER relinks alone");
     }
+    // A static link never by wild (#652): wild 0.10.0's static executables fault at their first TLS access, so wild by
+    // any name, ld.wild through a symlink among them, links dynamically, and its units compile without
+    // BUSTER_HOST_STATIC, which auto's static link's have.
+    char* which_wild[] = { "sh", "-c", "command -v wild", 0 };
+    if (run("/dev/null", 0, which_wild) == 0)
+    {
+        char wild[PATH_MAX];
+        capture_line(which_wild, wild, sizeof(wild));
+        char alias[PATH_MAX];
+        snprintf(alias, sizeof(alias), "%s/ld.wild", work);
+        unlink(alias);
+        if (symlink(wild, alias) != 0)
+        {
+            fail("can't link %s to %s", alias, wild);
+        }
+        char assignment[PATH_MAX + 16];
+        snprintf(assignment, sizeof(assignment), "BUSTER_LINKER=%s", alias);
+        char* aliased[] = { "env", assignment, "./build.sh", "print-compile-flags", 0 };
+        char* automatic[] = { "env", "BUSTER_LINKER=auto", "./build.sh", "print-compile-flags", 0 };
+        Text aliased_flags = capture(aliased);
+        Text automatic_flags = capture(automatic);
+        const char* const define = "-DBUSTER_HOST_STATIC=1";
+        const bool aliased_static = memmem(aliased_flags.data, aliased_flags.length, define, strlen(define)) != 0;
+        const bool automatic_static = memmem(automatic_flags.data, automatic_flags.length, define, strlen(define)) != 0;
+        free(aliased_flags.data);
+        free(automatic_flags.data);
+        if (aliased_static || !automatic_static)
+        {
+            fail("BUSTER_LINKER=%s (wild) %s statically, auto %s", alias, aliased_static ? "links" : "doesn't link", automatic_static ? "does" : "doesn't");
+        }
+        pass("a static link takes no wild, by any name, and auto's is static");
+    }
 }
 
 // Waits up to `seconds` for `child`, and returns its status, or -1 if it is still running.

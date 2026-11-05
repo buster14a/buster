@@ -991,6 +991,20 @@ static bool check_control_musttail(const CheckInput* input, uint32_t token)
     return low < input->musttail_count && input->musttails[low].statement == token;
 }
 
+// Whether a musttail return's value (`node`, the return's node: its conversion, then any selections) is a call of
+// __builtin_call_with_static_chain (#148), which clang's code generation makes an ordinary call of, the return after it:
+// no tail call, as for every builtin's call (c_check_musttail.c checked its signature).
+static bool check_control_static_chain(const CheckInput* input, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t value = node < graph->count && graph->ops[node] == CHECK_OP_CONVERT ? graph->operand0[node] : node;
+    for (uint32_t steps = 0; value < graph->count && steps < graph->count && graph->ops[value] == CHECK_OP_SELECT; steps += 1)
+    {
+        value = graph->operand0[value];
+    }
+    return value < graph->count && graph->ops[value] == CHECK_OP_BUILTIN_MISC && graph->members[value] == CBUILTIN_CALL_WITH_STATIC_CHAIN;
+}
+
 static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
 {
     if (token != BUSTER_CHECK_NONE)
@@ -1819,7 +1833,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         if (jump != BUSTER_CHECK_NONE)
         {
             const uint8_t kind = parser->tokens.kinds[jump];
-            if (kind == PARSE_KIND_RETURN && input->musttail_count != 0 && check_control_musttail(input, jump))
+            if (kind == PARSE_KIND_RETURN && input->musttail_count != 0 && check_control_musttail(input, jump) &&
+                !check_control_static_chain(input, input->token_nodes[jump]))
             {
                 // A musttail return's call, a tail call: no cleanup is in its scopes (c_check_musttail.c).
                 check_control_entry(writer, CHECK_CONTROL_RETURN, jump, input->token_nodes[jump], BUSTER_CHECK_CONTROL_TAIL);
