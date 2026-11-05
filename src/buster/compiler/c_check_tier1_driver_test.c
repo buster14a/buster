@@ -3159,6 +3159,8 @@ static void check_test_driver_tier1_invalid(CheckTest* test, const char* executa
         unlink(program);
     }
     unlink(source);
+}
+
 // The SSE targets' fixture (#141), for the x86-64 baseline and x86-64-v2, targets without AVX: C's operators on 16-byte
 // vectors of every element type, which the IR computes as its own operations of their lanes by legacy SSE's forms
 // (additions, subtractions, the bitwise operations, words' products and at x86-64-v2 doublewords', the floating
