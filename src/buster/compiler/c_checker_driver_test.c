@@ -3224,6 +3224,24 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
                               strstr(text, "unknown argument: --") == NULL,
                       "an input after -- is not an option; -E is read as a file");
     free(text);
+    // Both entry points must apply command-line policy to #if's ungrouped conversion warning.
+    static const char conversion[] = "#if -1 > 0u\nint a;\n#endif\n";
+    const bool conversion_made = parse_test_write(source, conversion, sizeof(conversion) - 1);
+    for (uint32_t action = 0; action < 2; action += 1)
+    {
+        for (uint32_t policy = 0; policy < 4; policy += 1)
+        {
+            char* arguments[] = { compiler, action == 0 ? "-E" : "-fsyntax-only", policy == 0 ? "-Wall" : "-Werror",
+                                  policy == 2 ? "-w" : policy == 3 ? "-Wno-error" : "-Wall", source, NULL };
+            text = NULL;
+            const int result = conversion_made ? check_test_driver_spawn(arguments, &text) : -1;
+            const bool warning = text != NULL && strstr(text, "warning: left side of operator converted") != NULL;
+            const bool error = text != NULL && strstr(text, "error: left side of operator converted") != NULL;
+            check_test_expect(test, result == (policy == 1 ? 1 : 0) && warning == (policy == 0 || policy == 3) && error == (policy == 1),
+                              "#if conversion warning follows command-line policy through -E and -fsyntax-only");
+            free(text);
+        }
+    }
     unlink(operand);
     unlink(output);
     unlink(source);
