@@ -1764,6 +1764,28 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .baseline = true,
     },
     {
+        // A complement into another register (%2 stays live) and in place (%6 dies), #1425's review.
+        .name = "a 16-byte vector's complement at the x86-64 baseline, apart and in place (#1425's review)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v4i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=16\n"
+                "  %4 = load.v4i32 %3 align=1\n"
+                "  %5 = not.v4i32 %2\n"
+                "  %6 = add.v4i32 %5, %4\n"
+                "  %7 = not.v4i32 %6\n"
+                "  %8 = xor.v4i32 %7, %2\n"
+                "  %9 = address.ptr %0 offset=128\n"
+                "  %10 = store.void %9, %8 align=1\n"
+                "  %11 = address.ptr %0 offset=144\n"
+                "  %12 = store.void %11, %5 align=1\n"
+                "  %13 = ret.void\n"
+                "}\n",
+        .baseline = true,
+    },
+    {
         .name = "vector constants: zeros, every bit, a splat and others",
         .text = "function (ptr) -> void {\n"
                 "b0:\n"
@@ -2759,6 +2781,22 @@ static const char tier1_masks_test_vector[] = "function (ptr) -> v4i32 {\n"
                                               "  %2 = ret.void %1\n"
                                               "}\n";
 
+// A 16-byte vector's comparison and selection, whose mask is an opmask: no SSE target has one, so the baseline refuses
+// them at emission (#1425's review).
+static const char tier1_masks_test_sse_compare[] = "function (ptr) -> void {\n"
+                                                   "b0:\n"
+                                                   "  %0 = param.ptr 0\n"
+                                                   "  %1 = address.ptr %0 offset=0\n"
+                                                   "  %2 = load.v4i32 %1 align=1\n"
+                                                   "  %3 = address.ptr %0 offset=16\n"
+                                                   "  %4 = load.v4i32 %3 align=1\n"
+                                                   "  %5 = vcmp.m8 %2, %4 lt\n"
+                                                   "  %6 = vselect.v4i32 %5, %2, %4\n"
+                                                   "  %7 = address.ptr %0 offset=128\n"
+                                                   "  %8 = store.void %7, %6 align=1\n"
+                                                   "  %9 = ret.void\n"
+                                                   "}\n";
+
 static const char tier1_masks_test_select[] = "function (ptr, i64) -> void {\n"
                                               "b0:\n"
                                               "  %0 = param.ptr 0\n"
@@ -3749,6 +3787,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         tier1_masks_test_fixtures[0].text,
         tier1_masks_test_fixtures[0].text,
         tier1_masks_test_words,
+        tier1_masks_test_sse_compare,
     };
     // The target each is emitted for (selection refusals stop first), and whether it is refused.
     const uint8_t* const targets[] = {
@@ -3757,6 +3796,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         baseline,
         foundation,
         foundation,
+        baseline,
     };
     const bool refused[] = {
         true,
@@ -3764,6 +3804,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         true,
         true,
         false,
+        true,
     };
     const char* const names[] = {
         "a vector result is refused at selection",
@@ -3771,6 +3812,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         "the baseline target has no opmask form",
         "AVX512F alone has no kandb, kmovd or kmovq",
         "AVX512F alone has kmovw and kandw",
+        "the baseline refuses a vector comparison and selection, which have no SSE form",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(texts); c += 1)
     {
@@ -4407,7 +4449,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.native_fixtures == (test.native ? runnable : 0) && test.native_runs == expected_runs,
                                     "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
             tier1_masks_test_expect(&test, test.recomputed != 0, "with rematerialization, general values beside the masks are recomputed");
-            tier1_masks_test_expect(&test, test.refused == 8, "every refusal on both paths");
+            tier1_masks_test_expect(&test, test.refused == 10, "every refusal on both paths");
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");

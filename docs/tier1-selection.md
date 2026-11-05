@@ -930,12 +930,20 @@ from the target's allow-list: whether it allows `vmovdqu` of an xmm register;
 | `CONSTANT`, loads, stores, spills, reloads, call saves | `movups` |
 | `COPY`, edge moves | `movaps` |
 | `BINARY` | the lanes' legacy form (`tier1_select_lane_forms`' SSE column) after `movaps x, left` where the destination isn't the left operand: a commutative integer operation's operands swapped where the right one is in the destination, and any other's right operand copied into xmm15 first, a floating one's too, so that a NaN result is its first operand's, as the IR's is |
+| `NOT` | `pcmpeqd x, x` and `pxor x, operand` where the operand is elsewhere; `pcmpeqd xmm15, xmm15` and `pxor x, xmm15` where it is the destination (#1425's review) |
+
+`COMPARE` and `SELECT` have no SSE records: their masks are opmasks, which no SSE
+target has. They take AVX-512's forms, which the target's allow-list refuses at
+emission (`TIER1_EMIT_TARGET`), as at a VEX target, so a function the decoder
+didn't give them (an IR client's) goes to Tier 0 rather than lose them.
 
 A machine row's roles are placed below 16 as at a VEX target, moved by `movaps`.
 `test-tier1-masks` runs two fixtures natively, at x86-64-v2 and at the baseline
 (without `pmulld`), of every lane's legacy operation in every operand order,
 against the interpreter; their records must all be the target's (its
-allow-list). `test-checker-driver`'s SSE fixture compiles C's operators on
+allow-list). A third, at the baseline, complements a vector into another register
+and in place, and a comparison and selection there must be refused at emission;
+`test-tier1-select` checks those records directly. `test-checker-driver`'s SSE fixture compiles C's operators on
 16-byte vectors of every element type by `--tier1 -march=x86-64` and
 `-march=x86-64-v2`, every function Tier 1's, by both paths and with and without
 rematerialization, and matches clang -O0's output.

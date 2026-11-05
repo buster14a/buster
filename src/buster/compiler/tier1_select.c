@@ -1100,7 +1100,10 @@ static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
 // form (tier1_select_lane_form's legacy column) after its left operand's copy into the destination: a commutative
 // integer operation's operands swapped where the right one is in the destination, and any other's right one copied into
 // xmm15, the class's scratch, first. A floating operation is never swapped, so that a NaN result is its first operand's,
-// as the IR's is (ir_simd_float_operation). There is no NOT, COMPARE or SELECT: the IR has them of AVX-512's rows alone.
+// as the IR's is (ir_simd_float_operation). A NOT is pxor with pcmpeqd's every bit, in the destination where the operand
+// is elsewhere, in xmm15 where it is the destination (#1425's review). COMPARE and SELECT aren't here: their masks are
+// opmasks, which no SSE target has, so they take AVX-512's forms, which the target's allow-list refuses at emission
+// (TIER1_EMIT_TARGET), as at a VEX target.
 static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint8_t x = destination & 15;
@@ -1120,6 +1123,12 @@ static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1Selec
     else if (kind == BUSTER_TIER1_VECTOR_COPY && x != left)
     {
         tier1_select_append(result, tier1_select_float_move(x, left));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_NOT)
+    {
+        const uint8_t ones = x != left ? x : BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_PCMPEQD_X_XM128, ones, ones));
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_PXOR_X_XM128, x, x != left ? left : ones));
     }
     else if (kind == BUSTER_TIER1_VECTOR_BINARY)
     {
@@ -1533,7 +1542,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint8_t left = holes->left & 15;
         const uint8_t right = holes->right & 15;
         const uint32_t kind = holes->scale;
-        if (holes->sse && width == 16)
+        if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
             tier1_select_sse_vector(&result, holes, destination);
         }

@@ -926,6 +926,67 @@ static void tier1_select_test_lane_forms(Tier1SelectTest* test)
     tier1_select_test_expect(test, forms != 0 && uncovered == 0, "every form a vector operation's lanes select is one x86 semantics covers");
 }
 
+// A 16-byte vector's NOT, COMPARE and SELECT at a target without AVX (#1425's review): a NOT is pcmpeqd's every bit and
+// pxor, in the destination where the operand is elsewhere and in xmm15 where it is the destination; a COMPARE's and a
+// SELECT's records are AVX-512's, which the baseline's allow-list refuses, so that emission refuses the function rather
+// than give no records.
+static void tier1_select_test_sse_vectors(Tier1SelectTest* test)
+{
+    uint8_t* baseline = malloc(X86_FORM_COUNT);
+    if (baseline != NULL)
+    {
+        const X86Target base = { .architecture = X86_ARCH_BASELINE };
+        x86_target_forms(&base, baseline);
+        Tier1SelectHoles complement = {
+            .rule = TIER1_RULE_VECTOR,
+            .width = 16,
+            .scale = BUSTER_TIER1_VECTOR_NOT,
+            .sse = true,
+            .destination = 1,
+            .left = 2,
+        };
+        const Tier1SelectRecords apart = tier1_select_expand(&complement);
+        tier1_select_test_expect(test, apart.count == 2 && apart.records[0].form == X86_FORM_PCMPEQD_X_XM128 && apart.records[0].reg == 1 && apart.records[0].rm == 1 &&
+                                     apart.records[1].form == X86_FORM_PXOR_X_XM128 && apart.records[1].reg == 1 && apart.records[1].rm == 2,
+                                 "an SSE vector NOT into another register is pcmpeqd of the destination and pxor of the operand");
+        complement.left = 1;
+        const Tier1SelectRecords same = tier1_select_expand(&complement);
+        tier1_select_test_expect(test, same.count == 2 && same.records[0].form == X86_FORM_PCMPEQD_X_XM128 && same.records[0].reg == BUSTER_TIER1_SELECT_FLOAT_SCRATCH &&
+                                     same.records[0].rm == BUSTER_TIER1_SELECT_FLOAT_SCRATCH && same.records[1].form == X86_FORM_PXOR_X_XM128 && same.records[1].reg == 1 &&
+                                     same.records[1].rm == BUSTER_TIER1_SELECT_FLOAT_SCRATCH,
+                                 "an SSE vector NOT in place is pcmpeqd of xmm15 and pxor of it");
+        bool allowed = true;
+        for (uint32_t r = 0; r < 2; r += 1)
+        {
+            allowed &= x86_target_form_allowed(baseline, apart.records[r].form) && x86_target_form_allowed(baseline, same.records[r].form);
+        }
+        tier1_select_test_expect(test, allowed, "an SSE vector NOT's records are the baseline's");
+        const uint32_t kinds[2] = { BUSTER_TIER1_VECTOR_COMPARE, BUSTER_TIER1_VECTOR_SELECT };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const Tier1SelectHoles masked = {
+                .rule = TIER1_RULE_VECTOR,
+                .width = 16,
+                .scale = (uint8_t)kinds[k],
+                .sse = true,
+                .destination = 1,
+                .left = 2,
+                .right = 3,
+                .third = 4,
+                .condition = IR_LT,
+            };
+            const Tier1SelectRecords records = tier1_select_expand(&masked);
+            bool refused = records.count != 0;
+            for (uint32_t r = 0; r < records.count; r += 1)
+            {
+                refused &= !x86_target_form_allowed(baseline, records.records[r].form);
+            }
+            tier1_select_test_expect(test, refused, k == 0 ? "an SSE vector COMPARE's records are none the baseline allows" : "an SSE vector SELECT's records are none the baseline allows");
+        }
+        free(baseline);
+    }
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -4387,6 +4448,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_plans(&test);
             tier1_select_test_intrinsics(&test);
             tier1_select_test_lane_forms(&test);
+            tier1_select_test_sse_vectors(&test);
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
