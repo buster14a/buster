@@ -1906,7 +1906,10 @@ record dump, as `BuiltinDumpStruct` checks it.
   it, whatever declarator it is part of (an array's, a pointer's, a
   function's: `check_lower_dump_parent`), up to a named one (C's named tags belong to no record), then the
   function whose body holds the outermost, with its parameters' types where
-  it has a written prototype (`struct main()::L::(unnamed)`,
+  it has a written prototype, each as its declaration spells it
+  (`check_lower_dump_parameter`: its declarator's declared type, qualifiers
+  kept, with every typedef its tokens name; an array's or a function's
+  adjusted type, which keeps none) (`struct main()::L::(unnamed)`,
   `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
   function has none.
 - **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool

@@ -218,6 +218,70 @@ static uint32_t check_lower_dump_parent(const CheckLowerDumpBuilder* builder, ui
     return result;
 }
 
+// Whether declaration token `token` is a typedef's name: the typedef keyword among its declaration's specifiers, before
+// it at its own brace depth (a record's body skipped), where a member's declaration meets its record's `{` first.
+static bool check_lower_dump_typedef(const Parser* parser, uint32_t token)
+{
+    uint32_t depth = 0;
+    bool found = false;
+    bool open = true;
+    for (uint32_t t = token; open && !found && t-- > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        found = depth == 0 && kind == PARSE_KIND_TYPEDEF;
+        open = !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE));
+        depth = kind == PARSE_KIND_R_BRACE ? depth + 1 : kind == PARSE_KIND_L_BRACE && depth != 0 ? depth - 1 : depth;
+    }
+    return found;
+}
+
+// The most typedefs a parameter's spelling keeps (check_lower_dump_parameter).
+#define BUSTER_CHECK_DUMP_PARAMETER_ALIASES 16u
+
+// A function scope's parameter `parameter` (its type in the function's type), as its declaration from `begin` to `end`
+// (a segment of the definition's parameter list) spells it, which clang prints (ParmVarDecl::getType's): its declarator's
+// declared type, qualifiers kept, every typedef its tokens name printed for the type it names; an array's or a function's
+// adjusted type, which keeps none, as the function's type has it.
+static String8 check_lower_dump_parameter(CheckLowerDumpBuilder* builder, uint32_t begin, uint32_t end, TypeId parameter)
+{
+    const CheckProgram* program = builder->program;
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const TypeTable* types = program->types;
+    const TypeId adjusted = type_unqualified(type_strip_aligned(types, parameter));
+    const bool known = input->declarations != NULL && input->declaration_kinds != NULL && input->declared_types != NULL;
+    TypeId alias_types[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
+    String8 alias_names[BUSTER_CHECK_DUMP_PARAMETER_ALIASES];
+    uint32_t aliases = 0;
+    TypeId printed = parameter;
+    bool named = false;
+    for (uint32_t t = begin; known && t < end && t < input->token_count; t += 1)
+    {
+        const uint32_t resolved = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? input->declarations[t] : BUSTER_CHECK_NONE;
+        const uint32_t identifier = parser->tokens.names[t];
+        if (resolved == t && !named)
+        {
+            // The parameter's own declarator, the first identifier of its declaration of its type that declares itself.
+            const TypeId declared = input->declared_types[t];
+            const TypeId bare = type_is_valid(types, declared) ? type_unqualified(type_strip_aligned(types, declared)) : 0;
+            const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+            named = bare == adjusted || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION;
+            printed = named && bare == adjusted ? declared : parameter;
+        }
+        else if (resolved != BUSTER_CHECK_NONE && resolved != t && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF &&
+                 aliases < BUSTER_CHECK_DUMP_PARAMETER_ALIASES && identifier < program->identifiers->count && check_lower_dump_typedef(parser, resolved))
+        {
+            alias_types[aliases] = type_unqualified(type_strip_aligned(types, input->declared_types[resolved]));
+            alias_names[aliases++] = (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
+        }
+    }
+    TypeNames names = builder->names;
+    names.alias_types = alias_types;
+    names.alias_names = alias_names;
+    names.alias_count = aliases;
+    return type_print(types, builder->scratch, printed, (String8){ 0 }, &names, builder->options);
+}
+
 // The scope a function gives the record whose body opens at `open` (NamedDecl::printNestedNameSpecifier's): the function
 // whose body holds it, as its name and, with a prototype, its parameters' types (and "..."), then "::"; nothing outside
 // a function. Writes it to `text`, of `room` bytes, and returns its length (`room` or more where it doesn't fit).
@@ -248,12 +312,29 @@ static uint64_t check_lower_dump_function_scope(CheckLowerDumpBuilder* builder, 
         const TypeId* parameters = written && (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? type_parameters(types, function, &count) : NULL;
         count = parameters != NULL ? count : 0;
         length += (uint64_t)snprintf(text, room, "%s(", (const char*)intern_bytes(program->identifiers, identifier));
+        // The parameters' declarations: the list after the name, cut at its own commas (a parameter's segment is
+        // empty where the list isn't found, whose parameter prints as the function's type has it).
+        const uint32_t list = declaration + 1 < parser->tokens.count && parser->tokens.kinds[declaration + 1] == PARSE_KIND_L_PAREN ? declaration + 1 : 0;
+        uint32_t cursor = list + 1;
         for (uint32_t p = 0; p < count && length < room; p += 1)
         {
+            uint32_t end = cursor;
+            uint32_t depth = 0;
+            bool open_list = list != 0;
+            while (open_list && end < parser->tokens.count)
+            {
+                const uint8_t kind = parser->tokens.kinds[end];
+                const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+                const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+                open_list = !(depth == 0 && (closer || kind == PARSE_KIND_COMMA));
+                depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+                end += open_list ? 1 : 0;
+            }
             const uint64_t mark = builder->scratch->length;
-            const String8 printed = type_print(types, builder->scratch, parameters[p], (String8){ 0 }, &builder->names, builder->options);
+            const String8 printed = check_lower_dump_parameter(builder, list != 0 ? cursor : 0, list != 0 ? end : 0, parameters[p]);
             length += (uint64_t)snprintf(text + length, room - length, "%s%.*s", p != 0 ? ", " : "", (int)printed.length, printed.pointer);
             arena_pop_to(builder->scratch, mark);
+            cursor = end + 1;
         }
         const bool variadic = parameters != NULL && (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
         length += length < room ? (uint64_t)snprintf(text + length, room - length, "%s)::", variadic ? count != 0 ? ", ..." : "..." : "") : 0;
@@ -423,23 +504,6 @@ static TypeId check_lower_dump_promoted(const TypeTable* types, TypeId type, uin
         result = type_promote(types, bare);
     }
     return result;
-}
-
-// Whether declaration token `token` is a typedef's name: the typedef keyword among its declaration's specifiers, before
-// it at its own brace depth (a record's body skipped), where a member's declaration meets its record's `{` first.
-static bool check_lower_dump_typedef(const Parser* parser, uint32_t token)
-{
-    uint32_t depth = 0;
-    bool found = false;
-    bool open = true;
-    for (uint32_t t = token; open && !found && t-- > 0;)
-    {
-        const uint8_t kind = parser->tokens.kinds[t];
-        found = depth == 0 && kind == PARSE_KIND_TYPEDEF;
-        open = !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE));
-        depth = kind == PARSE_KIND_R_BRACE ? depth + 1 : kind == PARSE_KIND_L_BRACE && depth != 0 ? depth - 1 : depth;
-    }
-    return found;
 }
 
 // The lines of a dump of a record of `record` (dumpUnnamedRecord and dumpRecordValue's), by an explicit stack of the
