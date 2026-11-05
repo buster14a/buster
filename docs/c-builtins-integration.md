@@ -1928,13 +1928,31 @@ record dump, as `BuiltinDumpStruct` checks it.
   in its record's body (`check_lower_dump_member`), from the token past the
   body's `}` (`CheckGraph.tag_completions`, which the deferred reader's merge
   maps for records its lanes complete), and its typedef specifier
-  (`check_input_typedef_spelling`) gives the alias `type_print` prints. An
+  (`check_input_typedef_spelling`) gives the alias `type_print` prints. A
+  typedef's name covers its own qualifiers but those its declaration writes
+  with it, which print before it as clang prints them (`CI`, `const CI`,
+  `volatile CI` of a `const int`'s `CI`: `TypeNames.alias_covered`,
+  `check_lower_dump_alias`). Each typedef names the place it is written
+  alone: the declaration's specifier sequences, its own then each nested
+  parameter's, are listed in source order with the typedef among each
+  (`check_lower_dump_places`), the order `type_print` prints its specifiers
+  in, which takes the k-th one's alias for the k-th it prints
+  (`TypeNames.alias_order`), so `int (*)(I)` keeps its `int`; a level an
+  alias names has no suffix of its own, which its AFTER and POINTER_END frames
+  ask of that level alone (`TypePrinter.aliased`, by each TYPE frame's id and
+  depth), so `int (*(*)(FP))(int)` keeps its return's `(int)`. Where the
+  counts differ (a declaration its walk doesn't model), the typedefs apply by
+  type, as before. An
   unnamed record's canonical name has its scope, as clang's
   `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
   it, whatever declarator it is part of (an array's, a pointer's, a
   function's: `check_lower_dump_parent`), up to a named one (C's named tags belong to no record), then the
   function whose body holds the outermost, with its parameters' types where
-  it has a written prototype (`struct main()::L::(unnamed)`,
+  it has a written prototype, each as its declaration spells it
+  (`check_lower_dump_parameter`: its declarator's declared type, qualifiers
+  kept, the first identifier outside a record body its specifiers define that
+  declares itself, with every typedef its tokens name; an array's or a
+  function's adjusted type, which keeps none) (`struct main()::L::(unnamed)`,
   `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
   function has none.
 - **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool

@@ -1079,16 +1079,19 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
     unlink(outputs[2]);
 }
 
-// __builtin_dump_struct by the driver (#148): a program of clang's dumps of records (every kind of field: the integer types,
-// bool and the character types as numbers, size_t's, ptrdiff_t's and intmax_t's typedefs, enums, the floating types,
-// strings, pointers, arrays, bit-fields and unnamed ones, anonymous members, nested and unnamed records with their
-// scopes (a pointer member's record's too), those of records in functions, of parameters, of no written prototype,
-// unions, vectors, a packed record, _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its
-// typedefs), through printf, a variadic
-// printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer through a
-// pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls, the rest of the
-// arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and without it, each
-// printing what clang's build does.
+// __builtin_dump_struct by the driver (#148): a program of clang's dumps of records (every kind of field: the integer
+// types, bool and the character types as numbers, size_t's, ptrdiff_t's and intmax_t's typedefs, enums, the floating
+// types, strings, pointers, arrays, bit-fields and unnamed ones, anonymous members, nested and unnamed records with
+// their scopes (a pointer member's record's too), those of records in functions, of parameters as their declarations
+// spell them (a record's array member among a parameter's tokens), of no written prototype, typedefs of qualified types
+// with and without qualifiers written with them, a typedef named in one place of a function pointer's types and not in
+// another of the same type (its return or its parameter, fields and parameters alike), a typedef of a function pointer
+// or an array named where the same type is spelled out elsewhere in the declaration, unions, vectors, a packed record,
+// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs), through printf, a
+// variadic printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer
+// through a pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls,
+// the rest of the arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and
+// without it, each printing what clang's build does.
 static void check_test_driver_dump_struct(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char program[] =
@@ -1180,6 +1183,45 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __builtin_dump_struct(&r.in, printf);\n"
                                   "}\n"
                                   "static void old_style(a) int a; { struct Old { struct { int k; } in; } r = { { a } }; __builtin_dump_struct(&r.in, printf); }\n"
+                                  "typedef int Arr4[4];\n"
+                                  "static void spelled(size_t n, cstr text, uint8_t *bytes, const size_t c, Arr4 arr, int (*cb)(size_t), int plain, ...)\n"
+                                  "{\n"
+                                  "    (void)n; (void)text; (void)bytes; (void)c; (void)arr; (void)cb;\n"
+                                  "    struct Spelled { struct { int k; } in; } r = { { plain } };\n"
+                                  "    __builtin_dump_struct(&r.in, printf);\n"
+                                  "}\n"
+                                  "typedef const int CI;\n"
+                                  "typedef int *const PC;\n"
+                                  "struct Qualified { CI ci; PC pc; const CI cci; volatile CI vci; CI const cic; };\n"
+                                  "static void qualified(CI x, PC p, const struct { int values[4]; } *const arg)\n"
+                                  "{\n"
+                                  "    (void)x; (void)p; (void)arg;\n"
+                                  "    struct Inner { struct { int n; } inner; } r = { { x } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
+                                  "typedef int I;\n"
+                                  "struct Placed { int (*a)(I); I (*b)(int); I c, (*d)(long), e; I (*(*f)(int))(I); size_t (*h)(const char *, ...); int (*k)(void); };\n"
+                                  "static void placed_return(int (*cb)(I))\n"
+                                  "{\n"
+                                  "    (void)cb;\n"
+                                  "    struct Outer1 { struct { int value; } inner; } r = { { 1 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
+                                  "static void placed_parameter(I (*cb)(int), I (*(*nested)(int))(I), ...)\n"
+                                  "{\n"
+                                  "    (void)cb; (void)nested;\n"
+                                  "    struct Outer2 { struct { int value; } inner; } r = { { 2 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
+                                  "typedef int (*FP)(int);\n"
+                                  "typedef int A4[4];\n"
+                                  "struct Repeated { int (*(*a)(FP))(int); FP (*b)(int (*)(int)); A4 *p; int (*q)[4]; A4 *(*r)(int (*)[4]); };\n"
+                                  "static void repeated(int (*(*cb)(FP))(int), int (*(*rev)(int (*)(int)))(FP))\n"
+                                  "{\n"
+                                  "    (void)cb; (void)rev;\n"
+                                  "    struct Outer3 { struct { int x; } inner; } r = { { 3 } };\n"
+                                  "    __builtin_dump_struct(&r.inner, printf);\n"
+                                  "}\n"
                                   "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
                                   "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
                                   "static struct S s;\n"
@@ -1233,6 +1275,17 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __typeof__(*pointee.p) pointed = { 42 };\n"
                                   "    pointee.p = &pointed;\n"
                                   "    __builtin_dump_struct(pointee.p, printf);\n"
+                                  "    spelled(1, \"t\", 0, 2, 0, 0, n);\n"
+                                  "    struct Qualified q = { 1, 0, 2, 3, 4 };\n"
+                                  "    __builtin_dump_struct(&q, printf);\n"
+                                  "    qualified(n, 0, 0);\n"
+                                  "    struct Placed placed = { 0 };\n"
+                                  "    __builtin_dump_struct(&placed, printf);\n"
+                                  "    placed_return(0);\n"
+                                  "    placed_parameter(0, 0);\n"
+                                  "    struct Repeated repeated_fields = { 0 };\n"
+                                  "    __builtin_dump_struct(&repeated_fields, printf);\n"
+                                  "    repeated(0, 0);\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];
