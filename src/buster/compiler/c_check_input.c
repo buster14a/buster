@@ -2682,10 +2682,6 @@ static bool check_input_attribute_only(const Parser* parser, uint32_t first, uin
             const uint32_t close = open < end ? parser->tree.parents[open] : end;
             token = close > open && close < end ? close + 1 : end;
         }
-        else if (kind == PARSE_KIND_EXTENSION)
-        {
-            token += 1;
-        }
         else
         {
             break;
@@ -6142,7 +6138,13 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             }
             else
             {
+                const uint32_t reports = reader->output->report_count;
                 check_input_report(reader, parameter, CHECK_INPUT_KR_IMPLICIT_INT);
+                if (reader->output->report_count != reports)
+                {
+                    // The missing type becomes known when the old-style declaration list ends, after its parser errors.
+                    reader->output->reports[reports].completion = body;
+                }
                 valid = false;
             }
         }
