@@ -42,6 +42,7 @@
 #include <stdio.h>
 
 #include "host_isa.h"
+#include "baked.h"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
 // unit of its own, such as a benchmark's, has them static, as every other function here.
@@ -339,7 +340,7 @@ _Static_assert(sizeof(parse_keyword_kinds) / sizeof(parse_keyword_kinds[0]) == C
 // The parser kind of each kind of the preprocessor's output (a C_TOKEN_*, a keyword's BUSTER_PP_KIND_KEYWORD + id - 1,
 // or BUSTER_PP_KIND_PRAGMA_END), for parse_tokens_from_output's lookup: UNKNOWN for what C doesn't use after
 // preprocessing (`#`, `##`, and C++'s `.*`, `->*` and `<=>`). parse_kind_table_initialize fills it.
-static uint8_t parse_kind_table[256] __attribute__((aligned(64)));
+static BUSTER_BAKED_FRONTEND uint8_t parse_kind_table[256] __attribute__((aligned(64)));
 
 static void parse_kind_table_initialize(void)
 {
@@ -2121,7 +2122,7 @@ BUSTER_INLINE void parse_statement_else(ParseScalar* parser, uint32_t token)
 #define BUSTER_PARSE_ROLE_INFO(role) ((uint32_t)parse_role_levels[role] | (uint32_t)parse_role_left_thresholds[role] << 8 | \
                                       (uint32_t)parse_role_right_thresholds[role] << 16 | (uint32_t)parse_role_rules[role] << 24)
 
-static uint32_t parse_role_info[PARSE_ROLE_COUNT];
+static BUSTER_BAKED_FRONTEND uint32_t parse_role_info[PARSE_ROLE_COUNT];
 
 static void parse_role_info_initialize(void)
 {
@@ -5795,8 +5796,8 @@ struct ParseKernels
 // K1, brackets: the scalar twin
 
 // The bracket deltas: of ( [ { by kind, for the first pass, and of every group by role, for the second.
-static int8_t parse_kind_deltas[128];
-static int8_t parse_role_deltas[128];
+static BUSTER_BAKED_FRONTEND int8_t parse_kind_deltas[128];
+static BUSTER_BAKED_FRONTEND int8_t parse_role_deltas[128];
 
 static void parse_kernels_init_tables(void)
 {
@@ -7139,7 +7140,7 @@ struct ParseCheckTables
     uint64_t declaration_modes;
 };
 
-static ParseCheckTables parse_check_tables;
+static BUSTER_BAKED_FRONTEND ParseCheckTables parse_check_tables;
 
 BUSTER_INLINE bool parse_class_set_has(const ParseClassSet* set, uint8_t c)
 {
@@ -8498,7 +8499,7 @@ struct ParseShifts
 #define BUSTER_PARSE_WORD_BYTES 0x5555555555555555ull
 #define BUSTER_PARSE_DWORD_BYTES 0x1111111111111111ull
 
-static ParseShifts parse_shifts;
+static BUSTER_BAKED_FRONTEND ParseShifts parse_shifts;
 
 static void parse_shifts_init(void)
 {
@@ -8770,7 +8771,7 @@ struct ParseParentTables
     uint16_t weak_ties[32];
 };
 
-static ParseParentTables parse_parent_tables;
+static BUSTER_BAKED_FRONTEND ParseParentTables parse_parent_tables;
 
 static void parse_parent_tables_init(void)
 {
@@ -8979,7 +8980,7 @@ struct ParseRoleTables
     uint8_t fixed_features[16];
 };
 
-static ParseRoleTables parse_role_tables;
+static BUSTER_BAKED_FRONTEND ParseRoleTables parse_role_tables;
 
 static void parse_role_tables_init(void)
 {
@@ -10113,7 +10114,7 @@ static void parse_after_colons_avx512(ParseKernels* kernels, uint32_t count)
 #define BUSTER_PARSE_STATEMENT_OWNED (BUSTER_PARSE_STATEMENT_TERMINATOR | BUSTER_PARSE_STATEMENT_HEAD | BUSTER_PARSE_STATEMENT_WHILE)
 #define BUSTER_PARSE_STATEMENT_ENDS (BUSTER_PARSE_STATEMENT_TERMINATOR | BUSTER_PARSE_STATEMENT_CLOSE)
 
-static uint8_t parse_statement_classes[128];
+static BUSTER_BAKED_FRONTEND uint8_t parse_statement_classes[128];
 
 static void parse_statement_tables_init(void)
 {
@@ -11400,7 +11401,7 @@ struct ParseCheckVectorTables
     uint32_t pseudo_groups;
 };
 
-static ParseCheckVectorTables parse_check_vector;
+static BUSTER_BAKED_FRONTEND ParseCheckVectorTables parse_check_vector;
 
 // K6's vector tables, from its tables and the twin's own functions: every class's refinement, mode and group the
 // kernel looks up is the twin's.
@@ -12573,10 +12574,11 @@ static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* pa
     return result;
 }
 
-static bool parse_tables_ready;
+static BUSTER_BAKED_FRONTEND bool parse_tables_ready;
 
-// The tables every parse reads, built once.
-static void parse_tables_initialize(void)
+// The tables every parse reads, built once, and baked into the executable (baked.h): a compile of the C driver's starts
+// with them built. bake-tables runs this from the checker's unit, which reaches the home's copies as every unit does.
+BUSTER_PARSER_ENTRY bool parse_tables_initialize(void)
 {
     if (!parse_tables_ready)
     {
@@ -12591,6 +12593,13 @@ static void parse_tables_initialize(void)
         parse_check_vector_init();
         parse_tables_ready = true;
     }
+    return true;
+}
+
+// Whether the tables are built: from the start, in a baked executable.
+BUSTER_PARSER_ENTRY __attribute__((unused)) bool parse_tables_initialized(void)
+{
+    return parse_tables_ready;
 }
 
 BUSTER_PARSER_ENTRY bool parse_initialize(Parser* parser, const ParseOptions* options, CLanguage language)
