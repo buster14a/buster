@@ -100,6 +100,8 @@ static bool tier1_select_range_zero(const IrFunction* function, uint32_t value)
 static uint32_t tier1_select_range_condition(const IrFunction* function, uint32_t value, bool* negated)
 {
     bool walking = true;
+    uint32_t comparison = BUSTER_IR_NONE;
+    bool comparison_negated = *negated;
     for (uint32_t depth = 0; walking && value < function->instruction_count && depth < BUSTER_TIER1_SELECT_CANONICAL_PASSES; depth += 1)
     {
         const uint32_t op = function->op[value];
@@ -110,6 +112,8 @@ static uint32_t tier1_select_range_condition(const IrFunction* function, uint32_
         else if (op == IR_ICMP && function->c[value] <= IR_NE &&
                  (tier1_select_range_zero(function, function->b[value]) || tier1_select_range_zero(function, function->a[value])))
         {
+            comparison = value;
+            comparison_negated = *negated;
             *negated ^= function->c[value] == IR_EQ;
             value = tier1_select_range_zero(function, function->b[value]) ? function->a[value] : function->b[value];
         }
@@ -117,6 +121,13 @@ static uint32_t tier1_select_range_condition(const IrFunction* function, uint32_
         {
             walking = false;
         }
+    }
+    if ((value >= function->instruction_count || function->op[value] != IR_ICMP) && comparison != BUSTER_IR_NONE)
+    {
+        // Peeling reaches an arbitrary integer in x == 0 or x != 0. Its last comparison is still the guard;
+        // restore the wrapper polarity from before that comparison, rather than discarding the useful test.
+        value = comparison;
+        *negated = comparison_negated;
     }
     return value;
 }

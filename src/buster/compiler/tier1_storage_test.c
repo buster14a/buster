@@ -493,7 +493,7 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
 {
     const uint32_t samples[] = { 0, 1, 127, 128, 65535, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX };
     uint64_t random = UINT64_C(0x76e31219cafe0921);
-    for (uint32_t shape = 0; shape < 14; shape += 1)
+    for (uint32_t shape = 0; shape < 18; shape += 1)
     {
         const uint64_t input_mark = test->input.length;
         const IrSizes sizes = { .instruction_count = 12, .block_count = 3, .constant_count = 3, .parameter_count = 2 };
@@ -506,7 +506,8 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
                                        shape == 3 || shape == 13 ? IR_ULE : shape == 4 ? IR_UGT : shape == 5 ? IR_GT : shape == 6 ? IR_EQ : shape == 7 ? IR_NE : IR_GE;
             const bool bounded = (shape >= 2 && shape <= 4) || shape == 9;
             const uint32_t limit = shape == 8 ? 1 : bounded || shape == 5 || shape >= 12 ? 4 : 2;
-            const bool proven = shape < 7 || shape == 12;
+            const bool proven = shape < 7 || shape == 12 || shape == 14 || shape == 16 || shape == 17;
+            const uint32_t source = shape >= 14 ? 3 : 5;
             function.parameter_types[0] = IR_I32;
             function.parameter_types[1] = IR_I32;
             function.result_type = IR_I64;
@@ -526,10 +527,18 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
             }
             tier1_select_test_node(&function, 5, shape == 11 ? IR_COPY : IR_OR, IR_I32, 0, shape == 11 ? BUSTER_IR_NONE : 2, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 6, IR_ICMP, IR_I1, shape == 4 ? limit : 5, shape == 4 ? 5 : limit, predicate);
+            if (shape >= 14)
+            {
+                tier1_select_test_node(&function, 3, IR_OR, IR_I32, 0, 2, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 4, IR_ICMP, IR_I1, 3, 2, shape == 17 ? IR_NE : IR_EQ);
+                tier1_select_test_node(&function, 5, IR_ZEXT, IR_I32, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 6, shape == 16 ? IR_COPY : IR_ICMP, IR_I1, shape == 16 ? 4 : 5,
+                                       shape == 16 ? BUSTER_IR_NONE : 2, shape == 16 ? BUSTER_IR_NONE : shape == 14 ? IR_NE : IR_EQ);
+            }
             tier1_select_test_node(&function, 7, IR_CBR, IR_VOID, 6, shape == 1 ? 2 : 1, shape == 1 ? 1 : 2);
-            tier1_select_test_node(&function, 8, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 8, IR_SEXT, IR_I64, source, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            tier1_select_test_node(&function, 10, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 10, IR_SEXT, IR_I64, source, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 11, shape == 10 ? IR_BR : IR_RET, IR_VOID, shape == 10 ? 1 : 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
             for (uint32_t path = 0; path < 2; path += 1)
             {
@@ -546,6 +555,11 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
                     {
                         tier1_emit_test_expect(test, plan.patterns[8].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
                                                "only a dominating nonnegative edge and real zero storage remove the signed conversion");
+                        if (plan.patterns[8].rule != (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND))
+                        {
+                            fprintf(stderr, "  scoped conversion shape=%u path=%u pressure=%u rule=%u expected=%u\n", shape, path, pressure,
+                                    plan.patterns[8].rule, proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND);
+                        }
                         const Tier1EmitOptions options = {
                             .certify = true,
                             .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),

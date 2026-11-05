@@ -2391,6 +2391,10 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
                     const uint32_t rule = shape == 20 ? TIER1_RULE_REGISTER : shape == 27 || shape == 28 || shape == 30 ? TIER1_RULE_LEA_ADD : load && shape != 18 && shape != 29 ? TIER1_RULE_LOAD_ADDRESS : shape == 2 || shape == 4 || shape == 6 || shape == 11 || shape == 13 || shape == 19 || shape == 22 ? TIER1_RULE_COPY :
                                           sign ? TIER1_RULE_SIGN_EXTEND : TIER1_RULE_ZERO_EXTEND;
                     tier1_select_test_expect(test, plan.patterns[converted].rule == rule, "range and physical-storage proofs choose the required extension");
+                    if (plan.patterns[converted].rule != rule)
+                    {
+                        fprintf(stderr, "  known-bit shape=%u path=%u rule=%u expected=%u\n", shape, path, plan.patterns[converted].rule, rule);
+                    }
                     if (shape == 20)
                     {
                         tier1_select_test_expect(test, plan.covered[3] && plan.patterns[converted].width == 8 && plan.patterns[converted].values[0] == 2 && plan.patterns[converted].values[1] == 2,
