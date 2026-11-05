@@ -4309,7 +4309,7 @@ static bool check_test_driver_clock_text(char* text, size_t capacity, bool syste
 static void check_test_driver_clock_printer(CheckTest* test)
 {
     bool printed = true;
-    for (uint32_t failed = 0; failed < 2; failed += 1)
+    for (uint32_t failed = 0; failed < 4; failed += 1)
     {
         CheckClock stage_clock;
         check_clock_start(&stage_clock);
@@ -4317,14 +4317,15 @@ static void check_test_driver_clock_printer(CheckTest* test)
         // one part in ten thousand, which the parts' ratios below allow.
         stage_clock.monotonic.tv_sec -= 1;
         stage_clock.last = stage_clock.start + 1000000000ull;
-        stage_clock.expression_ticks = 110000000ull;
+        stage_clock.deferred_expression_parts = failed >= 2;
+        stage_clock.expression_ticks = failed >= 2 ? 50000000ull : 110000000ull;
         for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
         {
             stage_clock.expression_part_ticks[p] = 10000000ull * (p + 1);
         }
         stage_clock.expression_system_us = 1234;
         stage_clock.expression_faults = 5678;
-        stage_clock.expression_usage_failed = failed != 0;
+        stage_clock.expression_usage_failed = (failed & 1) != 0;
         FILE* stream = tmpfile();
         char text[32768] = { 0 };
         if (stream != NULL)
@@ -4336,13 +4337,13 @@ static void check_test_driver_clock_printer(CheckTest* test)
             fclose(stream);
         }
         double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
-        bool valid = stream != NULL && check_clock_read_walk(text, parts) && parts[0] > 0;
+        bool valid = stream != NULL && check_clock_read_walk(text, parts) && parts[0] > 0 && check_clock_walk_work(text) == (failed >= 2);
         for (uint32_t p = 1; valid && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
         {
             const double ratio = parts[p] / parts[0];
             valid = ratio > (double)(p + 1) - 0.001 && ratio < (double)(p + 1) + 0.001;
         }
-        printed = printed && valid && (failed != 0 ? parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == -1 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == -1
+        printed = printed && valid && ((failed & 1) != 0 ? parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == -1 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == -1
                                                    : parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == 1.234 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == 5678);
     }
     check_test_expect(test, printed, "--time-stages prints each of the walk's parts under its own name, and its usage in order or as unavailable");
@@ -4360,7 +4361,7 @@ static void check_test_driver_clock_printer(CheckTest* test)
     char text[4096] = { 0 };
     if (stream != NULL)
     {
-        check_clock_print_walk(stream, median, low, high, 100.0);
+        check_clock_print_walk(stream, median, low, high, 100.0, false);
         rewind(stream);
         const size_t length = fread(text, 1, sizeof(text) - 1, stream);
         text[length] = 0;

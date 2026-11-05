@@ -1273,9 +1273,8 @@ struct CheckInputControlScan
     uint32_t after;
 };
 
-static uint32_t check_input_control_next(const Parser* parser, CheckInputControlScan* scan, bool resolving)
+static uint32_t check_input_control_next_range(const Parser* parser, CheckInputControlScan* scan, bool resolving, uint32_t count)
 {
-    const uint32_t count = parser->tokens.count;
     while (scan->selected == 0 && scan->after < count)
     {
         const uint32_t remaining = count - scan->after;
@@ -1294,24 +1293,28 @@ static uint32_t check_input_control_next(const Parser* parser, CheckInputControl
     return token;
 }
 
+static uint32_t check_input_control_next(const Parser* parser, CheckInputControlScan* scan, bool resolving)
+{
+    return check_input_control_next_range(parser, scan, resolving, parser->tokens.count);
+}
+
 // Only definitions enter the full-unit table. Diagnostic prefixes can also insert an unresolved &&name
 // in an unfinished function, so reserve for those address sites before prefix_count as well. Count a safe
 // superset (including deferred/invalid/duplicate sites), keeping the table below half full without token-sized
 // clearing. The normal path reads roles only; both columns are bounded, unpadded byte arrays.
-static uint64_t check_input_label_capacity(const Parser* parser, uint32_t prefix_count)
+static uint64_t check_input_label_capacity_range(const Parser* parser, uint32_t prefix_count, uint32_t begin, uint32_t count)
 {
-    const uint32_t count = parser->tokens.count;
     uint64_t entries = 0;
     if (BUSTER_SCALAR_PATH(parser->options.scalar))
     {
-        for (uint32_t token = 0; token < count; token += 1)
+        for (uint32_t token = begin; token < count; token += 1)
         {
             entries += parser->tree.roles[token] == PARSE_ROLE_LABEL || (token < prefix_count && check_input_label_address(parser, token));
         }
     }
     else
     {
-        for (uint64_t first = 0; first < count; first += BUSTER_CHECK_CONTROL_TOKENS)
+        for (uint64_t first = begin; first < count; first += BUSTER_CHECK_CONTROL_TOKENS)
         {
             const uint32_t remaining = count - first;
             const uint32_t length = remaining < BUSTER_CHECK_CONTROL_TOKENS ? remaining : BUSTER_CHECK_CONTROL_TOKENS;
@@ -1336,6 +1339,11 @@ static uint64_t check_input_label_capacity(const Parser* parser, uint32_t prefix
         capacity *= 2;
     }
     return capacity;
+}
+
+static uint64_t check_input_label_capacity(const Parser* parser, uint32_t prefix_count)
+{
+    return check_input_label_capacity_range(parser, prefix_count, 0, parser->tokens.count);
 }
 
 // Whether token `token` is within statement `root`'s subtree: its parents lead to `root`, each later than the one
@@ -2373,15 +2381,15 @@ static bool check_input_fallthrough_analyzed(const CheckInputReader* reader, uin
 
 // before == NONE is the unchanged full-unit path. The diagnostic prefix collects all function-scoped label names
 // for forward references, but reports only sites before its completion and defers unfinished-function obligations.
-static __attribute__((always_inline)) void check_input_controls_mode(CheckInputReader* reader, uint32_t before)
+static __attribute__((always_inline)) void check_input_controls_range(CheckInputReader* reader, uint32_t before, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     const bool prefix = before != BUSTER_CHECK_NONE;
-    const uint32_t limit = prefix && before < count ? before : count;
+    const uint32_t limit = prefix && before < end ? before : end;
     const uint64_t mark = reader->scratch->length;
-    const uint64_t capacity = check_input_label_capacity(parser, prefix ? limit : 0);
+    const uint64_t capacity = check_input_label_capacity_range(parser, prefix ? limit : 0, begin, end);
     uint32_t* labels = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
     reader->output->resource |= labels == 0;
     CheckLocalLabels locals = { 0 };
@@ -2390,13 +2398,13 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
         memset(labels, 0, capacity * sizeof(uint32_t));
         uint32_t body = BUSTER_CHECK_NONE;
         uint32_t close = 0;
-        CheckInputControlScan scan = { 0 };
-        for (uint32_t token = 0; token < count; token += 1)
+        CheckInputControlScan scan = { .after = begin };
+        for (uint32_t token = begin; token < end; token += 1)
         {
             if (!scalar)
             {
-                token = check_input_control_next(parser, &scan, false);
-                if (token == count)
+                token = check_input_control_next_range(parser, &scan, false, end);
+                if (token == end)
                 {
                     break;
                 }
@@ -2523,12 +2531,12 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
             }
         }
         check_input_local_label_pop(reader, &locals, labels, capacity, BUSTER_CHECK_NONE, limit);
-        scan = (CheckInputControlScan){ 0 };
-        for (uint32_t token = 0; token < limit; token += 1)
+        scan = (CheckInputControlScan){ .after = begin };
+        for (uint32_t token = begin; token < limit; token += 1)
         {
             if (!scalar)
             {
-                token = check_input_control_next(parser, &scan, true);
+                token = check_input_control_next_range(parser, &scan, true, end);
                 if (token >= limit)
                 {
                     break;
@@ -2619,7 +2627,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 }
             }
         }
-        if (reader->indirect_gotos != 0)
+        if (reader->indirect_gotos != 0 && begin == 0 && end == count)
         {
             check_input_indirect_gotos(reader);
         }
@@ -2627,15 +2635,20 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
     arena_pop_to(reader->scratch, mark);
 }
 
+static bool check_deferred_controls(CheckDeferred* deferred, CheckInputReader* reader);
+
 static void check_input_controls(CheckInputReader* reader)
 {
-    check_input_controls_mode(reader, BUSTER_CHECK_NONE);
+    if (reader->deferred == NULL || !check_deferred_controls(reader->deferred, reader))
+    {
+        check_input_controls_range(reader, BUSTER_CHECK_NONE, 0, reader->parser->tokens.count);
+    }
 }
 
 static __attribute__((noinline)) void check_input_controls_prefix(CheckInputReader* reader, uint32_t before)
 {
     const uint32_t fragment_end = reader->fragment_end;
     reader->fragment_end = before < fragment_end ? before : fragment_end;
-    check_input_controls_mode(reader, before);
+    check_input_controls_range(reader, before, 0, reader->parser->tokens.count);
     reader->fragment_end = fragment_end;
 }
