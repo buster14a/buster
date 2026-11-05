@@ -29,6 +29,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-checker-asm` | `c_check_program_asm.c` | [checker-asm](checker-asm.md) |
 | `test-checker-corpus` | `c_check_corpus.c` | [checker-corpus](checker-corpus.md) |
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |
+| benchpress (the 9700X) over the tailnet | `.claude/hooks/join-tailnet.sh` | [benchpress](benchpress.md) |
 | `correctness.tests / CI selection` | `tools/ci/correctness.tests` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite` | `c_testsuite.c` | [c-testsuite](c-testsuite.md) |
@@ -66,6 +67,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-lowering, benchmark-lowering-source` | `c_lowering.c` | [lowering](lowering.md) |
 | `measure-lowering-templates` | `c_check_lower_inventory.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
+| micro-architecture campaign (`run.sh`, `uarch test`) | `tools/microarch/run.sh`, `tools/microarch/uarch.c` | [microarch](microarch.md) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
 | `parallel, test-parallel, test-tool` | `parallel.c`, `test_tool.c` | [parallel](parallel.md) |
@@ -78,11 +80,11 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |
 | `test-streaming, benchmark-streaming` | `streaming.c` | [streaming](streaming.md) |
 | `test-tier0, benchmark-backend, benchmark-backend-source` | `tier0.c` | [tier0](tier0.md) |
-| `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` | `tier1_select.c`, `tier1_programs_measure.c` | [tier1](tier1.md) |
+| `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs, measure-tier1-rows` | `tier1_select.c`, `tier1_programs_measure.c`, `tier1_rows_measure.c` | [tier1](tier1.md) |
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
 | `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
 | `test-tier1-cfg, test-tier1-cfg-source` | `tier1_cfg.c` | [tier1-cfg](tier1-cfg.md) |
-| `test-tier1-frame, test-tier1-frame-execution` | `tier1_frame.c` | [tier1-frame](tier1-frame.md) |
+| `test-tier1-frame, test-tier1-frame-execution, measure-frames` | `tier1_frame.c`, `frame_measure.c` | [tier1-frame](tier1-frame.md) |
 | `test-tier1-schedule, benchmark-tier1-schedule` | `tier1_schedule.c` | [tier1-schedule](tier1-schedule.md) |
 | `test-check-units, benchmark-check-units` | `c_checker_units.c` | [translation-units](translation-units.md) |
 | `test-types, benchmark-types` | `c_types.c` | [types](types.md) |
@@ -137,6 +139,7 @@ The original section titles are retained in their owning guides.
 - [Foreign benchmark](foreign.md#foreign-benchmark).
 - [Foreign corpus test](foreign-corpus.md#foreign-corpus-test).
 - [DCO sign-off tooling](dco.md#dco-sign-off-tooling).
+- [Micro-architecture campaign](microarch.md#micro-architecture-campaign).
 - [Dataflow tests](dataflow.md#dataflow-tests).
 - [Dataflow benchmark](dataflow.md#dataflow-benchmark).
 - [Preprocessor harness tests](preprocessor-fuzz.md#preprocessor-harness-tests).

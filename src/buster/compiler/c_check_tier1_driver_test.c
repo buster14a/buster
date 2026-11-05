@@ -1104,6 +1104,9 @@ struct CheckTestTier1Build
     uint64_t slots;
     uint64_t frame;
     uint64_t call_stores;
+    // Its machine rows and the moves around them into their roles' registers and out of them (#1283).
+    uint64_t machine_rows;
+    uint64_t row_moves;
     bool reported;
 };
 
@@ -1161,7 +1164,8 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "dropped_definitions", &build->dropped) &&
                       check_test_tier1_field(text, "spill_stores", &build->stores) && check_test_tier1_field(text, "spill_loads", &build->loads) &&
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
-                      check_test_tier1_field(text, "call_stores", &build->call_stores);
+                      check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
+                      check_test_tier1_field(text, "row_moves", &build->row_moves);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -2425,9 +2429,10 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
 // build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the
 // checks' messages. `option` (as -march=x86-64-v4), where it isn't NULL, every build takes, and only where the host can
-// (`runs`) are the programs run: elsewhere the builds are checked alone.
+// (`runs`) are the programs run: elsewhere the builds are checked alone. With --verify, the code's certificate (#939,
+// #1284) leaves exactly `uncertified` of their functions' code uncertified, for shapes it doesn't decode, and refuses none.
 static void check_test_driver_tier1_units(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* what, const char* header_source,
-                                          const char* unit_source, const char* other_source, const char* option, bool runs)
+                                          const char* unit_source, const char* other_source, const char* option, bool runs, uint32_t uncertified)
 {
     char header[512];
     char unit[512];
@@ -2490,10 +2495,16 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
     memcpy(both_arguments + 5 + optioned, both_tail, sizeof(both_tail));
     text = NULL;
     const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+    uint64_t certified = 0;
+    uint64_t left = 0;
+    const bool counted = both_built && check_test_tier1_field(text, "code_certified", &certified) && check_test_tier1_field(text, "code_uncertified", &left) && certified != 0 &&
+                         left == uncertified;
     free(text);
     char actual[4096] = { 0 };
     snprintf(message, sizeof(message), "both units of the %s fixture by --tier1, every function Tier 1's, print clang's build's output", what);
     check_test_expect(test, both_built && (!runs || (check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+    snprintf(message, sizeof(message), "both units of the %s fixture by --tier1 --verify have their code certified but %u functions'", what, uncertified);
+    check_test_expect(test, !both_built || counted, message);
     unlink(header);
     unlink(unit);
     unlink(other);
@@ -2502,18 +2513,20 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
     unlink(both);
 }
 
-// The by-value aggregates' fixture (#789), the other unit's va_arg of an aggregate among its functions.
+// The by-value aggregates' fixture (#789), the other unit's va_arg of an aggregate among its functions: that variadic
+// definition's code alone is left uncertified (its register save area isn't decoded).
 static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-records", "by-value aggregates'", check_test_tier1_records_header, check_test_tier1_records_source,
-                                  check_test_tier1_records_other_source, NULL, true);
+                                  check_test_tier1_records_other_source, NULL, true, 1);
 }
 
-// The wide values' fixture (#141).
+// The wide values' fixture (#141): the code of its 11 functions of long doubles (the x87's) and of its variadic one is left
+// uncertified.
 static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source,
-                                  NULL, true);
+                                  NULL, true, 12);
 }
 
 // Stack-passed vectors' alignment (#1204's review). A call whose 32- or 64-byte vector argument goes on the stack (its
@@ -2682,10 +2695,10 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
     const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
-                                  check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_vectors_other_source, "-march=x86-64-v4", host, 0);
     check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-zmm", "64-byte vector arguments'", check_test_tier1_zmm_header, check_test_tier1_zmm_source,
-                                  check_test_tier1_zmm_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_zmm_other_source, "-march=x86-64-v4", host, 0);
 }
 
 // The x86 builtins' bit manipulations' fixture (#141): BMI2's pdep, pext and bzhi and BMI1's bextr of unsigned ints and
@@ -2759,7 +2772,7 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
     const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
     const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-bmi", "x86 builtins' bit manipulations'", check_test_tier1_bmi_header, check_test_tier1_bmi_source,
-                                  check_test_tier1_bmi_other_source, "-march=x86-64-v3", host);
+                                  check_test_tier1_bmi_other_source, "-march=x86-64-v3", host, 0);
 }
 
 // The machine rows' fixture (#141): x86-64-v4's vector builtins and the vector operators on elements other than 32-bit
@@ -2937,14 +2950,800 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-rows", "machine rows'", check_test_tier1_rows_header, check_test_tier1_rows_source,
-                                  check_test_tier1_rows_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_rows_other_source, "-march=x86-64-v4", host, 0);
+    // #1283: Tier 1 places a row's vector roles one at a time, so that most rows take no move into or out of place: by
+    // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
+    // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows).
+    char header[512];
+    char unit[512];
+    char object[512];
+    snprintf(header, sizeof(header), "%s/tier1-rows.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-rows-moves.c", directory);
+    snprintf(object, sizeof(object), "%s/tier1-rows-moves.o", directory);
+    const bool written = parse_test_write(header, check_test_tier1_rows_header, strlen(check_test_tier1_rows_header)) &&
+                         parse_test_write(unit, check_test_tier1_rows_source, strlen(check_test_tier1_rows_source));
+    check_test_expect(test, written, "the machine rows' unit is written for its moves' count");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
+        char message[256];
+        snprintf(message, sizeof(message), "the machine rows' unit takes at most a move into or out of place for every two rows (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
+                 (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
+        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows, message);
+        unlink(object);
+    }
+    unlink(unit);
+    unlink(header);
 }
 
-// A machine row with a floating role in a VEX form (#141): F16C's half-precision conversions at x86-64-v3, whose rows
-// name the float in an XMM field that only a register below 16 holds. Tier 1 refuses the row at selection
-// (tier1_select_row_supported), so that the function is Tier 0's rather than staged through an EVEX copy the target has
-// none of: by each path, the build by --tier1 refuses _cvtsh_ss at selection, and where the host has x86-64-v3, it runs as
-// clang -O0's build does.
+// The lanes' fixture (#141's element types), for x86-64-v4: C's operators on vectors of 8-, 16- and 64-bit integers
+// (signed and unsigned), floats and doubles at 16, 32 and 64 bytes, which the IR computes as its own operations of their
+// lanes rather than machine rows (ir_simd_typed_operation): additions, subtractions, products (but bytes', which x86
+// hasn't), shifts by each lane's count, the floating arithmetic, and every comparison, whose results come back as -1 or
+// 0 lanes and are hashed apart from the arithmetic. Each floating operation is a statement of its own, so that clang
+// -O0 contracts none into an FMA (-ffp-contract=on). The other unit (clang -O2's) fills the operands and hashes the
+// results.
+static const char check_test_tier1_lanes_header[] =
+    "#include <stdio.h>\n"
+    "#include <stdint.h>\n"
+    "#include <string.h>\n"
+    "#define L_INTEGERS(X) X(i8x16, int8_t, 16, 0) X(u8x32, uint8_t, 32, 0) X(i8x64, int8_t, 64, 0) X(i16x8, int16_t, 16, 15) X(u16x16, uint16_t, 32, 15) \\\n"
+    "    X(i16x32, int16_t, 64, 15) X(u32x4, uint32_t, 16, 31) X(i32x16, int32_t, 64, 31) X(i64x2, int64_t, 16, 63) X(u64x4, uint64_t, 32, 63) X(i64x8, int64_t, 64, 63)\n"
+    "#define L_FLOATS(X) X(f32x4, float, int32_t, 16) X(f32x8, float, int32_t, 32) X(f32x16, float, int32_t, 64) X(f64x2, double, int64_t, 16) \\\n"
+    "    X(f64x4, double, int64_t, 32) X(f64x8, double, int64_t, 64)\n"
+    "#define L_INTEGER_TYPE(n, t, w, k) typedef t n __attribute__((vector_size(w)));\n"
+    "#define L_FLOAT_TYPE(n, t, i, w) typedef t n __attribute__((vector_size(w))); typedef i n##_mask __attribute__((vector_size(w)));\n"
+    "L_INTEGERS(L_INTEGER_TYPE)\n"
+    "L_FLOATS(L_FLOAT_TYPE)\n"
+    "#define L_INTEGER_DECLARE(n, t, w, k) n l_##n(n x, n y);\n"
+    "#define L_FLOAT_DECLARE(n, t, i, w) n l_##n(n x, n y, n##_mask* compares);\n"
+    "L_INTEGERS(L_INTEGER_DECLARE)\n"
+    "L_FLOATS(L_FLOAT_DECLARE)\n";
+
+static const char check_test_tier1_lanes_source[] =
+    "#include \"tier1-lanes.h\"\n"
+    "#define L_INTEGER(n, t, w, k) n l_##n(n a, n b)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n d = a - b;\\\n"
+    "    n r = s ^ d;\\\n"
+    "    r = r + ((n)(a < b) & s);\\\n"
+    "    r = r - ((n)(a <= b) | d);\\\n"
+    "    r = r ^ (n)(a > b);\\\n"
+    "    r = r + (n)(a >= b);\\\n"
+    "    r = r - ((n)(a == b) & d);\\\n"
+    "    r = r ^ ((n)(a != s) | b);\\\n"
+    "    if (k != 0)\\\n"
+    "    {\\\n"
+    "        n c = b & k;\\\n"
+    "        r = r + a * b;\\\n"
+    "        r = r ^ (a << c);\\\n"
+    "        r = r - (s >> c);\\\n"
+    "    }\\\n"
+    "    return r;\\\n"
+    "}\n"
+    "#define L_FLOAT(n, t, i, w) n l_##n(n a, n b, n##_mask* compares)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n p = s * a;\\\n"
+    "    n d = p - b;\\\n"
+    "    n q = d / (b + 3);\\\n"
+    "    n##_mask m = (a < b) + (a <= b);\\\n"
+    "    m = m - (a > b) + (a >= b);\\\n"
+    "    m = m + (a == b) - (q != s);\\\n"
+    "    *compares = m;\\\n"
+    "    return q;\\\n"
+    "}\n"
+    "L_INTEGERS(L_INTEGER)\n"
+    "L_FLOATS(L_FLOAT)\n";
+
+static const char check_test_tier1_lanes_other_source[] =
+    "#include \"tier1-lanes.h\"\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* q = p; for (unsigned i = 0; i < n; i++) { hash ^= q[i]; hash *= 1099511628211ull; } }\n"
+    "static uint32_t seed = 12345;\n"
+    "static uint32_t next(void) { seed = seed * 1103515245u + 12345u; return seed >> 8; }\n"
+    "static void fill(unsigned char* p, unsigned n) { for (unsigned i = 0; i < n; i++) p[i] = (unsigned char)next(); }\n"
+    "#define L_INTEGER_RUN(n, t, w, k) { n a; n c; fill((unsigned char*)&a, w); fill((unsigned char*)&c, w); if (round % 4 == 0) c = a; n r = l_##n(a, c); mix(&r, w); }\n"
+    "#define L_FLOAT_RUN(n, t, i, w) { n a; n c; for (unsigned e = 0; e < w / sizeof(t); e++) { a[e] = (t)((int)(next() % 4001) - 2000) / 16; c[e] = (t)((int)(next() % 4001) - 2000) / 16; } \\\n"
+    "    if (round % 4 == 1) c = a; n##_mask m; n r = l_##n(a, c, &m); mix(&r, w); mix(&m, w); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (unsigned round = 0; round < 64; round++)\n"
+    "    {\n"
+    "        L_INTEGERS(L_INTEGER_RUN)\n"
+    "        L_FLOATS(L_FLOAT_RUN)\n"
+    "        printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64-v4, run where the host has every feature of it; then the unit by --tier1 -c, by each path with
+// and without rematerialization, has 14 machine rows alone, its splats of a scalar (8 shift counts' masks, 6 floating
+// `b + 3`), which the IR has no operation for: every operator on the lanes is the IR's own.
+static void check_test_driver_tier1_lanes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-lanes", "lanes'", check_test_tier1_lanes_header, check_test_tier1_lanes_source,
+                                  check_test_tier1_lanes_other_source, "-march=x86-64-v4", host, 0);
+    char header[512];
+    char unit[512];
+    char object[512];
+    snprintf(header, sizeof(header), "%s/tier1-lanes.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-lanes-rows.c", directory);
+    snprintf(object, sizeof(object), "%s/tier1-lanes-rows.o", directory);
+    const bool written = parse_test_write(header, check_test_tier1_lanes_header, strlen(check_test_tier1_lanes_header)) &&
+                         parse_test_write(unit, check_test_tier1_lanes_source, strlen(check_test_tier1_lanes_source));
+    check_test_expect(test, written, "the lanes' unit is written for its rows' count");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
+        char message[256];
+        snprintf(message, sizeof(message), "the lanes' unit is the IR's own operations, its splats' 14 machine rows alone (path %u, rematerialize %u: %llu rows)", run & 1,
+                 (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows);
+        check_test_expect(test, compiled && build.machine_rows == 14, message);
+        unlink(object);
+    }
+    unlink(unit);
+    unlink(header);
+}
+
+// An unused comparison of floating lanes keeps its effect on the floating environment (#1413's review): a NaN operand
+// raises MXCSR's invalid flag, as fcmp's does, so dead code elimination keeps it where its mask goes unused. clang -O0
+// drops such a comparison itself (C allows it without FENV_ACCESS, which the checker refuses: #1135), so the oracle is
+// Tier 0's build of the same unit, which keeps every expression. A float's and a double's comparison, each the flag it
+// leaves: 3 where both operands' NaN raise it, 0 where none has one.
+static const char check_test_tier1_invalid_source[] =
+    "#include <stdio.h>\n"
+    "typedef float f4 __attribute__((vector_size(16)));\n"
+    "typedef double d4 __attribute__((vector_size(32)));\n"
+    "static unsigned csr(void) { return __builtin_ia32_stmxcsr(); }\n"
+    "__attribute__((noinline)) int invalid(f4 a, f4 b, d4 c, d4 d)\n"
+    "{\n"
+    "    __builtin_ia32_ldmxcsr(csr() & ~0x3fu);\n"
+    "    (void)(a < b);\n"
+    "    const unsigned first = csr() & 1u;\n"
+    "    __builtin_ia32_ldmxcsr(csr() & ~0x3fu);\n"
+    "    (void)(c >= d);\n"
+    "    return (int)(first * 2 + (csr() & 1u));\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    const f4 n = { 1.0f, __builtin_nanf(\"\"), 2.0f, 3.0f };\n"
+    "    const f4 o = { 0.5f, 1.0f, 4.0f, 3.0f };\n"
+    "    const d4 m = { 1.0, 2.0, __builtin_nan(\"\"), 3.0 };\n"
+    "    const d4 p = { 1.0, 2.0, 3.0, 4.0 };\n"
+    "    printf(\"%d %d %d\\n\", invalid(n, o, m, p), invalid(o, o, p, p), invalid(o, n, p, m));\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64-v4: Tier 0's, and by --tier1 by each path with and without rematerialization, `invalid` Tier 1's,
+// each printing "3 0 3", run where the host has x86-64-v4.
+static void check_test_driver_tier1_invalid(CheckTest* test, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    char source[512];
+    char program[512];
+    snprintf(source, sizeof(source), "%s/tier1-invalid.c", directory);
+    snprintf(program, sizeof(program), "%s/tier1-invalid", directory);
+    const bool written = parse_test_write(source, check_test_tier1_invalid_source, strlen(check_test_tier1_invalid_source));
+    check_test_expect(test, written, "the unused comparisons' unit is written");
+    for (uint32_t run = 0; written && run < 5; run += 1)
+    {
+        bool built = false;
+        CheckTestTier1Build build;
+        if (run == 4)
+        {
+            char* arguments[] = { (char*)executable, "-march=x86-64-v4", "-o", program, source, NULL };
+            char* text = NULL;
+            built = check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+        }
+        else
+        {
+            built = check_test_tier1_build(executable, source, "invalid", program, (run & 2) == 0, (run & 1) != 0, false, false, "-march=x86-64-v4", &build);
+        }
+        char* output = NULL;
+        char* run_arguments[] = { program, NULL };
+        const bool ran = built && host && check_test_driver_spawn_stream(run_arguments, &output, true) == 0;
+        char message[256];
+        snprintf(message, sizeof(message), "an unused floating comparison raises invalid on a NaN, as Tier 0's does (%s)", run == 4 ? "Tier 0" : (run & 1) != 0 ? "Tier 1, scalar path" : "Tier 1, vector path");
+        check_test_expect(test, built && (!host || (ran && output != NULL && strcmp(output, "3 0 3\n") == 0)), message);
+        free(output);
+        unlink(program);
+    }
+    unlink(source);
+}
+
+// The SSE targets' fixture (#141), for the x86-64 baseline and x86-64-v2, targets without AVX: C's operators on 16-byte
+// vectors of every element type, which the IR computes as its own operations of their lanes by legacy SSE's forms
+// (additions, subtractions, the bitwise operations, words' products and at x86-64-v2 doublewords', the floating
+// arithmetic, constants), and its comparisons, the rows' (pcmpeq and pcmpgt sequences, cmpps and cmppd), as machine
+// rows (but quadwords', which the baseline has no form for: the front end refuses them, as clang computes them a lane at
+// a time), every function Tier 1's. Each floating operation is a statement of its own, so that clang -O0 contracts none.
+static const char check_test_tier1_sse_header[] =
+    "#include <stdio.h>\n"
+    "#include <stdint.h>\n"
+    "#define S_INTEGERS(X) X(i8x16, int8_t, 1) X(u8x16, uint8_t, 1) X(i16x8, int16_t, 1) X(u16x8, uint16_t, 1) X(i32x4, int32_t, 1) X(u32x4, uint32_t, 1) X(i64x2, int64_t, 0) \\\n"
+    "    X(u64x2, uint64_t, 0)\n"
+    "#define S_FLOATS(X) X(f32x4, float, int32_t) X(f64x2, double, int64_t)\n"
+    "#define S_INTEGER_TYPE(n, t, cmp) typedef t n __attribute__((vector_size(16)));\n"
+    "#define S_FLOAT_TYPE(n, t, i) typedef t n __attribute__((vector_size(16))); typedef i n##_mask __attribute__((vector_size(16)));\n"
+    "S_INTEGERS(S_INTEGER_TYPE)\n"
+    "S_FLOATS(S_FLOAT_TYPE)\n"
+    "#define S_INTEGER_DECLARE(n, t, cmp) n s_##n(n x, n y);\n"
+    "#define S_FLOAT_DECLARE(n, t, i) n s_##n(n x, n y, n##_mask* compares);\n"
+    "S_INTEGERS(S_INTEGER_DECLARE)\n"
+    "S_FLOATS(S_FLOAT_DECLARE)\n"
+    "i16x8 s_words(i16x8 x, i16x8 y);\n"
+    "#if defined(__SSE4_1__)\n"
+    "u32x4 s_doublewords(u32x4 x, u32x4 y);\n"
+    "#endif\n";
+
+static const char check_test_tier1_sse_source[] =
+    "#include \"tier1-sse.h\"\n"
+    "#define S_INTEGER(n, t, cmp) n s_##n(n a, n b)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n d = a - b;\\\n"
+    "    n r = s ^ d;\\\n"
+    "    r = r + (s & d);\\\n"
+    "    r = r - (a | b);\\\n"
+    "    if (cmp)\\\n"
+    "    {\\\n"
+    "        r = r ^ (n)(a < b);\\\n"
+    "        r = r + (n)(a == s);\\\n"
+    "    }\\\n"
+    "    n k = { 3 };\\\n"
+    "    return r - k;\\\n"
+    "}\n"
+    "#define S_FLOAT(n, t, i) n s_##n(n a, n b, n##_mask* compares)\\\n"
+    "{\\\n"
+    "    n s = a + b;\\\n"
+    "    n p = s * a;\\\n"
+    "    n d = p - b;\\\n"
+    "    n q = d / b;\\\n"
+    "    n r = b - q;\\\n"
+    "    *compares = (a < b) + (a >= q) - (r != s);\\\n"
+    "    return r;\\\n"
+    "}\n"
+    "S_INTEGERS(S_INTEGER)\n"
+    "S_FLOATS(S_FLOAT)\n"
+    "i16x8 s_words(i16x8 a, i16x8 b) { i16x8 p = a * b; return p - (a * p); }\n"
+    "#if defined(__SSE4_1__)\n"
+    "u32x4 s_doublewords(u32x4 a, u32x4 b) { u32x4 p = a * b; return b * p + a; }\n"
+    "#endif\n";
+
+static const char check_test_tier1_sse_other_source[] =
+    "#include \"tier1-sse.h\"\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* q = p; for (unsigned i = 0; i < n; i++) { hash ^= q[i]; hash *= 1099511628211ull; } }\n"
+    "static uint32_t seed = 4321;\n"
+    "static uint32_t next(void) { seed = seed * 1103515245u + 12345u; return seed >> 8; }\n"
+    "static void fill(unsigned char* p) { for (unsigned i = 0; i < 16; i++) p[i] = (unsigned char)next(); }\n"
+    "#define S_INTEGER_RUN(n, t, cmp) { n a; n c; fill((unsigned char*)&a); fill((unsigned char*)&c); if (round % 4 == 0) c = a; n r = s_##n(a, c); mix(&r, 16); }\n"
+    "#define S_FLOAT_RUN(n, t, i) { n a; n c; for (unsigned e = 0; e < 16 / sizeof(t); e++) { a[e] = (t)((int)(next() % 4001) - 2000) / 16; c[e] = (t)((int)(next() % 4001) - 2001) / 8; } \\\n"
+    "    if (round % 4 == 1) c = a; n##_mask m; n r = s_##n(a, c, &m); mix(&r, 16); mix(&m, 16); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (unsigned round = 0; round < 64; round++)\n"
+    "    {\n"
+    "        S_INTEGERS(S_INTEGER_RUN)\n"
+    "        S_FLOATS(S_FLOAT_RUN)\n"
+    "        { i16x8 a; i16x8 c; fill((unsigned char*)&a); fill((unsigned char*)&c); i16x8 r = s_words(a, c); mix(&r, 16); }\n"
+    "#if defined(__SSE4_1__)\n"
+    "        { u32x4 a; u32x4 c; fill((unsigned char*)&a); fill((unsigned char*)&c); u32x4 r = s_doublewords(a, c); mix(&r, 16); }\n"
+    "#endif\n"
+    "        printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, at the x86-64 baseline and at x86-64-v2, each run on any x86-64 host, but x86-64-v2's only where the host
+// has its features.
+static void check_test_driver_tier1_sse(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v2 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v2", 9, &v2);
+    const bool host = parsed && (x86_target_native().features & v2.features) == v2.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-sse", "SSE targets' (x86-64)", check_test_tier1_sse_header, check_test_tier1_sse_source,
+                                  check_test_tier1_sse_other_source, "-march=x86-64", true, 0);
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-sse", "SSE targets' (x86-64-v2)", check_test_tier1_sse_header, check_test_tier1_sse_source,
+                                  check_test_tier1_sse_other_source, "-march=x86-64-v2", host, 0);
+}
+
+// The VEX fixture (#1281): x86-64-v3's AVX2 and F16C builtins and the vector operators, at a target without AVX-512,
+// whose vectors Tier 1 moves, spills and computes by VEX forms in xmm0 to xmm15 alone and whose machine rows' roles it
+// places below 16: the 32-bit integers' operators (the IR's own operations by their VEX forms) and their comparisons,
+// shifts and complements (machine rows), on 16- and 32-byte vectors; the operators on words, bytes, quadwords, floats and
+// doubles (machine rows: the floats' splat of a scalar names a floating operand in a VEX form); AVX2's shuffles, blends,
+// permutes, shifts by counts and by vectors, unpacks and maxima, tests and movemasks, extracts and inserts of 128-bit
+// lanes, widening conversions, masked loads and stores and gathers (whose mask the row writes); F16C's conversions of
+// scalars (_cvtsh_ss's float result and _cvtss_sh's float operand in VEX forms) and of vectors; FMA's; vector constants
+// of zeros, every bit, splats and others; a loop whose vectors cross its back edge and live across a call; and more
+// vectors live at once than xmm0 to xmm14, spilled. Its other unit (clang -O2's) hashes the results. Each expression
+// that clang would contract into an FMA (-ffp-contract=on, even at -O0) is split into statements. Its SSE carriers
+// (#1280: _mm_cvtph_ps's and _mm256_cvtepu8_epi32's 8-byte operands) move by VEX's vmovq and vinsertps.
+static const char check_test_tier1_vex_header[] =
+    "#include <immintrin.h>\n"
+    "#include <stdint.h>\n"
+    "typedef int v8si __attribute__((vector_size(32)));\n"
+    "typedef int v4si __attribute__((vector_size(16)));\n"
+    "typedef short v16hi __attribute__((vector_size(32)));\n"
+    "typedef signed char v16qi __attribute__((vector_size(16)));\n"
+    "typedef long long v4di __attribute__((vector_size(32)));\n"
+    "typedef float v8sf __attribute__((vector_size(32)));\n"
+    "typedef double v2df __attribute__((vector_size(16)));\n"
+    "v8si x_ints(v8si a, v8si b, int n);\n"
+    "v4si x_small(v4si a, v4si b);\n"
+    "v16hi x_words(v16hi a, v16hi b);\n"
+    "v16qi x_bytes(v16qi a, v16qi b);\n"
+    "v4di x_quads(v4di a, v4di b);\n"
+    "v8sf x_floats(v8sf a, v8sf b, float s);\n"
+    "v2df x_doubles(v2df a, v2df b);\n"
+    "__m256i x_builtins(__m256i a, __m256i b, __m256i m, int n);\n"
+    "int x_tests(__m256i a, __m256i b, __m256i m);\n"
+    "__m256i x_lanes(__m256i a, __m128i l, int i, long long g);\n"
+    "void x_memory(int* out, const int* in, __m256i m);\n"
+    "float x_half(unsigned short h, float f, float g);\n"
+    "__m256 x_fma(__m256 a, __m256 b, __m256 c);\n"
+    "uint32_t x_loop(const unsigned char* p, unsigned n, unsigned char* out);\n"
+    "__m256i x_pressure(const int* p);\n"
+    "int b_tick(int k);\n";
+
+static const char check_test_tier1_vex_source[] =
+    "#include \"tier1-vex.h\"\n"
+    "v8si x_ints(v8si a, v8si b, int n)\n"
+    "{\n"
+    "    v8si s = (a + b) * a - b;\n"
+    "    v8si t = (s & b) | (a ^ s);\n"
+    "    v8si c = (a < b) + (s == t) - (b >= s);\n"
+    "    v8si u = (t << 3) + (s >> n) + ~c - -a;\n"
+    "    return u + (v8si){ 1, -2, 3, -4, 5, -6, 7, -8 } + n;\n"
+    "}\n"
+    "v4si x_small(v4si a, v4si b)\n"
+    "{\n"
+    "    v4si z = { 0, 0, 0, 0 };\n"
+    "    v4si o = { -1, -1, -1, -1 };\n"
+    "    return (a * b + z) ^ (o & (a - b)) ^ (a > b) ^ (v4si){ 9, 9, 9, 9 };\n"
+    "}\n"
+    "v16hi x_words(v16hi a, v16hi b) { return (a + b) * (a - b) ^ (a > b); }\n"
+    "v16qi x_bytes(v16qi a, v16qi b) { return (a + b) - (a == b) + (b + b + b); }\n"
+    "v4di x_quads(v4di a, v4di b) { return (a - b) + (a < b) + (b & 7); }\n"
+    "v8sf x_floats(v8sf a, v8sf b, float s)\n"
+    "{\n"
+    "    v8sf p = a * b;\n"
+    "    return p + s - b / (a + 3.0f);\n"
+    "}\n"
+    "v2df x_doubles(v2df a, v2df b)\n"
+    "{\n"
+    "    v2df p = a * b;\n"
+    "    return p - a + (v2df){ 0.5, -0.25 };\n"
+    "}\n"
+    "__m256i x_builtins(__m256i a, __m256i b, __m256i m, int n)\n"
+    "{\n"
+    "    __m256i x = _mm256_add_epi8(a, _mm256_shuffle_epi8(a, b));\n"
+    "    __m256i y = _mm256_blendv_epi8(x, b, m);\n"
+    "    __m256i z = _mm256_permutevar8x32_epi32(y, a);\n"
+    "    __m256i w = _mm256_srli_epi16(z, n);\n"
+    "    __m256i v = _mm256_sllv_epi32(b, _mm256_and_si256(a, _mm256_set1_epi32(31)));\n"
+    "    __m256i u = _mm256_max_epu8(_mm256_cmpgt_epi32(a, b), _mm256_sub_epi64(w, v));\n"
+    "    __m256i t = _mm256_mullo_epi32(_mm256_add_epi32(u, _mm256_set1_epi32(n)), _mm256_or_si256(a, _mm256_setzero_si256()));\n"
+    "    return _mm256_xor_si256(t, _mm256_unpacklo_epi8(u, _mm256_set1_epi32(-1)));\n"
+    "}\n"
+    "int x_tests(__m256i a, __m256i b, __m256i m)\n"
+    "{\n"
+    "    __m256i x = _mm256_blendv_epi8(a, b, m);\n"
+    "    int mask = _mm256_movemask_epi8(x);\n"
+    "    return mask ^ _mm256_testz_si256(a, b) ^ (_mm256_testc_si256(x, m) << 1) ^ (_mm256_movemask_epi8(_mm256_add_epi8(x, m)) << 3) ^ _mm_cvtsi128_si32(_mm256_castsi256_si128(x));\n"
+    "}\n"
+    "__m256i x_lanes(__m256i a, __m128i l, int i, long long g)\n"
+    "{\n"
+    "    __m128i e = _mm256_extracti128_si256(a, 1);\n"
+    "    __m256i x = _mm256_inserti128_si256(a, _mm_add_epi32(l, e), 0);\n"
+    "    __m256i y = _mm256_add_epi64(x, _mm256_set1_epi64x(g));\n"
+    "    __m256i z = _mm256_cvtepu8_epi16(_mm_xor_si128(e, _mm_set1_epi32(i)));\n"
+    "    z = _mm256_add_epi32(z, _mm256_cvtepu8_epi32(l));\n"
+    "    return _mm256_sub_epi16(_mm256_add_epi32(y, _mm256_set1_epi32(i)), z);\n"
+    "}\n"
+    "void x_memory(int* out, const int* in, __m256i m)\n"
+    "{\n"
+    "    __m256i a = _mm256_maskload_epi32(in, m);\n"
+    "    __m256i b = _mm256_loadu_si256((const __m256i*)(in + 3));\n"
+    "    __m256i g = _mm256_i32gather_epi32(in, _mm256_and_si256(b, _mm256_set1_epi32(15)), 4);\n"
+    "    _mm256_maskstore_epi32(out, m, _mm256_add_epi32(a, b));\n"
+    "    _mm256_storeu_si256((__m256i*)(out + 8), g);\n"
+    "    _mm_storeu_si128((__m128i*)(out + 16), _mm_mask_i32gather_epi32(_mm_set1_epi32(-7), in, _mm_set_epi32(1, 5, 2, 7), _mm256_castsi256_si128(m), 4));\n"
+    "}\n"
+    "float x_half(unsigned short h, float f, float g)\n"
+    "{\n"
+    "    float a = _cvtsh_ss(h);\n"
+    "    unsigned short n = _cvtss_sh(f * g, 0);\n"
+    "    __m256 v = _mm256_cvtph_ps(_mm_set1_epi16((short)n));\n"
+    "    __m128 q = _mm_cvtph_ps(_mm_set1_epi16((short)(n ^ 0x0400)));\n"
+    "    __m128i p = _mm_cvtps_ph(_mm_set_ps(f, g, a, 1.5f), 0);\n"
+    "    return a + _cvtsh_ss(n) + _mm256_cvtss_f32(v) + _mm_cvtss_f32(q) + (float)_mm_extract_epi16(p, 1) + _cvtsh_ss((unsigned short)_mm_extract_epi16(p, 2));\n"
+    "}\n"
+    "__m256 x_fma(__m256 a, __m256 b, __m256 c) { return _mm256_fmadd_ps(a, b, _mm256_fmsub_ps(b, c, a)); }\n"
+    "uint32_t x_loop(const unsigned char* p, unsigned n, unsigned char* out)\n"
+    "{\n"
+    "    __m256i acc = _mm256_setzero_si256();\n"
+    "    __m256i ones = _mm256_set1_epi32(0x01010101);\n"
+    "    v8si total = { 0, 0, 0, 0, 0, 0, 0, 0 };\n"
+    "    uint32_t count = 0;\n"
+    "    for (unsigned i = 0; i + 32 <= n; i += 32)\n"
+    "    {\n"
+    "        __m256i v = _mm256_loadu_si256((const __m256i*)(p + i));\n"
+    "        __m256i k = _mm256_cmpeq_epi8(v, _mm256_set1_epi32(0x61616161));\n"
+    "        count += (uint32_t)__builtin_popcount((unsigned)_mm256_movemask_epi8(k)) + (uint32_t)b_tick((int)i);\n"
+    "        acc = _mm256_add_epi8(acc, _mm256_and_si256(k, ones));\n"
+    "        acc = _mm256_max_epu8(acc, v);\n"
+    "        total += (v8si)v;\n"
+    "    }\n"
+    "    _mm256_storeu_si256((__m256i*)out, acc);\n"
+    "    return count + (uint32_t)(total[0] ^ total[7]);\n"
+    "}\n"
+    "__m256i x_pressure(const int* p)\n"
+    "{\n"
+    "    v8si v[18];\n"
+    "    for (int i = 0; i < 18; i += 1) v[i] = (v8si){ p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5], p[i + 6], p[i + 7] };\n"
+    "    v8si a = v[0] * v[1] + v[2] * v[3] + v[4] * v[5] + v[6] * v[7] + v[8] * v[9];\n"
+    "    v8si b = v[10] * v[11] + v[12] * v[13] + v[14] * v[15] + v[16] * v[17];\n"
+    "    v8si c = (v[0] + v[1] + v[2] + v[3] + v[4] + v[5] + v[6] + v[7] + v[8]) ^ (v[9] + v[10] + v[11] + v[12] + v[13] + v[14] + v[15] + v[16] + v[17]);\n"
+    "    return (__m256i)(a - b + c);\n"
+    "}\n";
+
+static const char check_test_tier1_vex_other_source[] =
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "#include \"tier1-vex.h\"\n"
+    "static uint64_t hash = 0xcbf29ce484222325ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) hash = (hash ^ b[i]) * 0x100000001b3ull; }\n"
+    "static int ticks = 0;\n"
+    "int b_tick(int k) { ticks += 1; return k & 3; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned char in[512];\n"
+    "    unsigned char out[256];\n"
+    "    for (int round = 0; round < 4; round += 1)\n"
+    "    {\n"
+    "        for (unsigned i = 0; i < sizeof(in); i += 1) in[i] = (unsigned char)(i * 37u + (i >> 3) * 11u + round * 101u + (i % 7 == 0 ? 'a' : 0));\n"
+    "        memset(out, 0, sizeof(out));\n"
+    "        __m256i a = _mm256_loadu_si256((const void*)in);\n"
+    "        __m256i b = _mm256_loadu_si256((const void*)(in + 32));\n"
+    "        __m256i c = _mm256_loadu_si256((const void*)(in + 64));\n"
+    "        v8si i8 = x_ints((v8si)a, (v8si)b, 1 + round);\n"
+    "        mix(&i8, 32);\n"
+    "        v4si i4 = x_small((v4si)_mm256_castsi256_si128(a), (v4si)_mm256_castsi256_si128(c));\n"
+    "        mix(&i4, 16);\n"
+    "        v16hi w = x_words((v16hi)b, (v16hi)c);\n"
+    "        mix(&w, 32);\n"
+    "        v16qi q = x_bytes((v16qi)_mm256_castsi256_si128(b), (v16qi)_mm256_castsi256_si128(a));\n"
+    "        mix(&q, 16);\n"
+    "        v4di d = x_quads((v4di)a, (v4di)c);\n"
+    "        mix(&d, 32);\n"
+    "        v8sf f = x_floats(_mm256_cvtepi32_ps(_mm256_and_si256(a, _mm256_set1_epi32(0xffff))), _mm256_cvtepi32_ps(_mm256_and_si256(b, _mm256_set1_epi32(0xfff))), 0.75f * round);\n"
+    "        mix(&f, 32);\n"
+    "        v2df e = x_doubles((v2df){ in[3] * 0.5, in[9] * -1.25 }, (v2df){ in[11], round + 0.5 });\n"
+    "        mix(&e, 16);\n"
+    "        __m256i r = x_builtins(a, b, c, 3 + round);\n"
+    "        mix(&r, 32);\n"
+    "        int t = x_tests(a, b, c);\n"
+    "        mix(&t, 4);\n"
+    "        r = x_lanes(a, _mm256_castsi256_si128(c), -77 + round, 0x123456789abcll * (round + 1));\n"
+    "        mix(&r, 32);\n"
+    "        int words[64];\n"
+    "        for (int k = 0; k < 64; k += 1) words[k] = (int)(in[k] * 131u + (unsigned)round);\n"
+    "        int results[24];\n"
+    "        memset(results, 0, sizeof(results));\n"
+    "        x_memory(results, words, _mm256_setr_epi32(-1, 0, -1, -1, 0, 0, -1, round & 1 ? -1 : 0));\n"
+    "        mix(results, sizeof(results));\n"
+    "        float h = x_half((unsigned short)(0x3c00 + round * 77), 1.5f + round, -0.375f * round);\n"
+    "        mix(&h, 4);\n"
+    "        __m256 m = x_fma(_mm256_set1_ps(1.25f + round), _mm256_cvtepi32_ps(_mm256_and_si256(c, _mm256_set1_epi32(255))), _mm256_set1_ps(-3.5f));\n"
+    "        mix(&m, 32);\n"
+    "        uint32_t k = x_loop(in, sizeof(in), out);\n"
+    "        mix(&k, 4);\n"
+    "        mix(out, 32);\n"
+    "        r = x_pressure(words + round);\n"
+    "        mix(&r, 32);\n"
+    "        printf(\"%016llx %u %d\\n\", (unsigned long long)hash, k, ticks);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// The SSE carriers' fixture (#1280): vectors of 4 and 8 bytes, an f32 or f64 in the IR, in and out of the machine rows
+// that read and make them. The intrinsics' widening conversions of each width (cvtepu8, cvtepi8, cvtepu16 and cvtepi16
+// into 16-, 32- and 64-byte vectors, whose shuffles make the narrow operand); loadl and storel, loadu and storeu of 4
+// and 8 bytes, move_epi64 and the float halves' loadl_pi and storel_pi; the movq forms (cvtsi64_si128, cvtsi128_si64,
+// movepi64_pi64 and movpi64_epi64, MMX's cvtsi64_m64 and cvtm64_si64); MMX's __m64 operations, passed by value to and
+// from clang -O2's unit; GNU C's operators on vectors of 8 and 4 bytes; constants (a signaling NaN's and -0's bits,
+// which no floating move may change); a loop whose carriers cross its back edge; and, under FENV_ACCESS (where clang
+// computes a narrow float vector one element at a time), a product of two-float shuffles of vectors whose other lanes
+// would overflow, which raises no exception only where the carriers' registers are zero past their bytes, as Tier 0's
+// are.
+static const char check_test_tier1_carriers_header[] =
+    "#include <immintrin.h>\n"
+    "#include <stdint.h>\n"
+    "__m256i s_widen(__m128i a, __m128i b);\n"
+    "__m512i s_widen512(__m128i a, __m128i b);\n"
+    "__m128i s_widen128(__m128i a, __m128i b);\n"
+    "void s_memory(unsigned char* out, const unsigned char* in);\n"
+    "long long s_movq(__m128i a, long long x);\n"
+    "long long s_mmx(long long x, long long y, int n);\n"
+    "__m64 s_m64(__m64 a, __m64 b);\n"
+    "uint64_t s_operators(uint64_t x, uint32_t y);\n"
+    "uint64_t s_constants(void);\n"
+    "uint64_t s_loop(const unsigned char* p, unsigned n);\n"
+    "int s_flags(__m128 a, __m128 b, float* out);\n";
+
+static const char check_test_tier1_carriers_source[] =
+    "#include \"tier1-carriers.h\"\n"
+    "typedef unsigned char v8u8 __attribute__((vector_size(8)));\n"
+    "typedef short v4i16 __attribute__((vector_size(8)));\n"
+    "typedef unsigned char v4u8 __attribute__((vector_size(4)));\n"
+    "typedef float v2f32 __attribute__((vector_size(8)));\n"
+    "typedef float v4f32 __attribute__((vector_size(16)));\n"
+    "__m256i s_widen(__m128i a, __m128i b)\n"
+    "{\n"
+    "    __m256i x = _mm256_cvtepu8_epi32(a);\n"
+    "    __m256i y = _mm256_cvtepi8_epi32(_mm_srli_si128(a, 8));\n"
+    "    __m256i z = _mm256_cvtepu16_epi64(b);\n"
+    "    __m256i w = _mm256_cvtepu8_epi64(_mm_srli_si128(b, 3));\n"
+    "    return _mm256_xor_si256(_mm256_add_epi32(x, y), _mm256_sub_epi64(z, w));\n"
+    "}\n"
+    "__m512i s_widen512(__m128i a, __m128i b)\n"
+    "{\n"
+    "    __m512i x = _mm512_cvtepu8_epi64(a);\n"
+    "    __m512i y = _mm512_cvtepi8_epi64(b);\n"
+    "    return _mm512_add_epi64(x, y);\n"
+    "}\n"
+    "__m128i s_widen128(__m128i a, __m128i b)\n"
+    "{\n"
+    "    __m128i x = _mm_cvtepu8_epi32(a);\n"
+    "    __m128i y = _mm_cvtepu16_epi32(b);\n"
+    "    __m128i z = _mm_cvtepi8_epi16(_mm_srli_si128(a, 5));\n"
+    "    __m128i w = _mm_cvtepu16_epi64(b);\n"
+    "    __m128i v = _mm_cvtepi16_epi64(_mm_srli_si128(b, 7));\n"
+    "    __m128i u = _mm_cvtepu8_epi64(a);\n"
+    "    return _mm_add_epi32(_mm_xor_si128(x, y), _mm_add_epi64(_mm_sub_epi16(z, w), _mm_xor_si128(v, u)));\n"
+    "}\n"
+    "void s_memory(unsigned char* out, const unsigned char* in)\n"
+    "{\n"
+    "    __m128i l = _mm_loadl_epi64((const __m128i*)(in + 3));\n"
+    "    _mm_storel_epi64((__m128i*)out, _mm_add_epi8(l, _mm_set1_epi8(1)));\n"
+    "    __m128i m = _mm_move_epi64(_mm_loadu_si128((const __m128i*)(in + 20)));\n"
+    "    _mm_storeu_si128((__m128i*)(out + 8), m);\n"
+    "    __m128i s = _mm_loadu_si64(in + 41);\n"
+    "    _mm_storeu_si64(out + 24, _mm_cvtepu8_epi16(s));\n"
+    "    __m128i t = _mm_loadu_si32(in + 50);\n"
+    "    _mm_storeu_si32(out + 32, _mm_cvtepu8_epi32(t));\n"
+    "    _mm_storeu_si128((__m128i*)(out + 36), _mm_cvtepu8_epi32(t));\n"
+    "    __m128 f = _mm_loadl_pi(_mm_set1_ps(2.5f), (const __m64*)(in + 60));\n"
+    "    _mm_storel_pi((__m64*)(out + 52), _mm_shuffle_ps(f, f, 0x1b));\n"
+    "    _mm_storeu_ps((float*)(out + 60), f);\n"
+    "}\n"
+    "long long s_movq(__m128i a, long long x)\n"
+    "{\n"
+    "    __m128i b = _mm_add_epi64(_mm_move_epi64(a), _mm_cvtsi64_si128(x));\n"
+    "    __m64 m = _mm_movepi64_pi64(b);\n"
+    "    __m128i c = _mm_movpi64_epi64(m);\n"
+    "    return _mm_cvtsi128_si64(c) ^ _mm_cvtm64_si64(_mm_cvtsi64_m64(x * 3)) ^ (long long)_mm_cvtsi128_si32(_mm_cvtsi32_si128((int)x));\n"
+    "}\n"
+    "long long s_mmx(long long x, long long y, int n)\n"
+    "{\n"
+    "    __m64 a = _mm_cvtsi64_m64(x);\n"
+    "    __m64 b = _mm_cvtsi64_m64(y);\n"
+    "    __m64 c = _mm_add_pi16(a, b);\n"
+    "    __m64 d = _mm_unpacklo_pi16(c, a);\n"
+    "    __m64 e = _mm_sub_pi32(d, _mm_set_pi16(1, -2, 3, -4));\n"
+    "    __m64 f = _mm_mullo_pi16(e, b);\n"
+    "    __m64 g = _mm_slli_pi16(f, n);\n"
+    "    __m64 h = _mm_cmpeq_pi8(g, _mm_and_si64(a, b));\n"
+    "    __m64 i = _mm_sad_pu8(a, b);\n"
+    "    __m64 j = _mm_shuffle_pi16(g, 0x4e);\n"
+    "    __m64 k = _mm_packs_pi16(c, j);\n"
+    "    return _mm_cvtm64_si64(_mm_xor_si64(_mm_or_si64(h, i), _mm_add_pi8(k, _mm_set1_pi8((char)n))));\n"
+    "}\n"
+    "__m64 s_m64(__m64 a, __m64 b)\n"
+    "{\n"
+    "    return _mm_adds_pu8(_mm_avg_pu8(a, b), _mm_max_pi16(a, b));\n"
+    "}\n"
+    "uint64_t s_operators(uint64_t x, uint32_t y)\n"
+    "{\n"
+    "    v8u8 a;\n"
+    "    v4u8 b;\n"
+    "    __builtin_memcpy(&a, &x, 8);\n"
+    "    __builtin_memcpy(&b, &y, 4);\n"
+    "    v8u8 c = (a + (v8u8){ 1, 2, 3, 4, 5, 6, 7, 8 }) ^ (a & 0x7e);\n"
+    "    v4u8 d = (b + (v4u8){ 3, 5, 7, 9 }) - (b & 0x0f);\n"
+    "    v4i16 e = (v4i16)c;\n"
+    "    v4i16 less = e < (v4i16){ 0, 100, -100, 7 };\n"
+    "    e = (e & less) | (-e & ~less);\n"
+    "    uint64_t r;\n"
+    "    uint32_t s;\n"
+    "    __builtin_memcpy(&r, &e, 8);\n"
+    "    __builtin_memcpy(&s, &d, 4);\n"
+    "    return r ^ ((uint64_t)s << 7);\n"
+    "}\n"
+    "uint64_t s_constants(void)\n"
+    "{\n"
+    "    volatile v2f32 nan = (v2f32){ __builtin_nansf(\"0x12345\"), -0.0f };\n"
+    "    volatile v4u8 bytes = (v4u8){ 0xff, 0x80, 0x01, 0x7f };\n"
+    "    v2f32 n = nan;\n"
+    "    v4u8 b = bytes;\n"
+    "    uint64_t bits;\n"
+    "    uint32_t more;\n"
+    "    __builtin_memcpy(&bits, &n, 8);\n"
+    "    __builtin_memcpy(&more, &b, 4);\n"
+    "    return bits ^ more;\n"
+    "}\n"
+    "uint64_t s_loop(const unsigned char* p, unsigned n)\n"
+    "{\n"
+    "    v4i16 acc = { 0 };\n"
+    "    v4u8 low = { 0 };\n"
+    "    for (unsigned i = 0; i + 8 <= n; i += 8)\n"
+    "    {\n"
+    "        v4i16 v;\n"
+    "        __builtin_memcpy(&v, p + i, 8);\n"
+    "        acc = acc + (v >> 2);\n"
+    "        v4u8 w;\n"
+    "        __builtin_memcpy(&w, p + i + 1, 4);\n"
+    "        low = low ^ w;\n"
+    "    }\n"
+    "    uint64_t r;\n"
+    "    uint32_t s;\n"
+    "    __builtin_memcpy(&r, &acc, 8);\n"
+    "    __builtin_memcpy(&s, &low, 4);\n"
+    "    return r + s;\n"
+    "}\n"
+    "int s_flags(__m128 a, __m128 b, float* out)\n"
+    "{\n"
+    "#pragma STDC FENV_ACCESS ON\n"
+    "    _mm_setcsr(_mm_getcsr() & ~0x3fu);\n"
+    "    v4f32 x = (v4f32)a;\n"
+    "    v4f32 y = (v4f32)b;\n"
+    "    v2f32 p = __builtin_shufflevector(x, x, 0, 1) * __builtin_shufflevector(y, y, 0, 1) + __builtin_shufflevector(x, x, 1, 0);\n"
+    "    int flags = (int)(_mm_getcsr() & 0x3fu);\n"
+    "    __builtin_memcpy(out, &p, 8);\n"
+    "    return flags;\n"
+    "}\n";
+
+static const char check_test_tier1_carriers_other_source[] =
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "#include \"tier1-carriers.h\"\n"
+    "static uint64_t hash = 0xcbf29ce484222325ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) hash = (hash ^ b[i]) * 0x100000001b3ull; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned char in[256];\n"
+    "    unsigned char out[128];\n"
+    "    for (int round = 0; round < 4; round += 1)\n"
+    "    {\n"
+    "        for (unsigned i = 0; i < sizeof(in); i += 1) in[i] = (unsigned char)(i * 53u + (i >> 2) * 7u + round * 89u);\n"
+    "        memset(out, 0, sizeof(out));\n"
+    "        __m128i a = _mm_loadu_si128((const __m128i*)in);\n"
+    "        __m128i b = _mm_loadu_si128((const __m128i*)(in + 16));\n"
+    "        __m256i w = s_widen(a, b);\n"
+    "        mix(&w, 32);\n"
+    "        __m512i z = s_widen512(a, b);\n"
+    "        mix(&z, 64);\n"
+    "        __m128i x = s_widen128(a, b);\n"
+    "        mix(&x, 16);\n"
+    "        s_memory(out, in + round);\n"
+    "        mix(out, sizeof(out));\n"
+    "        long long q = s_movq(b, 0x0123456789abcdefll * (round + 1));\n"
+    "        mix(&q, 8);\n"
+    "        long long m = s_mmx(0x7f00ff0180017ffell + round, -0x123456789abcll * (round + 3), round + 1);\n"
+    "        mix(&m, 8);\n"
+    "        __m64 n = s_m64(_mm_cvtsi64_m64(0x1122334455667788ll + round), _mm_cvtsi64_m64(-0x0102030405060708ll));\n"
+    "        long long nn = _mm_cvtm64_si64(n);\n"
+    "        mix(&nn, 8);\n"
+    "        uint64_t o = s_operators(0x8899aabbccddeeffull * (round + 1), 0xdeadbeefu + round);\n"
+    "        mix(&o, 8);\n"
+    "        uint64_t c = s_constants();\n"
+    "        mix(&c, 8);\n"
+    "        uint64_t l = s_loop(in, sizeof(in) - round * 9);\n"
+    "        mix(&l, 8);\n"
+    "        float f[2];\n"
+    "        int flags = s_flags(_mm_setr_ps(1.5f + round, -2.0f, 1e30f, 1e30f), _mm_setr_ps(3.0f, 0.25f, 1e30f, 0.0f / 0.0f), f);\n"
+    "        mix(&flags, 4);\n"
+    "        mix(f, 8);\n"
+    "        printf(\"%016llx %llx %d\\n\", (unsigned long long)hash, (unsigned long long)c, flags);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64-v3, run where the host has every feature of it.
+static void check_test_driver_tier1_vex(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v3 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
+    const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vex", "VEX vectors'", check_test_tier1_vex_header, check_test_tier1_vex_source, check_test_tier1_vex_other_source,
+                                  "-march=x86-64-v3", host, 0);
+}
+
+// The AVX fixture (#1281's review): Sandy Bridge's AVX without AVX2, whose ymm integer forms Tier 1 doesn't take: 32-byte
+// vectors' bitwise operators and constants of every kind (AVX's vandps, vorps, vxorps, vpcmpeqd, vpshufd and vinsertf128), 16-byte
+// vectors' arithmetic, and AVX's float builtins, every function Tier 1's.
+static const char check_test_tier1_avx_header[] =
+    "#include <immintrin.h>\n"
+    "typedef int a8 __attribute__((vector_size(32)));\n"
+    "typedef int a4 __attribute__((vector_size(16)));\n"
+    "a8 x_bits(a8 a, a8 b, int n);\n"
+    "a4 x_small(a4 a, a4 b);\n"
+    "__m256 x_floats(__m256 a, __m256 b);\n";
+
+static const char check_test_tier1_avx_source[] =
+    "#include \"tier1-avx.h\"\n"
+    "a8 x_bits(a8 a, a8 b, int n)\n"
+    "{\n"
+    "    a8 ones = { -1, -1, -1, -1, -1, -1, -1, -1 };\n"
+    "    a8 seven = { 7, 7, 7, 7, 7, 7, 7, 7 };\n"
+    "    a8 zero = { 0, 0, 0, 0, 0, 0, 0, 0 };\n"
+    "    a8 other = { 1, 2, 3, 4, 5, 6, 7, 8 };\n"
+    "    a8 x = ((a & b) | (a ^ seven)) ^ (ones & b);\n"
+    "    for (int i = 0; i < n; i += 1) x = (x ^ other) | zero;\n"
+    "    return x;\n"
+    "}\n"
+    "a4 x_small(a4 a, a4 b) { return a * b + a - (a4){ 1, 2, 3, 4 }; }\n"
+    "__m256 x_floats(__m256 a, __m256 b) { return _mm256_add_ps(_mm256_and_ps(a, b), _mm256_set1_ps(1.5f)); }\n";
+
+static const char check_test_tier1_avx_other_source[] =
+    "#include <stdio.h>\n"
+    "#include \"tier1-avx.h\"\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long hash = 0xcbf29ce484222325ull;\n"
+    "    for (int round = 0; round < 4; round += 1)\n"
+    "    {\n"
+    "        a8 a = { round, 3, -5, 7 * round, 11, -13, 17, 19 };\n"
+    "        a8 b = { 23, round * 29, 31, -37, 41, 43, -47, round };\n"
+    "        a8 r = x_bits(a, b, round);\n"
+    "        a4 s = x_small((a4){ round, 5, -7, 9 }, (a4){ 2, -3, round, 4 });\n"
+    "        __m256 f = x_floats(_mm256_set1_ps(2.5f * round), _mm256_set1_ps(-3.25f));\n"
+    "        const unsigned char* bytes[3] = { (const unsigned char*)&r, (const unsigned char*)&s, (const unsigned char*)&f };\n"
+    "        const unsigned sizes[3] = { 32, 16, 32 };\n"
+    "        for (int k = 0; k < 3; k += 1) for (unsigned i = 0; i < sizes[k]; i += 1) hash = (hash ^ bytes[k][i]) * 0x100000001b3ull;\n"
+    "        printf(\"%016llx\\n\", hash);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by Sandy Bridge, run where the host has AVX.
+static void check_test_driver_tier1_avx(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    // x86-64-v2 with AVX, as Sandy Bridge is.
+    X86Target v2 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v2", 9, &v2);
+    const uint64_t features = v2.features | BUSTER_X86_FEATURE(AVX);
+    const bool host = parsed && (x86_target_native().features & features) == features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-avx", "AVX vectors'", check_test_tier1_avx_header, check_test_tier1_avx_source, check_test_tier1_avx_other_source,
+                                  "-march=sandybridge", host, 0);
+}
+
+// Its builds, by x86-64-v4, run where the host has every feature of it.
+static void check_test_driver_tier1_carriers(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-carriers", "SSE carriers'", check_test_tier1_carriers_header, check_test_tier1_carriers_source,
+                                  check_test_tier1_carriers_other_source, "-march=x86-64-v4", host, 0);
+}
+
+// A machine row with a floating role in a VEX form (#141, #1281): F16C's half-precision conversions at x86-64-v3, whose
+// rows name the float in an XMM field that only a register below 16 holds. Tier 1 places such a role below 16
+// (tier1_emit_cfg_row): by each path, the build by --tier1 compiles every function, _cvtsh_ss's among them, by Tier 1,
+// and where the host has x86-64-v3, it runs as clang -O0's build does.
 static const char check_test_tier1_half_source[] =
     "#include <immintrin.h>\n"
     "#include <stdio.h>\n"
@@ -2992,12 +3791,117 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
         arguments[count] = NULL;
         text = NULL;
         const bool built = check_test_driver_spawn(arguments, &text) == 0;
-        const bool refused = built && text != NULL && strstr(text, "tier1-refused\t_cvtsh_ss\tselection") != NULL;
+        const bool taken = built && text != NULL && strstr(text, "tier1-refused") == NULL && strstr(text, "fallbacks=0\t") != NULL;
         free(text);
-        snprintf(message, sizeof(message), "a row with a floating role in a VEX form is refused at selection, and its function is Tier 0's (path %u)", path);
-        check_test_expect(test, refused, message);
+        snprintf(message, sizeof(message), "a row with a floating role in a VEX form is placed below 16, and every function is Tier 1's (path %u)", path);
+        check_test_expect(test, taken, message);
         char actual[256] = { 0 };
         snprintf(message, sizeof(message), "the half-precision fixture by --tier1 runs as clang -O0's build does (path %u)", path);
+        check_test_expect(test, built && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+        unlink(program);
+    }
+    unlink(reference);
+    unlink(unit);
+}
+
+// #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
+// x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
+// split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
+// noinline one, which stays a call, beside them. By each path, with --verify's certificates, the build inlines (the
+// report's `inlined`), and runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4.
+static const char check_test_tier1_inline_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "typedef struct { long long a; int b; short c; } Triple;\n"
+    "static inline __attribute__((always_inline)) Triple twist(Triple t, long long k) { Triple r = { t.a * 3 + k, t.b ^ (int)k, (short)(t.c + 1) }; return r; }\n"
+    "static __attribute__((noinline)) int kept(int x) { return x * 7; }\n"
+    "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
+    "{\n"
+    "    __m512i x = _mm512_add_epi32(a, b);\n"
+    "    x = _mm512_xor_si512(x, _mm512_min_epu8(x, c));\n"
+    "    return _mm512_mask_sub_epi32(x, (__mmask16)0x5a5a, x, _mm512_set1_epi32(17));\n"
+    "}\n"
+    "__attribute__((noinline)) uint64_t count(const uint8_t* p, int n)\n"
+    "{\n"
+    "    __m512i acc = _mm512_setzero_si512();\n"
+    "    for (int i = 0; i + 64 <= n; i += 64)\n"
+    "    {\n"
+    "        __m512i v = _mm512_loadu_si512(p + i);\n"
+    "        __mmask64 m = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('a'));\n"
+    "        acc = _mm512_add_epi64(acc, _mm512_set1_epi64((long long)__builtin_popcountll(m)));\n"
+    "        acc = _mm512_mask_add_epi32(acc, (__mmask16)m, acc, _mm512_set1_epi32(3));\n"
+    "    }\n"
+    "    return (uint64_t)_mm512_reduce_add_epi64(acc);\n"
+    "}\n"
+    "__attribute__((noinline)) long long structs(int n)\n"
+    "{\n"
+    "    Triple t = { 5, 9, 2 };\n"
+    "    for (int i = 0; i < n; i += 1) t = twist(t, i);\n"
+    "    return t.a + t.b + t.c + kept(n);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    uint8_t buffer[640];\n"
+    "    for (int i = 0; i < 640; i += 1) buffer[i] = (uint8_t)(\"abcab\"[i % 5] + (i % 7 == 0));\n"
+    "    __m512i a = _mm512_set1_epi32(7);\n"
+    "    __m512i b = _mm512_set_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);\n"
+    "    __m512i c = _mm512_set1_epi8(9);\n"
+    "    long long out[8];\n"
+    "    _mm512_storeu_si512(out, mix(a, b, c));\n"
+    "    printf(\"%llx %llx %llu %lld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9));\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-inline.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-inline-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_inline_source, strlen(check_test_tier1_inline_source));
+    char* reference_arguments[] = { (char*)clang, "-O0", "-march=x86-64-v4", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
+    check_test_expect(test, ran, "clang's build of the inlining fixture runs");
+    for (uint32_t build = 0; ran && build < 4; build += 1)
+    {
+        // Builds 0 and 1 inline, by the vector path and the scalar twin; 2 and 3 keep every call (--tier1-no-inline).
+        const bool scalar = build % 2 != 0;
+        const bool inlining = build < 2;
+        char program[512];
+        char message[256];
+        snprintf(program, sizeof(program), "%s/tier1-inline-%u", directory, build);
+        char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", "-march=x86-64-v4" };
+        uint32_t count = 5;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (!inlining)
+        {
+            arguments[count++] = "--tier1-no-inline";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = program;
+        arguments[count++] = unit;
+        arguments[count] = NULL;
+        text = NULL;
+        const bool built = check_test_driver_spawn(arguments, &text) == 0;
+        uint64_t inlined = UINT64_MAX;
+        uint64_t internal = UINT64_MAX;
+        const bool reported = built && check_test_tier1_field(text, "inlined", &inlined) && check_test_tier1_field(text, "internal_failures", &internal);
+        free(text);
+        snprintf(message, sizeof(message), "--tier1 %s the wrappers' and the struct helper's calls, not the noinline one's (build %u)", inlining ? "inlines" : "keeps", build);
+        check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 10 : inlined == 0), message);
+        char actual[256] = { 0 };
+        snprintf(message, sizeof(message), "the inlining fixture by --tier1 runs as clang -O0's build does (build %u)", build);
         check_test_expect(test, built && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
         unlink(program);
     }
@@ -3009,7 +3913,7 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
 static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
-                                  check_test_tier1_shapes_other_source, NULL, true);
+                                  check_test_tier1_shapes_other_source, NULL, true, 0);
 }
 
 // The thread-locals' fixture (#141): this unit's own thread-locals (a long, a static array and a struct), whose addresses
@@ -3070,7 +3974,7 @@ static const char check_test_tier1_tls_other_source[] =
 static void check_test_driver_tier1_tls(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-tls", "thread-locals'", check_test_tier1_tls_header, check_test_tier1_tls_source, check_test_tier1_tls_other_source, NULL,
-                                  true);
+                                  true, 0);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

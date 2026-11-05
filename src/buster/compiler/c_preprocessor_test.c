@@ -6338,13 +6338,15 @@ static const char* const pp_test_clang_headers[] = { "immintrin", "x86intrin", "
 
 #define BUSTER_PP_TEST_HEADER_TEXT (1u << 20)
 
+#include "c_preprocessor_header_diagnostics_test.c"
+
 // buster's headers among the C library's and clang's other ones (pp_test_system_headers, pp_test_clang_headers), in
 // one mode, hosted or `freestanding`: two units, the others first and then buster's 11, and buster's first, each
 // followed by `checks` (the mode's check lines, whose #include lines then include nothing). clang preprocesses each
 // with its own headers, and with buster's in the search --buster-headers makes (-nobuiltininc -isystem `ours` -isystem
 // `links`: pp_test_buster_search), both with -Wsystem-headers, and:
-// - with buster's, clang warns about nothing in the headers (with its own, glibc's C23 widths in <limits.h> and the
-//   line comments of <stdckdint.h> in strict C89 give warnings), and gives the unit itself the same diagnostics;
+// - with buster's, clang adds no header warning beyond those with its own headers (including clang/glibc warnings
+//   such as glibc 2.39's __INT64_C redefinition), and gives the unit itself the same diagnostics;
 // - each compared macro expands to the same tokens with either. The declarations aren't compared: clang's freestanding
 //   <stdint.h> leaves helper macros defined (__int_least16_t and the like) that rename glibc's typedefs of those names
 //   after it;
@@ -6357,8 +6359,8 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
     const bool strict_c89 = strcmp(mode, "-std=c89") == 0;
     char path[4096];
     snprintf(path, sizeof(path), "%s/header-orders.c", directory);
-    char* theirs[4];
-    char* mine[9];
+    char* theirs[6];
+    char* mine[11];
     int their_count = 0;
     int my_count = 0;
     theirs[their_count++] = (char*)mode;
@@ -6371,6 +6373,10 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
     my_count += pp_test_buster_search(mine + my_count, ours, links);
     theirs[their_count++] = "-Wsystem-headers";
     mine[my_count++] = "-Wsystem-headers";
+    theirs[their_count++] = "-fno-caret-diagnostics";
+    mine[my_count++] = "-fno-caret-diagnostics";
+    theirs[their_count++] = "-fno-color-diagnostics";
+    mine[my_count++] = "-fno-color-diagnostics";
     theirs[their_count++] = "-P";
     mine[my_count++] = "-P";
     uint32_t result = 0;
@@ -6392,14 +6398,12 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
         PPClangOutput their_text = same ? pp_test_clang_process("clang", theirs, their_count, path, false) : (PPClangOutput){ 0 };
         PPClangOutput my_text = same ? pp_test_clang_process("clang", mine, my_count, path, false) : (PPClangOutput){ 0 };
         same = same && their_text.status == PP_CLANG_ACCEPTED && my_text.status == PP_CLANG_ACCEPTED;
-        // No warning in the headers with buster's, and the unit's own diagnostics (ATOMIC_VAR_INIT is deprecated in
-        // C17) as with clang's.
-        uint32_t primary = 0;
-        uint32_t elsewhere = 0;
-        pp_test_count_diagnostics(my_text.diagnostics, path, &primary, &elsewhere);
-        if (same && elsewhere != 0)
+        // Subtract only identical reference header warnings, one occurrence at a time. The unit's own diagnostics
+        // (ATOMIC_VAR_INIT is deprecated in C17) still compare independently below; neither run may fail.
+        if (same && !pp_test_header_warnings(their_text.diagnostics, my_text.diagnostics, path))
         {
-            printf("%s: with ours, clang warns in the headers:\n%s", label, my_text.diagnostics);
+            printf("%s: with ours, clang adds header diagnostics:\nreference:\n%s\nours:\n%s", label,
+                   their_text.diagnostics != NULL ? their_text.diagnostics : "", my_text.diagnostics != NULL ? my_text.diagnostics : "");
             same = false;
         }
         static char their_diagnostics[1 << 16];
@@ -7235,6 +7239,7 @@ static bool pp_test_buster_tree(void)
 static bool pp_test_headers(const char* directory)
 {
     char ours[PATH_MAX];
+    const bool diagnostics = pp_test_header_warning_fixtures() && pp_test_header_warning_oracle(directory);
     const bool trees = pp_test_buster_tree();
     bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
@@ -7278,7 +7283,7 @@ static bool pp_test_headers(const char* directory)
            failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), order_failures,
            (unsigned long)(4 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
-    return trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
+    return diagnostics && trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
 static bool pp_fuzz_checks(const PPFuzzOptions* options);
@@ -7378,12 +7383,14 @@ static bool pp_test_implemented_features(const char* directory)
         "G __has_attribute(cleanup) __has_builtin(__atomic_load) __has_c_attribute(nodiscard)\n"
         "I __has_attribute(__cleanup__) __has_attribute(__constructor__) __has_attribute(__destructor__) __has_attribute(__weak__) __has_attribute(__overloadable__) "
         "__has_c_attribute(gnu::__cleanup__) __has_c_attribute(gnu::__constructor__) __has_c_attribute(gnu::__destructor__) __has_c_attribute(gnu::__weak__) __has_c_attribute(clang::__overloadable__)\n"
-        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
+        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n"
+        // A version, not 1, as clang answers it (pp_implemented_builtin_query).
+        "J __has_builtin(__builtin_operator_new)\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\nJ 201802L\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\nJ 201802L\n",
     };
     static const uint32_t standards[] =
     {
@@ -7909,7 +7916,10 @@ static bool pp_test_implemented_features(const char* directory)
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
             // clang makes __builtin_c23_va_start a builtin in C23 alone (#148).
             const bool language = inventory[i].id != CBUILTIN_C23_VA_START || standards[mode] >= 2023;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == (inventory[i].source && language);
+            // operator_new's and operator_delete's answer is a version, as clang's (pp_implemented_builtin_query).
+            const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+            const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == answer;
             result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == (inventory[i].constant && language);
         }
     }
@@ -8045,7 +8055,9 @@ static bool pp_test_implemented_features(const char* directory)
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
                 // In gnu17, where __builtin_c23_va_start is no builtin (#148).
                 const bool language = inventory[i].id != CBUILTIN_C23_VA_START;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == (inventory[i].source && language);
+                const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+                const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == answer;
                 result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == (inventory[i].constant && language);
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;

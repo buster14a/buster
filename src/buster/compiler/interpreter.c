@@ -133,6 +133,8 @@ struct InterpreterNativeRequest
     const IrPassed* passed;
     uint64_t destination;
     uint32_t result_size;
+    // The static chain (#148), which the bridge passes in r10 (0 for a call without one: r10 is a scratch register).
+    uint64_t chain;
 };
 
 typedef struct InterpreterProgram InterpreterProgram;
@@ -1486,8 +1488,21 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             break;
         case BUSTER_TYPED_CALL:
         {
-            const uint32_t count = function->call_argument_counts[value];
-            const uint32_t first = function->call_first[value];
+            // A static chain's (#148, tier0_call_chain) argument 0 isn't a parameter: it leaves the stack, the arguments
+            // above it moved down over it, the callee's count and first are the others', and a native one gets the chain
+            // in r10.
+            const uint32_t chain = tier0_call_chain(function, value);
+            const uint32_t below = top - function->call_argument_counts[value];
+            const uint64_t chain_value = chain != 0 ? stack[below].low : 0;
+            if (chain != 0)
+            {
+                result->status = classes[below] == BUSTER_TYPED_CLASS_U64 ? result->status : INTERPRETER_INVALID;
+                memmove(stack + below, stack + below + 1, (uint64_t)(top - below - 1) * sizeof(*stack));
+                memmove(classes + below, classes + below + 1, (uint64_t)(top - below - 1) * sizeof(*classes));
+                top -= 1;
+            }
+            const uint32_t count = function->call_argument_counts[value] - chain;
+            const uint32_t first = function->call_first[value] + chain;
             const SymbolId symbol = function->call_targets[value];
             const bool indirect = symbol == 0;
             const uint32_t argument_base = top - count;
@@ -1595,6 +1610,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                     .result_type = pointer_result && class == BUSTER_TYPED_CLASS_U64 ? IR_PTR : interpreter_typed_ir_type(class),
                     .variadic = function->call_variadic[value] != 0,
                     .runtime = &runtime,
+                    .chain = chain_value,
                 };
                 InterpreterValue returned = { 0 };
                 if (binding == 0 || !interpreter_native_invoke(&request, &returned))

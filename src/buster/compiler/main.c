@@ -199,6 +199,8 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_builtin_catalog.c"
 #include "buster/compiler/test_process.c"
+// libm's functions for the tests' oracles, which the compiler's link doesn't take (#652).
+#include "buster/compiler/test_libm.c"
 // The clang and gcc runs the tests compare with, kept between runs (#542), and its tests, for the test-oracle-cache
 // command.
 #include "buster/compiler/oracle_cache.c"
@@ -362,7 +364,16 @@ int run_type_benchmark(int argc, char** argv);
 // the driver's time depends on where its hot loops fall in the instruction caches, and code compiled before them, in
 // their unit or in another, moved them by any number of bytes. In their section, only the checker's own code moves
 // them. Its tests and the builtins' actions, which the driver seldom runs, stay in .text.
-__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text");
+// BUSTER_CHECKER_OFFSET (0 unless BUSTER_BUILD_DEFINES sets it: a multiple of 16 below a page) starts the checker's
+// code that many bytes into its page, after int3 padding. Builds of one tree at several offsets sample where its hot
+// loops fall, which ./build.sh shifts can't: it moves units' .text, never this section (#1233, docs/profiling.md).
+#ifndef BUSTER_CHECKER_OFFSET
+#define BUSTER_CHECKER_OFFSET 0
+#endif
+_Static_assert(BUSTER_CHECKER_OFFSET >= 0 && BUSTER_CHECKER_OFFSET < 4096 && BUSTER_CHECKER_OFFSET % 16 == 0, "BUSTER_CHECKER_OFFSET must be a multiple of 16 below 4096");
+#define BUSTER_CHECKER_OFFSET_TEXT_(offset) #offset
+#define BUSTER_CHECKER_OFFSET_TEXT(offset) BUSTER_CHECKER_OFFSET_TEXT_(offset)
+__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip " BUSTER_CHECKER_OFFSET_TEXT(BUSTER_CHECKER_OFFSET) ", 0xcc\n\t.text");
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_environment.c"
 #include "buster/compiler/c_check_body_bindings.c"
@@ -603,6 +614,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_licm_test.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
+#include "buster/compiler/ir_optimize_inline_simd_test.c"
 // #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
 #include "buster/compiler/ir_optimize_text_test.c"
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
@@ -670,6 +682,12 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a rotating order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
+// measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
+// own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
+#include "buster/compiler/tier1_rows_measure.c"
+// measure-frames (#177): the frames functions' code makes, by build, against another build's (Tier 1's against clang
+// -O2's, with and without the objects' lifetimes).
+#include "buster/compiler/frame_measure.c"
 // measure-helpers (#1059): the direct forms against the helpers they replace (--helper-forms=all), by both tiers, as
 // whole processes in a rotating order: the primitives' kernels and speedtest1.
 #include "buster/compiler/helpers_measure.c"
@@ -761,9 +779,9 @@ static bool main_assembly_source(int count, char** arguments)
 }
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
-// is, so that the other units' branches fold to false (at the top). The driver's last branch, which no command takes,
-// runs the compiler itself.
-static int main_command(int argc, char** argv, bool* found)
+// is, so that the other units' branches fold to false (at the top). What no unit takes runs the compiler itself
+// (main_source_command), in a frame of its own: noinline keeps this function's frame, the tests' locals, out of main's.
+static __attribute__((noinline)) int main_command(int argc, char** argv, bool* found)
 {
     int result = 0;
     *found = true;
@@ -1124,11 +1142,13 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
         arena_static_base_pages();
+        arena_limits_fix();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
         arena_static_base_pages();
+        arena_limits_fix();
         result = run_parse_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
@@ -1603,6 +1623,14 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_tier1_programs_measure(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-rows") == 0)
+    {
+        result = run_tier1_rows_measure(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-frames") == 0)
+    {
+        result = run_frame_measure(argc - 1, argv + 1);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-helpers") == 0)
     {
         result = run_helpers_measure(argc - 1, argv + 1);
@@ -1631,16 +1659,6 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_c_testsuite_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
-    {
-        arena_static_base_pages();
-        // Semantic checking and object emission share the same typed source stream in the checker's unit.
-        if (!main_information(argc - 1, argv + 1, &result))
-        {
-            result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
-                     run_source_check_command(argc - 1, argv + 1);
-        }
-    }
     else
     {
         *found = false;
@@ -1649,6 +1667,23 @@ static int main_command(int argc, char** argv, bool* found)
 }
 
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
+// The commands of source files (-E, -fsyntax-only, -c and a link, main_information's): what no unit's main_command
+// takes. It runs after the driver's main_command has returned rather than inside it (#652): that function's frame is 140
+// KB, the inlined locals of the tests' and benchmarks' commands, and a compile run below it touched pages of it that its
+// build's inlining decided, 5 more of them in an empty file's -E after an unrelated change.
+static __attribute__((noinline)) int main_source_command(int argc, char** argv)
+{
+    int result = 1;
+    arena_static_base_pages();
+    arena_limits_fix();
+    // Semantic checking and object emission share the same typed source stream in the checker's unit.
+    if (!main_information(argc - 1, argv + 1, &result))
+    {
+        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) : run_source_check_command(argc - 1, argv + 1);
+    }
+    return result;
+}
+
 #if BUSTER_FUZZ_AVAILABLE
 #include BUSTER_FUZZ_ENTRY
 extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const uint8_t*, size_t));
@@ -1716,6 +1751,10 @@ static int main_driver(int argc, char** argv)
     if (!found)
     {
         result = main_command(argc, argv, &found);
+    }
+    if (!found)
+    {
+        result = main_source_command(argc, argv);
     }
     return result;
 }

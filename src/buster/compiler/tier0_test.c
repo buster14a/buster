@@ -988,6 +988,14 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        // A frame pointer the options keep (#177): every function's, or with the leaf rule every one's that calls.
+        bool calls = false;
+        for (uint32_t i = 0; i < function->count; i += 1)
+        {
+            calls |= function->kinds[i] == BUSTER_TYPED_CALL;
+        }
+        const bool kept = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
+        result = result && tier0_test_expect(tally, !kept || scalar.frame_pointer, "frame pointer", "seed %" PRIu64 " function %u: the frame pointer the options keep is missing", seed, f);
         result = result && tier0_test_expect(tally, plain.error == TIER0_OK && plain.entry_records == 0 && plain.entry_count == 0 && plain.count == vector.count &&
                                                     memcmp(plain.records, vector.records, (uint64_t)plain.count * sizeof(X86Instruction)) == 0,
                                              "entries", "seed %" PRIu64 " function %u: a compile without the entries' first records differs or makes them", seed, f);
@@ -1314,6 +1322,13 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             ok = tier0_test_expect(tally, ok, "programs", "seed %" PRIu64 ": the generator ran out of room", program_seed);
             ok = ok && tier0_test_expect(tally, tier0_program_functions(program, tables, &arena, functions), "programs", "seed %" PRIu64 ": no room for the signatures",
                                          program_seed);
+            // A quarter of the programs keep a frame pointer in every function, and a quarter in every one that calls
+            // (#177: -fno-omit-frame-pointer, and -momit-leaf-frame-pointer's leaf rule), run against the same oracle.
+            const uint8_t frame_pointer = program_seed % 4 == 2 ? BUSTER_TIER0_FRAME_POINTER_ALL : program_seed % 4 == 3 ? BUSTER_TIER0_FRAME_POINTER_NON_LEAF : BUSTER_TIER0_FRAME_POINTER_NONE;
+            for (uint32_t f = 0; ok && f < functions->count; f += 1)
+            {
+                functions->functions[f].frame_pointer = frame_pointer;
+            }
             code->records = 0;
             code->entries = 0;
             code->deferred = 0;

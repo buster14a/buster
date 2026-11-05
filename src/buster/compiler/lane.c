@@ -85,10 +85,11 @@
 #include <x86intrin.h>
 #include <cpuid.h>
 
-// Resource-exhaustion fixtures must leave the detector runtime free to allocate
-// shadow/fake-stack memory and start its own threads. Diagnostic builds inject
-// the same compiler-owned reservation/start failures instead of limiting the OS.
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+// Resource-exhaustion fixtures must leave sanitizer runtimes free to allocate
+// memory for diagnostics, map shadow/fake-stack memory and start their threads.
+// Even standalone UBSan can need allocations to report a forced stack overflow.
+// Inject compiler-owned reservation/start failures rather than limiting the OS.
+#if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
 #define BUSTER_SANITIZER_RESOURCES 1
 static bool arena_test_reservation_allowed(uint64_t bytes);
 #else
@@ -276,6 +277,10 @@ static __attribute__((unused)) void arena_discard(Arena* arena);
 // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
 // as on the 9700X, the first write in two of them took a huge page each: 4 MB cleared for 44 KB of statics.
 static __attribute__((unused)) void arena_static_base_pages(void);
+// Reads the process's RLIMIT_AS once, for every later reservation and pool of the process (ArenaLimits, #652): for a
+// compile's commands to call first, before they start any thread. A setrlimit after it, or another process's prlimit,
+// changes no reservation's share.
+static __attribute__((unused)) void arena_limits_fix(void);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages, or else an inaccessible page on each side of them.
@@ -309,6 +314,25 @@ _Thread_local ArenaFailure arena_failure;
 #else
 static _Thread_local bool arena_compact;
 static _Thread_local ArenaFailure arena_failure;
+#endif
+
+// The RLIMIT_AS share each reservation admits (arena_address_share), read once for the rest of the process by
+// arena_limits_fix (#652). A compile's commands call it first: they don't change their limits, and their reservations
+// without a pool (about 30 for an empty file's -fsyntax-only) each made a getrlimit call before. Without it, as in the
+// tests that lower RLIMIT_AS in-process or in a forked child, every reservation reads the limit, and each pool reads it
+// once (arena_pool_limits). Written before the process starts any thread; main.c's units share it.
+typedef struct ArenaLimits ArenaLimits;
+struct ArenaLimits
+{
+    bool fixed;
+    uint64_t address_share;
+};
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern ArenaLimits arena_limits;
+#elif defined(BUSTER_UNIT)
+ArenaLimits arena_limits;
+#else
+static ArenaLimits arena_limits;
 #endif
 
 // The share of a finite RLIMIT_AS that one arena admits, or BUSTER_ARENA_MAX_CAPACITY.
@@ -347,10 +371,18 @@ static void arena_pool_limits(ArenaPool* pool)
 {
     if (!pool->limits)
     {
-        pool->address_share = arena_address_share();
+        pool->address_share = arena_limits.fixed ? arena_limits.address_share : arena_address_share();
         pool->keeps_commits = arena_commit_unbounded();
         pool->limits = true;
     }
+}
+
+static __attribute__((unused)) void arena_limits_fix(void)
+{
+    arena_limits = (ArenaLimits){
+        .fixed = true,
+        .address_share = arena_address_share(),
+    };
 }
 
 static uint64_t arena_reservation_limit(void)
@@ -364,7 +396,7 @@ static uint64_t arena_reservation_limit(void)
     }
     else
     {
-        share = arena_address_share();
+        share = arena_limits.fixed ? arena_limits.address_share : arena_address_share();
     }
     uint64_t result = arena_compact ? BUSTER_ARENA_COMPACT_BYTES : BUSTER_ARENA_MAX_CAPACITY;
     result = share < result ? share : result;

@@ -1244,7 +1244,12 @@ is retained.
 
 The top level, the merge's replay and layouts, and the phases after it are
 sequential, so the lanes shorten only the bodies' walks and the merge's pass,
-which on `sqlite3.c` are about a quarter of one lane's reading. On eight lanes
+which on `sqlite3.c` are about a quarter of one lane's reading. The C driver
+reads a unit this way with `--deferred-bodies` (#151), on rounds of its
+command's flow: on 8 lanes `-c sqlite3.c -w` takes 2.4% less wall time for
+12.8% more user cycles, so it isn't the default ([the lanes
+guide](function-lanes.md)'s "The checker's bodies on lanes"). #1404 runs the
+phases after the merge per body, the largest serial part left. On eight lanes
 the pass shares the memory's bandwidth: it reads each of its columns at every
 token, mostly zeros, and the lanes' scans of their shares run at about a third
 of one lane's speed per token (on `sqlite3.c`, 0.8 ms a lane for 88,000

@@ -288,6 +288,38 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
     unlink(header);
     unlink(source);
     rmdir(system_directory);
+    // An unavailable member's use in an initializer is clang's error under -w too (#147, check_init_member_use): each use,
+    // at its place, with its note, by both paths; and where another declaration's error sends the initializers to the
+    // diagnostic walk.
+    static const char* const unavailable_texts[] = {
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct S a = { .u = 1 };\n"
+        "struct S b = { 2, 3 };\nvoid f(void) { struct S c = { .w = 1, .u = 2 }; (void)c; }\n",
+        "struct S { int u __attribute__((unavailable(\"gone\"))); };\nstruct S a = { .u = 1 };\nvoid *bad = &(int){1} + nope;\n",
+    };
+    for (uint32_t u = 0; u < BUSTER_ARRAY_LENGTH(unavailable_texts) && parse_test_write(source, unavailable_texts[u], strlen(unavailable_texts[u])); u += 1)
+    {
+        char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-color-diagnostics", "-w", source, NULL };
+        char* reference = NULL;
+        const int oracle = check_test_driver_spawn(arguments, &reference);
+        char expected[8192];
+        const bool expected_valid = check_test_cleanup_errors(reference, 0, expected, sizeof(expected));
+        free(reference);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu23", "-fsyntax-only", "-w", source,
+                                scalar != 0 ? "--scalar" : NULL, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(checked, &text);
+            char actual[8192];
+            const bool actual_valid = check_test_cleanup_errors(text, 0, actual, sizeof(actual));
+            free(text);
+            char description[512];
+            snprintf(description, sizeof(description), "an unavailable member's initializer uses under -w (%u), by the %s path: clang's (status %d)\n%sagainst (status %d)\n%s",
+                     u, scalar != 0 ? "scalar" : "vector", oracle, expected, status, actual);
+            check_test_expect(test, oracle == 1 && status == oracle && expected_valid && actual_valid && strcmp(expected, actual) == 0, description);
+        }
+    }
+    unlink(source);
     // A label's attributes are its own, a declaration's after it among them: aligned(64) doesn't align y, which the
     // program reads through its address's remainder, as clang's build does.
     static const char program[] =
@@ -882,6 +914,268 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void __attribute__((ms_abi)) f(int n) { char* a; __builtin_ms_va_start(a, (n)); }\n",
         "void f(int n) { __builtin_va_list a; __builtin_va_start(a, n); }\n",
         "void u(void) __attribute__((unavailable));\nvoid z(void) { u(); }\n",
+        // Members' uses (check_input_member_uses): `.` and `->`, through an anonymous member and a union, of any operand
+        // (a dereference, an address, a compound literal, a call), in sizeof; none in a deprecated or unavailable
+        // function's body, nor in a deprecated declaration's initializer; an unavailable one's error, in a deprecated
+        // function too, with its note at the member's name.
+        "struct S { int x __attribute__((deprecated(\"msg\"))); int y; struct { int z __attribute__((deprecated)); }; };\n"
+        "union U { int a [[deprecated]]; };\nstruct S g(void);\n"
+        "int f(struct S *p, struct S s, union U v) { return p->x + s.x + s.z + v.a + s.y + (*p).x + (&s)->x + ((struct S){.y = 0}).y + g().x; }\n"
+        "int h(struct S *p) { int a = sizeof(p->z); return a; }\n"
+        "__attribute__((deprecated)) int m(struct S *p) { return p->x; }\n"
+        "__attribute__((unavailable)) int n(struct S *p) { return p->x; }\n"
+        "struct S t;\n__attribute__((deprecated)) int q = sizeof(t.x);\nint r __attribute__((deprecated)) = sizeof(t.z);\n"
+        "int w(void) { __attribute__((deprecated)) int l = t.x; return 0; }\n",
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nint k(struct S *p) { return p->u; }\n",
+        "struct S { int u __attribute__((unavailable)); };\n__attribute__((deprecated)) int k(struct S *p) { return sizeof(p->u); }\n",
+        "struct S { int u __attribute__((unavailable)); };\n__attribute__((unavailable)) int k(struct S *p) { return p->u; }\n",
+        "struct S { int x __attribute__((deprecated)), y __attribute__((deprecated(\"y\"))); } s;\n"
+        "struct T { struct S in; } t;\nint k(void) { return s.x + t.in.y + __builtin_offsetof(struct S, x); }\n",
+        // Both deprecated and unavailable: unavailable, whatever their order, one list or two, as clang's getAvailability
+        // takes the worst; a deprecated context doesn't drop it.
+        "struct S { int x __attribute__((deprecated(\"old\"), unavailable(\"gone\"))); };\nint f(struct S *s) { return s->x; }\n",
+        "struct S { int x __attribute__((unavailable(\"gone\"), deprecated(\"old\"))); };\nint f(struct S *s) { return s->x; }\n",
+        "struct S { int x __attribute__((deprecated(\"old\"))) __attribute__((unavailable(\"gone\"))); };\n"
+        "__attribute__((deprecated)) int f(struct S *s) { return s->x; }\n",
+        "int g(void) __attribute__((deprecated(\"old\"), unavailable(\"gone\")));\n"
+        "int h(void) __attribute__((unavailable(\"gone\"), deprecated(\"old\")));\nint f(void) { return g() + h(); }\n",
+        // Redeclarations (check_input_availability_mark): a use reads the marks up to the declaration its lookup finds,
+        // unavailable over deprecated and the latest of a kind's message, with the unavailable note at that declaration.
+        "int g(void) __attribute__((deprecated(\"old\")));\nint f(void) { return g(); }\n"
+        "int g(void) __attribute__((unavailable(\"gone\")));\nint g(void);\nint h(void) { return g(); }\n",
+        "int a(void) __attribute__((deprecated(\"old\")));\nint a(void) __attribute__((deprecated(\"older\")));\n"
+        "int b(void) __attribute__((unavailable(\"gone\")));\nint b(void) __attribute__((unavailable(\"really\")));\n"
+        "int b(void) __attribute__((deprecated(\"dep\")));\nint f(void) { return a() + b(); }\n",
+        // A block's later extern that the use doesn't see doesn't mark it; a block's earlier one marks a file-scope
+        // redeclaration, and a block's own redeclaration takes the note.
+        "void k(void) { extern int v __attribute__((deprecated(\"old\"))); { extern int v __attribute__((unavailable(\"gone\"))); } (void)v; }\n"
+        "void m(void) { extern int w __attribute__((unavailable(\"gone\"))); }\nextern int w;\nint f(void) { return w; }\n",
+        "int g(void) __attribute__((unavailable(\"gone\")));\nint f(void) { int g(void); return g(); }\n",
+        // A tag's: its attributes before the use, the note at its latest declaration's name; an enumerator's by its enum,
+        // the note naming the enum; a typedef's redeclaration.
+        "struct __attribute__((deprecated(\"old\"))) S;\nstruct S *p;\nstruct __attribute__((unavailable(\"gone\"))) S;\nstruct S;\n"
+        "struct S *q;\nstruct __attribute__((unavailable)) U { int a; };\nstruct U *r;\n",
+        "enum __attribute__((unavailable(\"gone\"))) E { A };\nenum __attribute__((deprecated(\"old\"), unavailable(\"gone\"))) F { B };\n"
+        "typedef int T __attribute__((deprecated(\"old\")));\ntypedef int T __attribute__((unavailable(\"gone\")));\nint x = A + B;\nT t;\n",
+        // A marked declaration's specifiers by its worst mark: a deprecated one drops a deprecated typedef's or tag's use,
+        // not an unavailable one's, whose error stays (at file scope, an attribute before or after the declarator, by both
+        // marks or a redeclaration); an unavailable one drops both.
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) T x;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S { int a; };\n__attribute__((deprecated)) struct S s;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\nT x __attribute__((deprecated)), y;\n",
+        "typedef int T __attribute__((deprecated(\"old\"), unavailable(\"gone\")));\n__attribute__((deprecated)) T x, y;\n"
+        "typedef int U __attribute__((deprecated(\"old\")));\ntypedef int U __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) U z;\n",
+        "typedef int T __attribute__((deprecated(\"old\")));\n__attribute__((deprecated)) T x;\n"
+        "typedef int U __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) U y;\n"
+        "typedef int V __attribute__((deprecated(\"old\")));\n__attribute__((unavailable)) V z;\nT w __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated(\"old\"))) S { int a; };\n__attribute__((deprecated)) struct S s;\n"
+        "struct __attribute__((unavailable(\"gone\"))) R { int a; };\n__attribute__((unavailable)) struct R r;\n",
+        // Not a later declarator's: a use in an initializer (bare, in parentheses or braces) or an earlier declarator's
+        // bound keeps its diagnostic; the declarator's own mark drops its initializer's, and `typeof`'s operand and an
+        // attribute list's comma are in the specifiers.
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\nint a = E, b __attribute__((unavailable));\n",
+        "enum { D __attribute__((deprecated(\"old\"))) = 1 };\nint a = D, b __attribute__((deprecated));\n"
+        "int c = (D), d __attribute__((deprecated));\nint k[D], m __attribute__((deprecated));\nint n = { D }, o __attribute__((deprecated));\n",
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\nint k[E], m __attribute__((unavailable));\n",
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1, D __attribute__((deprecated(\"old\"))) = 2 };\n"
+        "int c __attribute__((unavailable)) = E, d;\nint e __attribute__((deprecated)) = D, f;\n__attribute__((deprecated)) int g = D, h;\n"
+        "typeof(E) n __attribute__((unavailable));\n__attribute__((deprecated)) typeof(D) p;\n"
+        "typedef int T __attribute__((unavailable(\"gone\")));\nT __attribute__((aligned(8), unavailable)) r;\n",
+        // A comma inside a group the use is in, as `typeof((E, 1))`'s, is the specifiers' too; unmarked, the use keeps its
+        // diagnostic.
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1, D __attribute__((deprecated(\"old\"))) = 2 };\n"
+        "__attribute__((unavailable)) typeof((E, 1)) x;\n__attribute__((deprecated)) typeof((D, 1)) y;\n"
+        "__attribute__((unavailable)) typeof((D, 1)) z;\nint a = (E), b __attribute__((unavailable)) = sizeof(typeof((E, 1)));\n",
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\ntypeof((E, 1)) x;\n",
+        "enum { D __attribute__((deprecated(\"old\"))) = 2 };\ntypeof((D, 1)) y;\n",
+        // A marked declarator's parameter lists take its mark: named and unnamed parameters, a definition's, an attribute
+        // after the declarator, a function pointer's, a nested list, a block's prototype; unmarked, the uses keep theirs.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((unavailable)) int f(T x);\n__attribute__((unavailable)) int g(T);\n"
+        "__attribute__((unavailable)) int h(T x) { return x; }\n__attribute__((deprecated)) int i(D x);\n"
+        "__attribute__((unavailable)) int j(D);\nint k(T x) __attribute__((unavailable));\n"
+        "__attribute__((deprecated)) int (*fp)(D x);\n__attribute__((deprecated)) int m(int (*q)(D));\n"
+        "void n(void) { __attribute__((deprecated)) int p(D x); __attribute__((unavailable)) int (*r)(T); (void)r; }\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\nint f(T x);\nint g(T);\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nint i(D x);\nint (*fp)(D x);\nvoid n(void) { int p(D); }\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) int f(T x);\n",
+        // A parameter's own mark is no context of its specifiers, before or after them; its marked function's is, and a
+        // file-scope declarator in a group or a call in `typeof` before it is still the declaration's.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "int f(T x __attribute__((unavailable)));\nint g(D x __attribute__((deprecated)));\n"
+        "int k(__attribute__((unavailable)) T x);\nint m(__attribute__((deprecated)) D x);\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\nint g(int);\n"
+        "__attribute__((unavailable)) int h(T x __attribute__((unavailable)));\n__attribute__((deprecated)) D (*fq)(int);\n"
+        "__attribute__((unavailable)) T (*fr)(int);\ntypeof(g((T)1)) x __attribute__((unavailable));\n",
+        // A compound literal's braces in the specifiers (`typeof((T){0})`) are the specifiers'; a `{` at the declaration's
+        // level, an initializer's compound literal's, still ends them.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((unavailable)) typeof((T){0}) x;\n__attribute__((deprecated)) typeof((D){0}) y;\n"
+        "__attribute__((unavailable)) typeof((D){0}) w;\nint *a = (D[]){0}, b __attribute__((deprecated));\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypeof((T){0}) x;\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\ntypeof((D){0}) y;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) typeof((T){0}) z;\n",
+        // A marked declarator's array bounds take its mark, at any scope, past a group's `)` and in a later dimension; a
+        // tag's body in its specifiers doesn't (an enumerator's value), and a compound literal's braces there do.
+        "typedef int D __attribute__((deprecated(\"old\")));\n__attribute__((deprecated)) int x[sizeof(D)];\n"
+        "int y __attribute__((deprecated)), z[sizeof(D)];\n__attribute__((deprecated)) int (*fp)[sizeof(D)];\n"
+        "__attribute__((deprecated)) int w[2][sizeof(D)];\nvoid f(void) { __attribute__((deprecated)) int v[sizeof(D)]; (void)v; }\n"
+        "__attribute__((deprecated)) enum { A = sizeof(D) } e;\n__attribute__((deprecated)) typeof((int){ sizeof(D) }) c;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) int x[sizeof(T)];\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) enum { A = sizeof(T) } x;\n",
+        // A tag's body in a marked declarator's bound, parameter list or initializer has its own context, the members'
+        // and enumerators' uses keeping theirs; one in a marked function's body takes the function's.
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) int x[sizeof(struct { T m; })];\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\n__attribute__((deprecated)) int x[sizeof(struct { D m; })];\n"
+        "__attribute__((deprecated)) int y[sizeof(enum { A = sizeof(D) })];\n__attribute__((deprecated)) int z[sizeof((D){0})];\n"
+        "__attribute__((deprecated)) int i = sizeof(struct { D m; });\n__attribute__((deprecated)) int f(struct { D m; } *p);\n"
+        "__attribute__((deprecated)) int j = sizeof(enum { B = sizeof(D) });\n"
+        "__attribute__((deprecated)) void g(void) { struct { D m; } s; enum { C = sizeof(D) }; (void)s; }\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) void f(void) { struct { T m; } s; (void)s; }\n",
+        // A marked tag's own body is its context: a struct's, a union's, an enum's (and its base), a nested tag's, a tag
+        // marked by an earlier declaration, an anonymous enum, an enum's attribute after its body; a struct's after its
+        // body or a later declaration's isn't. Its definition's name is no use of it.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "struct __attribute__((unavailable)) S { T m; };\nstruct __attribute__((deprecated)) R { D m; };\n"
+        "enum __attribute__((deprecated)) E { A = sizeof(D) };\nunion __attribute__((deprecated)) U { D m; };\n"
+        "struct __attribute__((deprecated)) N { struct { D n; } m; };\nenum __attribute__((deprecated)) { B = sizeof(D) };\n"
+        "enum __attribute__((deprecated)) F : D { C };\nenum G { H = sizeof(D) } __attribute__((deprecated));\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nstruct S { D m; } __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated)) R;\nstruct R { D m; };\nstruct Q { D m; };\nstruct __attribute__((deprecated)) Q;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\nstruct __attribute__((deprecated)) S { T m; };\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "struct S { T m; };\nenum E { A = sizeof(D) };\n",
+        // A marked tag's definition with declarators is a use of it at its name (its attributes after the body counting),
+        // a standalone one isn't; and a tag's use in a declaration's specifiers is diagnosed once for each declarator, in
+        // that declarator's context, at any scope, where a typedef name's is once.
+        "struct __attribute__((unavailable(\"gone\"))) S;\nstruct S { int m; } obj;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S;\nstruct S { int m; };\nstruct __attribute__((deprecated(\"old\"))) R;\n"
+        "struct R { int m; };\nstruct __attribute__((deprecated(\"old\"))) Q;\nstruct Q { int m; } q1, q2;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S { int m; } obj;\n",
+        "struct __attribute__((deprecated(\"old\"))) S { int m; } obj;\ntypedef struct __attribute__((deprecated(\"old\"))) R { int m; } RT;\n"
+        "struct __attribute__((deprecated(\"old\"))) Q;\nstruct Q { int m; } obj2 __attribute__((deprecated));\n"
+        "struct P { int m; } __attribute__((deprecated(\"late\"))) p;\n",
+        "enum __attribute__((unavailable(\"gone\"))) E : int;\nenum E : int { A } obj;\n",
+        "struct __attribute__((unavailable(\"gone\"))) S;\nstruct S { int m; };\nstruct S *p;\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nD a, b;\nD c __attribute__((deprecated)), e;\nD f, g __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated(\"t\"))) S { int m; };\nstruct S h, i;\nstruct S j __attribute__((deprecated)), k;\n"
+        "struct S l, m __attribute__((deprecated));\nvoid n(void) { struct S o, q __attribute__((deprecated)); (void)o; (void)q; }\n"
+        "struct X { struct S r, u; struct S v __attribute__((deprecated)), w; };\nstruct S (*fp)(void), x, *y = 0;\n"
+        "typedef struct S T1, T2;\nvoid z(struct S a, struct S b);\nint size = sizeof(struct S);\n",
+        "struct __attribute__((unavailable(\"gone\"))) U;\nstruct U *u1, *u2;\n",
+        // A fixed enum's underlying type (a typedef name) is no declarator: its definition's uses are each declarator's,
+        // in that declarator's context. A use in the base is once, in the first declarator's context at any scope, not
+        // the enum's own mark; in a declaration of the enum alone, in the enum's. An attribute group before a declarator
+        // names none.
+        "typedef unsigned T;\nenum __attribute__((unavailable(\"gone\"))) E : T;\nenum E : T { A } x __attribute__((unavailable));\n",
+        "typedef unsigned T;\nenum __attribute__((unavailable(\"gone\"))) E : T;\nenum E : T { A } x __attribute__((unavailable)), y;\n",
+        "typedef unsigned T;\nenum __attribute__((deprecated(\"old\"))) E1 : T;\nenum E1 : T { A1 } x1 __attribute__((deprecated));\n"
+        "enum __attribute__((deprecated(\"old\"))) E2 : T;\nenum E2 : T { A2 } x2;\nenum __attribute__((deprecated(\"old\"))) E3 : T;\n"
+        "enum E3 : T { A3 } x3 __attribute__((deprecated)), y3;\n",
+        "typedef unsigned T __attribute__((deprecated(\"old\")));\ntypedef unsigned V __attribute__((unavailable(\"gone\")));\nvoid f(void)\n{\n"
+        "    enum E1 : T { A1 } a1 __attribute__((deprecated)), b1;\n    enum E2 : T { A2 } a2, b2 __attribute__((deprecated));\n"
+        "    enum E3 : T { A3 };\n}\nstruct S\n{\n    enum G1 : T { C1 } m1 __attribute__((deprecated)), n1;\n"
+        "    enum G2 : T { C2 } m2, n2 __attribute__((deprecated));\n};\nenum __attribute__((deprecated)) K : T { K1 } k;\n"
+        "enum L : T { L1 } __attribute__((deprecated)) l;\nenum : T { N } z __attribute__((deprecated)), w;\nenum M : V { M1 } v __attribute__((deprecated));\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nenum __attribute__((deprecated)) F1 : D { C1 };\nenum F2 : D { C2 } __attribute__((deprecated));\n"
+        "enum F3 : D { C3 };\nenum __attribute__((deprecated)) F4 : D;\nenum __attribute__((deprecated)) F5 : D;\nenum F5 : D { C5 };\n"
+        "void f(void) { enum __attribute__((deprecated)) F6 : D { C6 }; enum F7 : D { C7 }; }\n"
+        "struct S { enum __attribute__((deprecated)) F8 : D { C8 } m; };\n",
+        "struct __attribute__((deprecated)) S { int a; } __attribute__((unused)) s __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated)) R { int a; } __attribute__((unused)) r;\n"
+        "struct __attribute__((unavailable)) Q { int a; } __attribute__((aligned(8))) q __attribute__((unavailable)), *q2 __attribute__((unavailable));\n",
+        // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
+        "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
+        "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"
+        "int k(void) __attribute__((deprecated(\"x\")));\nint k(void) __attribute__((unavailable(\"y\")));\nint k(void) { return g(); }\n",
+        // Initializers' uses (check_init_member_use): a designator's member, a value's member by its position at each level
+        // of elided braces, through an anonymous member and a union's first; none in a deprecated declaration's.
+        "struct S { int x __attribute__((deprecated(\"m\"))); int y; struct { int z __attribute__((deprecated)); }; };\n"
+        "struct S a = { 1, 2, 3 };\nstruct S b = { .x = 1, .z = 2 };\n"
+        "struct T { struct S in; int w __attribute__((deprecated)); } c = { 1, 2, 3, 4 }, d = { { 1 }, 5 }, e = { .in.x = 1, .w = 2 };\n"
+        "int f(void) { struct S l = { 0 }; return ((struct S){ .y = 1, 2 }).y + l.y; }\n"
+        "__attribute__((deprecated)) struct S g = { 1 };\n"
+        "union U { int a [[deprecated]]; float b; } u = { 1 }, v = { .b = 1 };\n"
+        "struct S h[2] = { [1].x = 1, [0] = { 2 } };\n",
+        // An unavailable member's use in an initializer is clang's error (check_init_member_use): a designator's, a value's by its
+        // position at each level, a union's first, a compound literal's, an array element's; none in an unavailable declaration's.
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct S a = { .u = 1 };\nstruct S b = { 2, 3 };\n"
+        "void f(void) { struct S c = { .w = 1, .u = 2 }; (void)c; }\n",
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nstruct T { struct S s; int z; };\n"
+        "struct T a = { .s.u = 1 };\nstruct T b = { { 1, 2 }, 3 };\nunion U { int v __attribute__((unavailable)); int x; } c = { 1 };\n"
+        "__attribute__((unavailable)) struct S d = { .u = 1 };\n__attribute__((deprecated)) struct S e = { .u = 1 };\n"
+        "int f(void) { return (struct S){ .u = 2 }.w; }\nstruct S g[2] = { [1].u = 3 };\n",
+        // A marked member's access the evaluator alone reads (check_input_evaluated_members): `typeof`'s operand, a file-scope
+        // array bound, an enumerator's value, a static assertion's; once where the graph reads it too (a variable length array's
+        // bound); none in a marked declaration's specifiers.
+        "struct S { int x __attribute__((deprecated(\"old\"))); int u __attribute__((unavailable)); } s;\ntypeof(s.x) a;\n"
+        "int b[sizeof(s.x)];\nint c[sizeof(s.u)];\nvoid f(void) { typeof(s.x) d; (void)d; }\n",
+        "struct S { int x __attribute__((deprecated(\"old\"))); int y; struct { int z __attribute__((deprecated)); }; } s, *p;\n"
+        "typeof(p->x) a;\ntypeof(s.z) b;\nint c[sizeof(s.x) + sizeof(p->x)];\n__attribute__((deprecated)) typeof(s.x) d;\n"
+        "typeof(s.x) e __attribute__((deprecated));\n"
+        "int f(void) { typeof(p->x) g = 0; return sizeof(s.x) + g + (int)sizeof(typeof(s.y)); }\n"
+        "_Static_assert(sizeof(s.x) == 4, \"\");\nenum { E = sizeof(s.x) };\n"
+        "int h(int n) { int v[sizeof(s.x)]; int w[n + sizeof(p->x)]; return v[0] + w[0]; }\nstruct T { int m[sizeof(s.x)]; };\n",
+        "struct S { int x __attribute__((deprecated(\"old\"))); } *p;\nint h(int n) { int w[n + sizeof(p->x)]; return w[0]; }\n"
+        "int k(int n) { int w[n + p->x]; return w[0]; }\n",
+        // A call that resolves to a deprecated overloadable overload (check_input_overload_uses), through parentheses, a
+        // redeclaration and a block's; none at an address taken through the overload set, nor in a deprecated function.
+        "int f(int) __attribute__((overloadable, deprecated(\"old\")));\nint f(double) __attribute__((overloadable));\n"
+        "int f(int) __attribute__((overloadable));\nint g(void) { return (f)(1) + f(2.0) + f(3); }\n"
+        "__attribute__((deprecated)) int h(void) { return f(1); }\nint k(char) __attribute__((overloadable));\n"
+        "int k(long) __attribute__((overloadable, deprecated));\nint m(void) { int (*q)(long) = k; return k(1L) + q(0); }\n"
+        "void n(void) { int f(int) __attribute__((overloadable)); f(1); }\n",
+        // A member's own mark is its specifiers', parameter lists' and bounds' context (CheckInputReader.member_marks): a later
+        // declarator's isn't the first's, in a struct in a function too.
+        "typedef int D __attribute__((deprecated(\"old\")));\ntypedef int T __attribute__((unavailable(\"gone\")));\n"
+        "struct S { int (*m)(D) __attribute__((deprecated)); D n __attribute__((deprecated)); int (*o)(T) __attribute__((unavailable)); int (*q)(D); };\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\n"
+        "struct S { D a, b __attribute__((deprecated)); D c[sizeof(D)] __attribute__((deprecated)); int d[sizeof(D)] __attribute__((deprecated)); };\n"
+        "void f(void) { struct L { int (*m)(D) __attribute__((deprecated)); } l; (void)l; }\n",
+        // A deprecated anonymous struct's, union's or enum's use (its definition with declarators, a type name's, an anonymous
+        // member's) at its keyword, named `(unnamed at ...)` or `(anonymous at ...)` or by its typedef; an unavailable one's error.
+        "struct __attribute__((deprecated)) { int a; } x;\ntypedef struct __attribute__((deprecated)) { int a; } T;\nT y;\n"
+        "union __attribute__((deprecated(\"m\"))) { int a; } z, w;\n"
+        "void f(void) { struct __attribute__((deprecated)) { int a; } l; (void)l; }\n",
+        "typedef struct __attribute__((deprecated)) { int a; } T, U;\nT a, b;\nU c;\nstruct { int a; } __attribute__((deprecated)) d;\n"
+        "__attribute__((deprecated)) struct __attribute__((deprecated)) { int a; } e;\n"
+        "struct __attribute__((unavailable)) { int a; } *f;\nenum __attribute__((deprecated)) { E0 } g;\n"
+        "int h = sizeof(struct __attribute__((deprecated)) { int a; });\nstruct __attribute__((deprecated)) { int a; };\n"
+        "struct O { struct __attribute__((deprecated)) { int a; } m; struct __attribute__((deprecated)) { int b; }; };\ntypedef T V;\n"
+        "V v;\n",
+        // A typedef that names a marked struct, union or enum takes its mark (ShouldDiagnoseAvailabilityOfDecl): through qualifiers
+        // and typedefs, a definition's marks or a first declaration's own; a block's object's specifiers keep the use, a typedef's
+        // and a member's drop it.
+        "struct __attribute__((deprecated(\"s\"))) S { int a; };\ntypedef struct S T;\nT x, y;\nT *p;\ntypedef T W;\nW w;\n"
+        "typedef struct S *P;\nP q;\nvoid f(T a);\nint g(void) { return sizeof(T); }\n",
+        "struct __attribute__((unavailable(\"gone\"))) S { int a; };\ntypedef struct S T;\nT *p;\ntypedef const struct S CT;\nCT *q;\n"
+        "struct R;\ntypedef struct R TR;\nTR *r0;\nstruct __attribute__((deprecated(\"late\"))) R;\nTR *r1;\n"
+        "enum __attribute__((deprecated)) E { E0 };\ntypedef enum E TE;\nTE e;\n"
+        "typedef struct __attribute__((deprecated(\"m\"))) { int a; } A;\n__attribute__((deprecated)) A a1;\n"
+        "__attribute__((deprecated)) int f(A x) { A y; (void)y; return x.a; }\nint g(void) { return sizeof(A); }\n"
+        "typedef A B __attribute__((deprecated(\"b\")));\nB b;\ntypedef union __attribute__((unavailable)) { int a; } U;\nU *u;\n"
+        "struct H { struct __attribute__((unavailable)) { int z; }; union __attribute__((deprecated)) { int w; } k; };\n"
+        "void h(struct __attribute__((deprecated)) { int a; } *p);\n",
+        "typedef int D __attribute__((deprecated(\"d\")));\nstruct __attribute__((deprecated(\"s\"))) S { int a; };\n"
+        "typedef D X __attribute__((deprecated));\ntypedef int (*F)(D) __attribute__((deprecated));\n"
+        "typedef struct S Y __attribute__((deprecated));\ntypedef int Z[sizeof(D)] __attribute__((deprecated));\n"
+        "typedef D W, V __attribute__((deprecated));\ntypedef struct S Q, P __attribute__((deprecated));\n"
+        "void f(void) { typedef D L __attribute__((deprecated)); }\n",
+        "struct R;\ntypedef struct R TR;\nstruct __attribute__((deprecated(\"def\"))) R { int a; };\nTR x;\nstruct Q;\n"
+        "typedef struct Q TQ;\nstruct __attribute__((deprecated(\"fwd\"))) Q;\nstruct Q { int a; };\nTQ y;\n"
+        "void f(void) { __attribute__((deprecated)) TR z; (void)z; }\n",
+        "typedef int D __attribute__((deprecated(\"d\")));\nstruct __attribute__((deprecated(\"s\"))) S { int a; };\n"
+        "typedef struct S TS;\nvoid f(void) {\n  __attribute__((deprecated)) D a; (void)a;\n"
+        "  D b __attribute__((deprecated)); (void)b;\n  typedef D c __attribute__((deprecated));\n"
+        "  __attribute__((deprecated)) struct S d; (void)d;\n  __attribute__((deprecated)) TS e; (void)e;\n"
+        "  TS g __attribute__((deprecated)); (void)g;\n}\n__attribute__((deprecated)) TS h;\nTS i __attribute__((deprecated));\n",
+        // An attribute that takes no arguments is checked for its subject first (check_input_attribute_subjects' count), not a
+        // type's; and a declarator's type's convention warnings come before the declaration's attributes'
+        // (check_input_attribute_function_types).
+        "void f(void) __attribute__((cold(1)));\n",
+        "int e __attribute__((const(1)));\nint i __attribute__((always_inline(1)));\nint m __attribute__((returns_twice(1)));\n",
+        "int __attribute__((cold)) __stdcall x;\n__attribute__((cold)) int __stdcall y;\nint __stdcall __attribute__((cold)) z;\n"
+        "int __attribute__((unused, cold)) __fastcall w;\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

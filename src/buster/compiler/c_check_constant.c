@@ -1075,6 +1075,44 @@ static uint32_t check_constant_separator(CheckConstantInput* input, uint32_t fir
 
 #include "c_check_intrinsic_input.c"
 
+// A marked member's access that the evaluator reads (#147, CheckInputReader.evaluated_members): `token` is its `.` or
+// `->` (an arrow's operand a pointer to the record), `base` its operand's type, `name` the member's name. Only a marked
+// member's is kept, for check_input_deprecated_uses.
+static void check_input_evaluated_member(CheckInputReader* reader, uint32_t token, bool arrow, TypeId base, uint32_t name)
+{
+    const TypeTable* types = reader->types;
+    TypeId record = type_is_valid(types, base) ? type_strip_aligned(types, base) : 0;
+    record = arrow ? (record != 0 && type_kind(types, record) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, record)) : 0) : record;
+    const uint8_t kind = record != 0 ? type_kind(types, type_unqualified(record)) : BUSTER_TYPE_KIND_NONE;
+    uint64_t offset = 0;
+    uint32_t qualifiers = 0;
+    const uint32_t member = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? type_lookup_member(types, record, name, &offset, &qualifiers) : 0;
+    const bool marked = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN &&
+                        check_marked_member(reader->output->marked_members, reader->output->marked_member_count, member) != NULL;
+    if (marked && reader->evaluated_member_count == reader->evaluated_member_capacity && !reader->output->resource)
+    {
+        const uint32_t capacity = reader->evaluated_member_capacity != 0 ? reader->evaluated_member_capacity * 2 : 16;
+        uint32_t* grown = capacity <= UINT32_MAX / 2 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 2) : NULL;
+        reader->output->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (reader->evaluated_member_count != 0)
+            {
+                memcpy(grown, reader->evaluated_members, (uint64_t)reader->evaluated_member_count * 2 * sizeof(*grown));
+            }
+            reader->evaluated_members = grown;
+            reader->evaluated_member_capacity = capacity;
+        }
+    }
+    if (marked && reader->evaluated_member_count < reader->evaluated_member_capacity)
+    {
+        reader->evaluated_members[reader->evaluated_member_count * 2] = token + 1;
+        reader->evaluated_members[reader->evaluated_member_count * 2 + 1] = member;
+        reader->evaluated_member_count += 1;
+    }
+}
+
+
 // Declaration queries can encounter a missing library name before the main reader reaches it, including an
 // address/sizeof operand. Bind it at that source point using the ordinary declaration path. Intrinsics still
 // require a direct call; replay reads the captured types instead of creating a new declaration in a closed scope.
@@ -2886,6 +2924,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             valid = count == 1 && token + 1 < input->end && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
             action.op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
             action.member = valid ? parser->tokens.names[token + 1] : 0;
+            if (valid && reader->output->marked_member_count != 0)
+            {
+                check_input_evaluated_member(reader, token, kind == PARSE_KIND_ARROW, action.operands[0].type, action.member);
+            }
             // The access's base type, which __builtin_counted_by_ref's check reads at its operator (#148); queries are a
             // type query's, which no operator token has.
             input->queries[index] = valid ? action.operands[0].type : 0;

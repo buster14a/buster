@@ -42,6 +42,7 @@
 #include <stdio.h>
 
 #include "host_isa.h"
+#include "baked.h"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
 // unit of its own, such as a benchmark's, has them static, as every other function here.
@@ -339,7 +340,7 @@ _Static_assert(sizeof(parse_keyword_kinds) / sizeof(parse_keyword_kinds[0]) == C
 // The parser kind of each kind of the preprocessor's output (a C_TOKEN_*, a keyword's BUSTER_PP_KIND_KEYWORD + id - 1,
 // or BUSTER_PP_KIND_PRAGMA_END), for parse_tokens_from_output's lookup: UNKNOWN for what C doesn't use after
 // preprocessing (`#`, `##`, and C++'s `.*`, `->*` and `<=>`). parse_kind_table_initialize fills it.
-static uint8_t parse_kind_table[256] __attribute__((aligned(64)));
+static BUSTER_BAKED_FRONTEND uint8_t parse_kind_table[256] __attribute__((aligned(64)));
 
 static void parse_kind_table_initialize(void)
 {
@@ -1101,6 +1102,8 @@ struct ParseDiagnostic
     uint8_t place;
     // An error, or a warning (only errors fail the parse).
     bool error;
+    // The opener clang's "to match this '('" note is at, of an expected closer's error (#147), or BUSTER_PARSE_NONE.
+    uint32_t note;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1488,6 +1491,8 @@ struct ParseScalar
     // The first error in the current top-level declaration: its token (BUSTER_PARSE_NONE if none), message and place.
     uint32_t error_token;
     uint32_t error_argument;
+    // The opener the error's "to match this" note is at (ParseDiagnostic.note), or BUSTER_PARSE_NONE.
+    uint32_t error_note;
     uint8_t error_message;
     uint8_t error_place;
     // The diagnostics, in order.
@@ -1513,6 +1518,8 @@ BUSTER_INLINE bool parse_message_expects_semi(uint8_t message)
            message == PARSE_MESSAGE_EXPECTED_SEMI_IN_FOR;
 }
 
+// The first error of the current top-level declaration. An expected closer's at a token has clang's note "to match this
+// '('" at its opener (#147, BalancedDelimiterTracker's): the innermost open frame's of the closer's kind.
 BUSTER_INLINE void parse_scalar_error_argument(ParseScalar* parser, uint32_t token, uint8_t message, uint8_t place, uint32_t argument)
 {
     if (parser->error_token == BUSTER_PARSE_NONE)
@@ -1523,6 +1530,16 @@ BUSTER_INLINE void parse_scalar_error_argument(ParseScalar* parser, uint32_t tok
         parser->error_message = message;
         parser->error_place = place;
         parser->error_argument = argument;
+        const uint8_t opener_kind = place != BUSTER_PARSE_AT_TOKEN ? PARSE_KIND_END : message == PARSE_MESSAGE_EXPECTED_R_PAREN ? PARSE_KIND_L_PAREN :
+                                    message == PARSE_MESSAGE_EXPECTED_R_SQUARE ? PARSE_KIND_L_SQUARE : message == PARSE_MESSAGE_EXPECTED_R_BRACE ? PARSE_KIND_L_BRACE :
+                                                                                                                                             PARSE_KIND_END;
+        uint32_t note = BUSTER_PARSE_NONE;
+        for (uint32_t f = parser->frame_count; opener_kind != PARSE_KIND_END && note == BUSTER_PARSE_NONE && f > 1; f -= 1)
+        {
+            const uint32_t opener = parser->frames[f - 1].opener;
+            note = opener < parser->count && parser->kinds[opener] == opener_kind ? opener : BUSTER_PARSE_NONE;
+        }
+        parser->error_note = note;
     }
 }
 
@@ -1578,7 +1595,10 @@ static void parse_scalar_close_expected(ParseScalar* parser, uint32_t i, uint8_t
     }
     else
     {
+        // The builtins clang reads with an argument list of its own expect their `)` without a balanced tracker: no note.
+        const bool first = parser->error_token == BUSTER_PARSE_NONE;
         parse_scalar_error(parser, i, message, BUSTER_PARSE_AT_TOKEN);
+        parser->error_note = first && !balanced ? BUSTER_PARSE_NONE : parser->error_note;
     }
 }
 
@@ -1595,6 +1615,7 @@ static void parse_scalar_note(ParseScalar* parser, uint32_t token, uint8_t messa
             .message = message,
             .place = BUSTER_PARSE_AT_TOKEN,
             .error = error,
+            .note = BUSTER_PARSE_NONE,
         };
         parser->diagnostic_count += 1;
     }
@@ -2101,7 +2122,7 @@ BUSTER_INLINE void parse_statement_else(ParseScalar* parser, uint32_t token)
 #define BUSTER_PARSE_ROLE_INFO(role) ((uint32_t)parse_role_levels[role] | (uint32_t)parse_role_left_thresholds[role] << 8 | \
                                       (uint32_t)parse_role_right_thresholds[role] << 16 | (uint32_t)parse_role_rules[role] << 24)
 
-static uint32_t parse_role_info[PARSE_ROLE_COUNT];
+static BUSTER_BAKED_FRONTEND uint32_t parse_role_info[PARSE_ROLE_COUNT];
 
 static void parse_role_info_initialize(void)
 {
@@ -4141,7 +4162,9 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     const uint32_t flags = frame->flags;
     const bool attribute = (flags & BUSTER_PARSE_FRAME_ATTRIBUTE) != 0;
     const bool asm_operands = (flags & BUSTER_PARSE_FRAME_ASM) != 0;
-    const bool empty = (flags & BUSTER_PARSE_FRAME_EMPTY_OK) != 0;
+    // An omitted array bound ends only at `]`, not at another closer or a statement terminator (#1253).
+    const bool empty = (flags & BUSTER_PARSE_FRAME_EMPTY_OK) != 0 &&
+                       ((flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) == 0 || kind == PARSE_KIND_R_SQUARE);
     const uint8_t previous = parser->kinds[(int64_t)i - 1];
     // A GNU attribute's type argument (parse_scalar_type_argument_attribute), where a type name starts it.
     const bool type_argument = frame->role == PARSE_ROLE_OPEN_CALL && i == frame->opener + 1 && parse_scalar_gnu_attribute_group(parser, frame) &&
@@ -5401,6 +5424,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .message = parser->error_message,
             .place = parser->error_place,
             .error = true,
+            .note = parser->error_note,
         };
         parser->diagnostic_count += 1;
     }
@@ -5774,8 +5798,8 @@ struct ParseKernels
 // K1, brackets: the scalar twin
 
 // The bracket deltas: of ( [ { by kind, for the first pass, and of every group by role, for the second.
-static int8_t parse_kind_deltas[128];
-static int8_t parse_role_deltas[128];
+static BUSTER_BAKED_FRONTEND int8_t parse_kind_deltas[128];
+static BUSTER_BAKED_FRONTEND int8_t parse_role_deltas[128];
 
 static void parse_kernels_init_tables(void)
 {
@@ -7118,7 +7142,7 @@ struct ParseCheckTables
     uint64_t declaration_modes;
 };
 
-static ParseCheckTables parse_check_tables;
+static BUSTER_BAKED_FRONTEND ParseCheckTables parse_check_tables;
 
 BUSTER_INLINE bool parse_class_set_has(const ParseClassSet* set, uint8_t c)
 {
@@ -8477,7 +8501,7 @@ struct ParseShifts
 #define BUSTER_PARSE_WORD_BYTES 0x5555555555555555ull
 #define BUSTER_PARSE_DWORD_BYTES 0x1111111111111111ull
 
-static ParseShifts parse_shifts;
+static BUSTER_BAKED_FRONTEND ParseShifts parse_shifts;
 
 static void parse_shifts_init(void)
 {
@@ -8749,7 +8773,7 @@ struct ParseParentTables
     uint16_t weak_ties[32];
 };
 
-static ParseParentTables parse_parent_tables;
+static BUSTER_BAKED_FRONTEND ParseParentTables parse_parent_tables;
 
 static void parse_parent_tables_init(void)
 {
@@ -8958,7 +8982,7 @@ struct ParseRoleTables
     uint8_t fixed_features[16];
 };
 
-static ParseRoleTables parse_role_tables;
+static BUSTER_BAKED_FRONTEND ParseRoleTables parse_role_tables;
 
 static void parse_role_tables_init(void)
 {
@@ -10092,7 +10116,7 @@ static void parse_after_colons_avx512(ParseKernels* kernels, uint32_t count)
 #define BUSTER_PARSE_STATEMENT_OWNED (BUSTER_PARSE_STATEMENT_TERMINATOR | BUSTER_PARSE_STATEMENT_HEAD | BUSTER_PARSE_STATEMENT_WHILE)
 #define BUSTER_PARSE_STATEMENT_ENDS (BUSTER_PARSE_STATEMENT_TERMINATOR | BUSTER_PARSE_STATEMENT_CLOSE)
 
-static uint8_t parse_statement_classes[128];
+static BUSTER_BAKED_FRONTEND uint8_t parse_statement_classes[128];
 
 static void parse_statement_tables_init(void)
 {
@@ -11379,7 +11403,7 @@ struct ParseCheckVectorTables
     uint32_t pseudo_groups;
 };
 
-static ParseCheckVectorTables parse_check_vector;
+static BUSTER_BAKED_FRONTEND ParseCheckVectorTables parse_check_vector;
 
 // K6's vector tables, from its tables and the twin's own functions: every class's refinement, mode and group the
 // kernel looks up is the twin's.
@@ -12504,6 +12528,11 @@ struct Parser
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
+    // The diagnostics' and the meanings' columns in the tokens' arena (parse_translation_unit), and the meanings it has
+    // room for.
+    ParseDiagnostic* diagnostic_column;
+    uint8_t* meaning_column;
+    uint32_t meaning_room;
     uint32_t errors;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.
@@ -12547,10 +12576,11 @@ static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* pa
     return result;
 }
 
-static bool parse_tables_ready;
+static BUSTER_BAKED_FRONTEND bool parse_tables_ready;
 
-// The tables every parse reads, built once.
-static void parse_tables_initialize(void)
+// The tables every parse reads, built once, and baked into the executable (baked.h): a compile of the C driver's starts
+// with them built. bake-tables runs this from the checker's unit, which reaches the home's copies as every unit does.
+BUSTER_PARSER_ENTRY bool parse_tables_initialize(void)
 {
     if (!parse_tables_ready)
     {
@@ -12565,6 +12595,13 @@ static void parse_tables_initialize(void)
         parse_check_vector_init();
         parse_tables_ready = true;
     }
+    return true;
+}
+
+// Whether the tables are built: from the start, in a baked executable.
+BUSTER_PARSER_ENTRY __attribute__((unused)) bool parse_tables_initialized(void)
+{
+    return parse_tables_ready;
 }
 
 BUSTER_PARSER_ENTRY bool parse_initialize(Parser* parser, const ParseOptions* options, CLanguage language)
@@ -12723,7 +12760,8 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
         result = predeclared[i] != 0;
     }
     const uint32_t capacity = table->count;
-    parser->meanings.meanings = result ? parse_column(parser, 9, capacity, 1) : 0;
+    // In the tokens' arena where they fit, as they do unless the table grew by more than parse_translation_unit allowed.
+    parser->meanings.meanings = !result ? 0 : capacity <= parser->meaning_room ? parser->meaning_column : parse_column(parser, 9, capacity, 1);
     parser->meanings.capacity = capacity;
     parser->meanings.table = table;
     result = result && parser->meanings.meanings != 0;
@@ -12764,11 +12802,21 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         // The columns, all or none.
         ParseTokens* tokens = &parser->tokens;
         const uint64_t pragmas = (uint64_t)output->count + 1;
-        const uint64_t entries[] = { capacity, capacity, capacity, pragmas, pragmas, capacity };
-        const uint64_t sizes[] = { 1, 4, 4, 4, 4, 1 };
+        // With the names' meanings, one for each name the intern table has and those parse_clang_scope_numbers
+        // (`_Clang`) and parse_prepare_meanings may add, and where the address space is unbounded, the diagnostics, at
+        // most one for each token and 16 more: two arenas fewer for each unit (#652). Sized before conversion, the
+        // diagnostics take room for the tokens' bound, twice the output's; under a finite RLIMIT_AS that would map 12
+        // bytes more for each token of a large unit than it can use, so they keep an arena of their own, sized by the
+        // tokens converted (#1279's review).
+        const uint64_t room = (uint64_t)pp->table->count + BUSTER_PARSE_PREDECLARED_TYPEDEFS + 1;
+        const bool unbounded = arena_reservation_limit() == BUSTER_ARENA_MAX_CAPACITY;
+        const uint64_t entries[] = { capacity, capacity, capacity, pragmas, pragmas, capacity, room, capacity + 16 };
+        const uint64_t sizes[] = { 1, 4, 4, 4, 4, 1, 1, sizeof(ParseDiagnostic) };
         void** columns[] = { (void**)&tokens->kinds, (void**)&tokens->names, (void**)&tokens->sources, (void**)&tokens->pragma_sources, (void**)&tokens->pragma_positions,
-                             (void**)&tokens->flags };
-        result = parse_columns(parser, 0, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
+                             (void**)&tokens->flags, (void**)&parser->meaning_column, (void**)&parser->diagnostic_column };
+        parser->diagnostic_column = 0;
+        result = parse_columns(parser, 0, BUSTER_ARRAY_LENGTH(columns) - !unbounded, entries, sizes, columns);
+        parser->meaning_room = result ? (uint32_t)room : 0;
         tokens->capacity = (uint32_t)capacity;
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
@@ -12786,7 +12834,8 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         parse_clang_scope_numbers(parser, pp);
         const uint32_t count = parser->tokens.count;
         parser->diagnostic_capacity = count + 16;
-        parser->diagnostics = parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));
+        parser->diagnostics = parser->diagnostic_column != 0 ? parser->diagnostic_column :
+                              parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));
         result = parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
@@ -13098,7 +13147,15 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
         if (diagnostic->place == BUSTER_PARSE_AT_TOKEN && diagnostic->token < parser->tokens.count)
         {
-            pp_diagnose_output(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parser->tokens.sources[diagnostic->token], "%s", text);
+            // An expected closer's note at its opener (#147): "to match this '('".
+            const uint32_t opener = diagnostic->note;
+            const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
+            const PPOutputDiagnosticNote note = {
+                .token = opener < parser->tokens.count ? parser->tokens.sources[opener] : 0,
+                .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
+            };
+            const uint32_t source = parser->tokens.sources[diagnostic->token];
+            pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, source, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
         }
         else
         {
@@ -13108,7 +13165,15 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             uint32_t position = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
             const uint32_t saved = pp->diagnostic_position;
             pp->diagnostic_position = position;
-            pp_diagnose(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic), "%s", text);
+            // An expected closer's note at its opener (#147), where the error is at the unit's end.
+            const uint32_t opener = diagnostic->note;
+            const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
+            const PPDiagnosticNote note = {
+                .location = opener < parser->tokens.count ? parse_primary_location(pp, parser->tokens.sources[opener]) : 0,
+                .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
+            };
+            pp_diagnose_note(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic),
+                             opener_kind != PARSE_KIND_END ? &note : NULL, "%s", text);
             pp->diagnostic_position = saved;
         }
     }

@@ -105,7 +105,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
                                       check_input(&input, &parser, &pp, &types.table, &output, &scratch)) &&
                 check_graph_run(&types.table, &input.graph, &output, &scratch, &checking, &stream) && stream.report_count == 0 &&
                 check_initializers_run(&plans, &input, &stream, &parser, &types.table, &output, &scratch) && plans.count == 1;
-        check_test_expect(test, ready, "integer table source checks with compact paths and the full-graph reference");
+        check_test_expect(test, ready, "literal table source checks with compact paths and the full-graph reference");
         if (ready)
         {
             const CheckInitializer* plan = plans.plans;
@@ -121,7 +121,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
             {
                 ready = ready && plan->object_size == expected_size && memcmp(bytes, expected, expected_size) == 0;
             }
-            check_test_expect(test, ready, "compact integer table bytes, omitted zero tail and completed type equal ordinary per-element planning");
+            check_test_expect(test, ready, "compact literal table bytes, omitted zero tail and completed type equal ordinary per-element planning");
             check_test_expect(test, input.literal_table_count == (path != 0 && compact ? 1u : 0u) &&
                                    (!compact || path == 0 || (input.graph.count < dense_nodes && dense_nodes - input.graph.count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
                                     plan->count == 1 && plan->parts[0].kind == CHECK_INIT_BYTES)),
@@ -180,7 +180,7 @@ static void check_test_literal_table_shapes(CheckTest* test)
     }
 }
 
-static void check_test_literal_table_contract(CheckTest* test)
+static void check_test_literal_table_contract(CheckTest* test, const char* element)
 {
     char source[8192];
     InternTable identifiers = { 0 };
@@ -194,7 +194,7 @@ static void check_test_literal_table_contract(CheckTest* test)
     const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
     const ParseOptions parsing = { 0 };
     bool ready = output.base != NULL && scratch.base != NULL && rollback.base != NULL &&
-                 check_test_literal_table_source(source, sizeof(source), "unsigned char", 129, 0, true) &&
+                 check_test_literal_table_source(source, sizeof(source), element, 129, 0, true) &&
                  intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
                  parse_initialize(&parser, &parsing, preprocessing.language) &&
                  pp_run_source(&pp, "table-contract.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&
@@ -278,6 +278,51 @@ static void check_test_literal_table_contract(CheckTest* test)
             check_test_expect(test, unchanged, "payload and retained-record allocation failures restore arenas and publish no ignored range or table");
             rollback.capacity = capacity;
         }
+        // A floating table's scratch, refused at every 4 bytes past its length (#1210's review): its converted bitset
+        // (check_literal_table_floating), then what its conversions take, until the table is accepted. Each refusal is a
+        // resource failure that restores both arenas and publishes no ignored range or table; the first room that holds
+        // the table accepts it, and no step before it does.
+        const bool floating = strcmp(element, "float") == 0 || strcmp(element, "double") == 0;
+        // What an accepted table writes besides the table: its query's type and its name's linked type.
+        TypeId* query_types = BUSTER_ARENA_PUSH_ARRAY(&scratch, TypeId, (uint64_t)parser.tokens.count + 1);
+        TypeId* linked_types = query_types != NULL ? BUSTER_ARENA_PUSH_ARRAY(&scratch, TypeId, (uint64_t)identifiers.count + 1) : NULL;
+        allocated = allocated && linked_types != NULL;
+        check_test_expect(test, allocated, "floating scratch refusal adapter has room");
+        const uint64_t scratch_capacity = scratch.capacity;
+        uint32_t refusals = 0;
+        bool accepted = false;
+        for (uint64_t room = 0; allocated && floating && !accepted && room <= 4096; room += 4)
+        {
+            CheckInput copy = input;
+            copy.literal_tables = NULL;
+            copy.literal_tables_last = NULL;
+            copy.literal_table_count = 0;
+            copy.resource = false;
+            rollback.length = 17;
+            reader.output = &copy;
+            reader.arena = &rollback;
+            reader.declared_types = input.declared_types;
+            reader.initializer_declarations = declarations;
+            reader.ignored = ignored;
+            reader.function_body = BUSTER_CHECK_NONE;
+            reader.query_types = query_types;
+            reader.linked_types = linked_types;
+            reader.declaration_bits = input.declaration_bits;
+            const uint64_t before = scratch.length;
+            scratch.capacity = before + room;
+            accepted = check_input_literal_table_prepare(&reader, begin - 1);
+            scratch.capacity = scratch_capacity;
+            bool unchanged = !accepted && copy.resource && rollback.length == 17 && scratch.length == before && copy.literal_tables == NULL &&
+                             copy.literal_table_count == 0;
+            for (uint32_t token = 0; unchanged && token <= parser.tokens.count; token += 1)
+            {
+                unchanged = ignored[token] == 0x9d;
+            }
+            refusals += !accepted;
+            check_test_expect(test, accepted ? copy.literal_table_count == 1 && !copy.resource && scratch.length == before : unchanged,
+                              "a floating table's scratch refusal restores arenas and publishes nothing, and enough room accepts it");
+        }
+        check_test_expect(test, !floating || (accepted && refusals != 0), "a floating table's scratch is refused, then accepted with room");
         arena_pop_to(&scratch, scratch_mark);
     }
     if (mapping != MAP_FAILED)
@@ -368,10 +413,14 @@ static void check_test_literal_table_order(CheckTest* test)
     }
 }
 
+#include "c_check_literal_table_floating_test.c"
+
 static void check_test_literal_tables(CheckTest* test, const char* clang)
 {
     check_test_literal_table_shapes(test);
-    check_test_literal_table_contract(test);
+    check_test_literal_table_contract(test, "unsigned char");
+    check_test_literal_table_contract(test, "float");
+    check_test_literal_table_contract(test, "double");
     check_test_literal_table_order(test);
     char source[32768];
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
@@ -393,7 +442,7 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
         check_test_expect(test, made, "typed literal table fixture fits its source buffer");
         if (made)
         {
-            check_test_literal_table_case(test, source, i < 7, false);
+            check_test_literal_table_case(test, source, i < 8, false);
         }
     }
     {
@@ -422,4 +471,5 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
             check_test_program_source(test, source, "literal-table-native", clang);
         }
     }
+    check_test_literal_floating_tables(test, clang);
 }

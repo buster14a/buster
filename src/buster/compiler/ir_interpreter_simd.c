@@ -18,6 +18,13 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
         case IR_OR: operation = IR_SIMD_OR; break;
         case IR_XOR: operation = IR_SIMD_XOR; break;
         case IR_NOT: operation = IR_SIMD_NOT; break;
+        case IR_SHL: operation = IR_SIMD_SHL; break;
+        case IR_LSHR: operation = IR_SIMD_LSHR; break;
+        case IR_ASHR: operation = IR_SIMD_ASHR; break;
+        case IR_FADD: operation = IR_SIMD_FADD; break;
+        case IR_FSUB: operation = IR_SIMD_FSUB; break;
+        case IR_FMUL: operation = IR_SIMD_FMUL; break;
+        case IR_FDIV: operation = IR_SIMD_FDIV; break;
         case IR_VCMP: operation = IR_SIMD_COMPARE; break;
         case IR_VSELECT: operation = IR_SIMD_SELECT; break;
         default: break;
@@ -115,6 +122,8 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
         .operation = ir_interpreter_simd_opcode(op),
         .result = ir_simd_shape(function->type[i]),
         .predicate = op == IR_VCMP ? (IrSimdPredicate)function->c[i] : IR_SIMD_EQ,
+        // Its lanes (#141's element types): a vector operation's flags, which the verifier checked.
+        .lane = (IrSimdLane)function->flags[i],
     };
     IrSimdValue values[3] = {0};
     const IrSimdValue* operands[3] = {0};
