@@ -6005,6 +6005,16 @@ arguments against the function. The checker now gives these as clang does.
   attributes `noreturn`, `packed`, `may_alias`, `transparent_union` and
   nullability, and `sentinel`, keep their count-first checks.
 
+  The scalar parser uses those same generated string-slot facts when a
+  malformed expression would otherwise hide an earlier string error, as in
+  `section(1,)`. A stray name immediately before the closing parenthesis of a
+  `sizeof` or `alignof` type inside a GNU attribute is retained as a parser
+  error with its opener note. The diagnostic-only recovery view drops that
+  name, keeping the original complete type and closing parenthesis, so the
+  outer attribute can still diagnose its count. This view cannot accept or
+  emit the source. A delayed count diagnostic takes its name from its source
+  report and publishes after the arguments, independently of its sort key.
+
   Custom grammars keep their handlers' rules: `cpu_specific` and
   `cpu_dispatch` require at least one identifier, `no_sanitize` at least one
   string, and `target_clones` requires a default target. Their zero-argument
@@ -6204,6 +6214,51 @@ arguments against the function. The checker now gives these as clang does.
   unit of 19 glibc headers with their extern inline functions (merged). So
   source order costs nothing measured there, where publishing the attribute
   state across lanes would take a merge of its own.
+- **GNU `noderef`** (`c_check_noderef_types.c`, `c_check_noderef_input.c`,
+  `c_check_noderef_graph.c`). Source-only immutable shadows retain annotations
+  through pointers, arrays, function results and parameters, typedefs, record
+  members, `typeof` and inferred declarations. They never enter canonical type
+  identity, layout or generated values. A sparse token column exists only in
+  units spelling `noderef` or `__noderef__`; ordinary units take no expression
+  pass or annotation allocation. Declarator and constant/type-name readers
+  compose the same shadow shape. An attribute just inside declarator parentheses
+  marks that chunk's type without adding a canonical layer. An invalid
+  placement retains its type sugar and gives `-Wignored-attributes`, as Clang
+  does; a trailing declaration
+  spelling has no dereference effect. C23 `clang::noderef` remains ignored.
+  The checked graph transfers the annotations through calls, casts, pointer
+  arithmetic, assignments, comma and conditional expressions, then gives
+  `-Wnoderef` for dereferences, subscripts and arrow accesses. A pointer or array
+  identifier's warning names it and notes its declaration; an atomic operand
+  uses the generic expression warning. Unary dereferences that select array
+  values compute addresses without a warning; subscripts retain their annotation
+  check. `sizeof`, `alignof`, `typeof`
+  and generic controlling expressions suppress the warning. Taking an address
+  cancels its lvalue's dereference, including array-member address computations,
+  while loading an intermediate pointer member still warns. Implicit pointer
+  conversions that remove the annotation warn; explicit casts do not. The
+  check uses the original source and destination pointer types before array
+  decay or atomic value conversion, and only fixed prototype parameters
+  supply assignment conversions at calls. Conversion locations share the
+  attribute argument reader's expression spelling, including parentheses.
+  This lookup follows the first token's parent chain once, retaining a
+  subscript base's location without repeatedly scanning nested prefixes.
+  Initializer conversion diagnostics follow the actual selected member or
+  array element, including nested designators, union alternatives, atomic
+  pointer elements and GNU ranges. The graph pass retains one bit per value
+  for these consumers; its temporary expression shadows remain disposable.
+  The initializer's warning sink keeps one conversion warning per selected
+  range element, while dropping scalar initializers already diagnosed by the
+  graph pass. Conversion warnings also apply in unevaluated operands;
+  dereference warnings keep their query suppression.
+  Function redeclarations preserve the previous composite function type's
+  sugar, while an object's most recent declaration and a definition's own
+  parameters keep their own sugar. Parameter adjustment preserves atomic
+  wrappers; K&R declarations retain the adjusted annotations and the typed
+  parameter's location for declaration notes. Call arguments and their sparse
+  parameter annotations advance in source order together. A body's annotated
+  record members request source-order replay before publishing member indexes;
+  other body shadows remain immutable in the deferred reader's retained arenas.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers
     (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
@@ -6213,7 +6268,6 @@ arguments against the function. The checker now gives these as clang does.
     of the same declaration are missing: a second list's, and its parser's
     recovery errors and their notes (a first error's "to match this '('" is
     the parser's: `docs/c-parser.md`).
-  - GNU's `noderef` is refused by name.
   - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
     "an attribute list cannot appear here".
   - A function definition's attribute whose argument count is wrong

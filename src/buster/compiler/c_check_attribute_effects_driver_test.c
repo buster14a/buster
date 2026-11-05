@@ -83,6 +83,7 @@ static void check_test_driver_thread_arguments(CheckTest* test, const char* clan
 
 static void check_test_driver_attribute_effects(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_noderef(test, clang, executable, directory);
     check_test_driver_thread_arguments(test, clang, executable, directory);
     static const struct
     {
