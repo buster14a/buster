@@ -12709,31 +12709,39 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
 }
 
 // Whether token `t` is a number where a C23 attribute's identifier goes: before `::` (the two colons of one `::` token, a
-// scope's) or right after `[[` (a name's), which C has nowhere else.
+// scope's), right after `[[`, or after a comma. The last is only a candidate: the sparse history/context walk below
+// proves that it is an attribute's name, rather than an expression or an attribute argument.
 BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t)
 {
     const bool scope = tokens->kinds[t + 1] == PARSE_KIND_COLON && tokens->kinds[t + 2] == PARSE_KIND_COLON &&
                        (tokens->flags[t + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
     const bool name = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
-    return tokens->kinds[t] == PARSE_KIND_NUMBER && (scope || name);
+    const bool comma = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_COMMA;
+    return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (scope || name || comma);
 }
 
 // clang's reading of `__clang__`'s expansion where a C23 attribute's identifier goes (#147, clang's
 // TryParseCXX11AttributeIdentifier): a number the macro's own expansion made, outside any other macro's and its arguments,
-// before `::` or right after `[[`, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
+// before `::`, right after `[[`, or after a comma in that list, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
 // its source, a number). The token becomes that identifier before the names' meanings are sized. The places are found 64
 // tokens at a time, as masks of the kinds around each token (the columns' padding covers the edges), and each one's
 // expansion is looked up, the history recorded first where it was deferred; the scalar path tests each token, the twin.
-static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
+static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
 {
     ParseTokens* tokens = &parser->tokens;
     const uint32_t count = tokens->count;
+    Arena* scratch = parser->options.scratch != NULL ? parser->options.scratch : &parser->scratch;
+    const uint64_t mark = scratch->length;
+    uint32_t* groups = NULL;
+    uint32_t group_count = 0;
+    uint32_t scanned = 0;
+    bool result = true;
     const IdentId clang = intern_find(pp->table, (const uint8_t*)"__clang__", 9);
     IdentId spelling = 0;
     // The history, which a deferred one replays the unit for (pp_history_ensure), is read only where a place is found.
     bool history = false;
     bool asked = false;
-    for (uint32_t first = 0; clang != 0 && first < count; first += 64)
+    for (uint32_t first = 0; result && clang != 0 && first < count; first += 64)
     {
         uint64_t places = 0;
         const uint32_t length = count - first < 64 ? count - first : 64;
@@ -12747,13 +12755,16 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const __m512i before = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 1);
             const __m512i earlier = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 2);
             const __m512i flags = _mm512_loadu_si512(tokens->flags + first + 2);
-            const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER));
+            const __m512i own_flags = _mm512_loadu_si512(tokens->flags + first);
+            const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER)) &
+                                     _mm512_test_epi8_mask(own_flags, _mm512_set1_epi8(BUSTER_PP_FROM_MACRO));
             const __mmask64 scope = _mm512_cmpeq_epi8_mask(after, _mm512_set1_epi8(PARSE_KIND_COLON)) &
                                     _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(PARSE_KIND_COLON)) &
                                     _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_PARSE_COLONCOLON_SECOND));
             const __mmask64 name = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) &
                                    _mm512_cmpeq_epi8_mask(earlier, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
-            places = live & number & (scope | name);
+            const __mmask64 comma = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_COMMA));
+            places = live & number & (scope | name | comma);
         }
         else
 #endif
@@ -12763,15 +12774,37 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
                 places |= parse_clang_scope_place(tokens, first + i) ? UINT64_C(1) << i : 0;
             }
         }
-        for (; places != 0; places &= places - 1)
+        for (; result && places != 0; places &= places - 1)
         {
             const uint32_t t = first + (uint32_t)__builtin_ctzll(places);
             history = asked ? history : pp_history_ensure(pp);
             asked = true;
             const uint32_t origin = history ? pp_history_at(pp, tokens->sources[t]) : 0;
             const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
-            const bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
-                                  pp->history[index].name == clang && pp->history[index].parent == 0;
+            bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
+                            pp->history[index].name == clang && pp->history[index].parent == 0;
+            if (expanded && t > 0 && tokens->kinds[t - 1] == PARSE_KIND_COMMA)
+            {
+                // Only a direct __clang__ expansion after a comma needs enclosing-delimiter state. Scan its prefix
+                // once, monotonically across all such uses, so long attribute lists and deeply nested arguments
+                // stay linear. The ordinary path keeps no stack or additional token-wide column.
+                groups = groups != NULL ? groups : BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
+                result = groups != NULL;
+                for (; result && scanned < t; scanned += 1)
+                {
+                    const uint8_t kind = tokens->kinds[scanned];
+                    if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+                    {
+                        groups[group_count++] = scanned;
+                    }
+                    else if (parse_kind_is_closer(kind) && group_count != 0)
+                    {
+                        group_count -= 1;
+                    }
+                }
+                const uint32_t open = result && group_count != 0 ? groups[group_count - 1] : 0;
+                expanded = open > 0 && tokens->kinds[open] == PARSE_KIND_L_SQUARE && tokens->kinds[open - 1] == PARSE_KIND_L_SQUARE;
+            }
             spelling = expanded && spelling == 0 ? intern_find_or_add(pp->table, (const uint8_t*)"_Clang", 6) : spelling;
             if (expanded && spelling != 0)
             {
@@ -12780,6 +12813,8 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             }
         }
     }
+    arena_pop_to(scratch, mark);
+    return result;
 }
 
 // The meaning of every name the unit may use, ordinary but for clang's predeclared typedef names.
@@ -12864,12 +12899,12 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parse_tokens_from_output(output, &parser->tokens);
         }
         parse_mark_pragma_packs(pp, &parser->tokens);
-        parse_clang_scope_numbers(parser, pp);
+        const bool normalized = parse_clang_scope_numbers(parser, pp);
         const uint32_t count = parser->tokens.count;
         parser->diagnostic_capacity = count + 16;
         parser->diagnostics = parser->diagnostic_column != 0 ? parser->diagnostic_column :
                               parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));
-        result = parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
+        result = normalized && parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
     // The parse's temporaries, each step's popped after it (ParseOptions.scratch).

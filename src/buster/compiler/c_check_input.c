@@ -1496,6 +1496,8 @@ struct CheckInputReader
     // The specifiers' attributes of the next declarator run (#147), which check_input_declarator_begin takes into its run
     // (CheckDeclaratorRun.common_attributes) for its type's warnings (check_input_attribute_type_warnings), or 0.
     CheckInputAttributes* declarator_common;
+    // The current complete declarator's end: type and declaration attribute warnings follow its parameters (#147).
+    uint32_t attribute_completion;
     uint32_t declarator_declarations;
     // The prototypes open around the reader's position: a declarator's parameter lists, each a scope a level deeper than
     // the one around it (check_input_declaration_depth).
@@ -2475,7 +2477,7 @@ static bool check_input_attribute_function_typed(CheckInputReader* reader, const
 }
 
 // The "only applies to function types" warning of `attribute` (check_input_attribute_type_warnings and
-// check_input_attribute_function_types), completing at `earliest` where that is no later than after its first token.
+// check_input_attribute_function_types), completing where its declarator's type is ready.
 static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, uint32_t name, uint32_t earliest)
 {
     const CheckWarningEvent event =
@@ -2485,7 +2487,7 @@ static void check_input_attribute_function_type_warning(CheckInputReader* reader
         .token = attribute->first,
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = earliest <= attribute->first + 1 ? earliest : attribute->first + 1,
+        .completion = earliest,
         .payload = { .first_type = type, .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                      .data = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0 },
     };
@@ -4693,20 +4695,8 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         kind = type_kind(reader->types, function);
     }
     const bool applies = kind == BUSTER_TYPE_KIND_FUNCTION;
-    // Where its attributes' own checks complete, after the first's token (an unknown one's warning, which comes at its
-    // token's end, at that token): tied with them, these come first, and after an earlier declarator's.
-    const CheckInputAttributes* lists[2] = { common, own };
-    uint32_t completion = UINT32_MAX;
-    for (uint32_t l = 0; l < 2; l += 1)
-    {
-        const CheckInputAttributes* list = lists[l];
-        const uint32_t unknown = list != NULL && list->unknown_first != 0 ? list->unknown_first - 1 : UINT32_MAX;
-        completion = unknown < completion ? unknown : completion;
-        for (uint32_t i = 0; list != NULL && i < list->count; i += 1)
-        {
-            completion = list->records[i].first + 1 < completion ? list->records[i].first + 1 : completion;
-        }
-    }
+    // The declaration's type and then its subject checks complete after every parameter's checks.
+    const uint32_t completion = reader->attribute_completion;
     // Three passes over the lists: where it applies, the specifiers', the trailing ones and the chunks'; where it doesn't,
     // the chunks', the specifiers' and the trailing ones.
     for (uint32_t pass = 0; pass < 3; pass += 1)
@@ -5141,6 +5131,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
                 if (type != 0)
                 {
+                    reader->attribute_completion = i;
                     // The type's attributes' warnings in clang's order (#147): a parameter's specifiers' are its frame's, a
                     // declaration's its run's.
                     const uint32_t split = frame->name != BUSTER_CHECK_NONE ? frame->name : frame->missing_name;

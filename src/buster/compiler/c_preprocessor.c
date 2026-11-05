@@ -17251,6 +17251,9 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
 // language mode decides (pp_predefines adds those) and the ones the target and the other options decide
 // (c_predefines.c's predefines_text).
 static const char pp_predefines_base[] =
+    // Clang's first two definitions also anchor expansion notes at their real built-in source lines.
+    "#define __llvm__ 1\n"
+    "#define __clang__ 1\n"
     "#define _LP64 1\n"
     "#define __ATOMIC_ACQUIRE 2\n"
     "#define __ATOMIC_ACQ_REL 4\n"
@@ -17573,7 +17576,6 @@ static const char pp_predefines_base[] =
     "#define __WINT_WIDTH__ 32\n"
     "#define __amd64 1\n"
     "#define __amd64__ 1\n"
-    "#define __clang__ 1\n"
     "#define __clang_literal_encoding__ \"UTF-8\"\n"
     "#define __clang_major__ 23\n"
     "#define __clang_minor__ 1\n"
@@ -17582,7 +17584,6 @@ static const char pp_predefines_base[] =
     "#define __gnu_linux__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
-    "#define __llvm__ 1\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
     "#define __unix 1\n"

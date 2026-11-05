@@ -671,6 +671,26 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
     // definition (a local label's at its declaration). The whole output, line for line, by both paths.
     unlink(source);
     static const char* const statements[] = {
+        // Parser macro warnings precede semantic attribute checks; every declarator processes its shared list after
+        // its parameters. Compare notes too, including the predefined macro's exact line and explicit redefinitions.
+        "[[__clang__::x, __clang__::y]] int a;\n",
+        "[[x, __clang__]] int a;\n",
+        "[[x, __clang__::y, __clang__::z]] int a;\n",
+        "[[__clang__::noinline(1)]] void f(void);\n",
+        "[[__clang__::x]] int a [[__clang__::y]], b [[__clang__::z]];\n",
+        "[[__clang__::x]] void f(int a [[__clang__::y]]);\n",
+        "void f(int p [[__clang__::unused]]) __attribute__((stdcall));\n",
+        "#undef __clang__\n#define __clang__ 7\n[[__clang__::unused]] int a;\n",
+        "#define WRAP __clang__\n[[WRAP::unused]] int a;\n",
+        "[[gnu::annotate(\"tag\", __clang__)]] int a;\nint values[] = {1, __clang__};\n",
+        "void f(int p [[gnu::cold]]) __attribute__((stdcall));\n",
+        "__attribute__((stdcall)) void f(int a __attribute__((cold)));\n",
+        "void (__attribute__((stdcall)) f)(int a __attribute__((cold)));\n",
+        "__attribute__((stdcall)) void (*f)(int a __attribute__((cold)));\n",
+        "void f(void) [[gnu::stdcall]];\n",
+        "typedef void F(void) [[gnu::stdcall]];\n",
+        "int (*f)(void) [[gnu::stdcall]];\n",
+        "void f(void) [[gnu::stdcall, gnu::cold, x]];\n",
         "int f(int x) {\n    [[gnu::aligned(4)]] x += 1;\n    return x;\n}\n",
         "int f(int x) {\n    [[__gnu__::__fallthrough__]] x += 1;\n    return x;\n}\n",
         "int f(int x) {\n    [[__deprecated__]] x += 1;\n    return x;\n}\n",

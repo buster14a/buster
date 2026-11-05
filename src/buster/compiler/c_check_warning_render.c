@@ -1012,7 +1012,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                    if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
+                    if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE)
+                    {
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                     }

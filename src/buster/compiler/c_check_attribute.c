@@ -200,6 +200,8 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
+    // An unknown spelling retained only to warn when each declarator processes its attributes (#147).
+    bool unrecognized;
     // Ignored by the subject check (check_input_attribute_subjects) of the declarator that read it last: a record that
     // declaration specifiers' attributes share among their declarators is checked again by each.
     bool subject_ignored;
@@ -2351,7 +2353,7 @@ static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t
             .token = token,
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-            .completion = token + 1,
+            .completion = token,
             .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
         };
         check_input_warning_event(reader, &event, NULL, 0);
@@ -3103,8 +3105,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         else if (valid)
         {
-            // One clang doesn't know (#147), which it ignores with -Wunknown-attributes' warning at the attribute's first
-            // token (its scope's), as the C23 one's spelling normalized: none of it is kept.
+            // Declaration attributes are processed after the whole declarator's type, including its parameters. Keep
+            // unknown spellings for that point too: a shared specifier list warns once for each declarator. Statements
+            // and type names have no declaration subject pass, so publish their warnings here.
+            const bool deferred = !reader->statement_attributes && !check_input_attribute_in_type_name(parser, attribute.first);
             const CheckWarningEvent event =
             {
                 .id = CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE,
@@ -3116,9 +3120,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 .payload = { .name = attribute.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                              .data = scope_name | (standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
             };
-            check_input_warning_event(reader, &event, NULL, 0);
+            if (!deferred)
+            {
+                check_input_warning_event(reader, &event, NULL, 0);
+            }
             attributes->unknown_first = attributes->unknown_first != 0 ? attributes->unknown_first : attribute.first + 1;
-            unknown = true;
+            attribute.unrecognized = deferred;
+            attribute.ignored = deferred;
+            unknown = !deferred;
         }
         if (valid && !unknown)
         {
@@ -5047,12 +5056,20 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
                                            uint32_t name)
 {
     const Parser* parser = reader->parser;
+    const uint32_t warning_begin = reader->warning_events.count;
+    const uint32_t report_begin = reader->output->report_count;
+    const uint32_t completion = reader->attribute_completion;
     const uint32_t pointer_variable = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER;
     const uint32_t subjects = declaration | ((declaration & pointer_variable) == pointer_variable ? BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE : 0);
     bool valid = true;
     for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = attributes->records + i;
+        if (attribute->unrecognized)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE, CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE);
+            continue;
+        }
         const bool scoped = attribute->standard && attribute->first != attribute->name_token;
         const uint32_t scope_name = scoped ? parser->tokens.names[attribute->first] : 0;
         const String8 scope = scoped ? check_input_attribute_name(reader, scope_name) : (String8){ "", 0 };
@@ -5377,6 +5394,23 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
                 other->ignored = true;
             }
         }
+    }
+    // Subject checks run after the declarator's type is complete. Give their warnings and errors that same boundary,
+    // retaining the handlers' order and keeping parameters before the containing declarator's checks. Parser macro
+    // warnings retain their own lexical boundaries, including any read by an attribute's nested type expression.
+    for (uint32_t w = warning_begin; w < reader->warning_events.count; w += 1)
+    {
+        CheckWarningEvent* event = reader->warning_events.events + w;
+        if (event->kind != CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE && event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN &&
+            event->completion < completion)
+        {
+            event->completion = completion;
+        }
+    }
+    for (uint32_t r = report_begin; r < reader->output->report_count; r += 1)
+    {
+        CheckInputReport* report = reader->output->reports + r;
+        report->completion = report->completion < completion ? completion : report->completion;
     }
     return valid;
 }
