@@ -403,8 +403,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-checker-asm
 == Test c-testsuite's harness
 # The self-test checks the harness's timeouts, relative paths (as the programs' heading gives them) and
-# cross-check rules with a stand-in compiler, in a directory of its own: about 7 s, most of it waiting out
-# the timeouts, so it runs apart from the programs, on one CPU rather than their four.
+# cross-check rules with a stand-in compiler, in a directory of its own. Six scenarios run concurrently with
+# five-second watchdogs (the stand-in's deliberate hangs are 30 s); most of the time is waiting, not CPU use.
 "$BUSTER_COMPILER" test-c-testsuite --self-test
 == Test the C lexer without digraphs and // comments, as c89
 "$BUSTER_COMPILER" test-lexer --no-digraphs --no-line-comments

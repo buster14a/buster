@@ -302,6 +302,13 @@ struct CheckProgram
     uint32_t asm_target_count;
     uint32_t object_count;
     uint32_t symbol_count;
+    // The unit's constant CFStrings' calls (#148, CheckDataPrepared's), each of which takes its canonical call's symbol
+    // (check_program_alias_number), and the object of the __CFConstantStringClassReference they point to, which is the
+    // program's own where `cfstring_class_own` (the emission names it, an undefined global).
+    const CheckDataCFString* cfstrings;
+    uint32_t cfstring_count;
+    uint32_t cfstring_class;
+    bool cfstring_class_own;
     uint32_t token;
     uint32_t diagnostic_position;
     CheckProgramStatus status;
@@ -2717,6 +2724,20 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         }
         else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
         {
+            if (op == CHECK_OP_BUILTIN_MISC && (graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || graph->members[node] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING))
+            {
+                // A constant CFString's call (#148), whose value is its object's address: a reference to its canonical
+                // record (check_data_cfstring_keys), whose symbol the call's object takes.
+                const CheckValue value = check_stream_value(program->stream, node);
+                const uint32_t object = value.constant_kind == CHECK_CONSTANT_ADDRESS && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 ?
+                                        check_data_cfstring_canonical(program->cfstrings, program->cfstring_count, value.object) : 0;
+                if (object != 0 && object < program->object_count && seen[object] != epoch)
+                {
+                    seen[object] = epoch;
+                    needed[object] = 1;
+                    references[reference_count++] = (uint64_t)object << 32;
+                }
+            }
             if (op == CHECK_OP_STATEMENT_VALUE)
             {
                 const uint32_t selected = program->input->expression_regions[graph->tokens[node]];
@@ -3451,6 +3472,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                                .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
                                .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
+    // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
+    if (options.prepared_data != NULL)
+    {
+        program->cfstrings = options.prepared_data->cfstrings;
+        program->cfstring_count = options.prepared_data->cfstring_count;
+        program->cfstring_class = options.prepared_data->cfstring_class;
+        program->cfstring_class_own = options.prepared_data->cfstring_class_own;
+    }
     if (options.return_flow_work != NULL)
     {
         *options.return_flow_work = 0;
@@ -3903,7 +3932,13 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
         const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, &target_events) :
                                                               check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), &target_events);
-        for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
+        // The constant CFStrings' records' references, the last ones, are no roots (#148): a live record's are needed
+        // (check_program_alias_number).
+        const CheckDataPrepared* prepared = options.prepared_data;
+        const uint32_t roots = prepared != NULL && options.initializer_references == prepared->references &&
+                               prepared->cfstring_reference_first < options.initializer_reference_count ? prepared->cfstring_reference_first :
+                                                                                                          options.initializer_reference_count;
+        for (uint32_t i = 0; i < roots; i += 1)
         {
             const uint32_t object = options.initializer_references[i];
             if (object != 0 && object <= count)

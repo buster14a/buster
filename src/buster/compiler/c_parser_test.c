@@ -431,6 +431,31 @@ static const ParseTestSnippet parse_test_snippets[] =
 {
     // Valid code.
     { "int x;\nint f(int a, int b) { return a + b * 2; }\n", "", 0 },
+    // Empty array bounds close with `]`; qualifiers and unspecified-size parameters keep that allowance (#1253).
+    { "extern int a[]; void f(int a[], int b[const], int c[*], int d[static 3]);\n", "", 0 },
+    { "void f(int [], int [const], int [*]);\n", "", 0 },
+    // Before any bound, a wrong closer or a semicolon is a missing expression, not a missing `]`.
+    { "int a[);\n", "1:7: expected expression", 0 },
+    { "int a[;\n", "1:7: expected expression", 0 },
+    { "int a[};\n", "1:7: expected expression", 0 },
+    { "void f(int a[);\n", "1:14: expected expression", 0 },
+    { "void f(const x [);\n", "1:17: expected expression", 0 },
+    { "void f(int a[const);\n", "1:19: expected expression", 0 },
+    { "void f(int a[const;\n", "1:19: expected expression", 0 },
+    { "void f(int a[const};\n", "1:19: expected expression", 0 },
+    { "void f(int a[static );\n", "1:21: expected expression", 0 },
+    { "void f(int a[static ;\n", "1:21: expected expression", 0 },
+    // Starting an expression still requires its operand, even at the matching bracket.
+    { "void f(int a[+]);\n", "1:15: expected expression", 0 },
+    { "void f(int a[*);\n", "1:15: expected expression", 0 },
+    // After a bound the missing bracket is still the error; a subscript never admits an empty expression.
+    { "int a[3;\n", "1:8: expected ']'", 0 },
+    { "int a[static 3);\n", "1:15: expected ']'", 0 },
+    { "void f(int a[3);\n", "1:15: expected ']'", 0 },
+    { "int g(int *p) { return p[); }\n", "1:26: expected expression", 0 },
+    { "int g(int *p) { return p[]; }\n", "1:26: expected expression", 0 },
+    // Other empty expression contexts are unchanged.
+    { "void f(void); void g(void) { f(); for (;;) { return; } }\n", "", 0 },
     { "struct S { int a : 3; char *p; } s = { 1, \"x\" };\n", "", 0 },
     { "int x; void g(void) { if (x) x = 1; else { for (int i = 0; i < 3; i++) x += i; } do x--; while (x); switch (x) { case 1: break; default: ; } }\n", "", 0 },
     { "typedef int T; T (x); int f(T (x)); int g(int (x));\n", "", 0 },

@@ -22,12 +22,14 @@ tier0_emit / tier0_program_functions (including abi_assign)
   → native execution
 ```
 
-The source is original project test code. It appends the established typed-stream
-columns through `tier0_emit` and obtains the real System V ABI view through
-`tier0_program_functions`. It does not manufacture an alternate frontend or
-substitute handwritten SSA for the producer. Every stage owns a separate arena;
-derived CFG and dominance columns are rebuilt after optimization. The selected
-plan's effective uses feed the production liveness consumer.
+The source is original project test code. The original scalar fixtures append
+the established typed-stream columns through `tier0_emit` and obtain the real
+System V ABI view through `tier0_program_functions`. The boundary fixtures below
+append the same typed columns and provide explicit ABI and label descriptors,
+frozen before either backend reads them. Neither manufactures an alternate
+frontend or substitutes handwritten SSA for lowering. Every stage owns a separate
+arena; derived CFG and dominance columns are rebuilt after optimization. The
+selected plan's effective uses feed the production liveness consumer.
 
 ## Running the checks
 
@@ -57,8 +59,8 @@ changes to compiler options or production routing.
 
 ## Supported fixtures and independent oracles
 
-Each supported function takes three `uint64_t` parameters and returns a
-`uint64_t`. Seventeen original fixtures cover:
+Each original scalar fixture's entry takes three `uint64_t` parameters and
+returns a `uint64_t`. Seventeen fixtures cover:
 
 | Fixture | Handoff exercised |
 | --- | --- |
@@ -103,14 +105,14 @@ formulas with Clang at `-O0` and `-O2`, using `-march=x86-64`, and checks every
 fixture/input pair against the typed interpreter. It does not translate selected
 instructions or optimized IR back into C.
 
-A successful complete run reports 1,920 native results, including twelve
-emitted call sites across the scalar/vector and rematerialization combinations,
-and 28 functions through the CFG consumer, whose edge moves and stubs it counts:
-each one's allocation must pass `tier1_cfg_verify` as well. A cross-check
-additionally reports 960 Clang results. Original typed symbols
-resolve to helpers compiled through the same complete pipeline; relocation
-metadata, signed rel32 range and encoder instruction ends are checked before
-execution. The check count also includes stage validation,
+A successful complete run reports 2,176 native results from these seventeen
+fixtures, including twelve emitted call sites across the scalar/vector and
+rematerialization combinations, and 36 functions through the CFG consumer,
+whose edge moves and stubs it counts: each one's allocation must pass
+`tier1_cfg_verify` as well. A cross-check additionally reports 1,088 Clang
+results. Original typed symbols resolve to helpers compiled through the same
+complete pipeline; relocation metadata, signed rel32 range and encoder instruction
+ends are checked before execution. The check count also includes stage validation,
 allocation/frame assertions and failure contracts; it is not a corpus size.
 
 Two focused harness regressions run even without Clang. One deliberately changes
@@ -119,10 +121,43 @@ detection and a semantic difference from the frozen result. The other hangs a
 command, its child and a detached grandchild; it requires a timeout, reaping of
 all three processes and proof that both descendant PIDs no longer exist.
 
+## Native Tier 0 boundary comparisons (#789)
+
+`tier1_pipeline_boundary_test.c`, included by the pipeline command, adds five
+fixtures. Both backends compile exactly the same frozen `Tier0Function` columns
+and ABI descriptors. Tier 1 must lower, promote, optimize, verify, select,
+allocate and emit successfully; a refusal is a failure, never a Tier 0 fallback.
+
+| Fixture | Boundary exercised |
+| --- | --- |
+| Runtime-selected label address carried through a local and phi | Exactly one indirect dispatch; both label symbols relocated to their emitted records |
+| A two-word aggregate passed by value, mutated by its callee and returned in two registers | Argument, definition and result ABI records; independent callee storage; result-object capture and a value live across the call |
+| A variadic definition called with only general-register and stack arguments | `%al=0`, saved general arguments and the incoming overflow area's address |
+| A variadic definition with eight register doubles and a ninth on the stack, mixed with integer arguments | `%al=8`, all eight vector save slots and mixed overflow values |
+| A variadic definition with seven named integer arguments | The overflow anchor starts after the named argument already on the stack |
+
+The thirty-two inputs and both scalar/vector paths are reused, with
+rematerialization off/on; the latter also keeps a frame pointer and disables the
+red zone. These fixtures use the full available general-register mask rather
+than the original pressure fixtures' five-register pool. Their native results
+must agree with both Tier 0 and independent unsigned C formulas. The variadic
+call sites are typed host-C calls into each emitted callee, not another typed
+stream being tested as the caller. This tests the incoming frame contract
+without claiming coverage of every variadic call-lowering shape.
+
+The loader validates branch layout, baseline target forms, ordered symbolic
+references, both encoders' bytes and field ends, label bounds and rel32 ranges
+before making code executable. Each comparison runs in a child with a five-second
+alarm; a fault, timeout, missing compile or result mismatch fails the command.
+The suite requires 640 native differential pairs (1,280 native results), reported
+separately from the original fixtures' counters. `--cross-check` still adds Clang's
+`-O0`/`-O2` comparison for the original seventeen fixtures; it does not turn the
+boundary suite into an external Clang cross-check or a performance benchmark.
+
 ## Run time
 
 `benchmark-tier1-pipeline [--clang PATH] [--repeat N] [--seed N] [--dump
-DIRECTORY]` compiles each supported fixture four ways: by Tier 1 (the vector
+DIRECTORY]` compiles each original scalar fixture four ways: by Tier 1 (the vector
 path with rematerialization, every caller-saved register and the red zone), by
 Tier 0 (`tier0_test.c`'s builder, from the same typed stream), and by clang at
 `-O0` and `-O2` (`-march=x86-64`) from the fixtures' C formulas, as shared
@@ -144,7 +179,7 @@ values around a loop past the registers 5.05, 4.44 and 3.72; a call in a loop
 
 ## Unsupported cases and limits
 
-No fixture here is refused any longer: the floating-point fixture that had to
+No fixture here is intended to be refused: the floating-point fixture that had to
 return `TIER1_SELECT_ERROR_UNSUPPORTED` is the floating fixture above since Tier
 1 takes floating values (#141). Refusals, with their rollback of the result and
 the arenas, are `test-tier1-select`'s (unsupported operations, an over-aligned
@@ -167,16 +202,18 @@ branch whose true successor follows is inverted. Where the IR's entry has
 predecessors, an empty entry block goes before it. The terminal tests' nonempty
 self-loops, conditional returns and phis go through it now, keeping their calls
 and jumps back, with no trap in their place.
-The fixtures don't exercise indirect, variadic or by-value aggregates' calls,
-variadic definitions, arguments past the registers, variable shifts, division or
-undefined values; Tier 1 takes them all, and `test-tier1-emit`'s native fixtures
-and `test-checker-driver`'s `--tier1` fixtures run them against clang. What Tier
-1 still refuses is [the Tier 1 guide](tier1.md)'s list. See [selection](tier1-selection.md), [liveness](tier1-liveness.md),
-[allocation](tier1-allocation.md), and [frames](tier1-frame.md) for their contracts.
+The boundary suite covers indirect jumps, one by-value aggregate ABI shape and
+variadic definitions including stack arguments. The fixtures do not cover
+indirect or variadic call lowering, every aggregate classification, variable
+shifts, division or undefined values; the broader native coverage remains in
+`test-tier1-emit` and `test-checker-driver`'s `--tier1` fixtures. What Tier 1 still
+refuses is [the Tier 1 guide](tier1.md)'s list. See [selection](tier1-selection.md),
+[liveness](tier1-liveness.md), [allocation](tier1-allocation.md), and
+[frames](tier1-frame.md) for their contracts.
 
 These are bounded integration fixtures, not source-corpus qualification. The
 source driver does not yet provide complete typed function streams for arbitrary
 C programs. No c-testsuite, SQLite, `speedtest1`, or other source corpus is compiled
 through this path here. The tests do not establish general C correctness,
-performance acceptance, target-host evidence, or issue closure. See the producer
-boundaries in [Tier 0](tier0.md), [IR](ir.md), and [SSA](ssa.md).
+performance acceptance or target-host evidence. See the producer boundaries in
+[Tier 0](tier0.md), [IR](ir.md), and [SSA](ssa.md).

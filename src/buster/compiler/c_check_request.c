@@ -117,11 +117,13 @@ struct CheckRequestReceipt
 // The options that require code generation or ABI behavior the C driver doesn't yet implement. The preprocessor may
 // still take them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
 // differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values and
-// their auxiliary options; only the exact inactive or default requests below are admitted. This doesn't yet audit every
-// -f or -m option. Negative options outside these families keep their existing handling. -fsanitize-coverage= isn't one
+// their auxiliary options; only the exact inactive or default requests below are admitted. All other -f/-m options
+// must have an explicit owner or compatibility entry in c_check_options.c. -fsanitize-coverage= isn't one
 // of them: the predefines resolve its features as clang does, a later -fno-sanitize-coverage= among them, and
 // check_request_refusal refuses what is left where the request emits code (CHECK_REQUEST_COVERAGE); only the bare
 // spelling, which clang doesn't take, is refused here by name.
+#include "c_check_options.c"
+
 static bool check_request_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
@@ -166,6 +168,11 @@ static bool check_request_codegen_option(const char* argument)
     for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
     {
         unsupported = strcmp(argument, inactive[i]) != 0;
+    }
+    const bool codegen_family = argument[0] == '-' && (argument[1] == 'f' || argument[1] == 'm');
+    if (!unsupported && codegen_family)
+    {
+        unsupported = !check_request_known_option(argument);
     }
     return unsupported;
 }

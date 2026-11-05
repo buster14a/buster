@@ -18,7 +18,14 @@ lanes the bodies ran on, each a share of whole bodies by their tokens
 declaration with linkage changes its entity's linked state, one that makes a
 union of the top level's transparent, one whose walk reports an error, and a
 unit with overloadable functions) is checked in source order, with the reason.
-The driver still checks in source order.
+The C driver reads a whole unit this way with `--deferred-bodies`
+(`check_input_deferred_compile`, #151): the bodies' walks and the merge's pass
+are rounds of the command's flow (`CheckDeferred.flow`, `CheckDeferredFlow`),
+on the session's lanes, as the emission's are, of no more lanes than the grant
+gives (the session's and the worker budget's) before the top level's walk; a
+unit whose bodies take one lane, a prefix, a repair and `-flazy-system-headers`'
+selection are read in source order. [docs/function-lanes.md](../../docs/function-lanes.md)'s
+"The checker's bodies on lanes" has the measurements and the default.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
 (and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
