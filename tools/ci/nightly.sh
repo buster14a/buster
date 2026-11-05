@@ -100,8 +100,17 @@ evidence()
             fi
             ;;
         push)
-            # A push to main: its own native correctness and measurements, after its own hosted rows. It reuses nothing
-            # from its pull request, whose run measures without native correctness.
+            # A push to main: its full hosted rows here. In the nightly mode (the owner's choice on 2026-11-05) it keeps
+            # off the 9700X: its native correctness and targeted measurements are its first-parent state's, run in the
+            # 02:00-08:00 window, after these hosted rows. Before the nightly mode, it runs both here, after its hosted
+            # rows. Either way it reuses nothing from its pull request, whose run measures without native correctness.
+            if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
+                native=-
+                measurement=-
+                hardware=skip
+                reason=deferred
+                notes='the nightly mode defers a push'"'"'s native correctness and measurements to the 02:00-08:00 Europe/Madrid window'
+            fi
             ;;
         schedule)
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
@@ -532,12 +541,17 @@ coordinate()
     [[ "$mode" == run || "$mode" == dry-run ]]
     local coordinator=${GITHUB_RUN_ID:?} states="$work/states.tsv" facts="$work/facts.tsv" ledger="$work/ledger.tsv"
     local refs="$work/refs.tsv" pending="$work/pending.tsv" refused="$work/refused.tsv" main sequence=1 times cycle start deadline started
-    started=$(now)
+    # The job's start; NIGHTLY_STARTED stands in for it in tests, as NIGHTLY_NOW does for the clock.
+    started=${NIGHTLY_STARTED:-$(now)}
+    # A window job hands over to the continuation job once it has run this long (345 minutes, inside GitHub's 360 and
+    # the job's 355-minute timeout) with the window still open: the night the clocks go back, the window is 7 hours.
+    local job_limit=${NIGHTLY_JOB_LIMIT:-20700} handoff=false
     : > "$pending"
     # The states whose nightly/SHA branch this job couldn't create: the plan skips them for the rest of the job.
     : > "$refused"
     if [ "$phase" = window ]; then
-        sequence=10001
+        # The window job's requests from 10001, its continuation's from 20001 (NIGHTLY_SEQUENCE): never the same token.
+        sequence=${NIGHTLY_SEQUENCE:-10001}
         # Without the prepare job's pending dispatches, a dispatch the runs don't show yet could be dispatched again:
         # nothing is planned. The next coordinator run plans when the runs show them.
         if ! pending_received "${NIGHTLY_PENDING:-}" "$pending"; then
@@ -561,7 +575,7 @@ coordinate()
         limit=1
     fi
     # A prepare job that will wait for the window keeps preparing while it waits, as hosted runs complete and free their
-    # slots (the planner admits no hardware before 04:00): every five minutes until the window opens.
+    # slots (the planner admits no hardware before 02:00): every five minutes until the window opens.
     local waits=false
     if [ "$phase" = prepare ] && [ "$mode" = run ] && [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
         waits=true
@@ -642,6 +656,14 @@ coordinate()
             esac
         done < "$work/plan.tsv"
         branch_token_warning
+        # Still waiting inside the window, but out of job time: the continuation job takes over from here, with this
+        # job's pending dispatches as its output.
+        if [ "$phase" = window ] && [ "$verdict" = wait ] && [ "$(( $(now) - started ))" -ge "$job_limit" ] &&
+            { [ -n "${NIGHTLY_OVERRIDE:-}" ] || [ "$(now)" -lt "$deadline" ]; }; then
+            handoff=true
+            printf 'The window is still open after %s minutes of this job: the continuation job takes over.\n' "$(( ($(now) - started) / 60 ))"
+            break
+        fi
         if [ -n "$limit" ] && [ "$iterations" -ge "$limit" ]; then
             break
         fi
@@ -657,16 +679,20 @@ coordinate()
             sleep "${NIGHTLY_SLEEP:-$(( remaining < 300 ? remaining : 300 ))}"
             continue
         fi
-        # An override (a manual run's reason) admits past 07:00: the loop then ends when nothing more is admissible.
+        # An override (a manual run's reason) admits past 08:00: the loop then ends when nothing more is admissible.
         if [ "$verdict" != wait ] || { [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -ge "$deadline" ]; }; then
             break
         fi
         sleep "$pause"
     done
     summary < "$work/report.md"
-    if [ "$phase" = prepare ]; then
+    # The prepare job hands over to the window job, and a window job out of time to its continuation, the same way.
+    if [ "$phase" = prepare ] || [ "$handoff" = true ]; then
         output snapshot "$(awk -F '\t' -v cycle="$cycle" '$1 == "cycle" && $2 == cycle { print $3 }' "$ledger" | tail -n 1)"
         output pending "$(pending_handoff "$pending")"
+    fi
+    if [ "$phase" = window ]; then
+        output continue "$([ "$handoff" = true ] && echo reachable || echo closed)"
     fi
     # After the handoff's outputs, and never failing the job: the window job's night doesn't depend on buster-performance.
     publish "$cycle"
