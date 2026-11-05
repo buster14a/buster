@@ -144,6 +144,8 @@ static void check_test_driver_noderef(CheckTest* test, const char* clang, const 
         "struct S { NP *p; }; void f(struct S s) { int *q[1] = {s.p[0]}; (void)q; }\n",
         "int *f(NP **p) { return p++[0][0]; }\n",
         "void g(int *); void f(NP **p) { g(p++[0][0]); }\n",
+        "struct S { NP *p; }; struct S g(void); void f(void) { int *q = 0[g().p]; (void)q; }\n",
+        "struct S { NP *p; }; struct S g(void); void f(void) { int *q[1] = {g().p[0]}; (void)q; }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
