@@ -495,8 +495,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return where its
-// unwinding isn't made (a variadic function's, one within an expression, one beside a musttail call), and an NSString of
+// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; an NSString of
 // no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
@@ -516,11 +515,6 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
         { "struct S { char c[5000]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores" },
-        { "void f(int n, void* p, ...) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return in a variadic function" },
-        { "int f(void* p, int c) { return c + (__builtin_eh_return(8, p), 1); }\n",
-          "unsupported: __builtin_eh_return within an expression, not a statement of its own" },
-        { "int g(void* p, int c);\nint f(void* p, int c) { if (c) __builtin_eh_return(8, p); __attribute__((musttail)) return g(p, c); }\n",
-          "unsupported: a musttail call in a function that calls __builtin_eh_return" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
@@ -1450,14 +1444,19 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
 // CFI and clang's say) and eh_returns from one of its two sites (#1420's review: the second after a branch to the first,
 // rax's slot written again), at offsets 0, 16 and 32, into an assembly handler that records the registers it
 // finds (the callee-saved ones restored, rax and rdx from their slots) and rsp (the CFA plus the offset); and one that
-// returns normally. Built by both paths at Tier 0 (with --verify, whose verifier proves its frame events) and with
-// --tier1 --verify (Tier 0's frame, which Tier 1 falls back to), each the output of clang -O0's build.
+// returns normally. The same of a variadic function that reads its variadic argument first, of one within an expression
+// whose left operand calls first, and of a function that makes a musttail call where it doesn't unwind, whose callee's
+// return the runner records too (its callee-saved registers restored, rsp back). Built by both paths at Tier 0 (with
+// --verify, whose verifier proves its frame events) and with --tier1 --verify (Tier 0's frame, which Tier 1 falls back
+// to), each the output of clang -O0's build.
 static void check_test_driver_eh_return(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char program[] = "#include <stdio.h>\n"
+    static const char program[] = "#include <stdarg.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <string.h>\n"
                                   "long seen[8];\n"
                                   "long before;\n"
-                                  "void thrower(long offset, void* h);\n"
+                                  "void* target;\n"
                                   "__attribute__((naked, noinline)) long run(long offset)\n"
                                   "{\n"
                                   "    __asm__(\n"
@@ -1466,8 +1465,11 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "        \"subq $40, %rsp\\n\"\n"
                                   "        \"movq %rsp, before(%rip)\\n\"\n"
                                   "        \"leaq handler(%rip), %rsi\\n\"\n"
-                                  "        \"call thrower\\n\"\n"
-                                  "        \"movq $-1, %rax\\njmp 1f\\n\"\n"
+                                  "        \"movq $77, %rdx\\nxorl %eax, %eax\\n\"\n"
+                                  "        \"call *target(%rip)\\n\"\n"
+                                  "        \"movq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\nmovq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\n\"\n"
+                                  "        \"movq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
+                                  "        \"jmp 1f\\n\"\n"
                                   "        \"handler:\\n\"\n"
                                   "        \"movq %rax, seen+0(%rip)\\nmovq %rdx, seen+8(%rip)\\nmovq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\n\"\n"
                                   "        \"movq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\nmovq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
@@ -1489,6 +1491,38 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "    if (pick) { frame[-7] = 0x5151 + offset; __builtin_eh_return(offset, h); }\n"
                                   "    __builtin_eh_return(offset, h);\n"
                                   "}\n"
+                                  "__attribute__((noinline)) void vthrower(long offset, void* h, ...)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    va_list ap;\n"
+                                  "    va_start(ap, h);\n"
+                                  "    long extra = va_arg(ap, long);\n"
+                                  "    va_end(ap);\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x2a2a + offset + extra;\n"
+                                  "    frame[-6] = 0x3b3b + churn(extra);\n"
+                                  "    if (pick) __builtin_eh_return(offset + extra - 77, h);\n"
+                                  "    __builtin_eh_return(offset, h);\n"
+                                  "}\n"
+                                  "__attribute__((noinline)) long ethrower(long offset, void* h)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x3c3c + offset;\n"
+                                  "    frame[-6] = 0x4d4d + offset;\n"
+                                  "    if (pick) return (long)sink * 2 + churn(offset) * (__builtin_eh_return(offset, h), 3);\n"
+                                  "    return churn(offset + 1) + (__builtin_eh_return(offset, (char*)h + 0), 1);\n"
+                                  "}\n"
+                                  "__attribute__((noinline)) long tailee(long offset, void* h) { sink = offset * 3; return offset + 1000 + (h != 0); }\n"
+                                  "__attribute__((noinline)) long mthrower(long offset, void* h)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x5e5e + offset;\n"
+                                  "    frame[-6] = 0x6f6f + churn(offset);\n"
+                                  "    if (pick) __builtin_eh_return(offset, h);\n"
+                                  "    __attribute__((musttail)) return tailee(offset, h);\n"
+                                  "}\n"
                                   "__attribute__((noinline)) void maybe(long offset, void* h, int go)\n"
                                   "{\n"
                                   "    __builtin_unwind_init();\n"
@@ -1497,11 +1531,17 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "}\n"
                                   "int main(void)\n"
                                   "{\n"
-                                  "    for (long offset = 0; offset <= 32; offset += 8)\n"
+                                  "    void* const functions[4] = { (void*)thrower, (void*)vthrower, (void*)ethrower, (void*)mthrower };\n"
+                                  "    for (int k = 0; k < 4; k += 1)\n"
                                   "    {\n"
-                                  "        pick = (offset & 8) != 0;\n"
-                                  "        long r = run(offset & ~8);\n"
-                                  "        printf(\"%ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld\\n\", r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before);\n"
+                                  "        target = functions[k];\n"
+                                  "        for (long offset = 0; offset <= 32; offset += 8)\n"
+                                  "        {\n"
+                                  "            memset(seen, 0, sizeof(seen));\n"
+                                  "            pick = (offset & 8) != 0;\n"
+                                  "            long r = run(offset & ~8);\n"
+                                  "            printf(\"%d %ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld sink=%ld\\n\", k, r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before, sink);\n"
+                                  "        }\n"
                                   "    }\n"
                                   "    maybe(0, 0, 0);\n"
                                   "    printf(\"normal return %ld\\n\", sink);\n"
@@ -1520,9 +1560,9 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
     char* const reference[] = { (char*)clang, "-O0", "-o", outputs[4], source, NULL };
     const int built = written ? check_test_driver_spawn(reference, &text) : 1;
     free(text);
-    static char expected[4096];
+    static char expected[8192];
     const bool referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
-    check_test_expect(test, referenced && strlen(expected) > 100, "clang's build of the eh_return program runs");
+    check_test_expect(test, referenced && strlen(expected) > 1000, "clang's build of the eh_return program runs");
     static const char* const names[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
     for (uint32_t mode = 0; referenced && mode < 4; mode += 1)
     {
@@ -1542,7 +1582,7 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
         arguments[count++] = source;
         arguments[count] = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        static char captured[4096];
+        static char captured[8192];
         const bool ran = status == 0 && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
         char description[256];
         snprintf(description, sizeof(description), "__builtin_eh_return unwinds to its handler as clang's build does (%s)", names[mode]);

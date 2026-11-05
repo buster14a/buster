@@ -1735,6 +1735,29 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
 - **Ordinary returns** step over rax's and rdx's slots and keep the result.
   LLVM's pop the saved rax over it (`movl $42, %eax; popq %rax`), as GCC's
   epilogue doesn't.
+- **Where it may be:**
+  - **A variadic function.** Its register save area is stored after the
+    pushes, so rax's and rdx's slots stay where the CFI says, as in clang's
+    frame. The unwinding passes none of the function's arguments on
+    (`tier0_tail_call_valid`).
+  - **Beside musttail calls.** Each TAIL_CALL row has its own kind in
+    `Tier0Function.call_tails`. The lowering tells an eh_return's row by its
+    argument's ABI type, a `const void`. A musttail call's teardown steps
+    over rax's and rdx's slots, as an ordinary return does
+    (`tier0_count_tail_finish` and `tier0_emit_tail`, per row).
+    `unwind_tier0_frame_tails` reads each tail by its kind: an eh_return's
+    jump comes right after `mov rsp, rcx`. `emitted_tier0_eh_rows` restores
+    rax's and rdx's rules after a musttail call's release, as it does after
+    the epilogue's.
+  - **Within an expression** (`c + (__builtin_eh_return(o, h), 1)`). The
+    offset and the handler go into temporaries, the expression's pending
+    values are discarded, and the TAIL_CALL then has nothing under its
+    operands (`check_lower_eh_unwind`). The rest of the expression is dead.
+    Dead constants of the discarded values' classes stand in for them, as for
+    a terminal helper's call (`check_lower_terminate`). A unit that calls
+    `__builtin_eh_return` tracks its typed stacks for this
+    (`CheckLowerShared.terminal`). The pending values are evaluated before
+    the offset and the handler, as clang evaluates them.
 - **Its consumers:**
   - `unwind_tier0_frame_tails` reads the frame.
   - `emitted_verify_frames` proves its rows up to the `mov rsp, rcx`. At the
@@ -1742,14 +1765,15 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
     doesn't describe it either.
   - Tier 1 falls back to Tier 0 for the function, as for
     `__builtin_unwind_init`'s frame.
-- **Refused by name:** one that isn't an expression statement of its own (a
-  tail call leaves nothing under its operands), one in a variadic function,
-  and one beside a musttail call.
 - **Tests.** `test-checker-driver`'s eh_return program writes rax's and
   rdx's slots, then unwinds at offsets 0, 16 and 32 into a handler that
-  records the registers and rsp. It is built on both paths at Tier 0 and
-  with `--tier1`, all with `--verify`, and prints what clang `-O0`'s build
-  prints.
+  records the registers and rsp. It runs four functions: one with two
+  unwinding sites, a variadic one that reads its variadic argument first,
+  one that unwinds within expressions after a call, and one that makes a
+  musttail call where it doesn't unwind. For the last, the runner also
+  records the callee's result, the callee-saved registers and rsp. It is
+  built on both paths at Tier 0 and with `--tier1`, all with `--verify`, and
+  prints what clang `-O0`'s build prints.
 
 `__builtin___CFStringMakeConstantString(s)` and
 `__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are
