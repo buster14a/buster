@@ -181,13 +181,19 @@ static void check_input_symbol_pragmas_complete(CheckInputReader* reader)
     if (count != 0)
     {
         const uint32_t tokens = reader->parser->tokens.count;
+        const uint32_t names = reader->pp->table->count;
         uint32_t* map = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)tokens + 1);
         CheckInputSymbolPragmaObject* objects = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckInputSymbolPragmaObject, count);
-        reader->output->resource |= map == NULL || objects == NULL;
+        uint32_t* deferred_first = reader->output->deferred_tokens != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, names) : NULL;
+        reader->output->resource |= map == NULL || objects == NULL || (reader->output->deferred_tokens != NULL && deferred_first == NULL);
         uint32_t used = 0;
         if (!reader->output->resource)
         {
             memset(map, 0, ((uint64_t)tokens + 1) * sizeof(uint32_t));
+            if (deferred_first != NULL)
+            {
+                memset(deferred_first, 0xff, (uint64_t)names * sizeof(uint32_t));
+            }
         }
         for (uint32_t i = 0; !reader->output->resource && i < count; i += 1)
         {
@@ -205,6 +211,15 @@ static void check_input_symbol_pragmas_complete(CheckInputReader* reader)
         }
         for (uint32_t token = 0; !reader->output->resource && token < tokens; token += 1)
         {
+            if (deferred_first != NULL && reader->output->deferred_tokens[token] != 0)
+            {
+                const IdentId name = reader->parser->tokens.names[token];
+                if (name != 0 && name < names && deferred_first[name] == BUSTER_CHECK_NONE)
+                {
+                    deferred_first[name] = token;
+                }
+                continue;
+            }
             const uint32_t declaration = reader->output->declarations[token];
             const uint32_t object = declaration < tokens ? reader->objects[declaration] : 0;
             const uint32_t index = object <= tokens ? map[object] : 0;
@@ -228,7 +243,14 @@ static void check_input_symbol_pragmas_complete(CheckInputReader* reader)
             const uint32_t linked = reader->linked_declarations[record->name];
             const uint32_t object = linked != 0 ? reader->objects[linked - 1] : 0;
             const uint32_t index = object <= tokens ? map[object] : 0;
-            if (index == 0)
+            const bool hidden_before = deferred_first != NULL && record->name < names && deferred_first[record->name] < record->token;
+            if (hidden_before)
+            {
+                // A skipped body may contain an earlier use or declaration. Refuse only the affected name;
+                // unrelated spellings cannot change this pragma's ordering or binding.
+                check_input_symbol_pragma_refuse(reader, record);
+            }
+            else if (index == 0)
             {
                 // An unused external-name mapping is a no-op, unlike an unmatched weak directive (Clang warns).
                 if (record->replacement == 0 || linked != 0)

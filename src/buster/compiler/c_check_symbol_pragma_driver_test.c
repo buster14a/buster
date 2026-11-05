@@ -84,6 +84,49 @@ static void check_test_driver_symbol_pragmas(CheckTest* test, const char* clang,
             free(diagnostics);
         }
     }
+    // A real unreferenced system-header body must be selected out in the lazy route. An unrelated skipped body
+    // must not suppress file-scope pragma metadata; a skipped earlier spelling of the same name must fail closed.
+    char header[512];
+    snprintf(header, sizeof(header), "%s/symbol-lazy.h", directory);
+    static const char unrelated_header[] = "#pragma GCC system_header\nstatic inline int unused_system(void){return 7;}\n";
+    static const char unrelated_source[] = "#include \"symbol-lazy.h\"\n#pragma weak lazy_weak\n#pragma redefine_extname lazy_name lazy_export\nint lazy_weak(void){return 3;}\nint lazy_name=4;\n";
+    bool prepared = parse_test_write(header, unrelated_header, sizeof(unrelated_header) - 1) &&
+                    parse_test_write(path, unrelated_source, sizeof(unrelated_source) - 1);
+    check_test_expect(test, prepared, "unrelated lazy symbol pragma fixture is written");
+    for (uint32_t pass = 0; prepared && pass < 3; pass += 1)
+    {
+        unlink(object);
+        char* diagnostics = NULL;
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-c", path, "-o", object,
+                              pass == 0 ? "-fno-lazy-system-headers" : "-flazy-system-headers", pass == 2 ? "--scalar" : NULL, NULL };
+        const bool compiled = check_test_driver_spawn(arguments, &diagnostics) == 0;
+        uint16_t weak = UINT16_MAX;
+        uint16_t renamed = UINT16_MAX;
+        uint16_t stale = UINT16_MAX;
+        check_test_expect(test, compiled && check_test_visibility_symbol(object, "lazy_weak", &weak) && weak == (uint16_t)(STB_WEAK << 8) &&
+                                check_test_visibility_symbol(object, "lazy_export", &renamed) && renamed == (uint16_t)(STB_GLOBAL << 8) &&
+                                !check_test_visibility_symbol(object, "lazy_name", &stale),
+                          "symbol pragmas survive an unrelated deferred system-header body");
+        if (!compiled)
+        {
+            fprintf(stderr, "symbol pragma lazy pass %u: %s\n", pass, diagnostics != NULL ? diagnostics : "");
+        }
+        free(diagnostics);
+    }
+    static const char hidden_header[] = "#pragma GCC system_header\nstatic inline int unused_system(void){return late_f;}\n";
+    static const char hidden_source[] = "extern int late_f;\n#include \"symbol-lazy.h\"\n#pragma weak late_f\n";
+    prepared = parse_test_write(header, hidden_header, sizeof(hidden_header) - 1) && parse_test_write(path, hidden_source, sizeof(hidden_source) - 1);
+    for (uint32_t scalar = 0; prepared && scalar < 2; scalar += 1)
+    {
+        char* diagnostics = NULL;
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-c", path, "-o", object, "-flazy-system-headers", scalar ? "--scalar" : NULL, NULL };
+        const int status = check_test_driver_spawn(arguments, &diagnostics);
+        check_test_expect(test, status == 1 && diagnostics != NULL && strstr(diagnostics, "unsupported semantic") != NULL,
+                          "a hidden earlier spelling of the pragma name fails closed in lazy mode");
+        free(diagnostics);
+    }
+    check_test_expect(test, prepared, "lazy symbol pragma fixtures are written");
+    unlink(header);
     unlink(path);
     unlink(partner);
     unlink(object);

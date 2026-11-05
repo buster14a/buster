@@ -6070,6 +6070,9 @@ and changes after a use/definition still produce a named unsupported-semantic
 error. Clang expands both directives' operands; retained macro spellings must
 not accidentally alter a different symbol. Late changes also depend on Clang's
 code-emission timing, so they are refused rather than applied retroactively.
+With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
+deferred body is conservatively refused because its binding was not checked;
+unrelated deferred bodies do not suppress weak or renamed symbol metadata.
 These refusal boundaries remain errors under `-w` and diagnostic suppression.
 
 Other unsupported semantic effects, including `scalar_storage_order` and

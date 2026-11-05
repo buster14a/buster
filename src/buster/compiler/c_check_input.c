@@ -10691,7 +10691,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
-            if (resolved && !input->resource)
+            // Symbol pragmas can also finish a selected unit: their completion detects names hidden in deferred bodies.
+            if (complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && !input->resource)
             {
                 check_input_symbol_pragmas_complete(&reader);
             }
