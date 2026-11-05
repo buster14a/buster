@@ -637,7 +637,8 @@ printf '%s\n' '    .text' '    .globl early' '    .type early, @function' 'early
     '    sub $64, %rsp' '    add $80, %rsp' '    pop %rbx' '    ret' '    .size table, .-table' '    .globl conflict' '    .type conflict, @function' \
     'conflict:' '    test %edi, %edi' '    je 3f' '    push %rbx' '3:' '    ret' '    .size conflict, .-conflict' '    .globl tail' '    .type tail, @function' \
     'tail:' '    push %rbx' '    test %edi, %edi' '    je 4f' '    pop %rbx' '    jmp elsewhere' '4:' '    sub $16, %rsp' '    add $16, %rsp' '    pop %rbx' '    ret' \
-    '    .size tail, .-tail' > "$directory/paths.s"
+    '    .size tail, .-tail' '    .globl padded' '    .type padded, @function' 'padded:' '    push %rbx' '    test %edi, %edi' '    je 5f' '    jmp 6f' '    nop' \
+    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' > "$directory/paths.s"
 "$BUSTER_COMPILER" -c -o "$directory/paths.o" "$directory/paths.s"
 "$BUSTER_COMPILER" measure-frames --functions paths="$directory/paths.o" > "$directory/paths.txt"
 grep -q "$(printf '^frame\tpaths\tearly\t168\t0\t0\t0\tresolved$')" "$directory/paths.txt"
@@ -646,7 +647,9 @@ grep -q "$(printf '^frame\tpaths\tconflict\t[0-9]*\t0\t0\t0\tunresolved$')" "$di
 # A tail call's jump, whose displacement an object leaves to its relocation, leaves the function: no edge to the next
 # instruction, whose depth the other path gives.
 grep -q "$(printf '^frame\tpaths\ttail\t24\t0\t0\t0\tresolved$')" "$directory/paths.txt"
-grep -q "$(printf '^frames\tpaths\tfunctions=4\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=3\texcluded=1\t')" "$directory/paths.txt"
+# An indirect tail call gives the code no edge reaches its depth, but not the nop that pads a loop's head after a jump.
+grep -q "$(printf '^frame\tpaths\tpadded\t8\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frames\tpaths\tfunctions=5\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=4\texcluded=1\t')" "$directory/paths.txt"
 if "$BUSTER_COMPILER" measure-frames > /dev/null 2> "$directory/errors"; then exit 1; fi
 grep -q '^usage: compiler measure-frames' "$directory/errors"
 rm -rf "$directory"

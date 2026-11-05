@@ -94,8 +94,12 @@ static int64_t frame_measure_step(const X86Instruction* instruction, int64_t dep
     const bool mov_from_rbp = direct && ((form == X86_FORM_MOV_RM64_R64 && instruction->rm == X86_REGISTER_RSP && instruction->reg == X86_REGISTER_RBP) ||
                                          (form == X86_FORM_MOV_R64_RM64 && instruction->reg == X86_REGISTER_RSP && instruction->rm == X86_REGISTER_RBP));
     const bool from_rbp = mov_from_rbp || (lea && instruction->rm == X86_REGISTER_RBP) || form == X86_FORM_LEAVE;
+    // Every 64-bit push and pop moves rsp by 8: a register's, an immediate's (a stack argument's, as clang pushes them),
+    // memory's and the flags'.
+    const bool push = form == X86_FORM_PUSH_R64 || form == X86_FORM_PUSH_IMM8 || form == X86_FORM_PUSH_IMM32 || form == X86_FORM_PUSH_RM64 || form == X86_FORM_PUSHFQ;
+    const bool pop = form == X86_FORM_POP_R64 || form == X86_FORM_POPFQ;
     int64_t result = depth;
-    result += form == X86_FORM_PUSH_R64 ? 8 : form == X86_FORM_POP_R64 ? -8 : 0;
+    result += push ? 8 : pop ? -8 : 0;
     result += sub ? instruction->immediate : add ? -(int64_t)instruction->immediate : lea && instruction->rm == X86_REGISTER_RSP ? -(int64_t)instruction->displacement : 0;
     if (set_rbp)
     {
@@ -237,11 +241,16 @@ static FrameMeasureFunction frame_measure_code(const uint8_t* code, uint64_t siz
         const bool external = relative && frame_measure_relocated(relocations, relocation_count, field);
         frame_measure_reach(depths, work, &pending, transfer && relative && !external ? frame_measure_find(decoded, count, goal) : count, count, after, &unresolved);
         frame_measure_reach(depths, work, &pending, on ? i + 1 : count, count, after, &unresolved);
-        // Once every path is done, code no edge reached takes an indirect jump's depth, a run at a time.
+        // Once every path is done, code no edge reached takes an indirect jump's depth, a run at a time; padding (nops,
+        // `xchg ax, ax` the 2-byte one among them, and traps, as after an unconditional jump to align a loop's head)
+        // takes none, whatever it falls into.
         while (pending == 0 && indirect != BUSTER_FRAME_MEASURE_UNSET && unreached < count)
         {
-            const bool trap = (x86_effects(decoded[unreached].instruction.form)->kinds >> 4) == BUSTER_X86_CONTROL_TRAP;
-            if (depths[unreached] == BUSTER_FRAME_MEASURE_UNSET && !trap)
+            const X86Instruction* gap = &decoded[unreached].instruction;
+            const X86Effects* effects = x86_effects(gap->form);
+            const bool xchg_nop = (gap->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_XCHG_R16_AX && gap->rm == X86_REGISTER_RAX && gap->reg == X86_REGISTER_RAX;
+            const bool padding = (effects->kinds >> 4) == BUSTER_X86_CONTROL_TRAP || effects->operation == X86_OPERATION_NOP || xchg_nop;
+            if (depths[unreached] == BUSTER_FRAME_MEASURE_UNSET && !padding)
             {
                 frame_measure_reach(depths, work, &pending, unreached, count, indirect, &unresolved);
                 assumed = true;
