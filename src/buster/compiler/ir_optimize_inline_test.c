@@ -102,10 +102,30 @@ static uint32_t ir_inline_test_symbol(const IrInlineUnit* unit, uint32_t symbol)
     return function;
 }
 
-static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, uint32_t entry, const IrInlineTestValue* arguments, const uint8_t* memory, Arena* scratch)
+// A frame's stack slots (#1282): BUSTER_IR_INLINE_TEST_STACK past 4096 bytes each, its slots 16-byte aligned in their
+// order. An access there is the frame's own, neither an effect nor the compared memory: inlining moves a callee's slots
+// into its caller's frame.
+#define BUSTER_IR_INLINE_TEST_STACK 1024u
+#define BUSTER_IR_INLINE_TEST_STACK_BASE 4096u
+
+static uint64_t ir_inline_test_slot(const IrFunction* function, uint32_t slot)
+{
+    uint64_t offset = 0;
+    for (uint32_t s = 0; s < slot && s < function->slot_count; s += 1)
+    {
+        offset += (function->slots[s].size + 15) & ~UINT64_C(15);
+    }
+    return slot < function->slot_count && offset + function->slots[slot].size <= BUSTER_IR_INLINE_TEST_STACK ? offset : UINT64_MAX;
+}
+
+// `loads`: whether a load or a store that isn't volatile is an effect too, or only the memory it leaves, which every
+// stub's call observes (an aggregate argument's bytes) and the comparison reads. A by-value aggregate's inlined copies
+// (#1282) read its argument's bytes and write its result's otherwise than the call's interpretation does.
+static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, uint32_t entry, const IrInlineTestValue* arguments, const uint8_t* memory, bool loads, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     IrInlineTestExecution execution = { 0 };
+
     memcpy(execution.memory, memory, sizeof(execution.memory));
     IrInlineTestFrame frames[32] = { 0 };
     uint32_t stride = 1;
@@ -114,7 +134,13 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
         stride = unit->functions[f].instruction_count > stride ? unit->functions[f].instruction_count : stride;
     }
     IrInlineTestValue* all_values = BUSTER_ARENA_PUSH_ARRAY(scratch, IrInlineTestValue, (uint64_t)stride * 32);
-    execution.status = all_values && entry < unit->count ? 0 : 4;
+    const uint64_t stack_bytes = 32 * BUSTER_IR_INLINE_TEST_STACK;
+    uint8_t* stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stack_bytes);
+    execution.status = all_values && stack && entry < unit->count ? 0 : 4;
+    if (stack != 0)
+    {
+        memset(stack, 0, stack_bytes);
+    }
     uint32_t depth = execution.status == 0 ? 1 : 0;
     if (depth != 0)
     {
@@ -301,11 +327,34 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
                 case IR_ADDRESS:
                     value = a + (bi == UINT32_MAX ? 0 : b * function->addresses[ci].scale) + (IrInlineTestValue)function->addresses[ci].offset;
                     break;
+                case IR_STACK_ADDR:
+                {
+                    const uint64_t offset = ir_inline_test_slot(function, ai);
+                    execution.status = offset == UINT64_MAX ? 2 : 0;
+                    value = BUSTER_IR_INLINE_TEST_STACK_BASE + (IrInlineTestValue)(depth - 1) * BUSTER_IR_INLINE_TEST_STACK + offset;
+                }
+                break;
+                case IR_LIFETIME:
+                    break;
                 case IR_LOAD:
                 case IR_STORE:
                 {
                     const uint32_t bytes = (ir_inline_test_width(op == IR_LOAD ? function->type[node] : function->type[bi]) + 7) / 8;
-                    if (a > 64 || bytes > 64 - (uint64_t)a)
+                    const bool framed = a >= BUSTER_IR_INLINE_TEST_STACK_BASE && a - BUSTER_IR_INLINE_TEST_STACK_BASE < stack_bytes &&
+                                        bytes <= stack_bytes - (uint64_t)(a - BUSTER_IR_INLINE_TEST_STACK_BASE);
+                    if (framed)
+                    {
+                        uint8_t* place = stack + (uint64_t)(a - BUSTER_IR_INLINE_TEST_STACK_BASE);
+                        if (op == IR_LOAD)
+                        {
+                            memcpy(&value, place, bytes);
+                        }
+                        else
+                        {
+                            memcpy(place, &b, bytes);
+                        }
+                    }
+                    else if (a > 64 || bytes > 64 - (uint64_t)a)
                     {
                         execution.status = 2;
                     }
@@ -320,7 +369,10 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
                             memcpy(execution.memory + (uint32_t)a, &b, bytes);
                         }
                         // Observe access order, address, value and volatile annotation independently of instruction IDs.
-                        execution.effects = execution.effects * UINT64_C(1099511628211) ^ op ^ (uint64_t)a * 131 ^ (uint64_t)(op == IR_LOAD ? value : b) ^ ((uint64_t)function->flags[node] << 61);
+                        if (loads || (function->flags[node] & BUSTER_IR_VOLATILE) != 0)
+                        {
+                            execution.effects = execution.effects * UINT64_C(1099511628211) ^ op ^ (uint64_t)a * 131 ^ (uint64_t)(op == IR_LOAD ? value : b) ^ ((uint64_t)function->flags[node] << 61);
+                        }
                     }
                 }
                 break;
@@ -468,6 +520,7 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
 {
     bool same = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count && a->constant_count == b->constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count && a->call_count == b->call_count && a->call_type_count == b->call_type_count && a->parameter_count == b->parameter_count && a->result_type == b->result_type && a->symbol_count == b->symbol_count;
     same = same && a->label_count == b->label_count && a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count && a->parameter_passed == b->parameter_passed && a->result_size == b->result_size && memcmp(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) == 0 && a->variadic == b->variadic && memcmp(&a->incoming, &b->incoming, sizeof(AbiCall)) == 0;
+    same = same && a->vector_constant_count == b->vector_constant_count && a->row_count == b->row_count;
     if (same)
     {
         const void* left[] = {
@@ -489,6 +542,8 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
             a->labels,
             a->abi_calls,
             a->passed,
+            a->vector_constants,
+            a->rows,
         };
         const void* right[] = {
             b->op,
@@ -509,6 +564,8 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
             b->labels,
             b->abi_calls,
             b->passed,
+            b->vector_constants,
+            b->rows,
         };
         const uint64_t bytes[] = {
             a->instruction_count,
@@ -529,6 +586,8 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
             (uint64_t)a->label_count * 4,
             (uint64_t)a->abi_call_count * sizeof(IrAbiCall),
             (uint64_t)a->passed_count * sizeof(IrPassed),
+            (uint64_t)a->vector_constant_count * sizeof(IrSimdValue),
+            (uint64_t)a->row_count * sizeof(Tier0Operation),
         };
         for (uint32_t column = 0; same && column < sizeof(bytes) / sizeof(bytes[0]); column += 1)
         {
@@ -577,7 +636,7 @@ static void ir_inline_test_call(IrFunction* function, uint32_t node, uint32_t de
     }
 }
 
-static void ir_inline_test_compare(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, uint32_t entry, Arena* scratch, uint32_t trials)
+static void ir_inline_test_compare_loads(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, uint32_t entry, Arena* scratch, uint32_t trials, bool loads)
 {
     const IrInlineUnit output = {
         .functions = result->functions,
@@ -611,12 +670,17 @@ static void ir_inline_test_compare(IrInlineTest* test, const IrInlineUnit* input
         {
             memory[b] = (uint8_t)ir_inline_test_random(test);
         }
-        const IrInlineTestExecution before = ir_inline_test_execute(input, entry, arguments, memory, scratch);
-        const IrInlineTestExecution after = ir_inline_test_execute(&output, entry, arguments, memory, scratch);
+        const IrInlineTestExecution before = ir_inline_test_execute(input, entry, arguments, memory, loads, scratch);
+        const IrInlineTestExecution after = ir_inline_test_execute(&output, entry, arguments, memory, loads, scratch);
         ir_inline_test_expect(test, before.status != 1 && before.status != 3 && before.status != 4, "independent interpreter supports fixture");
         ir_inline_test_expect(test, before.status == after.status && before.returned == after.returned && before.effects == after.effects && memcmp(before.memory, after.memory, 64) == 0, "before/after calls, return, fault and memory semantics");
         test->executions += 2;
     }
+}
+
+static void ir_inline_test_compare(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, uint32_t entry, Arena* scratch, uint32_t trials)
+{
+    ir_inline_test_compare_loads(test, input, result, entry, scratch, trials, true);
 }
 
 static bool ir_inline_test_run(IrInlineTest* test, const IrInlineUnit* input, IrInlineOptions options, Arena* output, Arena* scalar_output, Arena* scratch, IrInlineResult* result)
@@ -1281,21 +1345,33 @@ static void ir_inline_test_aggregates(IrInlineTest* test, Arena* input, Arena* o
         IrInlineResult result = { 0 };
         if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
         {
+            // G's records are its own (#1282): its aggregate argument is copied into a fresh slot of the caller and its
+            // 12 result bytes from the address it returns into A. H returns through a hidden pointer, and stays a call.
             const uint8_t decisions[] = {
                 IR_INLINE_SELECTED,
-                IR_INLINE_ABI,
+                IR_INLINE_SELECTED,
                 IR_INLINE_ABI,
                 IR_INLINE_UNKNOWN_SYMBOL,
                 IR_INLINE_SELECTED,
             };
-            ir_inline_test_expect(test, result.inlined_calls == 2 && result.call_count == 5 && memcmp(result.decisions, decisions, sizeof(decisions)) == 0, "calls with ABI records stay calls");
-            // Each leaf adds two values (its constant and its result's copy): A is 6, B is 9.
+            ir_inline_test_expect(test, result.inlined_calls == 3 && result.call_count == 5 && memcmp(result.decisions, decisions, sizeof(decisions)) == 0, "only calls whose ABI records are their callees' own are inlined");
             const IrFunction* out = &result.functions[0];
-            const bool shape = out->instruction_count == 18 && out->op[8] == IR_CALL && out->a[8] == 3 && out->op[10] == IR_CALL && out->a[10] == 4 && out->op[11] == IR_CALL && out->a[11] == 50;
-            ir_inline_test_expect(test, shape && out->c[8] == 6 && out->c[10] == 9 && out->c[11] == UINT32_MAX && out->op[6] == IR_INTTOPTR && out->op[9] == IR_ADDRESS, "aggregate results' destinations follow the inlined values");
-            ir_inline_test_expect(test, shape && out->calls[out->b[8]].abi == 1 && out->calls[out->b[10]].abi == 2 && out->calls[out->b[11]].abi == 3 && out->abi_call_count == 3 && memcmp(out->abi_calls, caller->abi_calls, 3 * sizeof(IrAbiCall)) == 0 && out->passed_count == 6 && memcmp(out->passed, caller->passed, 6 * sizeof(IrPassed)) == 0, "the caller keeps its ABI records");
+            uint32_t calls[2] = { UINT32_MAX, UINT32_MAX };
+            uint32_t count = 0;
+            for (uint32_t i = 0; i < out->instruction_count; i += 1)
+            {
+                if (out->op[i] == IR_CALL && count < 2)
+                {
+                    calls[count] = i;
+                }
+                count += out->op[i] == IR_CALL;
+            }
+            const bool shape = count == 2 && out->a[calls[0]] == 4 && out->a[calls[1]] == 50 && out->c[calls[0]] < out->instruction_count && out->op[out->c[calls[0]]] == IR_ADDRESS &&
+                               out->c[calls[1]] == UINT32_MAX;
+            ir_inline_test_expect(test, shape && out->slot_count == 1 && out->slots[0].size == 16, "the kept calls' destinations follow the inlined values, and the copied argument has a slot");
+            ir_inline_test_expect(test, shape && out->calls[out->b[calls[0]]].abi == 2 && out->calls[out->b[calls[1]]].abi == 3 && out->abi_call_count == 3 && memcmp(out->abi_calls, caller->abi_calls, 3 * sizeof(IrAbiCall)) == 0 && out->passed_count == 6 && memcmp(out->passed, caller->passed, 6 * sizeof(IrPassed)) == 0, "the caller keeps its ABI records");
             ir_inline_test_expect(test, ir_inline_test_same_function(&result.functions[2], registers) && ir_inline_test_same_function(&result.functions[3], hidden), "the callees keep their own records");
-            ir_inline_test_compare(test, &unit, &result, 0, scratch, 128);
+            ir_inline_test_compare_loads(test, &unit, &result, 0, scratch, 128, false);
         }
         // A call with records still says whether its callee is variadic: a variadic call of the registers callee, which
         // isn't, keeping its two arguments and its records, is the unit's type error at the call, as any other's is.
@@ -1317,7 +1393,7 @@ static void ir_inline_test_aggregates(IrInlineTest* test, Arena* input, Arena* o
 
 static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
-    for (uint32_t mode = 0; mode < 11; mode += 1)
+    for (uint32_t mode = 0; mode < 12; mode += 1)
     {
         for (uint32_t count = 0; count <= 33; count += 1)
         {
@@ -1354,6 +1430,27 @@ static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* ou
             ir_inline_test_node(&functions[0], first + count, IR_RET, IR_VOID, count == 0 ? 0 : first + count - 1, UINT32_MAX, UINT32_MAX);
             if (mode == 8)
             {
+                // Two blocks that aren't one straight line (a cbr ends the first): a body the inliner doesn't take.
+                functions[1] = ir_inline_test_function(test, input, (IrSizes){
+                                                                        .instruction_count = 6,
+                                                                        .block_count = 2,
+                                                                        .constant_count = 1,
+                                                                        .parameter_count = 1,
+                                                                    },
+                                                       IR_I64);
+                functions[1].block_offsets[1] = 3;
+                functions[1].parameter_types[0] = IR_I64;
+                functions[1].constants[0].low = 3;
+                ir_inline_test_node(&functions[1], 0, IR_PARAM, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+                ir_inline_test_node(&functions[1], 1, IR_TRUNC, IR_I1, 0, UINT32_MAX, UINT32_MAX);
+                ir_inline_test_node(&functions[1], 2, IR_CBR, IR_VOID, 1, 1, 1);
+                ir_inline_test_node(&functions[1], 3, IR_CONST, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+                ir_inline_test_node(&functions[1], 4, IR_ADD, IR_I64, 0, 3, UINT32_MAX);
+                ir_inline_test_node(&functions[1], 5, IR_RET, IR_VOID, 4, UINT32_MAX, UINT32_MAX);
+            }
+            if (mode == 11)
+            {
+                // #1282: two blocks of one straight line (the lowering's preheader's br to the body), whose br goes.
                 functions[1] = ir_inline_test_function(test, input, (IrSizes){
                                                                         .instruction_count = 5,
                                                                         .block_count = 2,
@@ -1405,12 +1502,12 @@ static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* ou
             IrInlineResult result = { 0 };
             if (ir_inline_test_run(test, &unit, options, output, twin, scratch, &result))
             {
-                const uint32_t expected_count = mode == 0 ? count : (mode == 3 || mode == 4) && count != 0 ? 1
-                                                                                                           : 0;
+                const uint32_t expected_count = mode == 0 || mode == 11 ? count : (mode == 3 || mode == 4) && count != 0 ? 1
+                                                                                                                         : 0;
                 ir_inline_test_expect(test, result.inlined_calls == expected_count, "disabled, linkage, shape and exact budget admission");
                 for (uint32_t c = 0; c < count; c += 1)
                 {
-                    const uint8_t expected = mode == 0 ? IR_INLINE_SELECTED : mode == 1            ? IR_INLINE_DISABLED
+                    const uint8_t expected = mode == 0 || mode == 11 ? IR_INLINE_SELECTED : mode == 1 ? IR_INLINE_DISABLED
                                                                           : mode == 2              ? IR_INLINE_COST
                                                                           : mode == 3 || mode == 4 ? c == 0 ? IR_INLINE_SELECTED : IR_INLINE_GROWTH
                                                                           : mode == 5              ? IR_INLINE_EXTERNAL
@@ -1865,6 +1962,9 @@ static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* out
     arena_pop_to(twin, 0);
 }
 
+// #1282's SIMD and by-value fixtures (ir_optimize_inline_simd_test.c, after SROA and the interpreter).
+static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch);
+
 static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char** argv)
 {
     (void)argv;
@@ -1886,6 +1986,7 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_empty_and_identity(&test, &input, &output, &twin, &scratch);
         ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
     }
     arena_release(&scratch);
     arena_release(&twin);

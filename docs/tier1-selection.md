@@ -846,7 +846,46 @@ reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
 the class's call-save rows and temporary slot take the widest vector's bytes,
 which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
 need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
-emission, as any record's. A vector C passes or returns by value is an aggregate
+emission, as any record's.
+
+### At targets without AVX-512 (#1281)
+
+A target without AVX512VL, such as x86-64-v3, has no EVEX form of a 16- or 32-byte
+vector, and no register past xmm15. There the CFG consumer
+(`Tier1EmitPrepared.vex`, from the target's allow-list: whether it allows
+`vmovdqa64` of an xmm register) takes VEX forms of AVX and AVX2 for them
+(`tier1_select_vector_forms` and `tier1_select_class_forms` with `vex`, and
+`Tier1SelectHoles.vex`), which name xmm0 to xmm15 alone, as the class's values
+are:
+
+| Kind | Records |
+| --- | --- |
+| `ZERO` | `vpxor x, x, x` of the xmm register, which zeroes a ymm one's upper half too |
+| `ONES` | `vpcmpeqd x, x, x` |
+| `SPLAT` | `mov r11d, imm32`, `vmovd x, r11d`, then `vpshufd x, x, 0` (16 bytes) or `vpbroadcastd y, x` (32 bytes) |
+| `CONSTANT`, loads, stores, spills, reloads, call saves | `vmovdqu` at the width |
+| `COPY`, edge moves | `vmovdqa` of a ymm register (`movaps` for 16 bytes) |
+| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor` |
+
+At a target with AVX but not AVX2 (Sandy Bridge's, `Tier1EmitPrepared.avx2`
+from the allow-list's `vpcmpeqd` of a ymm register), a ymm register's integer
+forms are AVX2's, so a 32-byte vector's bitwise operations take the packed
+singles' `vandps`, `vorps` and `vxorps` (the same bits), its ones `vpcmpeqd x,
+x, x` and `vinsertf128 y, y, x, 1`, and its splat `vmovd`, `vpshufd x, x, 0` and
+`vinsertf128 y, y, x, 1`: no record reads the register's old bits as floats,
+which a signaling NaN or a denormal among them would raise MXCSR's flags for; its additions, subtractions and multiplications are AVX2's alone,
+which the decoder admits only where the target has them.
+
+VEX has no ternary logic, no compare into a mask and no blend under one: a target
+without AVX-512 has no masks (their types still refuse there), and the IR's
+`not`, `vcmp` and `vselect` come of EVEX rows alone, which it has none of. Its
+typed stream's rows are VEX's (`c_check_program_vectors_baseline.c` and the
+builtins'): the 32-bit integers' addition, subtraction, multiplication and
+bitwise operations decode into the IR's own operations by their VEX forms
+(`ir_simd_typed_operation`), and the others, a comparison or a complement among
+them, are machine rows. The lowering admits a 16- or 32-byte vector where the
+target has AVX512F and VL, or else AVX (`ir_typed_vector_moves`: the features of
+the moves Tier 1 then takes), and a 64-byte one with AVX512F. A vector C passes or returns by value is an aggregate
 to the lowering, a pointer to its bytes, in a vector register whole ("By-value
 aggregates"); an IR function whose own parameter or result is a vector value has
 no convention's place of Tier 1's and is refused at selection
@@ -858,7 +897,13 @@ locals) stays in its frame object, as a 128-bit integer's does.
 interpreter on both paths, with and without rematerialization: every operation
 and all ten predicates at each width; constants of every kind; a loop whose vector
 phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
-and reloaded; and vectors of each width live across two calls of the helper.
+and reloaded; and vectors of each width live across two calls of the helper. And
+four emitted for x86-64-v3 (#1281), every record one that target has: the
+operations and constants of every kind at 16 and 32 bytes; a loop whose 32-byte
+phis swap through xmm15; seventeen 32-byte vectors live at once, spilled and
+reloaded; and vectors of both widths live across two calls. One more is emitted
+for x86-64-v2 with AVX, Sandy Bridge's target: 32-byte bitwise operations and
+constants of every kind by AVX's forms, beside 16-byte arithmetic.
 
 ## Machine rows (#141)
 
@@ -868,21 +913,39 @@ effective uses, each in a register (the CFG problem's uses of it are required,
 as any operand's): a row call isn't a call of a function's
 (`tier1_select_function_call`), so nothing is saved around it, no argument moves,
 and it makes no frame a caller's. The selector takes a row Tier 0 places
-(`tier0_operation_valid`, which needs x86_semantics.c's tables) whose records
-name vector registers in EVEX forms alone, so that its vector roles can be zmm16
-and on, which no value takes, its floating roles past them below 32
-(`tier1_select_row_supported`). Its narrow integer result isn't canonical
+(`tier0_operation_valid`, which needs x86_semantics.c's tables), whose vector
+and floating roles fit: a row whose records name vector registers in EVEX forms
+alone has its vector roles in zmm16 and on, which no value takes, and its floating
+roles past them below 32; a row with a VEX or legacy form's vector register has
+its vector roles below 16, each that doesn't stay in place in a free register;
+and a row that names a
+floating role in a VEX or legacy form's field (F16C's conversions,
+`tier1_select_row_low_floating`, #1281) has its floating roles below 16 too, its
+vector roles and its floating ones at most 16 (`tier1_select_row_supported`). Its narrow integer result isn't canonical
 (`tier1_select_canonical`): its field's bits past the class are the row's. Only
-the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row as Tier 0
-does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
+the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row at the
+node's definition phase as Tier 0 does (`Tier0Placement`, `tier0_operation_place`)
+but for its vector roles, which it places one at a time (#1283,
+`tier1_emit_cfg_row_place`), so that most rows emit their own records alone:
 
 | Role | Register |
 | --- | --- |
-| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
-| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
+| `VECTOR(0)` of a vector result | the destination, where nothing else there is read after the role's first write (no value live past the node, no floating operand, and no other vector operand that stays there whose role a later record names, or the first-writing one where its destination can't be a source: a gather's, a complex multiplication's), and every record that writes it is a VEX or EVEX form's (which zero the register past their field; one wider than the result is followed by a move of the destination into itself at the result's width). The first operand is copied in first (no other operand may then be there); or, where the first write is a pure one (no tied operand, no merge into the rest of the register, no merging opmask) and nothing reads the operand past its width up to it, it is read in its own register up to that write, which writes the destination: the two-operand forms' `op V0, V0, V1` with the result in a dying second operand's register is `op d, a, d` |
+| other `VECTOR(j)` of a vector operand | its own register where nothing reads it past its width up to the role's first write (whose bits the move at its width would have zeroed) and no record writes it, or they write it by VEX and EVEX forms alone and it dies at the node, no other operand in its register and not the destination the result is written in |
+| other `VECTOR(j)` | zmm16 + j, which no value takes and an EVEX form names, or for a row with a VEX or legacy form's vector register, and at a target without AVX512VL a row with a vector narrower than 64 bytes or any row where there is no AVX512F (#1281; a 64-byte EVEX row at Knights Landing's AVX512F without VL keeps zmm16 and on), a free xmm register below 16 (xmm15 among them, the class's scratch), each taken as its role is placed rather than a run of them, which register pressure could leave none of, and none the destination where the result is written there; a vector operand copied in at its width first (`vmovdqa64`, or `vmovdqa` at a target without AVX512VL), a vector result moved into the destination at its width last. An SSE carrier (#1280) is copied and moved zero-extended (`tier1_select_carrier_move`, by VEX's `vmovq` or `vinsertps` at a target without AVX512VL): its value's register may hold anything past its bytes, which every vector field reads past, so it never stays in its own register |
+| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last. For a row that names a floating role in a VEX or legacy form's field, and every row at a target without AVX512VL (#1281), all below 16: a written operand's a free xmm register no vector role takes (nor the destination a vector result is written in), from the vector roles' pool, and the result's the destination itself where no other operand is there, else such a free register; each copy `movaps` |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
-| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
+| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written: `MASK_RESULT` the first mask operand's, `INTEGER_RESULT` the first operand's of Tier 0's integer stack where that is an integer (a vector's place on that stack is no general register: after one, `INTEGER_RESULT` shares no operand's register, #1284) |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
+
+`tier1_select_row_vectors` reads what the records do with each vector role from
+x86_semantics.c's effects: which they write and by which family, how wide each
+role is read up to its first write and written, which record writes it first and
+whether purely, which names it last, and which records' destinations can't be a
+source. `--tier1-report` counts the rows and the moves around them
+(`machine_rows`, `row_moves`): the machine rows' fixture's unit below took 150
+moves around its 58 rows by Tier 0's placement and takes 18 (13 by the scalar
+path's allocation).
 
 The free registers are the caller-saved general registers (rax, rcx, rdx, rsi,
 rdi, r8, r9, r10 and the scratch r11) and k1 to k7 that hold no value live past
@@ -893,10 +956,47 @@ k and k + 1), which must be free where it is. Short of them, the row is refused 
 (`TIER1_EMIT_UNSUPPORTED`), and its function is Tier 0's: the CFG consumer keeps a
 node's own error rather than the block's owed call saves' (`TIER1_EMIT_INVALID`,
 which a refusal mid-block left owed). A move into place never
-overwrites another's source: its destination is free or a vector role's. Each row
-node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
-certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
-it doesn't decode the rows' records.
+overwrites another's source: its destination is free, a vector role's or the
+node's destination with no other operand in it. Each row
+node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share. The free xmm
+registers below 16 are those that hold no value live past the node and no operand.
+
+The emitter publishes each row's placement under `Tier1EmitOptions.certify`
+(`Tier1RowPlacement`, `Tier1EmitResult.row_placements`, by node): each role's
+register as the records name it, VECTOR(0)'s early register up to the result's
+first write where the first operand is read in its own register (#1283), and the
+renamed opmask registers. The code's certificate takes it as a claim (#1284, [the
+certificate guide](tier1-certificate.md)'s "Machine rows"): it places the template
+by it itself and compares, refuses roles in one register while both hold values
+that Tier 0's placement keeps apart, and proves each operand is at its role's
+register when the row reads it; the staging copies and the borrowed masks' saves
+are moves at the node's definition phase (`TIER1_ORIGIN_MOVE`), the row's records,
+its result's move and the reloads its node's (`TIER1_ORIGIN_NODE`). A row whose
+records read or write a role's register implicitly, or of a form x86_semantics.c's
+effects don't cover, leaves its function uncertified (`TIER1_CERT_EMITTED_VECTOR`).
+
+An SSE carrier (#1280), a vector of 4 or 8 bytes, is an f32 or f64 in the IR
+([the IR guide](ir.md)'s "Machine rows"), so it is the vector class's value as
+those are: their loads and stores (`movss`, `movsd`), constants (`xorps`, or the
+bits through the scratch register and `vmovd` or `vmovq`), copies, phis and
+spills move its bits alone, and no floating operation reads it, since only a row
+does. A row sees zeros past its bytes in its role's register, as Tier 0's row
+does (Tier 0 reloads every operand by `vmovd` or `vmovq`). Rows rely on those
+zeros: a row of no records, the intrinsics' narrowing shuffle, has its wider
+operand's register as its result, and a narrow vector's floating operation at a
+16-byte form computes its other lanes too, which must raise no exception (an
+sNaN there raises invalid). A carrier's own register needn't have the zeros: a
+`param.f64` or a call's `f64` result is the convention's, whose bytes past the
+double are undefined, and Tier 1 copies it by `movaps`. So each carrier operand
+moves into its role by `tier1_select_carrier_move`, which zero-extends it:
+`vmovq` for 8 bytes, and for 4 bytes `vinsertps` of element 0 with elements 1
+to 3 zeroed (immediate 0x0e), a shuffle that raises no exception. That move
+replaces the whole register's copy that staging takes anyway, so it costs
+nothing. A row's carrier result moves into its destination the same way, also
+at no cost. So a carrier that a row, a load or a constant makes has the zeros
+in its own register too, but one from a parameter or a call doesn't. A
+placement that leaves a carrier operand in place must zero-extend it unless its
+producer is one of the former.
 
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
@@ -907,10 +1007,52 @@ permutes and shuffles, shifts by immediates, by counts in general registers and 
 vectors, masked loads and stores, a store of no result and a compress, inserts,
 extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
-edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
+edge. Its unit takes at most a move into or out of place for every two rows, by
+each path and with and without rematerialization (#1283). Its SSE carriers' fixture (#1280) does the same for vectors of 4 and 8
+bytes:
+- the intrinsics' widening conversions of each width (`cvtepu8`, `cvtepi8`,
+  `cvtepu16`, `cvtepi16`);
+- `loadl` and `storel`, `loadu` and `storeu` of 4 and 8 bytes, `move_epi64`, and
+  `loadl_pi` and `storel_pi`;
+- the `movq` forms;
+- MMX's `__m64` operations, by value to and from clang's unit;
+- GNU C's operators on vectors of 4 and 8 bytes;
+- a signaling NaN's and -0's bits as constants;
+- a loop whose carriers cross its back edge;
+- under `FENV_ACCESS`, a product of two-float shuffles whose vectors' other
+  lanes would overflow. It raises no exception only where the zeros hold
+  (without `tier1_select_carrier_move`'s zeroing it raised overflow and inexact).
+
+`test-tier1-masks`' "SSE carriers with dirty upper lanes" fixture takes the
+carriers no row makes. A `param.f64`, a `param.f32` and a call's `f64` result,
+whose registers hold signaling NaNs past their bytes (the native entry's xmm0
+and xmm1, the helper's `vpbroadcastq` of its result), are each read whole by a
+row of no records. Each must read zeros past its bytes; with a whole register's
+staging copy it read the NaNs.
+
+Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
-refuses at selection, so that its function is Tier 0's, and the program runs as
-clang -O0's does.
+places below 16 (#1281), every function Tier 1's, and the program runs as clang
+-O0's does. With `--verify`, the fixture's every function's code is certified
+(#1284).
+
+Its VEX fixture (#1281) compiles a unit of x86-64-v3's AVX2 and F16C builtins and
+vector operators the same way, every function Tier 1's, by both paths and with and
+without rematerialization, against clang -O0's build: the 32-bit integers'
+operators (the IR's own operations by their VEX forms, and the comparisons,
+shifts and complements as machine rows) on 16- and 32-byte vectors; the operators
+on words, bytes, quadwords, floats and doubles; AVX2's shuffles, blends, permutes,
+shifts, unpacks, maxima, tests and movemasks, lane extracts and inserts, widening
+conversions, masked loads and stores and gathers; F16C's scalar and vector
+conversions and FMA's; constants of every kind; a loop whose vectors cross its
+back edge and live across a call; and more vectors live at once than xmm0 to
+xmm14. A floating expression clang would contract into an FMA (its
+`-ffp-contract=on`, even at -O0) is split into statements. `_mm256_set1_epi8`'s
+32 stack arguments are refused at every target, so the fixture takes other
+builtins in its place; its SSE carriers (#1280, `_mm_cvtph_ps`'s and
+`_mm256_cvtepu8_epi32`'s operands) move by VEX's `vmovq` and `vinsertps`. Its AVX fixture
+does the same at `-march=sandybridge` (AVX without AVX2): 32-byte bitwise
+operators and constants, 16-byte arithmetic and AVX's float builtins.
 
 `test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
 model of each (the interpreter has none of x86 records) by both paths, with and
@@ -918,10 +1060,30 @@ without rematerialization: rows beside seven word masks live in k1 to k7, one
 naming k1 and k2 by number and one taking a mask scratch register, which borrow
 live masks' registers and reload them; rows that read their integer and mask
 results as their first operands, as Tier 0 places them; a row of no records, its
-result its operand; and an EVEX floating row, its result read as its first
-operand. Its refusals take a row with a floating role in a VEX form, refused at
-selection by both paths; and its random mask programs whose rows the decoders
-refuse run as machine rows against the generator's model.
+result its operand; an EVEX floating row, its result read as its first
+operand; its VEX twin (#1281), for x86-64-v4 and for x86-64-v3, its floating
+roles below 16; and vector rows placed one role at a time (#1283), with the moves
+around them counted by each path: a two-operand form's, its result in a dying
+second operand's register; a tied operand's; a merging opmask's; an operand
+written and dying under an integer result; a VEX form's /is4 blend in the run
+below xmm16; a narrow result written at a wider width and a narrow operand read
+at one; and a widening conversion. Two more take the forms whose destination
+can't be a source's register (#1283's review): gathers whose source and index
+are one value dying at the row, and AVX512-FP16's complex multiplications whose
+factors die at it, the allocation giving the result such a register. The test
+checks that every record is valid and that each such destination is none of
+its sources, and runs them against a model, the complex multiplications only
+where the host has AVX512-FP16 (not the 9700X), on a forms table that allows
+that form, which no target of Tier 1's does yet. For x86-64-v3 it takes a fixture
+of rows too: a VEX row of 32-byte vectors, one live past it; a floating row whose
+result is read as its first operand and one that writes its second floating
+operand first, both operands live past them; and a 16-byte vector's row. Its
+random mask programs whose rows the decoders refuse run as machine rows against
+the generator's model. Every row's code is certified, and its corruptions refused
+(#1284, [the certificate guide](tier1-certificate.md)'s tests): a borrowed mask's
+reload left out, a staging copy onto a live register, a claimed placement whose
+roles share a register Tier 0 keeps apart or whose opmask register named by number
+is k0.
 
 ## Tests and benchmark
 

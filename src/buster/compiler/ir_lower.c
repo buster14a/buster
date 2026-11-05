@@ -108,6 +108,9 @@ struct IrTypedPlan
     uint32_t indirect;
     // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
     bool ignored_arguments;
+    // The vectors' widths a whole-vector aggregate parameter's entry copy may take (#1282, ir_typed_vector_whole): bit 0
+    // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
+    uint8_t vector_copies;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -441,17 +444,31 @@ static const uint8_t ir_typed_types[16] = {
     IR_I128,
 };
 
-// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
-// out the memory classes (I128 signed, F80 floating), which it compiles apart.
+// A vector's type is its width's container: v4i32, v8i32 or v16i32, and for an SSE carrier of 4 or 8 bytes (#1280: the
+// narrow vectors of shuffles and conversions, MMX's __m64) f32 or f64, its bits in the vector class's registers. No new
+// type for them: the f32 and f64 values' loads, stores, constants, copies, phis and spills are bit moves already (movss
+// and movsd, movaps, xorps, vmovd and vmovq), the IR's passes have no floating arithmetic to fold them by, and the
+// lowering gives them no floating operation (only a row reads one), so their bits stay exact. A new type would have
+// taken its own moves and spills, and a place in the type masks and the SIMD model's shapes. A row reads one
+// zero-extended into its role, as Tier 0's (tier1_emit_cfg_row), whatever made it.
 static IrType ir_typed_stack_type(uint8_t class)
 {
+    static const uint8_t vectors[17] = {
+        [1] = IR_F32,
+        [2] = IR_F64,
+        [4] = IR_V4I32,
+        [8] = IR_V8I32,
+        [16] = IR_V16I32,
+    };
     // A mask's (#179) m8 to m64 by its bytes, 1 to 8 (tier0_stack_mask's order).
-    const IrType type = tier0_stack_is_mask(class)            ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
-                        class >= BUSTER_TYPED_CLASS_LIMIT     ? class == BUSTER_TIER0_STACK_VECTOR(16) ? IR_V4I32 : class == BUSTER_TIER0_STACK_VECTOR(32) ? IR_V8I32 : IR_V16I32 :
-                                                                (IrType)ir_typed_types[class];
+    const IrType type = tier0_stack_is_mask(class)        ? (IrType)(IR_M8 + (class - BUSTER_TIER0_STACK_MASKS)) :
+                        class >= BUSTER_TYPED_CLASS_LIMIT ? (IrType)vectors[class - BUSTER_TYPED_CLASS_LIMIT] :
+                                                            (IrType)ir_typed_types[class];
     return type;
 }
 
+// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
+// out the memory classes (I128 signed, F80 floating), which it compiles apart.
 static const uint8_t ir_typed_signed_classes[16] = {
     [BUSTER_TYPED_CLASS_I8] = 1,
     [BUSTER_TYPED_CLASS_I16] = 1,
@@ -860,7 +877,7 @@ static uint8_t ir_typed_alignment(uint8_t class)
     const bool mask = tier0_stack_is_mask(class);
     const bool vector = class >= BUSTER_TYPED_CLASS_LIMIT && !mask;
     const uint32_t bytes = vector ? (class - BUSTER_TYPED_CLASS_LIMIT) * 4u : mask ? 0 : tier0_class_bytes(class);
-    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
+    return mask ? (uint8_t)(class - BUSTER_TIER0_STACK_MASKS) : vector ? (bytes == 64 ? 6 : bytes == 32 ? 5 : bytes == 8 ? 3 : bytes == 4 ? 2 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
 }
 
 // A conversion between an integer class and a mask's stack class (#179), as Tier 0's CONVERT is: to a mask, the integer
@@ -1029,6 +1046,21 @@ static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTyped
         ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, offset), loaded, BUSTER_IR_NONE, 0);
         offset += piece;
     }
+}
+
+// The vector type that copies an aggregate of `size` bytes at `location` whole (#1282): one that a vector register holds
+// whole (REGISTERS, a vector register alone, neither eightbyte alone: tier1_select_parts_of's "whole"), of 16, 32 or 64
+// bytes, a width `allowed` (IrTypedPlan.vector_copies) has; else IR_VOID, for a copy by integers. Its bytes are a
+// vector's, or a struct's whose high eightbyte is padding, which the copy keeps as padding: either way, one load and one
+// store of a vector move them, where eight of i64 each kept every aggregate parameter of a vector in memory.
+static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t allowed)
+{
+    const bool whole = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] != BUSTER_ABI_REGISTER_NONE &&
+                       (location.registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                       (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+    const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
+    const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
+    return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
 }
 
 static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
@@ -1299,11 +1331,14 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         else if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
         {
             const uint32_t bytes = ir_typed_vector_bytes(input, i);
-            const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
-            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. All real
-            // transports must be full 128/256/512-bit values. In particular, the 4/8-byte SSE carrier forms refuse.
+            // Tier 1's moves of it (ir_typed_vector_moves, #1281): AVX512F's of a zmm register; of an xmm or a ymm one, or
+            // an SSE carrier's, VL's EVEX ones, or else AVX's VEX ones.
+            const uint64_t required = ir_typed_vector_moves(bytes, target_features);
+            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. Every real
+            // transport is a full 128/256/512-bit value or an SSE carrier of 4 or 8 bytes (#1280), an f32 or f64 of its
+            // bits (ir_typed_stack_type).
             const bool inherited = kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE;
-            if (!inherited && bytes != 16 && bytes != 32 && bytes != 64)
+            if (!inherited && bytes != 4 && bytes != 8 && bytes != 16 && bytes != 32 && bytes != 64)
             {
                 check.error = IR_ERROR_UNSUPPORTED;
                 check.detail = IR_SIMD_TYPED_UNSUPPORTED;
@@ -1341,6 +1376,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
         plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
+        // A function with vectors copies its whole-vector aggregate parameters by vectors of the widths its target has
+        // (#1282): the lowering admits those widths alone (AVX-512F, and VL for 16 and 32 bytes, as a vector entry's).
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
+        const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
+        plan.vector_copies = !input->vectors || (target_features & evex) != evex ? 0 : (target_features & narrow) == narrow ? 7 : 4;
         if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
         {
             plan.error = "no scratch memory for the depth slots";

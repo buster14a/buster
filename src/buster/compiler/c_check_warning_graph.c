@@ -121,6 +121,78 @@ static bool check_warning_graph_null_candidate(const CheckGraph* graph, const Ch
     return result;
 }
 
+// clang's diagnostics of a use of a member that a deprecated or unavailable attribute marks (#147, DiagnoseUseOfDecl's of
+// a member expression): at the name of each `.` or `->` whose member is one, "'x' is deprecated"
+// (-Wdeprecated-declarations), with the attribute's message after a colon and a note at the attribute, or the error
+// "'x' is unavailable" (CHECK_INPUT_UNAVAILABLE_USE), with its note at the member's declaration. The member is the one
+// the access's record finds by its name, through anonymous members (type_lookup_member's), as the checker found it. A
+// deprecated context drops a deprecated use's and an unavailable one either's (CheckInput.availability_contexts). It runs
+// only where some member is marked, after checking: the record's type is the operand's checked one.
+static void check_input_member_uses(CheckInputReader* reader, const CheckStream* stream)
+{
+    const CheckInput* input = reader->output;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t operand = graph->operand0[node];
+        const uint32_t name = graph->tokens[node] + 1;
+        if ((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && stream->diagnostics[node] == CHECK_DIAG_NONE && operand < graph->count && name < count &&
+            parser->tree.roles[name] == PARSE_ROLE_MEMBER)
+        {
+            TypeId record = type_strip_aligned(types, check_stream_type(stream, operand));
+            if (op == CHECK_OP_ARROW)
+            {
+                record = type_kind(types, record) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, record)) : 0;
+            }
+            const uint8_t kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_NONE;
+            uint64_t offset = 0;
+            uint32_t qualifiers = 0;
+            const uint32_t member = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ?
+                                    type_lookup_member(types, record, graph->members[node], &offset, &qualifiers) : 0;
+            const CheckInputMarkedMember* marked = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN ?
+                                                   check_marked_member(input->marked_members, input->marked_member_count, member) : NULL;
+            const uint8_t context = input->availability_contexts != NULL ? input->availability_contexts[name] : 0;
+            const bool dropped = marked != NULL && check_marked_dropped(marked, context);
+            if (marked != NULL && !dropped && marked->unavailable)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, name, CHECK_INPUT_UNAVAILABLE_USE);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].note_token = marked->name;
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
+                    reader->output->reports[before].detail = marked->message != BUSTER_CHECK_WARNING_NO_SOURCE ? marked->message + 1 : 0;
+                }
+            }
+            else if (marked != NULL && !dropped)
+            {
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+                    .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+                    .token = name,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = name + 1,
+                    .payload = { .name = parser->tokens.names[name], .token = marked->message },
+                };
+                const CheckWarningNote note =
+                {
+                    .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+                    .token = marked->attribute,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, &note, 1);
+            }
+        }
+    }
+}
+
 static bool check_input_warning_graph(CheckInput* input, const Parser* parser, TypeTable* types, const CheckStream* stream, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -225,9 +297,16 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
             valid = !staged.resource;
         }
     }
+    if (valid && input->marked_member_count != 0)
+    {
+        check_input_member_uses(&reader, stream);
+        valid = !staged.resource;
+    }
     if (valid)
     {
         input->warning_events = staged.warning_events;
+        // The unavailable members' errors (check_input_member_uses), in the reports' capacity the reader gave them.
+        input->report_count = staged.report_count;
     }
     else
     {

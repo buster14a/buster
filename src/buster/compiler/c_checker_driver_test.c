@@ -483,10 +483,12 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; and eh_return's
-// unwinding and the constant strings' objects, which clang makes and this compiler doesn't; z/OS's va_start and
-// va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; and
-// os_log formats whose items take their data out of order, or data past 8 bytes; dump_struct's generated calls; and
+// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return's
+// unwinding, which clang makes and this compiler doesn't, and an NSString of no literal, which clang's code reads as one
+// (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
+// va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; os_log's
+// data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
+// vector); dump_struct's generated calls; and
 // __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
@@ -502,20 +504,29 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
         { "struct S { char c[5000]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores" },
         { "void f(void* p) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return, whose unwinding to a handler this compiler doesn't make" },
-        { "const void* f(void) { return __builtin___CFStringMakeConstantString(\"x\"); }\n",
-          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
-          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
+          "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
         { "void f(char** a, char** b) { __builtin_zos_va_copy(a, b); }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
         { "int g(int);\nint f(void* p) { return __builtin_call_with_static_chain(g(1), p); }\n",
           "unsupported: __builtin_call_with_static_chain, whose chain this compiler's calls don't pass in r10" },
-        { "void* f(void* b) { return __builtin_os_log_format(b, \"%2$d %1$d\", 1, 2); }\n",
-          "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
-        { "void* f(void* b) { return __builtin_os_log_format(b, \"%Lf\", 1.0L); }\n",
-          "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
+        { "int g(void);\nvoid* f(void* b) { return __builtin_os_log_format(b, \"%1$d %1$d\", g()); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "int g(void);\nvoid* f(void* b, int n) { return __builtin_os_log_format(b, \"%1$d %2$d %1$d\", n, g()); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "void* f(void* b, __float128 q) { return __builtin_os_log_format(b, \"%f\", q); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "typedef char V __attribute__((vector_size(2)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "typedef float V __attribute__((vector_size(32)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
         { "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s) { __builtin_dump_struct(s, printf); }\n",
           "unsupported: __builtin_dump_struct, whose calls of its printing function this compiler doesn't make" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
@@ -1711,6 +1722,172 @@ static void check_test_driver_section_bounds(CheckTest* test, const char* clang,
     unlink(object);
     unlink(linked_path);
     unlink(reference);
+}
+
+// Constant CFStrings in code (#148, check_data_cfstring_keys): clang's build of a unit of them, and the unit's -c objects by
+// each path and tier, linked by cc beside a driver that defines __CFConstantStringClassReference, and the direct path's
+// link of both, each printing clang's: one object of each literal (a static initializer's, NSString's and another
+// function's), an address constant cast and offset, the records' fields (the class's address, the flags, ASCII and
+// UTF-16 characters, a surrogate pair, a NUL, a conversion cut short, parentheses and a cast, the empty string) and the
+// record's size, and literals whose lowest calls are in a function nothing calls and in a static initializer nothing reads
+// (their records are the program's all the same).
+// The unit doesn't declare the class: its object's symbol is the program's own, an undefined global. A unit that declares
+// it takes the declaration's object. And a unit of a CFString in sizeof alone, whose record nothing references, has no
+// record, characters or class (#1363's review): its object, by -c and by -c --lower-all, names no class, and it links
+// without one, by cc and by the direct path.
+static bool check_test_driver_file_holds(const char* path, const char* needle)
+{
+    FILE* file = fopen(path, "rb");
+    char buffer[1 << 16];
+    const size_t length = file != NULL ? fread(buffer, 1, sizeof(buffer), file) : 0;
+    const bool result = file != NULL && memmem(buffer, length, needle, strlen(needle)) != NULL;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    return result;
+}
+
+static void check_test_driver_cfstrings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char unit[] =
+        "static const void* never_called(void) { return __builtin___CFStringMakeConstantString(\"only\"); }\n"
+        "static const void* never_read = __builtin___CFStringMakeConstantString(\"initial\");\n"
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
+        "static const void* s1 = __builtin___CFStringMakeConstantString(\"hello\");\n"
+        "static const void* s2 = __builtin___NSStringMakeConstantString(\"hello\");\n"
+        "static long as_long = (long)__builtin___CFStringMakeConstantString(\"x\");\n"
+        "static const char* shifted = (const char*)__builtin___CFStringMakeConstantString(\"y\") + 8;\n"
+        "static const void* other(void) { return __builtin___CFStringMakeConstantString(\"hello\"); }\n"
+        "const int* class_reference(void);\n"
+        "static void bytes(const CF* c)\n"
+        "{\n"
+        "    mix(c->isa == class_reference()); mix((unsigned)c->flags); mix((unsigned long)c->length);\n"
+        "    if (c->flags == 0x7d0) { const unsigned short* u = (const unsigned short*)c->str; for (long i = 0; i <= c->length; i++) mix(u[i]); }\n"
+        "    else { for (long i = 0; i <= c->length; i++) mix((unsigned char)c->str[i]); }\n"
+        "}\n"
+        "int tested(int n)\n"
+        "{\n"
+        "    h = (unsigned)n;\n"
+        "    const CF* a = (const CF*)__builtin___CFStringMakeConstantString(\"hello\");\n"
+        "    mix(a == s1); mix(a == s2); mix(a == other()); mix((long)a == as_long);\n"
+        "    mix((const CF*)as_long == (const CF*)__builtin___CFStringMakeConstantString(\"x\"));\n"
+        "    mix(shifted == (const char*)__builtin___CFStringMakeConstantString(\"y\") + 8);\n"
+        "    bytes(a); bytes((const CF*)__builtin___CFStringMakeConstantString(\"\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"h\\xc3\\xa9llo \\xf0\\x9f\\x98\\x80\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"a\\0b\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"cut \\xc3\\x28 here\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString((\"pa\" \"ren\")));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString((const char*)\"cast\"));\n"
+        "    bytes((const CF*)__builtin___NSStringMakeConstantString(\"ns\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"only\"));\n"
+        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"initial\"));\n"
+        "    mix(__builtin___NSStringMakeConstantString(\"ns\") == __builtin___CFStringMakeConstantString(\"ns\"));\n"
+        "    mix(__builtin___CFStringMakeConstantString(\"a\\0b\") != __builtin___CFStringMakeConstantString(\"a\"));\n"
+        "    mix(__builtin___CFStringMakeConstantString(\"abc\")->length * 10 + sizeof(*__builtin___CFStringMakeConstantString(\"q\")));\n"
+        "    return (int)(h ^ (h >> 32));\n"
+        "}\n";
+    static const char driver[] =
+        "#include <stdio.h>\n"
+        "int __CFConstantStringClassReference[4];\n"
+        "const int* class_reference(void) { return __CFConstantStringClassReference; }\n"
+        "int tested(int);\n"
+        "int main(void) { printf(\"%d %d\\n\", tested(3), tested(-2)); return 0; }\n";
+    static const char declared[] =
+        "extern const int __CFConstantStringClassReference[];\n"
+        "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
+        "const int* class_reference(void);\n"
+        "int tested(int n) { const CF* c = (const CF*)__builtin___CFStringMakeConstantString(\"d\"); return n + (c->isa == class_reference()) * 10 +\n"
+        "(c->isa == __CFConstantStringClassReference) * 100 + (int)c->length * 1000; }\n";
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        char source[256];
+        char main_source[256];
+        char object[256];
+        char reference[256];
+        char linked[256];
+        snprintf(source, sizeof(source), "%s/cfstrings-%u.c", directory, variant);
+        snprintf(main_source, sizeof(main_source), "%s/cfstrings-main.c", directory);
+        snprintf(object, sizeof(object), "%s/cfstrings-%u.o", directory, variant);
+        snprintf(reference, sizeof(reference), "%s/cfstrings-clang", directory);
+        snprintf(linked, sizeof(linked), "%s/cfstrings-linked", directory);
+        const char* program = variant == 0 ? unit : declared;
+        const bool written = parse_test_write(source, program, strlen(program)) && parse_test_write(main_source, driver, sizeof(driver) - 1);
+        check_test_expect(test, written, "the constant CFStrings' fixture is written");
+        char* text = NULL;
+        char* clang_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, main_source, NULL };
+        const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+        free(text);
+        text = NULL;
+        char expected[64] = { 0 };
+        const bool oracle = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+        check_test_expect(test, oracle, variant == 0 ? "clang's build of the constant CFStrings runs" : "clang's build of a declared class's CFString runs");
+        static const char* const names[] = { "-c's object, linked by cc", "-c --scalar's", "-c --tier1's", "-c --tier1 --scalar's", "the direct path's link" };
+        for (uint32_t path = 0; oracle && path < 5; path += 1)
+        {
+            char* plain[] = { (char*)executable, "-w", "-c", "-o", object, source, NULL };
+            char* scalar[] = { (char*)executable, "--scalar", "-w", "-c", "-o", object, source, NULL };
+            char* tier1[] = { (char*)executable, "--tier1", "-w", "-c", "-o", object, source, NULL };
+            char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-w", "-c", "-o", object, source, NULL };
+            char* direct[] = { (char*)executable, "-w", "-o", linked, source, main_source, NULL };
+            char* const* arguments = path == 0 ? plain : path == 1 ? scalar : path == 2 ? tier1 : path == 3 ? tier1_scalar : direct;
+            int status = check_test_driver_spawn(arguments, &text);
+            free(text);
+            text = NULL;
+            char* link_arguments[] = { "cc", "-o", linked, object, main_source, NULL };
+            status = status == 0 && path < 4 ? check_test_driver_spawn(link_arguments, &text) : status;
+            free(text);
+            text = NULL;
+            char captured[64] = { 0 };
+            char description[160];
+            snprintf(description, sizeof(description), "%s CFStrings: %s prints clang's build's output", variant == 0 ? "the unit's" : "a declared class's", names[path]);
+            check_test_expect(test, status == 0 && check_test_driver_capture(linked, captured, sizeof(captured)) && strcmp(captured, expected) == 0, description);
+            unlink(linked);
+        }
+        unlink(source);
+        unlink(main_source);
+        unlink(object);
+        unlink(reference);
+    }
+    // Its files' names hold no "cfstring", which the object is searched for.
+    static const char unreferenced[] = "int main(void) { return sizeof(__builtin___CFStringMakeConstantString(\"x\")) != sizeof(void *); }\n";
+    char source[256];
+    char object[256];
+    char linked[256];
+    snprintf(source, sizeof(source), "%s/constant-string-sizeof.c", directory);
+    snprintf(object, sizeof(object), "%s/constant-string-sizeof.o", directory);
+    snprintf(linked, sizeof(linked), "%s/constant-string-sizeof", directory);
+    const bool written = parse_test_write(source, unreferenced, sizeof(unreferenced) - 1);
+    check_test_expect(test, written, "the unreferenced CFString's fixture is written");
+    for (uint32_t path = 0; written && path < 4; path += 1)
+    {
+        const bool all = (path & 1) != 0;
+        const bool direct = (path & 2) != 0;
+        char* plain[] = { (char*)executable, "-w", "-c", "-o", object, source, NULL };
+        char* plain_all[] = { (char*)executable, "--lower-all", "-w", "-c", "-o", object, source, NULL };
+        char* linking[] = { (char*)executable, "-w", "-o", linked, source, NULL };
+        char* linking_all[] = { (char*)executable, "--lower-all", "-w", "-o", linked, source, NULL };
+        char* const* arguments = direct ? (all ? linking_all : linking) : (all ? plain_all : plain);
+        char* text = NULL;
+        int status = check_test_driver_spawn(arguments, &text);
+        free(text);
+        text = NULL;
+        const bool clean = direct || (status == 0 && !check_test_driver_file_holds(object, "__CFConstantStringClassReference") &&
+                                      !check_test_driver_file_holds(object, "cfstring"));
+        char* link_arguments[] = { "cc", "-o", linked, object, NULL };
+        status = status == 0 && !direct ? check_test_driver_spawn(link_arguments, &text) : status;
+        free(text);
+        text = NULL;
+        char captured[16] = { 0 };
+        char description[160];
+        snprintf(description, sizeof(description), "a CFString in sizeof alone%s: %s, no record or class, links and runs", all ? " (--lower-all)" : "",
+                 direct ? "the direct path's link" : "-c's object, linked by cc");
+        check_test_expect(test, clean && status == 0 && check_test_driver_capture(linked, captured, sizeof(captured)), description);
+        unlink(linked);
+    }
+    unlink(source);
+    unlink(object);
 }
 
 // #1122's own program, one atom in the section, whose count is 1: by clang, by -c's object that cc links, by the direct
@@ -5841,6 +6018,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 #include "c_check_common_driver_test.c"
 #include "c_check_attribute_effects_driver_test.c"
 #include "c_check_attribute_arguments_driver_test.c"
+#include "c_check_parse_note_driver_test.c"
 #include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_fence_driver_test.c"
@@ -7098,6 +7276,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_parse_notes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_conventions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -7257,7 +7439,23 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_vex(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_avx(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_carriers(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_half(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_inline(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -7292,6 +7490,10 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_asm_symbols(&test, executable, directory);
                 check_test_driver_setjmp_held(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_cfstrings(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

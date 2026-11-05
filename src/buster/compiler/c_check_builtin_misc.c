@@ -91,6 +91,9 @@ struct CheckBuiltinMiscAction
     // __builtin_infer_alloc_token's token, where the call's arguments give one (CheckBuiltinCall.alloc_token).
     bool alloc_token_known;
     uint64_t alloc_token;
+    // A constant CFString's object (#148): its call's own, its `)`'s token plus one, whose address its value is
+    // (check_data_cfstring_keys makes it, the first of each literal's for them all).
+    uint32_t cfstring_object;
     // Whether __builtin_call_with_static_chain's first argument is a call as written (CheckBuiltinCall.static_chain_call).
     bool static_chain_call;
     // The os_log builtins' format's layout (CheckBuiltinCall.os_log_items), whether its format is a literal, whether a
@@ -726,13 +729,14 @@ static int32_t check_builtin_misc_type_class(const TypeTable* table, TypeId type
 
 // An int constant expression of `value`, as the generic builtins below fold: no operand runs.
 // An os_log data argument's bytes (#148): its type's after the default argument promotions (DefaultVariadicArgumentPromotion),
-// an array's or a function's as a pointer's, a float's and a half's as a double's, an integer's as its promotion's.
+// an array's or a function's as a pointer's, a float's and an __fp16's as a double's, an integer's as its promotion's.
+// _Float16 and __bf16 aren't promoted: 2 bytes each, as clang's.
 static uint64_t check_builtin_misc_os_log_size(const TypeTable* table, TypeId type)
 {
     const TypeId bare = type_is_valid(table, type) ? type_unqualified(type_strip_aligned(table, type)) : BUSTER_TYPE_INT;
     const uint8_t kind = type_kind(table, bare);
     const bool pointer = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_POINTER;
-    const bool narrow_floating = bare == BUSTER_TYPE_FLOAT || bare == BUSTER_TYPE_FLOAT16 || bare == BUSTER_TYPE_HALF || bare == BUSTER_TYPE_BF16;
+    const bool narrow_floating = bare == BUSTER_TYPE_FLOAT || bare == BUSTER_TYPE_HALF;
     const bool integer = check_action_is_integer(table, bare);
     const uint64_t result = pointer || narrow_floating ? 8 : integer ? type_size(table, type_promote(table, bare)) : type_size(table, bare);
     return result;
@@ -1374,18 +1378,32 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     {
         // A constant CFString (#148), a const __NSConstantString *: CFString's of an ordinary string literal (clang's
         // CheckObjCString: "CFString literal is not a string constant" otherwise), NSString's of any const char * in C,
-        // which clang checks in Objective-C alone. clang's evaluator takes either call as an address constant
-        // (IsOpaqueConstantCall), which this checker's doesn't; clang's code generation makes the object, which this
-        // compiler's doesn't (check_lower_unsupported).
+        // which clang checks in Objective-C alone. Of a literal, clang's evaluator takes either call as an address
+        // constant (IsOpaqueConstantCall), whose code is its object's address and which no operand's evaluation runs:
+        // here its call's object (CheckBuiltinMiscAction.cfstring_object), a static one. NSString's of what is no
+        // literal stays a value, whose code clang makes from the literal its argument isn't (check_lower_unsupported).
         // Its argument converts to const char * as a prototype's, and past its parentheses and casts is an ordinary
         // literal, never a UTF-8 one (u8"x", a char array before C23).
         check_builtin_misc_convert(table, input, output, values + 0, 0, type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)));
         const TypeId record = input->ns_constant_string != 0 ? type_qualify(table, input->ns_constant_string, BUSTER_TYPE_CONST) : 0;
         const TypeId result = record != 0 ? type_pointer(table, record) : 0;
         const bool ordinary = id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING || (input->string_known && !input->string_utf8);
+        const bool literal = input->string_known && input->cfstring_object != 0;
         if (output->action.diagnostic == CHECK_DIAG_NONE && (!ordinary || result == 0))
         {
             check_action_diagnose(&output->action, result == 0 && ordinary ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (output->action.diagnostic == CHECK_DIAG_NONE && literal)
+        {
+            output->action.value = (CheckValue){
+                .type = result,
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = input->cfstring_object,
+            };
+            output->constant_value = output->action.value;
+            output->constant_evaluated_operands = 0;
         }
         else if (output->action.diagnostic == CHECK_DIAG_NONE)
         {

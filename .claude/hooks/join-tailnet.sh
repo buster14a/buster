@@ -1,16 +1,27 @@
 #!/bin/bash
-# SessionStart hook: joins the tailnet so that sessions reach benchpress (the
-# 9700X) with `tailscale ssh` without asking. It uses tailscaled's default
-# socket, which the allow rules in settings.json expect, and does nothing where
-# TS_AUTHKEY or tailscale is missing or the daemon is already up.
+# SessionStart hook: joins the tailnet so that sessions reach benchpress (the 9700X) with
+# `tailscale ssh david@benchpress` without asking (docs/commands/benchpress.md). It uses tailscaled's default socket,
+# which the allow rules in settings.json expect, and does nothing where TS_AUTHKEY or tailscale is missing or the
+# daemon is already up and reaches benchpress.
 #
 # The environment may have started a daemon on the default socket already,
 # without HTTPS_PROXY in its environment: it dials the control server directly,
 # which the egress gateway refuses (403), so it stays logged out. Such a daemon
 # is stopped and replaced by one started here, which inherits the session's
 # proxy. A daemon on a socket of its own (`--socket=`) is left alone.
+#
+# A daemon can also be up but stale: logged in from an earlier start, its control connection failing since (#1282's
+# session: the proxy given as an IP literal, which its control dialer refused), so that no peer answers it although
+# `tailscale status` lists them. Where the control server lists benchpress online and it doesn't answer a ping, even
+# through a DERP relay, the daemon is replaced the same way.
 
-if [ -n "$TS_AUTHKEY" ] && command -v tailscaled > /dev/null && ! tailscale status > /dev/null 2>&1; then
+benchpress_unreachable()
+{
+    tailscale status 2> /dev/null | awk '$2 == "benchpress" && !/offline/ { found = 1 } END { exit !found }' &&
+        ! timeout 30 tailscale ping -c 3 --timeout=5s --until-direct=false benchpress > /dev/null 2>&1
+}
+
+if [ -n "$TS_AUTHKEY" ] && command -v tailscaled > /dev/null && { ! tailscale status > /dev/null 2>&1 || benchpress_unreachable; }; then
     for pid in $(pgrep -x tailscaled); do
         if ! tr '\0' '\n' < /proc/$pid/cmdline | grep -q '^--socket'; then
             kill $pid 2> /dev/null

@@ -217,7 +217,8 @@ struct ObjectUnits
     // The units' inclusive prefix sums of their costs (atoms' bytes, and fixups and symbols at a record's bytes each), by
     // which object_write_units cuts them into parts.
     uint64_t* cost_prefix;
-    // lane_parts_by_cost's boundaries, which the lanes share: BUSTER_LANE_MAX_PARTS + 1 entries.
+    // lane_parts_by_cost's boundaries, which the lanes share: one more than the most parts it cuts the units into for a
+    // group of any size, which is no more than the units and BUSTER_LANE_MAX_PARTS (two entries for one unit, as -c's).
     uint64_t* part_boundaries;
     // Each atom's section in its object, among object_build's sections of atoms (numbered from 0 in the order it makes
     // them, which is their order in the object), and its offset there. object_build writes its own unit's.
@@ -520,6 +521,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         .count = count,
     };
     const uint64_t keys = unit_count * BUSTER_LINK_CLASS_COUNT;
+    const uint64_t parts = unit_count < BUSTER_LANE_MAX_PARTS ? unit_count : BUSTER_LANE_MAX_PARTS;
     if (prepared)
     {
         result.atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, atoms->count);
@@ -532,7 +534,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         result.unit_abi = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, unit_count);
         result.atom_name = BUSTER_ARENA_PUSH_ARRAY(arena, NameId, atoms->count);
         result.cost_prefix = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, unit_count);
-        result.part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
+        result.part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, parts + 1);
         result.atom_section = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count);
         result.atom_offset = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
         prepared = result.atoms != 0 && result.atom_begin != 0 && result.symbols != 0 && result.symbol_begin != 0 && result.symbol_info != 0 &&

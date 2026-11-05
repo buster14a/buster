@@ -175,7 +175,10 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     const Parser* parser = reader->parser;
     TypeTable* types = reader->types;
     const uint32_t assignment = begin - 1;
-    const bool c23 = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0;
+    // Deduced through its declarator (check_input_c23_auto_deduce): C23's auto's, or __auto_type's, whose errors name it.
+    const bool deduced_declarator = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0;
+    const bool gnu = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_GNU_AUTO) != 0;
+    const bool c23 = deduced_declarator && !gnu;
     uint32_t self = BUSTER_CHECK_NONE;
     for (uint32_t token = begin; token < end && self == BUSTER_CHECK_NONE; token += 1)
     {
@@ -212,22 +215,23 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     else
     {
         TypeId deduced_base = 0;
-        TypeId deduced = c23 ? check_input_type_result(reader, check_input_c23_auto_deduce(reader, placeholder, value.type, declaration, &deduced_base)) :
-                               check_input_type_result(reader, type_adjust_parameter(types, value.type));
+        TypeId deduced = deduced_declarator ? check_input_type_result(reader, check_input_c23_auto_deduce(reader, placeholder, value.type, declaration, &deduced_base)) :
+                                              check_input_type_result(reader, type_adjust_parameter(types, value.type));
         if (deduced == 0 && !reader->output->resource && reader->output->report_count == 0)
         {
             // A declarator shape its initializer doesn't fit, at clang's name for it.
             check_input_report(reader, declaration, CHECK_INPUT_DECLARATION);
         }
-        if (c23 && deduced != 0)
+        if (deduced_declarator && deduced != 0)
         {
-            // C23's later declarators deduce the same type (6.7.9): clang reports the difference at the declaration.
+            // C23's later declarators deduce the same type (6.7.9), and __auto_type's as clang deduces them: clang reports
+            // the difference at the declaration.
             const uint32_t group = reader->declaration_specifiers[declaration];
             const TypeId previous = group < parser->tokens.count ? reader->declaration_deduced[group] : 0;
             if (previous != 0 && type_same_canonical(types, previous, deduced_base) != TYPE_ANSWER_YES)
             {
                 // At the declaration's auto, where clang points its two deductions' error.
-                check_input_report(reader, group < parser->tokens.count ? group : declaration, CHECK_INPUT_AUTO_DEDUCED_MISMATCH);
+                check_input_report(reader, group < parser->tokens.count ? group : declaration, gnu ? CHECK_INPUT_AUTO_TYPE_MISMATCH : CHECK_INPUT_AUTO_DEDUCED_MISMATCH);
                 deduced = 0;
             }
             else if (previous == 0 && group < parser->tokens.count)
@@ -259,7 +263,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         }
         else if (deduced != 0)
         {
-            result = c23 ? deduced : type_qualify(types, deduced, type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
+            result = deduced_declarator ? deduced : type_qualify(types, deduced, type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
             reader->declared_types[declaration] = result;
             reader->query_types[assignment] = result;
             reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;

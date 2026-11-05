@@ -7635,12 +7635,16 @@ static uint32_t check_lower_padding_plan(const TypeTable* types, TypeId type, ui
 }
 
 // __builtin_os_log_format(buffer, format, data...) at run time (#148, clang's emitBuiltinOSLogFormat, whose helper's
-// stores are made here in place): the buffer's pointer, the format's (discarded) and each data argument, promoted (an
-// array or a function as its address), are evaluated in order into temporaries; then the summary byte (private items
-// 0x1, items other than scalars 0x2), the items' count, and each item's descriptor (its kind << 4 | its privacy), size
-// and data are stored at their offsets; the value is the buffer. clang evaluates the arguments in its items' order,
-// once each: a format whose items take its data arguments other than each once in order (positions, a repeat, an
-// unused one), or data of other than 1, 2, 4 or 8 bytes (a long double, an __int128, a vector), is refused by name.
+// stores are made here in place): the buffer's pointer and the format's (discarded) are evaluated, then each data argument
+// an item takes, in its items' order, promoted (an array or a function as its address, a float or an __fp16 as a double),
+// into a temporary; then the summary byte (private items 0x1, items other than scalars 0x2), the items' count, and each
+// item's descriptor (its kind << 4 | its privacy), size and data are stored at their offsets; the value is the buffer.
+// As clang's code: data no item takes isn't evaluated, a signed _BitInt narrower than its class is stored zero-extended
+// from its width, and a long double's 10 bytes are followed by 6 zeros (both, as clang's, an unsigned integer of the
+// item's size). clang evaluates an item's data again for each item that takes it; here an argument is evaluated once,
+// which is the same where it has no side effects and none ran since its first item. Data taken again otherwise is refused
+// by name, and so is data of a type whose bytes this compiler doesn't store or clang's code doesn't make (past 16 bytes,
+// a vector of 2 bytes, a __float128).
 static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -7651,50 +7655,90 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t arguments = count >= 2 ? count - 2 : 0;
-    bool ordered = witness != NULL && witness->os_log_known && count >= 2 && count <= 31 && witness->os_log_count <= 255;
-    uint32_t next = 0;
+    bool valid = witness != NULL && witness->os_log_known && count >= 2 && count <= 31 && witness->os_log_count <= 255;
+    // The data in their first items' order (order[0..evaluated)), whether an item takes each, and the side effects run
+    // when each was evaluated (since), which a later item's must equal.
+    uint32_t order[31] = { 0 };
+    uint32_t since[31] = { 0 };
+    bool taken[31] = { false };
+    uint32_t evaluated = 0;
+    uint32_t effects = 0;
     uint8_t summary = 0;
-    for (uint32_t i = 0; ordered && i < witness->os_log_count; i += 1)
+    for (uint32_t i = 0; valid && i < witness->os_log_count; i += 1)
     {
         const CheckOSLogItem* item = witness->os_log_items + i;
-        ordered = item->source != BUSTER_CHECK_OS_LOG_ARGUMENT || item->argument == next;
-        next += item->source == BUSTER_CHECK_OS_LOG_ARGUMENT ? 1 : 0;
+        const bool argument = item->source == BUSTER_CHECK_OS_LOG_ARGUMENT;
+        valid = !argument || item->argument < arguments;
+        if (valid && argument)
+        {
+            const uint32_t k = item->argument;
+            const bool effect = (check_stream_flags(stream, graph->argument_nodes[first + 2 + k]) & BUSTER_CHECK_SIDE_EFFECT) != 0;
+            valid = !taken[k] || (!effect && since[k] == effects);
+            if (!taken[k])
+            {
+                taken[k] = true;
+                order[evaluated] = k;
+                evaluated += 1;
+                effects += effect ? 1 : 0;
+                since[k] = effects;
+            }
+        }
         summary |= (item->flags & BUSTER_CHECK_OS_LOG_PRIVATE) != 0 ? 1 : 0;
         summary |= item->kind != BUSTER_CHECK_OS_LOG_SCALAR ? 2 : 0;
     }
-    ordered = ordered && next == arguments;
+    // Each taken argument's promoted type, its class and bytes, whether it is its address, and the count a signed
+    // _BitInt's value is shifted by to zero-extend it in its unsigned computing class (`extend`).
     uint8_t classes[31] = { 0 };
     TypeId targets[31] = { 0 };
     bool addresses[31] = { false };
-    for (uint32_t k = 0; ordered && k < arguments; k += 1)
+    uint64_t sizes[31] = { 0 };
+    uint32_t extend[31] = { 0 };
+    for (uint32_t k = 0; valid && k < arguments; k += 1)
     {
-        const TypeId type = check_stream_type(stream, graph->argument_nodes[first + 2 + k]);
-        const TypeId bare = type_unqualified(type_strip_aligned(types, type));
-        const uint8_t kind = type_kind(types, bare);
-        addresses[k] = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION;
-        targets[k] = addresses[k] ? BUSTER_TYPE_ULONG : bare == BUSTER_TYPE_FLOAT ? BUSTER_TYPE_DOUBLE :
-                     check_action_is_integer(types, bare) ? type_promote(types, bare) : bare;
-        classes[k] = addresses[k] ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, targets[k]);
-        const uint64_t size = addresses[k] ? 8 : type_size(types, targets[k]);
-        const bool scalar = (classes[k] >= BUSTER_TYPED_CLASS_I8 && classes[k] <= BUSTER_TYPED_CLASS_U64) || classes[k] == BUSTER_TYPED_CLASS_F32 ||
-                            classes[k] == BUSTER_TYPED_CLASS_F64;
-        ordered = scalar && (size == 1 || size == 2 || size == 4 || size == 8) && (targets[k] == bare || addresses[k] || check_lower_class(writer, bare) != UINT8_MAX);
+        if (taken[k])
+        {
+            const TypeId type = check_stream_type(stream, graph->argument_nodes[first + 2 + k]);
+            const TypeId bare = type_unqualified(type_strip_aligned(types, type));
+            const uint8_t kind = type_kind(types, bare);
+            addresses[k] = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION;
+            targets[k] = addresses[k] ? BUSTER_TYPE_ULONG : bare == BUSTER_TYPE_FLOAT || bare == BUSTER_TYPE_HALF ? BUSTER_TYPE_DOUBLE :
+                         check_action_is_integer(types, bare) ? type_promote(types, bare) : bare;
+            const uint8_t class = addresses[k] ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, targets[k]);
+            const uint64_t size = addresses[k] ? 8 : type_size(types, targets[k]);
+            const bool integer = (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64) || class == BUSTER_TYPED_CLASS_I128 ||
+                                 class == BUSTER_TYPED_CLASS_U128;
+            const bool floating = class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64 || class == BUSTER_CHECK_LOWER_CLASS_BINARY16 ||
+                                  class == BUSTER_CHECK_LOWER_CLASS_BFLOAT16;
+            const bool vector = class == BUSTER_TYPED_CLASS_VECTOR && check_lower_vector_bytes(types, targets[k]) == size && size <= 16;
+            const bool sized = (integer && (class == BUSTER_TYPED_CLASS_I128 || class == BUSTER_TYPED_CLASS_U128 ? 16 : tier0_class_bytes(class)) == size) ||
+                               (class == BUSTER_TYPED_CLASS_F80 && size == 16) || (floating && size <= 8) || vector;
+            const bool sign = class == BUSTER_TYPED_CLASS_I8 || class == BUSTER_TYPED_CLASS_I16 || class == BUSTER_TYPED_CLASS_I32 ||
+                              class == BUSTER_TYPED_CLASS_I64 || class == BUSTER_TYPED_CLASS_I128;
+            const uint32_t shift = sign ? check_lower_bit_int_shift(types, targets[k]) : 0;
+            const uint32_t computing = class == BUSTER_TYPED_CLASS_I128 ? 128 : class == BUSTER_TYPED_CLASS_I64 ? 64 : 32;
+            extend[k] = shift != 0 ? shift + computing - 8 * (uint32_t)size : 0;
+            classes[k] = shift != 0 ? (uint8_t)(class + 1) : class;
+            sizes[k] = size;
+            valid = sized && (targets[k] == bare || addresses[k] || check_lower_class(writer, bare) != UINT8_MAX);
+        }
     }
-    if (!ordered)
+    if (!valid)
     {
-        check_lower_unsupported(writer, "__builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes");
+        check_lower_unsupported(writer, "__builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+                                        "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)");
     }
     else
     {
         const uint32_t buffer = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         const uint32_t format = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         uint32_t temporaries[31] = { 0 };
-        for (uint32_t k = 0; k < arguments; k += 1)
+        for (uint32_t e = 0; e < evaluated; e += 1)
         {
-            temporaries[k] = check_lower_temporary(writer, classes[k]);
+            const uint32_t k = order[e];
+            temporaries[k] = classes[k] == BUSTER_TYPED_CLASS_VECTOR ? check_lower_temporary_of(writer, targets[k]) : check_lower_temporary(writer, classes[k]);
         }
-        // The tasks run in the reverse of their pushes: the arguments first, then the stores in their offsets' order, then
-        // the buffer's value.
+        // The tasks run in the reverse of their pushes: the data first, in their items' order, then the stores in their
+        // offsets' order, then the buffer's value.
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, buffer);
         uint64_t offsets[256];
         uint64_t offset = 2;
@@ -7703,7 +7747,7 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
         {
             offsets[i] = offset;
             const CheckOSLogItem* item = witness->os_log_items + i;
-            const uint64_t size = item->source == BUSTER_CHECK_OS_LOG_ARGUMENT ? (addresses[item->argument] ? 8 : type_size(types, targets[item->argument])) :
+            const uint64_t size = item->source == BUSTER_CHECK_OS_LOG_ARGUMENT ? sizes[item->argument] :
                                   item->kind == BUSTER_CHECK_OS_LOG_MASK ? 8 : item->source == BUSTER_CHECK_OS_LOG_CONSTANT ? 4 : 0;
             offset += 2 + size;
         }
@@ -7711,12 +7755,24 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
         {
             const CheckOSLogItem* item = witness->os_log_items + i;
             const bool argument = item->source == BUSTER_CHECK_OS_LOG_ARGUMENT;
-            const uint64_t size = argument ? (addresses[item->argument] ? 8 : type_size(types, targets[item->argument])) :
-                                  item->kind == BUSTER_CHECK_OS_LOG_MASK ? 8 : item->source == BUSTER_CHECK_OS_LOG_CONSTANT ? 4 : 0;
+            const uint64_t size = argument ? sizes[item->argument] : item->kind == BUSTER_CHECK_OS_LOG_MASK ? 8 : item->source == BUSTER_CHECK_OS_LOG_CONSTANT ? 4 : 0;
             const uint8_t class = argument ? classes[item->argument] : item->kind == BUSTER_CHECK_OS_LOG_MASK ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_I32;
+            if (class == BUSTER_TYPED_CLASS_F80)
+            {
+                // A long double's bytes past its 10, zeros, stored after them.
+                const uint8_t zeros[2] = { BUSTER_TYPED_CLASS_U16, BUSTER_TYPED_CLASS_U32 };
+                for (uint32_t z = 2; z-- > 0;)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SET, zeros[z], 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, zeros[z], 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offsets[i] + 2 + 10 + 2 * z);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, buffer);
+                }
+            }
             if (size != 0)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, argument ? check_lower_access_value(types, class, targets[item->argument]) : 0);
                 if (argument)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, temporaries[item->argument]);
@@ -7748,9 +7804,25 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
             check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, b);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, buffer);
         }
-        for (uint32_t k = arguments; k-- > 0;)
+        for (uint32_t e = evaluated; e-- > 0;)
         {
+            const uint32_t k = order[e];
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, classes[k], temporaries[k]);
+            if (extend[k] != 0)
+            {
+                // A signed _BitInt's value, zero-extended from its width through its unsigned computing class and back to
+                // its own class's width (classes[k], the unsigned one).
+                const uint8_t computing = classes[k] == BUSTER_TYPED_CLASS_U128 || classes[k] == BUSTER_TYPED_CLASS_U64 ? classes[k] : BUSTER_TYPED_CLASS_U32;
+                if (computing != classes[k])
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, classes[k], 0);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_SHR, computing, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, extend[k]);
+                check_lower_instruction(writer, BUSTER_TYPED_SHL, computing, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, extend[k]);
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computing, 0);
+            }
             check_lower_operand(writer, node, 3 + 2 + k, addresses[k], targets[k]);
         }
         // The format's literal (an array: its address), or its cast's pointer, which nothing reads.
@@ -8001,7 +8073,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     }
     else if (runtime == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || runtime == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
     {
-        check_lower_unsupported(writer, "a constant CFString or NSString, whose object this compiler doesn't make");
+        check_lower_unsupported(writer, "an NSString of no string literal, whose object clang's code makes from the literal its argument isn't");
     }
     else if (runtime == CBUILTIN_CPU_INIT)
     {

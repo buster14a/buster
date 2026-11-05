@@ -372,16 +372,34 @@ harvest()
     "$tool" harvest --ledger "$ledger" --facts "$work/harvest.tsv" --states "$states" --records "$records" >> "$ledger"
 }
 
+# nightly/SHA at SHA: 0 when it is there. 2 when it can't be had for the rest of the job, which then stops asking for
+# it: GitHub refuses the workflow token the branch (HTTP 403, "Resource not accessible by integration", as it did on
+# 2026-11-05 for merges whose pull request's head lacked main's workflow changes), or the branch exists and points
+# elsewhere (until a person fixes it, never dispatched). 1 for anything else (a timeout, a 429 or 5xx, a failed
+# lookup), which a later step asks for again.
 ensure_branch()
 {
-    local commit=$1 found
+    local commit=$1 found answer result=0
     found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
     if [ -z "$found" ]; then
-        "$gh" api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" > /dev/null
+        if ! answer=$("$gh" api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" 2>&1); then
+            # Made meanwhile (a 422 for a branch another step created): there now, at the commit, is success.
+            found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
+            if [ "$found" = "$commit" ]; then
+                result=0
+            elif grep -F 'Resource not accessible by integration' <<< "$answer" | grep -F -q 'HTTP 403'; then
+                result=2
+                printf '::warning title=Nightly branch::GitHub refused the workflow token nightly/%s, so nothing is dispatched for it in this job; later states are planned instead (docs/ci.md)\n' "$commit"
+            else
+                result=1
+                printf '::warning title=Nightly branch::nightly/%s could not be created (%s); a later step tries again\n' "$commit" "$(tail -n 1 <<< "$answer")"
+            fi
+        fi
     elif [ "$found" != "$commit" ]; then
-        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it\n' "$commit" "$found"
-        return 1
+        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it in this job, and planning later states instead\n' "$commit" "$found"
+        result=2
     fi
+    return "$result"
 }
 
 publish()
@@ -470,9 +488,11 @@ coordinate()
     [[ "$phase" == prepare || "$phase" == window ]]
     [[ "$mode" == run || "$mode" == dry-run ]]
     local coordinator=${GITHUB_RUN_ID:?} states="$work/states.tsv" facts="$work/facts.tsv" ledger="$work/ledger.tsv"
-    local refs="$work/refs.tsv" pending="$work/pending.tsv" main sequence=1 times cycle start deadline started
+    local refs="$work/refs.tsv" pending="$work/pending.tsv" refused="$work/refused.tsv" main sequence=1 times cycle start deadline started
     started=$(now)
     : > "$pending"
+    # The states whose nightly/SHA branch this job couldn't create: the plan skips them for the rest of the job.
+    : > "$refused"
     if [ "$phase" = window ]; then
         sequence=10001
         # Without the prepare job's pending dispatches, a dispatch the runs don't show yet could be dispatched again:
@@ -528,10 +548,12 @@ coordinate()
             sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
         "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
             --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" \
-            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" \
+            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" --refused "$refused" \
             $( [ "$phase" = prepare ] && printf -- '--prepare-only' ) > "$work/plan.tsv"
         cat "$work/plan.tsv"
         verdict=''
+        # A new refusal: nothing was launched for that state, so the next step plans at once, without the wait.
+        local replan=false
         while IFS= read -r line; do
             IFS=$'\t' read -r -a action <<< "$line"
             case "${action[0]}" in
@@ -543,7 +565,9 @@ coordinate()
                     sha "$commit"
                     # The cycle's pinned snapshot, the planner's: main's head may have moved on since the pin.
                     sha "$pinned"
-                    if ensure_branch "$commit"; then
+                    local branch=0
+                    ensure_branch "$commit" || branch=$?
+                    if [ "$branch" -eq 0 ]; then
                         local override_arguments=()
                         if [ -n "${NIGHTLY_OVERRIDE:-}" ]; then
                             override_arguments=(-f "override=$NIGHTLY_OVERRIDE")
@@ -551,6 +575,9 @@ coordinate()
                         "$gh" workflow run 9700x.yml --repo "$repository" --ref "nightly/$commit" -f "purpose=$purpose" \
                             -f "hardware=$hardware" -f "snapshot=$pinned" -f "request=$request" "${override_arguments[@]}"
                         printf 'pending\t%s\t%s\t%s\t%s\t%s\n' "$request" "$purpose" "$hardware" "$commit" "$(now)" >> "$pending"
+                    elif [ "$branch" -eq 2 ]; then
+                        printf '%s\n' "$commit" >> "$refused"
+                        replan=true
                     fi
                     sequence=$((sequence + 1))
                     ;;
@@ -573,6 +600,9 @@ coordinate()
         done < "$work/plan.tsv"
         if [ -n "$limit" ] && [ "$iterations" -ge "$limit" ]; then
             break
+        fi
+        if [ "$replan" = true ]; then
+            continue
         fi
         if [ "$phase" = prepare ]; then
             # Preparing until the window opens, five minutes at a time; otherwise one step.

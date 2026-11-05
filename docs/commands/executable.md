@@ -512,3 +512,28 @@ static PIE", "GOT relaxation in every executable" and "The shared library") has
 the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
+
+## Dynamic image bounds (#1255)
+
+`test-dynamic` also binds all twelve image-bound names in a dynamic PIE:
+`__ehdr_start`, `__executable_start`, `__preinit_array_start`,
+`__preinit_array_end`, `_etext`, `etext`, `__etext`, `_edata`, `edata`,
+`__bss_start`, `_end` and `end`. The fixture has initialized data and an
+aligned, nonempty BSS, so the data end, BSS start and image end cannot be
+confused. It checks every resolved address against the output ELF headers
+and runs the executable to verify the relocated addresses. The ordinary
+lane-count, poisoned-scratch, exact-twin and RELR-disabled checks apply.
+Each write computes its expectations from its own headers: disabling RELR
+can move the sections. With `--cross-check`, GNU ld links the same object and
+lld compiles the same fixture without `__etext`, which it does not define.
+GNU ld and every direct write check all twelve names; lld checks its eleven
+built-in names. Their running executables must satisfy the same ELF-bound
+rules for their own layouts, except that lld places the absent preinit
+array's bounds at image offset zero. The direct writer retains GNU ld's
+choice of the init array's start.
+Kind-mask checks retain static-runtime selection, shared-library admission
+and the static executable's exclusive IPLT bounds.
+
+The fixture leaves the preinit array empty, as the direct path has no
+preinit atoms: both bounds coincide at the init array's start. It does not
+claim support for nonempty preinit arrays or new shared-library bounds.

@@ -105,6 +105,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_DEDUCED_ARRAY: result = "cannot use 'auto' with array in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_BIT_FIELD: result = "cannot pass bit-field as auto initializer in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_MISMATCH: result = "'auto' deduced types differ within one declaration"; break;
+        case CHECK_INPUT_AUTO_TYPE_MISMATCH: result = "'__auto_type' deduced types differ within one declaration"; break;
         case CHECK_INPUT_CONSTEXPR_INITIALIZER: result = "constexpr variable must be initialized by a constant expression"; break;
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
@@ -1599,15 +1600,22 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const CheckInputReport* report = input->reports + index;
                             const uint32_t used = parser->tokens.names[token];
                             const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
+                            // The note names its declaration: an enumerator's enum's where the enum marks it.
+                            const uint32_t declared = report->note_token < count && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ?
+                                                      parser->tokens.names[report->note_token] : used;
                             char noted[160];
-                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, used), intern_bytes(pp->table, used));
+                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, declared), intern_bytes(pp->table, declared));
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = noted,
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
-                                                        (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
-                                                        (int)message.length, message.pointer);
+                            // Once more for each of a tag's declarators after the first (report->value).
+                            for (uint64_t copy = 0; copy <= report->value; copy += 1)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "'%.*s' is unavailable%s%.*s", (int)intern_length(pp->table, used), intern_bytes(pp->table, used),
+                                                            message.length != 0 ? ": " : "", (int)message.length, message.pointer);
+                            }
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
                         {
@@ -3604,12 +3612,13 @@ struct CheckDriverCommand
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
-    // --tier1-no-lifetimes.
+    // --tier1-no-lifetimes; and --tier1-no-inline (#1282).
     bool tier1;
     bool tier1_strict;
     bool tier1_no_rematerialize;
     bool tier1_gvn;
     bool tier1_no_lifetimes;
+    bool tier1_no_inline;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
     // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
@@ -3824,7 +3833,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
                     CheckMusttails musttails = { 0 };
-                    const bool expression_valid = input_valid && stream.report_count == 0;
+                    // The reader's reports after checking are unavailable members' uses (check_input_member_uses, #147).
+                    const bool expression_valid = input_valid && stream.report_count == 0 && input.report_count == 0;
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
                     CheckDriverDiagnostic fallback[4] = { 0 };
                     CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);
@@ -4621,6 +4631,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes.tier1_no_rematerialize = true;
         }
+        else if (strcmp(arguments[i], "--tier1-no-inline") == 0)
+        {
+            lanes.tier1_no_inline = true;
+        }
         else if (strcmp(arguments[i], "--tier1-gvn") == 0)
         {
             lanes.tier1_gvn = true;
@@ -4840,6 +4854,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
         .tier1_gvn = lanes.tier1_gvn,
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
+        .tier1_no_inline = lanes.tier1_no_inline,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
         .helper_report = helper_report ? &lanes.helper_report : NULL,
@@ -4887,10 +4902,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
-    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
+    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes || lanes.tier1_no_inline) &&
+             !lanes.tier1)
     {
         fprintf(stderr, "error: %s needs --tier1\n", lanes.tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
-                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" : "--tier1-no-lifetimes");
+                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
+                                                    lanes.tier1_no_lifetimes ? "--tier1-no-lifetimes" : "--tier1-no-inline");
     }
     else
     {
