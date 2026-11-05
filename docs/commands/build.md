@@ -204,7 +204,14 @@ tests' libm oracles name come from `test_libm.c`'s table there, and a `dlopen`ed
 library brings a C library of its own. Nothing can be preloaded into it either:
 the tests that count a command's threads read the count its lanes write at exit
 to the file `BUSTER_TEST_THREADS` names (`lane_threads_report`), which a
-dynamic executable's preloaded counter of `pthread_create` must match. The compiler needs no libm either way
+dynamic executable's preloaded counter of `pthread_create` must match. Its start doesn't register its
+`.eh_frame` with libgcc's unwinder, as `crtbeginT.o` would where glibc's
+`pthread_exit` links the unwinder in: libgcc 13 and later sort every FDE at
+that registration, 1.16 million instructions of an empty file's 1.41 million.
+The link wraps `__register_frame_info` and `__deregister_frame_info` into
+`main.c`'s functions that do nothing (`--wrap`), libgcc finds the frames
+through `_dl_find_object` instead, as in a dynamic executable, and `test-lanes`
+checks that `backtrace` walks them. The compiler needs no libm either way
 (`host_math.h`); a dynamic link takes it only as needed.
 
 The post-link step has each executable write itself with the backend's tables

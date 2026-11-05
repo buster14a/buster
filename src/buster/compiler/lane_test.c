@@ -89,6 +89,10 @@
 //     then with the process's affinity set to a core's two siblings, one, and to CPUs of two cores, two. Before them,
 //     that oracle's reader on texts of /proc/cpuinfo's shape (lane_test_cpuinfo_controls): four processors' blocks with
 //     long flags lines of names with digits, values at and past their bounds, malformed values and near-miss keys.
+//   - Unwinding (#652), in a static executable: backtrace from two of the test's calls deep walks them and every frame
+//     below them to the process's start. glibc unwinds a lane's thread for pthread_exit and pthread_cancel through
+//     libgcc, which finds a static executable's frames through _dl_find_object, as its start doesn't register them
+//     (main.c's __wrap___register_frame_info).
 //
 // A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
 // the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
@@ -115,6 +119,9 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+#include <execinfo.h>
+#endif
 
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
@@ -146,6 +153,11 @@
 #define BUSTER_LANE_TEST_ADVANCES 20000
 #define BUSTER_LANE_TEST_ADVANCE_PAUSE_INTERVAL 5000
 #define BUSTER_LANE_TEST_TEAM_PARTS 13
+// Unwinding: the frames backtrace may return, and the least it must from lane_test_unwind_inner: that function, its
+// caller, the frame that calls that (run_lane_tests, or the main_command it is inlined into), main and the C library's
+// three below main (__libc_start_call_main, __libc_start_main and _start).
+#define BUSTER_LANE_TEST_UNWIND_FRAMES 64
+#define BUSTER_LANE_TEST_UNWIND_LEAST 7
 
 static const uint32_t lane_test_counts[] = { 1, 2, 3, 8 };
 static const uint64_t lane_test_record_counts[] = { 0, 1, 2, 3, 63, 64, 65, 1000, 100000 };
@@ -3098,6 +3110,35 @@ static void lane_test_session_main(void* argument)
     }
 }
 
+#if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+// Unwinding (#652): see the file's comment. Each count is volatile, so that its call isn't a tail call, which would leave
+// its caller's frame out.
+static __attribute__((noinline)) uint32_t lane_test_unwind_inner(void)
+{
+    void* frames[BUSTER_LANE_TEST_UNWIND_FRAMES];
+    volatile uint32_t count = (uint32_t)backtrace(frames, BUSTER_LANE_TEST_UNWIND_FRAMES);
+    return count;
+}
+
+static __attribute__((noinline)) uint32_t lane_test_unwind_outer(void)
+{
+    volatile uint32_t count = lane_test_unwind_inner();
+    return count;
+}
+
+static bool lane_test_unwinds(void)
+{
+    const uint32_t frames = lane_test_unwind_outer();
+    printf("unwinding: backtrace walked %u frames, of at least %u\n", frames, BUSTER_LANE_TEST_UNWIND_LEAST);
+    return frames >= BUSTER_LANE_TEST_UNWIND_LEAST;
+}
+#else
+static bool lane_test_unwinds(void)
+{
+    return true;
+}
+#endif
+
 // Sessions (#905): see the file's comment.
 static uint64_t lane_test_sessions(void)
 {
@@ -3346,6 +3387,7 @@ static int run_lane_tests(int argc, char** argv)
         passed = lane_test_cores() == 0 && passed;
         passed = lane_test_shared_cpus() == 0 && passed;
         passed = lane_test_sessions() == 0 && passed;
+        passed = lane_test_unwinds() && passed;
         fflush(stdout);
 
         uint64_t state = seed * BUSTER_LANE_TEST_GOLDEN_RATIO + 1;

@@ -1531,7 +1531,15 @@ The executable is now linked statically wherever nothing needs the loader
 (`test-ssa-source`, `interpret-ir --bind`) and the libm oracles of the tests
 come from a table of the host functions they name (`test_libm.c`), which links
 them in. The stack canary's check reads the compiler's objects, since libc.a
-defines and calls `__stack_chk_fail` itself.
+defines and calls `__stack_chk_fail` itself. The start doesn't register the
+executable's 634 KB of `.eh_frame` with libgcc's unwinder, which `crtbeginT.o`
+does where the unwinder is linked (glibc's `pthread_exit` needs it): libgcc 13
+and later sort every FDE at that registration, which doubled the user
+instructions of an empty file's `-fsyntax-only` (1.74 million against the
+dynamic executable's 0.80 million on the 9700X) and made a cold start slower
+than the dynamic one. The link wraps the registration into a function that does
+nothing, and libgcc finds the frames through `_dl_find_object`, as a dynamic
+executable's does.
 
 ## How it is measured
 

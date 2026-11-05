@@ -1752,6 +1752,29 @@ static int main_driver(int argc, char** argv)
     return result;
 }
 
+#if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+// A static executable's start without registering its .eh_frame with libgcc's unwinder (#652). Where the unwinder is
+// linked, which glibc's pthread_exit and pthread_cancel bring, crtbeginT.o's frame_dummy registers it, and libgcc 13
+// and later then sorts its every FDE: 1.16 million of the 1.41 million instructions of an empty file's -fsyntax-only, and
+// its 634 KB read at every start. The link wraps both functions (cmake/BusterSettings.cmake) into these, which do
+// nothing: libgcc finds the frames through glibc's _dl_find_object without the registration, as a dynamic executable's
+// crtbegin.o leaves it to, and test-lanes checks that backtrace walks them.
+void __wrap___register_frame_info(const void* begin, void* object);
+void* __wrap___deregister_frame_info(const void* begin);
+
+void __wrap___register_frame_info(const void* begin, void* object)
+{
+    (void)begin;
+    (void)object;
+}
+
+void* __wrap___deregister_frame_info(const void* begin)
+{
+    (void)begin;
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv)
 {
     int result;
