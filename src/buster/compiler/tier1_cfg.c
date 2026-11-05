@@ -396,7 +396,8 @@ static void tier1_cfg_spill_prefix(const Tier1CfgAllocation* result, uint32_t* s
 // earlier layout block proves nothing. The equality case is a reload at the block's first position in a continuing
 // interval: tier1_cfg_entry_location requires the preceding spill location on every incoming edge. A new interval
 // at that same position has no such contract. The prefix query is logarithmic, like tier1_cfg_location's.
-static bool tier1_cfg_slot_current(const Tier1CfgAllocation* result, const uint32_t* spill_ends, uint32_t value, uint32_t position, uint32_t block_start)
+// Keep this rare proof out of the hot edge helper so the common edge path can be inlined.
+static __attribute__((noinline)) bool tier1_cfg_slot_current(const Tier1CfgAllocation* result, const uint32_t* spill_ends, uint32_t value, uint32_t position, uint32_t block_start)
 {
     const uint32_t interval = tier1_cfg_interval_at(result, value, position);
     bool current = false;
@@ -479,7 +480,7 @@ struct Tier1CfgEdge
 // One value of an edge successor's entry state: `value` there, `carried` (the value itself, or a phi's operand) from
 // the predecessor's exit. Adds its move, if it needs one, to its class's pending moves or to the recomputations.
 // Returns false where either side has no location.
-static bool tier1_cfg_edge_value(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t exit, uint32_t entry)
+static inline __attribute__((always_inline)) bool tier1_cfg_edge_value(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t exit, uint32_t entry)
 {
     uint32_t from = 0;
     uint32_t to = 0;
