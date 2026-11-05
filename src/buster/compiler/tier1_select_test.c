@@ -2383,6 +2383,88 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+// The arithmetic transfers whose bounds drive widening elision: a bounded negative value survives truncation and
+// signed widening, and unsigned division/remainder leave a nonnegative I32 with physically zero upper bits.
+static void tier1_select_test_known_arithmetic(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    const uint64_t samples[] = { 0, 1, 127, 128, 255, 32767, 32768, INT32_MAX, UINT32_C(0x80000000), UINT32_MAX, UINT64_C(0xa55a120080000000), UINT64_MAX };
+    uint64_t random = UINT64_C(0x1219a117beef9001);
+    const uint8_t operations[] = { IR_NEG, IR_UDIV, IR_UREM };
+    for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(operations); shape += 1)
+    {
+        const IrSizes sizes = { .instruction_count = 9, .block_count = 1, .constant_count = 2, .parameter_count = 1 };
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        tier1_select_test_expect(test, created, "create bounded negation and unsigned division regressions");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.parameter_types[0] = IR_I32;
+            function.constants[0].low = shape == 0 ? 127 : 65535;
+            function.constants[1].low = shape == 1 ? 4 : 8;
+            tier1_select_test_node(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, shape == 2 ? IR_COPY : IR_AND, IR_I32, 0, shape == 2 ? BUSTER_IR_NONE : 1, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, operations[shape], IR_I32, 2, shape == 0 ? BUSTER_IR_NONE : 3, BUSTER_IR_NONE);
+            const uint32_t converted = shape == 0 ? 6 : 5;
+            const uint32_t returned = shape == 0 ? 7 : 5;
+            if (shape == 0)
+            {
+                tier1_select_test_node(&function, 5, IR_TRUNC, IR_I16, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 6, IR_SEXT, IR_I32, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 7, IR_ZEXT, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else
+            {
+                tier1_select_test_node(&function, 5, IR_SEXT, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            tier1_select_test_node(&function, returned + 1, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.instruction_count = returned + 2;
+            function.block_offsets[1] = function.instruction_count;
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &plan, &failed);
+                tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "bounded arithmetic selects by both paths");
+                if (planned == TIER1_SELECT_OK)
+                {
+                    tier1_select_test_expect(test, plan.patterns[converted].rule == TIER1_RULE_COPY && plan.patterns[converted].values[0] == 4,
+                                             "negation's signed bound and unsigned division/remainder bounds remove the redundant widening");
+                    tier1_select_test_expect(test, shape != 0 || plan.covered[5], "a bounded negative value bypasses its intermediate truncation");
+                    uint8_t registers[9];
+                    memset(registers, X86_REGISTER_RDI, sizeof(registers));
+                    registers[1] = X86_REGISTER_R9;
+                    registers[3] = X86_REGISTER_R9;
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
+                    tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "bounded arithmetic emits with coalesced registers");
+                    if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                    {
+                        for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
+                        {
+                            const uint64_t value = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : tier1_select_test_random(&random);
+                            const uint32_t low = (uint32_t)value;
+                            const uint64_t expected = shape == 0 ? (uint32_t)(0 - (low & 127)) : shape == 1 ? (low & 65535) / 4 : low % 8;
+                            tier1_select_test_expect(test, tier1_select_test_call(test, value, 0, 0) == expected,
+                                                     "bounded negative, quotient and remainder values preserve zero, signed boundaries and poisoned ABI upper bits");
+                        }
+                    }
+                }
+                arena_pop_to(&output, 0);
+            }
+        }
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void tier1_select_test_known_tails(Tier1SelectTest* test)
 {
     const long page = sysconf(_SC_PAGESIZE);
@@ -4621,6 +4703,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_call_barriers(&test);
             tier1_select_test_conversions(&test);
             tier1_select_test_known_bits(&test);
+            tier1_select_test_known_arithmetic(&test);
             tier1_select_test_known_tails(&test);
             tier1_select_test_copy_elision(&test);
             tier1_select_test_narrow_memory(&test);
