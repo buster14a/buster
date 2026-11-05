@@ -6224,13 +6224,16 @@ arguments against the function. The checker now gives these as clang does.
   array element, including nested designators, union alternatives, atomic
   pointer elements and GNU ranges. The graph pass retains one bit per value
   for these consumers; its temporary expression shadows remain disposable.
-  The initializer's existing warning sink deduplicates repeated range writes
-  and scalar initializers already diagnosed by the graph pass, and applies
-  the same unevaluated-query suppression before publication.
+  The initializer's warning sink keeps one conversion warning per selected
+  range element, while dropping scalar initializers already diagnosed by the
+  graph pass. Conversion warnings also apply in unevaluated operands;
+  dereference warnings keep their query suppression.
   Function redeclarations preserve the previous composite function type's
   sugar, while an object's most recent declaration and a definition's own
-  parameters keep their own sugar. A body's annotated record members request
-  source-order replay before publishing member indexes; other body shadows
+  parameters keep their own sugar. Parameter adjustment preserves atomic
+  wrappers; K&R declarations retain the adjusted annotations and the typed
+  parameter's location for declaration notes. A body's annotated record members
+  request source-order replay before publishing member indexes; other body shadows
   remain immutable in the deferred reader's retained arenas.
 - **Differences left.**
   - A C23 function type's attribute after the specifiers

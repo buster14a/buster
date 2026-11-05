@@ -610,6 +610,8 @@ struct CheckInput
     CheckNoderefMember* noderef_members;
     uint32_t noderef_member_count;
     uint32_t noderef_member_capacity;
+    const CheckNoderefDeclaration* noderef_declarations;
+    uint32_t noderef_declaration_count;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -5316,7 +5318,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .missing_name = frame->name == BUSTER_CHECK_NONE ? frame->missing_name : BUSTER_CHECK_NONE,
-                                .noderef = check_input_noderef_value(reader, type, noderef),
+                                .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
                             };
                             if (function->parameter_last != BUSTER_CHECK_NONE)
                             {
@@ -5352,7 +5354,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 reader->objects[token] = token + 1;
                                 reader->output->declarations[token] = token;
                                 reader->output->explicit_abis[token] = abi_origin;
-                                check_input_noderef_set(reader->output, token, check_input_noderef_value(reader, type, noderef));
+                                check_input_noderef_set(reader->output, token, check_input_noderef_adjust_parameter(reader, type, noderef));
                                 check_input_set_attributes_at(reader->output, token, check_input_merge_attributes(reader, frame->common_attributes, frame->attributes));
                                 if (check_input_attributes_at(reader->output, token) != 0)
                                 {
@@ -6164,6 +6166,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
         reader->specifier_pending = false;
         const TypeId base = valid ? check_input_specifiers(reader, &i, body, &is_typedef, &storage, &is_inline) : 0;
         CheckInputAttributes* common = reader->specifier_attributes;
+        const CheckNoderefType* base_noderef = reader->specifier_noderef;
         valid = valid && base != 0 && !reader->specifier_pending && !is_typedef && !is_inline && !reader->specifier_thread_local &&
                 (storage == 0 || storage == C_NAME_REGISTER);
         const uint32_t noreturn = valid ? check_input_noreturn_keyword(common) : BUSTER_CHECK_NONE;
@@ -6181,6 +6184,8 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
         {
             uint32_t name = BUSTER_CHECK_NONE;
             uint32_t parameters = BUSTER_CHECK_NONE;
+            reader->specifier_noderef = base_noderef;
+            reader->declarator_common = common;
             const TypeId type = check_input_declarator(reader, base, &i, body, &name, &parameters);
             CheckInputAttributes* attributes = check_input_merge_attributes(reader, common, reader->declarator_attributes);
             const uint8_t next = i < body ? parser->tokens.kinds[i] : PARSE_KIND_END;
@@ -6214,6 +6219,9 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
                 check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 check_input_set_attributes_at(reader->output, listed, attributes);
+                const CheckNoderefType* noderef = check_input_noderef_adjust_parameter(reader, type, reader->declarator_noderef);
+                check_input_noderef_set(reader->output, listed, noderef);
+                check_input_noderef_declaration(reader, listed, name, noderef);
                 // A typed parameter is visible to the remainder of this header, including enumerator conflicts
                 // and type queries. Its canonical declaration remains the earlier identifier-list token.
                 if (valid && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name], C_BINDING_OBJECT,

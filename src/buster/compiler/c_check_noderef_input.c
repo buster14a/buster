@@ -19,6 +19,24 @@ static void check_input_noderef_set(CheckInput* input, uint32_t token, const Che
     }
 }
 
+// Keep a K&R parameter's typed spelling without another token-sized column. The warning pass orders these cold
+// records once; every dereference note then looks up its declaration in logarithmic time.
+static void check_input_noderef_declaration(CheckInputReader* reader, uint32_t declaration, uint32_t token, const CheckNoderefType* type)
+{
+    if (type != NULL)
+    {
+        CheckInput* input = reader->output;
+        CheckNoderefDeclaration* record = input->noderef_declaration_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckNoderefDeclaration, 1) : NULL;
+        input->resource |= record == NULL;
+        if (record != NULL)
+        {
+            *record = (CheckNoderefDeclaration){ .next = input->noderef_declarations, .declaration = declaration, .token = token };
+            input->noderef_declarations = record;
+            input->noderef_declaration_count += 1;
+        }
+    }
+}
+
 static const CheckNoderefType* check_input_noderef_make(CheckInputReader* reader, const CheckNoderefType* base, const CheckNoderefParameter* parameters, bool marked)
 {
     CheckNoderefType* result = NULL;
@@ -76,9 +94,16 @@ static const CheckNoderefParameter* check_input_noderef_parameter_add(CheckInput
     return result;
 }
 
-// Parameter adjustment and value conversion have the same annotation shape for arrays and pointers. An atomic's
-// value loses its atomic wrapper; a function designator acquires a pointer wrapper. Aligned types carry no shadow
-// level: alignment is canonical representation, not a source declarator operator.
+// Parameter adjustment changes only a function's shape: arrays and their adjusted pointers already share theirs.
+// Atomic parameters keep their wrapper, as type_adjust_parameter keeps the atomic type.
+static const CheckNoderefType* check_input_noderef_adjust_parameter(CheckInputReader* reader, TypeId type, const CheckNoderefType* shadow)
+{
+    const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
+    return kind == BUSTER_TYPE_KIND_FUNCTION ? check_input_noderef_wrap(reader, shadow) : shadow;
+}
+
+// An atomic's value loses its atomic wrapper; a function designator acquires a pointer wrapper. Aligned types carry
+// no shadow level: alignment is canonical representation, not a source declarator operator.
 static const CheckNoderefType* check_input_noderef_value(CheckInputReader* reader, TypeId type, const CheckNoderefType* shadow)
 {
     const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));

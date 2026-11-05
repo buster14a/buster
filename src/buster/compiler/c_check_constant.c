@@ -1040,7 +1040,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .name = name,
-                                .noderef = check_input_noderef_value(reader, type, noderef),
+                                .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
                             };
                             valid = check_constant_parameter_unique(function, parameters, parameter_count);
                             if (function->parameter_last != BUSTER_CHECK_NONE)
