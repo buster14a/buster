@@ -4732,7 +4732,9 @@ the oracle.
   0.76%; `main`'s second set of executables, the comparison's floor, is within
   0.14% of the first in both. Warm
   (`benchmark-checker-bindings`, 5 passes), the class actions take 3.31 ms
-  against 3.92.
+  against 3.92. The runs, their scripts, the profiles and the visits' breakdown
+  by role are in the
+  [record](https://github.com/buster14a/buster-performance/tree/aedaec4d23a58d586b88b3158051f047beb19c62/docs/measurements/check-input-1038-graph-by-passes-2026-11-05).
 
   Not built: the numbering by counts and a prefix sum in a pass before the
   actions, and the operands by pointer jumping and segmented scans. A class's
