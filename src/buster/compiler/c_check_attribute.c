@@ -5532,10 +5532,32 @@ static void check_input_attribute_summary(CheckInputAttributes* attributes)
     }
 }
 
+// Whether declaration `d`, before `token`, is one clang's lookup of `token`'s entity finds in its chain (#147): at file
+// scope, or in a block `token` is in (CheckInputReader.declaration_scope_ends).
+static bool check_input_declaration_visible(const CheckInputReader* reader, uint32_t d, uint32_t token)
+{
+    return reader->declaration_scope_ends == NULL || reader->declaration_scope_ends[d] == BUSTER_CHECK_NONE || token <= reader->declaration_scope_ends[d];
+}
+
+// Whether `attribute`'s name is one of a mutual exclusion's (check_input_exclusions), which an earlier declaration's
+// attribute may exclude.
+static bool check_input_attribute_excludable(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    bool listed = false;
+    for (uint32_t r = 0; !listed && r < BUSTER_ARRAY_LENGTH(check_input_exclusions); r += 1)
+    {
+        listed = name.length == check_input_exclusions[r].length && memcmp(name.pointer, check_input_exclusions[r].spelling, name.length) == 0;
+    }
+    return listed;
+}
+
 // clang's error for an attribute of a redeclaration that an earlier declaration's of its entity excludes (#147, as its
 // mergeDeclAttributes takes them in): at the attribute, with the note at the earlier one. On the serial path, where the
-// declarations of `previous`'s entity before `token` are found by their linked object.
-static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uint32_t token, uint32_t previous)
+// declarations of `previous`'s entity before `token` are found by their linked object: where `token` has a visible
+// previous declaration (`visible`), those its lookup finds alone (check_input_declaration_visible), and otherwise every
+// one, as clang finds a block's extern declaration in a closed scope (findLocallyScopedExternCDecl).
+static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uint32_t token, uint32_t previous, bool visible)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
     const uint32_t object = reader->objects != NULL ? reader->objects[previous] : 0;
@@ -5545,11 +5567,7 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
         const CheckInputAttribute* attribute = attributes->records + i;
         const bool kept = !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
         const String8 name = kept ? check_input_attribute_name(reader, attribute->name) : (String8){ "", 0 };
-        bool listed = false;
-        for (uint32_t r = 0; kept && !listed && r < BUSTER_ARRAY_LENGTH(check_input_exclusions); r += 1)
-        {
-            listed = name.length == check_input_exclusions[r].length && memcmp(name.pointer, check_input_exclusions[r].spelling, name.length) == 0;
-        }
+        const bool listed = kept && check_input_attribute_excludable(reader, attribute);
         const bool scalar = reader->parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
         for (uint32_t first = listed ? check_input_attributed_next(all, 0, token, scalar) : token; !reported && first < token;
@@ -5559,7 +5577,8 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
             for (uint32_t selected = lanes; !reported && selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
-                const CheckInputAttributes* earlier = reader->objects[d] == object ? check_input_attributes_at(reader->output, d) : 0;
+                const bool seen = reader->objects[d] == object && (!visible || check_input_declaration_visible(reader, d, token));
+                const CheckInputAttributes* earlier = seen ? check_input_attributes_at(reader->output, d) : 0;
                 const uint32_t excluding = earlier != 0 ? check_input_attribute_excluding_in(reader, name, earlier, earlier->count) : UINT32_MAX;
                 if (excluding != UINT32_MAX)
                 {
@@ -5583,18 +5602,29 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
 // definition and the declarations before it lack the kind of (check_input_attribute_after_kind, #147), whose layout
 // it then no longer changes. Earlier accepted attributes remain in their declaration records. A specifier's list is
 // each declarator's: one declarator's is copied before its records are marked.
-static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
     const bool after = attributes != 0 && reader->definition_origins != NULL && reader->definition_origins[previous] &&
                        !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
     bool late = false;
-    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    // A body on a lane: what the earlier declarations' attributes decide, which the lane can't read (other lanes' columns
+    // hold them), and what its own decide for later declarations, which it can't publish to them, is source order's
+    // (#147): the declaration attributes clang drops after the definition and checks a later one's against
+    // (check_input_attribute_after_kind), and those of a mutual exclusion (check_input_attribute_merge_exclusions).
+    bool replay = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        late |= !attribute->ignored && ((reader->late_attributes && check_input_attribute_late_kind(attribute)) ||
-                                        (!reader->lane && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute)));
+        const bool kept = !attribute->ignored && !attribute->subject_ignored;
+        late |= after && !attribute->ignored && ((reader->late_attributes && check_input_attribute_late_kind(attribute)) ||
+                                                 (!reader->lane && !attribute->subject_ignored && check_input_attribute_after_kind(reader, attribute)));
+        // (One the declaration inherits, as naked from a file-scope one, check_input_naked_inherit, isn't the body's.)
+        const bool written = reader->function_body >= reader->parser->tokens.count || attribute->first > reader->function_body;
+        replay |= reader->lane && kept && written && (check_input_attribute_after_kind(reader, attribute) ||
+                                                      (!attribute->keyword && check_input_attribute_excludable(reader, attribute)));
     }
+    check_input_lane_refuse(reader, replay, "a body's redeclaration has attributes its entity's other declarations decide");
     CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
     const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
     reader->output->resource |= late && !copied;
@@ -5624,7 +5654,9 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                     const uint32_t object = reader->objects[d];
-                    if (object != 0 && object <= count)
+                    // (A file-scope declaration's alone: a block's attributes never reach the definition's, #147.)
+                    const bool file_scope = reader->declaration_scope_ends == NULL || reader->declaration_scope_ends[d] == BUSTER_CHECK_NONE;
+                    if (object != 0 && object <= count && file_scope)
                     {
                         reader->late_attribute_masks[object] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, d), reader->output->function_flags[d]);
                         check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, d), reader->late_attribute_kinds + 2 * (uint64_t)object);
@@ -5677,7 +5709,7 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         }
         check_input_set_attributes_at(reader->output, token, copy);
     }
-    check_input_attribute_merge_exclusions(reader, token, previous);
+    check_input_attribute_merge_exclusions(reader, token, previous, visible);
 }
 
 // Whether a parameter of `type` is one nonnull's index may name, as clang's isValidPointerAttrType has it: a pointer, or a

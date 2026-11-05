@@ -16,8 +16,9 @@ the merge's pass over the binding events and the token columns runs on the
 lanes the bodies ran on, each a share of whole bodies by their tokens
 (`check_deferred_pass_items`). A unit it can't merge yet (a body whose
 declaration with linkage changes its entity's linked state, one that makes a
-union of the top level's transparent, one whose walk reports an error, and a
-unit with overloadable functions) is checked in source order, with the reason.
+union of the top level's transparent, one whose walk reports an error, one
+whose redeclaration writes an attribute its entity's other declarations decide
+(#147), and a unit with overloadable functions) is checked in source order, with the reason.
 The C driver reads a whole unit this way with `--deferred-bodies`
 (`check_input_deferred_compile`, #151): the bodies' walks and the merge's pass
 are rounds of the command's flow (`CheckDeferred.flow`, `CheckDeferredFlow`),
