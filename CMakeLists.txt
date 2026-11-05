@@ -51,7 +51,7 @@ include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
-message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}")
+message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}")
 if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
     message(FATAL_ERROR "buster: BUSTER_PGO builds the Release configuration alone; configure with CMAKE_CONFIGURATION_TYPES=Release")
 endif()
@@ -226,12 +226,13 @@ function(buster_link target)
 endfunction()
 
 # The post-link step (cmake/BusterPostLink.cmake) of `target`'s linked file into `output`: the backend's tables baked
-# in, and the stack canary's absence checked. ARGUMENTS go to the step, which also depends on DEPENDS.
+# in, and the stack canary's absence checked in OBJECTS, the objects it links of the compiler's own code. ARGUMENTS go
+# to the step, which also depends on DEPENDS.
 function(buster_post_link target output)
-    cmake_parse_arguments(PARSE_ARGV 2 post "" "" "ARGUMENTS;DEPENDS")
+    cmake_parse_arguments(PARSE_ARGV 2 post "" "" "ARGUMENTS;DEPENDS;OBJECTS")
     add_custom_command(OUTPUT "${output}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_FILE:${target}>" "-DOUTPUT=${output}" "-DBAKE=${buster_bake}"
-            "-DNM=${BUSTER_NM}" ${post_ARGUMENTS} -P "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake"
+            "-DNM=${BUSTER_NM}" "-DOBJECTS=${post_OBJECTS}" ${post_ARGUMENTS} -P "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake"
         DEPENDS ${target} "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake" ${post_DEPENDS}
         COMMENT "Baking and checking ${target}'s executable"
         VERBATIM)
@@ -334,7 +335,7 @@ set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
 add_executable(compiler_link ${objects} ${lexer_objects})
 set_target_properties(compiler_link PROPERTIES OUTPUT_NAME compiler.link)
 buster_link(compiler_link)
-buster_post_link(compiler_link "${compiler}")
+buster_post_link(compiler_link "${compiler}" OBJECTS ${objects} ${lexer_objects})
 add_custom_target(compiler ALL DEPENDS "${compiler}")
 
 # build.sh shifts: the same objects linked again with BUSTER_SHIFTS' bytes of padding in .text before
@@ -372,10 +373,10 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
         buster_link(compiler_shift_${bytes})
         set(output "${directory}/compiler-${bytes}")
         if(bytes EQUAL 0)
-            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1)
+            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 OBJECTS ${shift_objects})
         else()
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
-                DEPENDS "${compiler}")
+                DEPENDS "${compiler}" OBJECTS ${shift_objects})
         endif()
         list(APPEND shifted "${output}")
     endforeach()

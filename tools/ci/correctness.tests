@@ -393,8 +393,11 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-interpreter-native
 "$BUSTER_COMPILER" test-interpreter-link
 "$BUSTER_COMPILER" test-ir-interpreter
-# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen.
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen, or in a
+# static executable in test_libm.c's table.
 "$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
+# And one of the C library's, which a static executable's table names too.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=getpid tests/ir/libm-call.ir
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.

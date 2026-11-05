@@ -2404,36 +2404,43 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
     {
         inherited += 1;
     }
-    char** environment = calloc(inherited + 4, sizeof(char*));
+    char** environment = calloc(inherited + 5, sizeof(char*));
     char preload[PATH_MAX + 16];
     char count_path[PATH_MAX + 32];
+    char lanes_path[PATH_MAX + 32];
     char failing[64];
     for (uint32_t c = 0; referenced && environment != NULL && c < command_count; c += 1)
     {
         const CheckLanesSessionCommand* command = commands + c;
         char object[PATH_MAX];
         char counted[PATH_MAX];
+        char lanes_counted[PATH_MAX];
         char executable_path[PATH_MAX];
         snprintf(object, sizeof(object), "%s/session_threads_%u.o", directory, c);
         snprintf(counted, sizeof(counted), "%s/session_threads_%u.count", directory, c);
+        snprintf(lanes_counted, sizeof(lanes_counted), "%s/session_threads_%u.lanes", directory, c);
         snprintf(executable_path, sizeof(executable_path), "%s/session_threads_%u", directory, c);
         snprintf(preload, sizeof(preload), "LD_PRELOAD=%s", library);
         snprintf(count_path, sizeof(count_path), "CHECK_LANES_THREADS=%s", counted);
+        snprintf(lanes_path, sizeof(lanes_path), "BUSTER_TEST_THREADS=%s", lanes_counted);
         snprintf(failing, sizeof(failing), "BUSTER_TEST_LANE_FAIL_AT=%s", command->fail_at != NULL ? command->fail_at : "");
         uint64_t used = 0;
         for (uint64_t i = 0; i < inherited; i += 1)
         {
             if (strncmp(environ[i], "LD_PRELOAD=", 11) != 0 && strncmp(environ[i], "CHECK_LANES_THREADS=", 20) != 0 &&
-                strncmp(environ[i], "BUSTER_TEST_LANE_FAIL_AT=", 25) != 0)
+                strncmp(environ[i], "BUSTER_TEST_LANE_FAIL_AT=", 25) != 0 && strncmp(environ[i], "BUSTER_TEST_THREADS=", 20) != 0)
             {
                 environment[used] = environ[i];
                 used += 1;
             }
         }
+        // The preloaded counter's count, and the lanes' own (lane_threads_report), which a static executable, where
+        // nothing is preloaded, gives alone.
         environment[used] = preload;
         environment[used + 1] = count_path;
-        environment[used + 2] = command->fail_at != NULL ? failing : NULL;
-        environment[used + 3] = NULL;
+        environment[used + 2] = lanes_path;
+        environment[used + 3] = command->fail_at != NULL ? failing : NULL;
+        environment[used + 4] = NULL;
         char* arguments[12] = { (char*)executable };
         uint32_t count = 1;
         for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(command->options) && command->options[o] != NULL; o += 1)
@@ -2456,6 +2463,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         }
         arguments[count] = NULL;
         unlink(counted);
+        unlink(lanes_counted);
         // The two sources' objects are written in the current directory, as clang names them: run them in `directory`.
         char saved[PATH_MAX];
         const bool moved = !command->two || (getcwd(saved, sizeof(saved)) != NULL && chdir(directory) == 0);
@@ -2485,6 +2493,13 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         {
             fclose(report);
         }
+        char lanes_text[32] = { 0 };
+        FILE* lanes_report = fopen(lanes_counted, "r");
+        const bool lanes_read = lanes_report != NULL && fgets(lanes_text, sizeof(lanes_text), lanes_report) != NULL;
+        if (lanes_report != NULL)
+        {
+            fclose(lanes_report);
+        }
 #if __has_feature(thread_sanitizer)
         // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
         const uint32_t detector = command->threads != 0 ? 1 : 0;
@@ -2492,11 +2507,16 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         const uint32_t detector = 0;
 #endif
         char expected[32];
+        char lanes_expected[32];
         snprintf(expected, sizeof(expected), "%u\n", command->threads + detector);
-        char detail[PATH_MAX + 96];
-        snprintf(detail, sizeof(detail), "command %u: %s thread(s) created, %u expected", c, read ? text : "no count, ", command->threads + detector);
-        check_lanes_test_expect(tally, status == 0 && returned && read && strcmp(text, expected) == 0, "the driver's session creates its lanes once, none for one lane",
-                                detail);
+        snprintf(lanes_expected, sizeof(lanes_expected), "%u\n", command->threads);
+        char detail[PATH_MAX + 128];
+        snprintf(detail, sizeof(detail), "command %u: %s thread(s) preloaded, %s by the lanes, %u expected", c, read ? text : "no count, ",
+                 lanes_read ? lanes_text : "no count, ", command->threads + detector);
+        // The preloaded counter's, but in a static executable, and the lanes' own, which doesn't see a sanitizer's thread.
+        const bool preloaded = BUSTER_HOST_STATIC_EXECUTABLE || (read && strcmp(text, expected) == 0);
+        check_lanes_test_expect(tally, status == 0 && returned && preloaded && lanes_read && strcmp(lanes_text, lanes_expected) == 0,
+                                "the driver's session creates its lanes once, none for one lane", detail);
         check_lanes_test_expect(tally, !command->object || check_test_driver_same_files(object, reference), "the driver's object on its session is one lane's",
                                 detail);
         uint32_t asked = 0;

@@ -362,6 +362,9 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_ADDRESS,
     CHECK_LOWER_QUERY,
     CHECK_LOWER_TERMINATE,
+    // __builtin_eh_return within an expression (#148, check_lower_eh_unwind): `node` its call, `value` the offset's local
+    // and `type` the handler's.
+    CHECK_LOWER_EH_UNWIND,
     // `value` bytes from the address on top to the one under it, which stays (`address`) or not.
     CHECK_LOWER_COPY,
     // An initializer's part of zeros or of bytes (CHECK_INIT_CLEAR or CHECK_INIT_BYTES): `node` its plan, `type` the
@@ -1959,7 +1962,7 @@ static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
 }
 
 // check_lower_emit's entry in a function that tracks its stack (CheckLowerWriter.track: one with a statement expression,
-// or a program with a terminal helper), out of line, as few functions do.
+// or a program with a terminal helper or a __builtin_eh_return), out of line, as few functions do.
 static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
     const bool operand = (kind >= BUSTER_TYPED_NEG && kind <= BUSTER_TYPED_SET_GLOBAL) || (kind >= BUSTER_TYPED_DISCARD && kind <= BUSTER_TYPED_BRANCH_TRUE) ||
@@ -5640,9 +5643,11 @@ static __attribute__((noinline)) void check_lower_chain_location(const CheckLowe
 // __builtin_eh_return(offset, handler) (#148), as LLVM's EH_RETURN unwinds: a TAIL_CALL of a row of the function's own
 // (Tier0Function.eh_return's BUSTER_TIER0_TAIL_EH), indirect, the handler its callee, and the offset, converted to size_t,
 // its one argument, in rcx (check_lower_chain_location, from its const void abi type), the row's result the function's
-// own. The offset runs first, into a temporary, then the handler, as clang's arguments run. One that isn't an expression
-// statement of its own (a TAIL_CALL leaves nothing under its operands), a variadic function's, and a function's that makes
-// a musttail call too, are refused by name. The tasks run in reverse.
+// own. The offset runs first, into a temporary, then the handler, as clang's arguments run. In a variadic function too,
+// and beside musttail calls, whose rows are the function's other tail calls (Tier0Function.call_tails). Within an
+// expression (`c + (__builtin_eh_return(o, h), 1)`), whose values a TAIL_CALL can't leave under its operands, the handler
+// goes into a temporary too, and check_lower_eh_unwind discards the expression's pending values before it unwinds. The
+// tasks run in reverse.
 static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckGraph* graph = &writer->program->input->graph;
@@ -5652,13 +5657,9 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
     // The statement's node, or its conversion (to void) or cast of the call.
     const uint32_t root = writer->statement;
     const bool alone = node == root || (root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) && graph->operand0[root] == node);
-    // A musttail call's tail, not an earlier __builtin_eh_return's (#1420's review): a function may have several.
-    const bool musttail = writer->tails && !writer->eh_return;
-    if (!alone || writer->variadic || musttail)
+    if (!alone && !writer->track)
     {
-        check_lower_unsupported(writer, !alone ? "__builtin_eh_return within an expression, not a statement of its own" :
-                                        writer->variadic        ? "__builtin_eh_return in a variadic function" :
-                                                                  "__builtin_eh_return in a function that makes a musttail call");
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else if (abi->count >= abi->capacity || abi->argument_count >= abi->argument_capacity)
     {
@@ -5687,8 +5688,17 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
         const uint32_t first = graph->argument_offsets[node];
         const TypeId handler_type = check_stream_type(stream, graph->argument_nodes[first + 1]);
         const bool handler_address = check_action_kind(types, type_strip_aligned(types, handler_type)) != BUSTER_TYPE_KIND_POINTER;
-        check_lower_instruction(writer, BUSTER_TYPED_TAIL_CALL, BUSTER_TYPED_CLASS_VOID, call);
-        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, offset);
+        if (alone)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_TAIL_CALL, BUSTER_TYPED_CLASS_VOID, call);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, offset);
+        }
+        else
+        {
+            const uint32_t handler = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EH_UNWIND, .node = call, .type = handler, .value = offset });
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, handler);
+        }
         check_lower_operand(writer, node, 4, handler_address, handler_address ? 0 : handler_type);
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, offset);
         check_lower_operand(writer, node, 3, false, BUSTER_TYPE_ULONG);
@@ -5781,18 +5791,14 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0);
-    const bool unwinding = tail && writer->eh_return;
-    if (passed != NULL || count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL || (tail && chained != 0) || unwinding)
+    if (passed != NULL || count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
         // A half-precision argument (the first type it finds of the parameters' and the arguments'): the call is
         // check_lower_call_halves', which checks them all again.
-        retry = !halves && passed == check_lower_half_passed && count + chained <= BUSTER_TIER0_MAX_CALL_ARGUMENTS && returned == NULL && !(tail && chained != 0) &&
-                !unwinding;
+        retry = !halves && passed == check_lower_half_passed && count + chained <= BUSTER_TIER0_MAX_CALL_ARGUMENTS && returned == NULL;
         if (!retry)
         {
             check_lower_unsupported(writer, count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
-                                            tail && chained != 0 ? "a musttail call with a static chain" :
-                                            unwinding ? "a musttail call in a function that calls __builtin_eh_return" :
                                             passed != NULL && passed != check_lower_half_passed ? passed : returned);
         }
     }
@@ -6630,6 +6636,26 @@ static void check_lower_math(CheckLowerWriter* writer, uint32_t node, const Chec
                 check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
             }
         }
+    }
+}
+
+// __builtin_eh_return's unwinding within an expression (#148), its offset and its handler in their locals: the
+// expression's pending values discarded, so that its TAIL_CALL has nothing under its operands, as at statement level;
+// then, as check_lower_terminate's, dead constants of their classes, from which the rest of the expression, which no path
+// reaches, is checked. Out of line: units with eh_return alone track their stacks for it (CheckLowerShared.terminal).
+static __attribute__((noinline)) void check_lower_eh_unwind(CheckLowerWriter* writer, uint32_t call, uint32_t offset, uint32_t handler)
+{
+    const uint32_t pending = writer->stack_head;
+    for (uint32_t value = pending; value != 0; value = writer->stack_parents[value])
+    {
+        check_lower_emit(writer, BUSTER_TYPED_DISCARD, writer->stack_classes[value], 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, handler);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, offset);
+    check_lower_emit(writer, BUSTER_TYPED_TAIL_CALL, BUSTER_TYPED_CLASS_VOID, call);
+    for (uint32_t value = pending; value != 0; value = writer->stack_parents[value])
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, writer->stack_classes[value], 0);
     }
 }
 
@@ -11619,6 +11645,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             check_lower_terminate(writer);
         }
+        else if (kind == CHECK_LOWER_EH_UNWIND)
+        {
+            check_lower_eh_unwind(writer, node, (uint32_t)(value >> 32), (uint32_t)type);
+        }
         else if (kind == CHECK_LOWER_COPY)
         {
             check_lower_copy(writer, value, (flags & 1) != 0, ((flags >> 3) & 1) != 0);
@@ -12997,6 +13027,8 @@ struct CheckLowerShared
     uint32_t builtin_count;
     uint32_t atomic_capacity;
     uint32_t integer_builtin_count;
+    // Whether every body tracks its typed stack: a program with a terminal helper (check_lower_terminate) or a
+    // __builtin_eh_return (check_lower_eh_unwind), whose calls within an expression discard the values under them.
     bool terminal;
     bool scalar;
     // #1048's node templates (c_check_program_templates.c): whether the program may take them (no -g tokens, _BitInt
@@ -13356,6 +13388,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     for (uint32_t i = 0; i < lowered->helpers.count; i += 1)
     {
         shared->terminal |= lowered->helpers.items[i].terminates;
+    }
+    // A unit that calls __builtin_eh_return tracks its stacks too, for one within an expression (check_lower_eh_unwind). A
+    // refused program may have no stream.
+    const uint32_t misc_count = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->misc_count : 0;
+    for (uint32_t i = 0; i < misc_count && !shared->terminal; i += 1)
+    {
+        shared->terminal = program->stream->misc[i].runtime_builtin == CBUILTIN_EH_RETURN;
     }
     // File-scope assembly is the emission's (check_program_emit_file_asm, #619): it lowers no code.
     // The room __builtin_dump_struct's calls and __builtin_os_log_format's data take past the per-node bounds
@@ -14343,15 +14382,21 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         if (writer->tails && status->status == CHECK_PROGRAM_OK)
         {
             // Each TAIL_CALL's row, a tail call's (Tier0Function.call_tails): a pass over the entries of a function with one.
+            // A __builtin_eh_return's row is the one whose argument's ABI type is a const void (check_lower_eh_return's),
+            // a musttail call's any other (#148: a function may make both).
             uint8_t* tails = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, writer->call_count);
             if (tails != 0)
             {
                 memset(tails, 0, writer->call_count);
                 for (uint32_t e = 0; e < writer->count; e += 1)
                 {
-                    if (writer->kinds[e] == BUSTER_TYPED_TAIL_CALL && writer->values[e] < writer->call_count)
+                    const uint32_t c = writer->kinds[e] == BUSTER_TYPED_TAIL_CALL ? (uint32_t)writer->values[e] : UINT32_MAX;
+                    // The call's ABI row, after the function's own signature's (shared->signatures).
+                    const uint32_t row = shared->signatures[b] + 1 + c;
+                    if (c < writer->call_count && row < abi->count)
                     {
-                        tails[writer->values[e]] = writer->eh_return ? BUSTER_TIER0_TAIL_EH : BUSTER_TIER0_TAIL_CALL;
+                        const bool unwinding = abi->counts[row] == 1 && abi->arguments[abi->first[row]] == (BUSTER_TYPE_VOID | BUSTER_TYPE_CONST);
+                        tails[c] = unwinding ? BUSTER_TIER0_TAIL_EH : BUSTER_TIER0_TAIL_CALL;
                     }
                 }
                 function->call_tails = tails;
