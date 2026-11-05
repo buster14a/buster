@@ -197,7 +197,12 @@ static void asm_test_group_section_names(AsmTest* test, const char* directory, b
             if (fits)
             {
                 const bool accepted = f == 3;
-                asm_test_pair(test, (String8){.pointer = source, .length = (uint64_t)length}, accepted, X86_ARCH_BASELINE);
+                const AsmResult result = asm_test_pair(test, (String8){.pointer = source, .length = (uint64_t)length}, accepted, X86_ARCH_BASELINE);
+                if (!accepted)
+                {
+                    asm_test_check(test, result.error != 0 && strcmp(result.error, "ambiguous section name in expression") == 0,
+                                   "same-name section reference is diagnosed as ambiguous", result.error);
+                }
                 if (cross_check && accepted)
                 {
                     asm_test_oracle(test, source, directory, X86_ARCH_BASELINE);
