@@ -3100,7 +3100,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // generic kind), its own handler's checks and effects aren't made.
             const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
                                         rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
-                                        rule->kind == CHECK_ATTRIBUTE_SENTINEL || rule->kind == CHECK_ATTRIBUTE_NODEREF;
+                                        rule->kind == CHECK_ATTRIBUTE_SENTINEL;
             const uint8_t parsed = count_check != BUSTER_CHECK_COUNT_NONE && !type_attribute ? check_input_attribute_parsed(reader, attributes, &attribute) :
                                    BUSTER_CHECK_PARSED_UNSURE;
             if (parsed == BUSTER_CHECK_PARSED_ERROR)

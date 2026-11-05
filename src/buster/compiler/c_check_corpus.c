@@ -1826,11 +1826,14 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     const CheckInputNonnullPragmas* nonnull_b = b->nonnull_pragmas;
     const CheckInputPackPragmas* pack_a = a->pack_pragmas;
     const CheckInputPackPragmas* pack_b = b->pack_pragmas;
+    const CheckInputSymbolPragmas* symbols_a = a->symbol_pragmas;
+    const CheckInputSymbolPragmas* symbols_b = b->symbol_pragmas;
     const bool contents = !a->resource && !b->resource;
     bool equal = (x == NULL) == (y == NULL) && a->fp_pragma_count == b->fp_pragma_count &&
                  (a->fp_environments == NULL) == (b->fp_environments == NULL) &&
                  (a->cx_limited_ranges == NULL) == (b->cx_limited_ranges == NULL) && (nonnull_a == NULL) == (nonnull_b == NULL) &&
-                 (a->pack_log2 == NULL) == (b->pack_log2 == NULL) && (pack_a == NULL) == (pack_b == NULL);
+                 (a->pack_log2 == NULL) == (b->pack_log2 == NULL) && (pack_a == NULL) == (pack_b == NULL) &&
+                 (symbols_a == NULL) == (symbols_b == NULL);
     if (equal && contents && x != NULL)
     {
         equal = x->count == y->count && x->final_state == y->final_state && x->maximum_depth == y->maximum_depth &&
@@ -1871,6 +1874,19 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
                     p->previous_same == q->previous_same && p->depth_before == q->depth_before && p->depth_after == q->depth_after &&
                     p->operation == q->operation && p->alignment_log2 == q->alignment_log2 && p->pack_before == q->pack_before &&
                     p->pack_after == q->pack_after && p->warnings == q->warnings && p->handled == q->handled && p->has_alignment == q->has_alignment;
+        }
+    }
+    if (equal && contents && symbols_a != NULL)
+    {
+        equal = symbols_a->count == symbols_b->count;
+        for (uint32_t i = 0; equal && i < symbols_a->count; i += 1)
+        {
+            const CheckInputSymbolPragma* p = symbols_a->records + i;
+            const CheckInputSymbolPragma* q = symbols_b->records + i;
+            equal = p->pragma == q->pragma && p->source == q->source && p->end == q->end && p->token == q->token &&
+                    p->name == q->name && p->target == q->target && p->diagnostic_source == q->diagnostic_source &&
+                    p->diagnostic_location == q->diagnostic_location && p->declaration == q->declaration &&
+                    p->kind == q->kind && p->warning == q->warning && p->supported == q->supported;
         }
     }
     for (uint32_t i = 0; equal && contents && i < a->fp_pragma_count; i += 1)

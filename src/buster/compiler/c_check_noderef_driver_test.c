@@ -89,6 +89,15 @@ static void check_test_driver_noderef(CheckTest* test, const char* clang, const 
         "void f(NP p) { int *q = (p); (void)q; }\n",
         "void f(NP p) { _Atomic(int *) a[1] = {p}; (void)a; }\n",
         "void f(NP p) { _Atomic(NP) a[1] = {p}; (void)a; }\n",
+        "void f(_Atomic(NP) p) { (void)*p; }\n",
+        "void g(_Atomic(NP)); void f(NP p) { g(p); }\n",
+        "#if __STDC_VERSION__ < 202311L\nvoid f(p) NP p; { (void)*p; }\n#endif\n",
+        "#if __STDC_VERSION__ < 202311L\nvoid f(q,p) NP (*q)(int v), p; { (void)*p; }\n#endif\n",
+        "#if __STDC_VERSION__ < 202311L\nvoid f(p) int __attribute__((noderef)) p[2]; { (void)p[0]; }\n#endif\n",
+        "int __attribute__((noderef(1))) *p;\n",
+        "void f(NP p, int *q) { (void)sizeof(q = p); }\n",
+        "void g(int *); void f(NP p) { (void)__alignof__(g(p)); }\n",
+        "void f(NP p) { int *a[2][2] = {[0 ... 1][0 ... 1] = p}; (void)a; }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
@@ -133,7 +142,14 @@ static void check_test_driver_noderef(CheckTest* test, const char* clang, const 
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
                     snprintf(description, sizeof(description), "noderef %u (%s), %s mode %u error %u: status %d (clang %d), lines\n%s(clang\n%s)",
                              unit, units[unit], arguments[1], mode, errors, status, oracle, actual_lines, expected_lines);
-                    check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+                    const bool matched = same && (status != 0) == (oracle != 0);
+                    if (!matched && test->failures >= 24)
+                    {
+                        // A source has eight mode/standard comparisons. Keep later distinct cases visible even if
+                        // earlier ones have already filled the shared reporter's first 24 failure descriptions.
+                        fprintf(stderr, "test-checker: %s\n", description);
+                    }
+                    check_test_expect(test, matched, description);
                     free(actual);
                 }
                 free(expected);

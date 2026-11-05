@@ -1194,6 +1194,8 @@ static uint32_t parse_test_check_resumed(const char* directory)
         { "int x y;\nint z const;\n", "1:6 expected ';' after top level declarator\n2:6 resumed expected ';' after top level declarator\n" },
         { "int x _Static_assert(1, \"\");\n", "1:6 expected ';' after top level declarator\n" },
         { "typedef int T;\nint x T;\n", "2:6 resumed expected ';' after top level declarator\n" },
+        { "void f(const p);\n", "1:14 parameter type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
+        { "const p;\n", "1:7 type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
     };
     uint32_t failures = 0;
     char path[4096];
@@ -1226,7 +1228,8 @@ static uint32_t parse_test_check_resumed(const char* directory)
                 const uint32_t line = range != BUSTER_PP_NONE ? pp_line_of(&pp, range, location, &column) : 0;
                 char message[256];
                 parse_diagnostic_message(&parser, &pp, diagnostic, message, sizeof(message));
-                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s\n", line, column, diagnostic->resumed ? "resumed " : "", message);
+                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s%s\n", line, column, diagnostic->resumed ? "resumed " : "",
+                                             diagnostic->parameter_type ? "parameter " : "", message);
                 length += printed > 0 && (uint32_t)printed < sizeof(text) - length ? (uint32_t)printed : 0;
             }
             if (!ran || strcmp(text, cases[i].diagnostics) != 0)
@@ -2312,6 +2315,7 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
     {
         const bool parsed = parse_translation_unit(&tree, pp);
         same = parsed == (full->errors == 0) && tree.errors == full->errors && tree.fatal == full->fatal &&
+               tree.recovered_parameter_types == full->recovered_parameter_types &&
                tree.diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree.tokens, &full->tokens) == BUSTER_PARSE_NONE &&
                tree.postorder == 0 && tree.sizes == 0 && tree.positions == 0 && tree.ends == 0 && tree.first_children == 0 && tree.next_siblings == 0;
         for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree.columns); column += 1)
@@ -2323,7 +2327,8 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
             const ParseDiagnostic* a = &full->diagnostics[d];
             const ParseDiagnostic* b = &tree.diagnostics[d];
             same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error &&
-                   a->note == b->note && a->resumed == b->resumed && a->resume_delete == b->resume_delete && a->resume_end == b->resume_end;
+                   a->note == b->note && a->resumed == b->resumed && a->resume_delete == b->resume_delete && a->resume_end == b->resume_end &&
+                   a->parameter_type == b->parameter_type;
         }
         if (same && parsed)
         {
@@ -3351,6 +3356,7 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
     const uint32_t count = a->tokens.count;
     const char* result = count != b->tokens.count ? "token count" :
                          a->errors != b->errors || a->fatal != b->fatal ? "errors" :
+                         a->recovered_parameter_types != b->recovered_parameter_types ? "parameter recovery" :
                          a->diagnostic_count != b->diagnostic_count ? "diagnostics' count" :
                          a->statistics.fallback_items != b->statistics.fallback_items || a->statistics.fallback_tokens != b->statistics.fallback_tokens ||
                          a->statistics.flagged_tokens != b->statistics.flagged_tokens || a->statistics.whole != b->statistics.whole ? "statistics" :
@@ -3370,7 +3376,8 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
         const ParseDiagnostic* x = &a->diagnostics[d];
         const ParseDiagnostic* y = &b->diagnostics[d];
         result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ||
-                 x->note != y->note || x->resumed != y->resumed || x->resume_delete != y->resume_delete || x->resume_end != y->resume_end ? "diagnostics" : 0;
+                 x->note != y->note || x->resumed != y->resumed || x->resume_delete != y->resume_delete || x->resume_end != y->resume_end ||
+                 x->parameter_type != y->parameter_type ? "diagnostics" : 0;
     }
     return result;
 }

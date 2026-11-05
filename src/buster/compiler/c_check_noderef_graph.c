@@ -34,7 +34,6 @@ static void check_noderef_graph_conversion(CheckInputReader* reader, const Check
             .kind = CHECK_WARNING_EVENT_NODEREF_CONVERSION,
             .token = token,
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-            .flags = check_input_warning_unevaluated(reader, token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
             .completion = completion,
             .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
@@ -94,6 +93,27 @@ static void check_noderef_graph_cancel(const CheckGraph* graph, const CheckStrea
     }
 }
 
+// A K&R parameter's binding names its identifier-list token, while clang's note names its typed declaration. The
+// pass sorts these keys once, so any number of warnings uses bounded binary lookups without rescanning headers.
+static uint32_t check_noderef_graph_declaration(const uint64_t* keys, uint32_t count, uint32_t declaration)
+{
+    uint32_t first = 0;
+    uint32_t end = count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        if ((keys[middle] >> 32) < declaration)
+        {
+            first = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return first < count && (keys[first] >> 32) == declaration ? (uint32_t)keys[first] : declaration;
+}
+
 static void check_input_noderef_graph(CheckInputReader* reader, const CheckStream* stream)
 {
     const CheckInput* input = reader->output;
@@ -102,6 +122,18 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
     const uint32_t count = graph->count;
     const uint32_t token_count = parser->tokens.count;
     const uint64_t mark = reader->scratch->length;
+    const uint32_t declaration_count = input->noderef_declaration_count;
+    uint64_t* declaration_keys = declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)declaration_count * 2) : NULL;
+    reader->output->resource |= declaration_count != 0 && declaration_keys == NULL;
+    if (declaration_keys != NULL)
+    {
+        uint32_t index = 0;
+        for (const CheckNoderefDeclaration* record = input->noderef_declarations; record != NULL; record = record->next)
+        {
+            declaration_keys[index++] = (uint64_t)record->declaration << 32 | record->token;
+        }
+        declaration_keys = c_bindings_sort(declaration_keys, declaration_keys + declaration_count, declaration_count, !parser->options.scalar, UINT32_MAX);
+    }
     const uint64_t words = ((uint64_t)count + 63) / 64;
     uint64_t* marked_values = words != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, words) : NULL;
     const CheckNoderefType** shadows = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const CheckNoderefType*, count);
@@ -205,7 +237,7 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         const CheckWarningNote note =
         {
             .kind = CHECK_WARNING_NOTE_NODEREF_DECLARATION,
-            .token = declaration,
+            .token = check_noderef_graph_declaration(declaration_keys, declaration_count, declaration),
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
             .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
         };

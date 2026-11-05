@@ -361,6 +361,68 @@ static void check_test_prefix_lost_body(CheckTest* test)
     intern_release(&identifiers);
 }
 
+// A diagnosed missing parameter type preserves its complete declaration's tree, but never admits a later
+// declaration, an unknown type, or a declaration whose syntax recovery erased nodes.
+static void check_test_prefix_parameter_types(CheckTest* test)
+{
+    static const struct
+    {
+        const char* source;
+        bool retain;
+    } cases[] = {
+        { "void f(const p);\nint later;\n", true },
+        { "void f(const p, int q);\nint later;\n", true },
+        { "void f(const p +);\nint later;\n", false },
+        { "const p;\nint later;\n", false },
+        { "void f(Unknown p);\nint later;\n", false },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+        const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                           pp_run_source(&pp, "prefix-parameter-types.c", (const uint8_t*)cases[c].source, strlen(cases[c].source));
+        check_test_expect(test, ready, "parameter-type prefix fixture initializes");
+        for (uint32_t path = 0; ready && path < 2; path += 1)
+        {
+            const ParseOptions parse_options = { .scalar = path == 0 };
+            Arena output = arena_reserve(UINT64_C(1) << 20);
+            Arena scratch = arena_reserve(UINT64_C(1) << 20);
+            const bool initialized = output.base != 0 && scratch.base != 0 && parse_initialize(&parser, &parse_options, options.language);
+            check_test_expect(test, initialized, "parameter-type prefix parser initializes");
+            if (initialized)
+            {
+                const bool parsed = parse_translation_unit(&parser, &pp);
+                const uint32_t errors = parser.errors;
+                uint32_t end = 0;
+                for (uint32_t t = 0; cases[c].retain && end == 0 && t < parser.tokens.count; t += 1)
+                {
+                    if (parser.tree.roles[t] == PARSE_ROLE_TERMINATOR && parser.tree.parents[t] == BUSTER_PARSE_ROOT)
+                    {
+                        end = t + 1;
+                    }
+                }
+                CheckPrefix prefix;
+                const CheckPrefixStatus status = check_prefix_make(&prefix, &parser, &output, &scratch);
+                check_test_expect(test, !parsed && errors != 0 && !parser.recovered_parameter_types && parser.errors == errors &&
+                                      status == (cases[c].retain ? CHECK_PREFIX_READY : CHECK_PREFIX_EMPTY) && prefix.end == end &&
+                                      prefix.parser.recovered_parameter_types == cases[c].retain && scratch.length == 0,
+                                  "parameter recovery retains only its complete declaration and preserves rejection");
+                check_test_expect(test, !cases[c].retain || (end != 0 && end < parser.tokens.count && parser.diagnostic_count == 1 &&
+                                                            parser.diagnostics[0].parameter_type),
+                                  "parameter recovery is explicitly diagnosed and excludes the later declaration");
+            }
+            parse_release(&parser);
+            arena_release(&scratch);
+            arena_release(&output);
+        }
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
 static __attribute__((noinline)) void check_test_prefixes(CheckTest* test, const char* clang)
 {
     const CheckPrefixFixture fixtures[] =
@@ -550,6 +612,7 @@ static __attribute__((noinline)) void check_test_prefixes(CheckTest* test, const
         }
     }
     check_test_prefix_lost_body(test);
+    check_test_prefix_parameter_types(test);
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);

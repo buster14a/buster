@@ -1114,6 +1114,9 @@ struct ParseDiagnostic
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
     uint32_t resume_end;
+    // A parameter's missing type after a syntactically complete declarator. Diagnostic-only views may retain the
+    // enclosing declaration and recover this parameter as int, while preserving the original error.
+    bool parameter_type;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1843,7 +1846,12 @@ static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
     if (frame->typeless_name != 0)
     {
         const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
+        const uint32_t before = parser->diagnostic_count;
         parse_scalar_note(parser, frame->typeless_name - 1, message, BUSTER_PARSE_NONE, true);
+        if (parser->diagnostic_count > before && frame->role == PARSE_ROLE_OPEN_FUNCTION)
+        {
+            parser->diagnostics[before].parameter_type = true;
+        }
         frame->typeless_name = 0;
     }
 }
@@ -12761,6 +12769,9 @@ struct Parser
     uint8_t* meaning_column;
     uint32_t meaning_room;
     uint32_t errors;
+    // A checked diagnostic prefix may include one complete declaration with already diagnosed typeless parameters.
+    // Only its parameter specifiers may recover as int; ordinary parses and emission never enable this.
+    bool recovered_parameter_types;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.
     ParseMessage fatal;
@@ -13055,6 +13066,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     parser->first_children = 0;
     parser->next_siblings = 0;
     parser->errors = 0;
+    parser->recovered_parameter_types = false;
     parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_TOO_MANY_TOKENS;
     parser->statistics = (ParseStatistics){ 0 };
     parser->gnu = (GnuSyntax){ 0 };

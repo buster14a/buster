@@ -123,6 +123,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Winvalid-noreturn", NULL, "function declared 'noreturn' should not return" },
     { "-Wprivate-extern", NULL, "use of __private_extern__ on a declaration may not produce external symbol private to the linkage unit and is deprecated" },
     { "-Wliteral-conversion", "-Wfloat-conversion", "implicit conversion of a floating literal changes value" },
+    { NULL, NULL, "weak identifier never declared" },
+    { "-Wpragmas", NULL, "#pragma redefine_extname is applicable to external C declarations only" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -631,6 +633,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         memset(handled, 0, count);
         valid = check_input_diagnostic_pragmas(&reader, handled);
         valid = valid && check_input_visibility_pragmas(&reader, handled, false);
+        valid = valid && check_input_symbol_pragmas(&reader, handled, false);
         // Visibility retains its own recovery-aware history. A later pop must still diagnose an unmatched push
         // when the parser skipped that push's annotation while recovering from a missing semicolon.
     }
@@ -666,6 +669,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     if (valid)
     {
         valid = check_input_ignored_pragmas(&reader, handled);
+        valid = valid && check_input_symbol_syntax_warnings(&reader);
     }
     if (valid)
     {

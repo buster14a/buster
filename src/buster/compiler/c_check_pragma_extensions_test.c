@@ -15,8 +15,8 @@ static void check_test_pragma_extension_history(CheckTest* test)
         "#pragma STDC FENV_ACCESS ON\ndouble inner_on=0;}double restored_off=0;return 0;}double restored_on;\n"
         "#pragma STDC FENV_ACCESS OFF\ndouble file_off;\n"
         "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n"
-        "#pragma float_control(push)\n#pragma float_control(except, on)\ndouble exceptions_on;\n"
-        "double g(void){\n#pragma clang fp exceptions(ignore)\ndouble exceptions_off=0;{\n"
+        "#define CONTROL except\n#define STATE on\n#pragma float_control(push)\n#pragma float_control(CONTROL, STATE)\ndouble exceptions_on;\n"
+        "#undef STATE\n#define STATE ignore\ndouble g(void){\n#pragma clang fp exceptions(STATE)\ndouble exceptions_off=0;{\n"
         "#pragma clang fp exceptions(maytrap)\ndouble exceptions_maytrap=0;}double exceptions_restored=0;return 0;}double exceptions_file;\n"
         "#pragma float_control(pop)\ndouble stack_restored;\n"
         "#pragma float_control(precise, off, push)\ndouble relaxed;\n#pragma float_control(precise, on)\n"
@@ -38,7 +38,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
                             "exceptions_maytrap", "exceptions_restored", "exceptions_file", "stack_restored", "relaxed", "permissions", "precise_restored",
                             "pushed_strict", "exceptions_disabled", "popped_off", "complex_off", "complex_on", "complex_end" };
     const uint8_t expected[] = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
-    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .semantic_pragmas = true };
     Arena arena = arena_reserve(UINT64_C(1) << 16);
     Arena scratch = arena_reserve(UINT64_C(1) << 16);
     bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
@@ -154,6 +154,23 @@ static void check_test_pragma_extension_sources(CheckTest* test)
 {
     static const CheckPragmaExtensionFixture fixtures[] =
     {
+        { .source = "#pragma weak value\nint value=7;\n", .accepted = true },
+        { .source = "int value;\n#pragma weak value\n", .accepted = true },
+        { .source = "int value=7;\n#pragma weak value\n", .accepted = true },
+        { .source = "#pragma weak missing\n", .accepted = true },
+        { .source = "#pragma weak value\nstatic int value=7;\n", .accepted = true },
+        { .source = "#pragma weak value\ntypedef int value;\n", .accepted = true },
+        { .source = "int f(void){\n#pragma weak value\nreturn 0;}\nint value=7;\n", .accepted = true },
+        { .source = "extern int value; int f(void){return value;}\n#pragma weak value\nint value=7;\n", .accepted = true },
+        { .source = "#pragma redefine_extname value renamed\nint value=7;\n", .accepted = true },
+        { .source = "extern int value; int size(void){return sizeof(value);}\n#pragma redefine_extname value renamed\nint value=7;\n", .accepted = true },
+        { .source = "int value;\n#pragma redefine_extname value renamed\n", .accepted = true },
+        { .source = "int value=7;\n#pragma redefine_extname value renamed\n", .accepted = true },
+        { .source = "#pragma redefine_extname value renamed\nstatic int value=7;\n", .accepted = true },
+        { .source = "#pragma weak\n#pragma weak alias=\n#pragma redefine_extname value\nint value;\n", .accepted = true },
+        { .source = "#pragma weak alias=value\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "extern int value; int f(void){return value;}\n#pragma redefine_extname value renamed\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "#define SOURCE value\n#pragma weak SOURCE\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma fenv_access(on)\ndouble f(double x){return x/3.0;}\n", .accepted = true },
         { .source = "#pragma fenv_access(off)\nint x;\n", .accepted = true },
         { .source = "#pragma clang fp contract(on)\n#pragma clang fp contract(off)\n#pragma clang fp contract(fast)\nint x;\n", .records = 3, .accepted = true },

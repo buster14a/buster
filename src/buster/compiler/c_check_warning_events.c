@@ -76,6 +76,8 @@ enum
     CHECK_WARNING_ID_INVALID_NORETURN = 84,
     CHECK_WARNING_ID_PRIVATE_EXTERN = 85,
     CHECK_WARNING_ID_LITERAL_CONVERSION = 86,
+    CHECK_WARNING_ID_WEAK_UNDECLARED = 87,
+    CHECK_WARNING_ID_REDEFINE_EXTNAME = 88,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -100,7 +102,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_INITIALIZER_OVERRIDES,
     CHECK_WARNING_EVENT_UNDEFINED_INTERNAL,
     CHECK_WARNING_EVENT_C23_PARAMETER,
-    // A retained directive is lexical, including at parser EOF; source and payload.token are PP coordinates.
+    // A retained directive, including at parser EOF; source and payload.token are PP coordinates. With
+    // BUSTER_CHECK_WARNING_SYMBOL_PRAGMA, payload.data names its symbol-pragma history record plus one.
     CHECK_WARNING_EVENT_PRAGMA,
     CHECK_WARNING_EVENT_LIBRARY_REDECLARATION,
     CHECK_WARNING_EVENT_BUILTIN_HEADER,
@@ -303,6 +306,8 @@ typedef enum CheckWarningCompletion
 #define BUSTER_CHECK_WARNING_DEFAULT_IGNORED 0x01u
 // A semantic proof prevents publication, independently of every requested warning policy (for example sizeof).
 #define BUSTER_CHECK_WARNING_SUPPRESSED 0x02u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputSymbolPragmas only with this discriminator.
+#define BUSTER_CHECK_WARNING_SYMBOL_PRAGMA 0x04u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u

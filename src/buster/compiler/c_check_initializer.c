@@ -356,7 +356,11 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
         const bool excess = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS;
         const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
                           event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION;
-        if (!once || sink->event_keys == NULL || !check_warning_set_contains(&keys, key))
+        // GNU range initialization converts each selected element, and clang diagnoses each noderef removal. Keep
+        // repeats from this walk, but still drop a scalar conversion already diagnosed by the graph or an earlier walk.
+        // `keys` is a private copy on its first insertion; the sink's prefix stays frozen until publication below.
+        const CheckWarningSet* seen = event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION ? sink->event_keys : &keys;
+        if (!once || sink->event_keys == NULL || !check_warning_set_contains(seen, key))
         {
             const CheckWarningNote* notes = event->note_count != 0 ? walker->warning_events.notes + event->note_first : NULL;
             valid = (!once || sink->event_keys == NULL || check_warning_set_add(&keys, key)) &&

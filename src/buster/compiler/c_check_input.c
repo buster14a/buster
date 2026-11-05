@@ -491,6 +491,7 @@ typedef struct CheckInputNonnullPragmas CheckInputNonnullPragmas;
 typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputVisibilityPragmas CheckInputVisibilityPragmas;
+typedef struct CheckInputSymbolPragmas CheckInputSymbolPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
 typedef struct CheckInputPackedMember CheckInputPackedMember;
@@ -593,6 +594,7 @@ struct CheckInput
     CheckInputNonnullPragmas* nonnull_pragmas;
     CheckInputPackPragmas* pack_pragmas;
     CheckInputVisibilityPragmas* visibility_pragmas;
+    CheckInputSymbolPragmas* symbol_pragmas;
     uint8_t* object_visibility;
     bool visibility_error;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
@@ -612,6 +614,8 @@ struct CheckInput
     CheckNoderefMember* noderef_members;
     uint32_t noderef_member_count;
     uint32_t noderef_member_capacity;
+    const CheckNoderefDeclaration* noderef_declarations;
+    uint32_t noderef_declaration_count;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -3472,7 +3476,8 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
 
 // Specifiers are retained in source order because their inherited base type precedes declarators semantically,
 // although the parser's ordinary postorder puts their nodes after those declarators.
-static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline)
+static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline,
+                                    bool parameter)
 {
     const Parser* parser = reader->parser;
     const uint32_t first = *cursor;
@@ -3867,7 +3872,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     // may have a function specifier, which is its own error (check_input_declaration).
     const bool free_standing = reader->specifier_free_standing && reader->specifier_owner == first;
     const bool typed = base != 0 || integer_seen || longs || shorts || signedness || complex;
-    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing);
+    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing || (parameter && parser->recovered_parameter_types));
     valid &= implicit_int || (saw && typed);
     valid &= longs <= 2 && shorts <= 1 && !(longs && shorts);
     valid &= !*is_typedef || (storage == 0 && (!*is_inline || free_standing) && !thread_local);
@@ -4010,6 +4015,7 @@ static inline __attribute__((always_inline)) bool check_input_spelling(CheckInpu
 #include "c_check_ignored_pragma.c"
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
+#include "c_check_symbol_pragma.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
@@ -5113,7 +5119,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     bool is_inline;
                     uint32_t storage;
                     const uint32_t start = i;
-                    const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline);
+                    const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline, true);
                     valid = parameter != 0 && !is_typedef && !is_inline && (storage == 0 || storage == C_NAME_REGISTER);
                     if (valid)
                     {
@@ -5391,7 +5397,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .missing_name = frame->name == BUSTER_CHECK_NONE ? frame->missing_name : BUSTER_CHECK_NONE,
-                                .noderef = check_input_noderef_value(reader, type, noderef),
+                                .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
                             };
                             if (function->parameter_last != BUSTER_CHECK_NONE)
                             {
@@ -5427,7 +5433,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 reader->objects[token] = token + 1;
                                 reader->output->declarations[token] = token;
                                 reader->output->explicit_abis[token] = abi_origin;
-                                check_input_noderef_set(reader->output, token, check_input_noderef_value(reader, type, noderef));
+                                check_input_noderef_set(reader->output, token, check_input_noderef_adjust_parameter(reader, type, noderef));
                                 check_input_set_attributes_at(reader->output, token, check_input_merge_attributes(reader, frame->common_attributes, frame->attributes));
                                 if (check_input_attributes_at(reader->output, token) != 0)
                                 {
@@ -5942,7 +5948,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     bool is_inline;
                     uint32_t storage;
                     frame->member_begin = i;
-                    const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline);
+                    const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline, false);
                     valid = base != 0 && !is_typedef && !is_inline && storage == 0 && !reader->specifier_thread_local;
                     frame->member_base = valid ? base : 0;
                     frame->member_abi_origin = reader->specifier_abi_origin;
@@ -6237,8 +6243,9 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
         uint32_t storage = 0;
         reader->specifier_owner = BUSTER_CHECK_NONE;
         reader->specifier_pending = false;
-        const TypeId base = valid ? check_input_specifiers(reader, &i, body, &is_typedef, &storage, &is_inline) : 0;
+        const TypeId base = valid ? check_input_specifiers(reader, &i, body, &is_typedef, &storage, &is_inline, false) : 0;
         CheckInputAttributes* common = reader->specifier_attributes;
+        const CheckNoderefType* base_noderef = reader->specifier_noderef;
         valid = valid && base != 0 && !reader->specifier_pending && !is_typedef && !is_inline && !reader->specifier_thread_local &&
                 (storage == 0 || storage == C_NAME_REGISTER);
         const uint32_t noreturn = valid ? check_input_noreturn_keyword(common) : BUSTER_CHECK_NONE;
@@ -6256,6 +6263,8 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
         {
             uint32_t name = BUSTER_CHECK_NONE;
             uint32_t parameters = BUSTER_CHECK_NONE;
+            reader->specifier_noderef = base_noderef;
+            reader->declarator_common = common;
             const TypeId type = check_input_declarator(reader, base, &i, body, &name, &parameters);
             CheckInputAttributes* attributes = check_input_merge_attributes(reader, common, reader->declarator_attributes);
             const uint8_t next = i < body ? parser->tokens.kinds[i] : PARSE_KIND_END;
@@ -6289,6 +6298,9 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
                 check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 check_input_set_attributes_at(reader->output, listed, attributes);
+                const CheckNoderefType* noderef = check_input_noderef_adjust_parameter(reader, type, reader->declarator_noderef);
+                check_input_noderef_set(reader->output, listed, noderef);
+                check_input_noderef_declaration(reader, listed, name, noderef);
                 // A typed parameter is visible to the remainder of this header, including enumerator conflicts
                 // and type queries. Its canonical declaration remains the earlier identifier-list token.
                 if (valid && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name], C_BINDING_OBJECT,
@@ -6907,7 +6919,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_pending = false;
     const bool free_standing = !continuation && check_input_free_standing(parser, first, count);
     reader->specifier_free_standing = free_standing;
-    const TypeId base = !prepared ? 0 : continuation ? reader->declaration_bases[first] : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline);
+    const TypeId base = !prepared ? 0 : continuation ? reader->declaration_bases[first] : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
     reader->specifier_free_standing = false;
     reader->specifier_owner = BUSTER_CHECK_NONE;
     if (reader->specifier_pending)
@@ -6971,8 +6983,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         if (valid)
         {
             const bool tag = check_input_empty_declaration_tag(parser, first, i, false);
-            // (At the specifiers' first token, after C23 attribute lists that begin the declaration, as clang's DeclSpec starts.)
-            uint32_t specifiers = first;
+            // At the specifiers' first token, after transparent __extension__ markers and leading C23 attribute lists,
+            // as clang's DeclSpec starts. A GNU attribute is itself a declaration specifier.
+            uint32_t specifiers = check_input_declaration_start(parser, first, i);
             while (specifiers < i && parser->tokens.kinds[specifiers] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, specifiers, i))
             {
                 specifiers = check_input_skip_attributes(parser, specifiers, i);
@@ -8614,7 +8627,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 bool is_inline;
                 uint32_t storage;
                 const uint32_t reports = reader->output->report_count;
-                TypeId type = check_input_specifiers(reader, &cursor, close, &is_typedef, &storage, &is_inline);
+                TypeId type = check_input_specifiers(reader, &cursor, close, &is_typedef, &storage, &is_inline, false);
                 CheckInputAttributes* specifier_attributes = reader->specifier_attributes;
                 uint32_t name;
                 uint32_t parameters;
@@ -11229,11 +11242,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_visibility_pragmas(&reader, handled, true);
+                prepared = prepared && check_input_symbol_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_ignored_pragmas(&reader, handled);
+                prepared = prepared && check_input_symbol_syntax_warnings(&reader);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -11468,6 +11483,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_packed_members(&reader);
                 }
                 check_input_multiversion_flush(&reader);
+                if (input->symbol_pragmas != NULL && !input->resource)
+                {
+                    check_input_symbol_finish(&reader, complete_translation_unit && input->report_count == 0);
+                }
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
                 if (!input->resource)
                 {

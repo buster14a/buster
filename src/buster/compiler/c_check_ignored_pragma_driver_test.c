@@ -161,6 +161,156 @@ static void check_test_driver_fp_pragma_errors(CheckTest* test, const char* clan
     unlink(source);
 }
 
+static void check_test_driver_symbol_pragma_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] = {
+        "#pragma weak missing\nint value;\n",
+        "int value;\n#pragma weak missing\n",
+        "#pragma weak missing\n",
+        "#pragma weak value\nstatic int value=7;\nint read_value(void){return value;}\n",
+        "static int value;\n#pragma weak value\nint read_value(void){return value;}\n",
+        "#pragma weak value\ntypedef int value;\n",
+        "typedef int value;\n#pragma weak value\n",
+        "#pragma redefine_extname value renamed\nstatic int value=7;\nint read_value(void){return value;}\n",
+        "static int value=7;\n#pragma redefine_extname value renamed\nint read_value(void){return value;}\n",
+        "#pragma redefine_extname function renamed\nstatic int function(void){return 7;}\nint read_value(void){return function();}\n",
+        "#pragma weak\nint value;\n",
+        "#pragma weak alias=\nint value;\n",
+        "#pragma weak value trailing\nint value;\n",
+        "#pragma weak int\nint value;\n",
+        "#pragma redefine_extname value\nint value;\n",
+        "#pragma redefine_extname value \"renamed\"\nint value;\n",
+        "#pragma redefine_extname value renamed trailing\nint value;\n",
+        "#pragma clang diagnostic ignored \"-Wignored-pragmas\"\n#pragma weak\nint value;\n",
+        "#pragma clang diagnostic ignored \"-Wpragmas\"\n#pragma redefine_extname value renamed\nstatic int value;\n",
+        "#define TARGET absent\n#pragma weak TARGET\nint value;\n",
+    };
+    char path[512];
+    snprintf(path, sizeof(path), "%s/symbol-pragma-warning.c", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        const bool written = parse_test_write(path, sources[c], strlen(sources[c]));
+        check_test_expect(test, written, "symbol pragma warning fixture is written");
+        for (uint32_t mode = 0; written && mode < 3; mode += 1)
+        {
+            char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", path,
+                                  mode == 1 ? "-Werror" : mode == 2 ? "-w" : NULL, NULL, NULL };
+            char* expected = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &expected);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                arguments[0] = (char*)executable;
+                arguments[mode != 0 ? 6 : 5] = scalar != 0 ? "--scalar" : NULL;
+                char* actual = NULL;
+                const int result = check_test_driver_spawn(arguments, &actual);
+                const uint64_t length = expected != NULL ? strcspn(expected, "\n") : 0;
+                const uint64_t observed = actual != NULL ? strcspn(actual, "\n") : 0;
+                const bool same = oracle == result && length == observed && (length == 0 || memcmp(actual, expected, length) == 0);
+                check_test_expect(test, same, "symbol pragma warnings match Clang's source, spelling and warning controls");
+                if (!same)
+                {
+                    fprintf(stderr, "symbol pragma warning %u mode %u scalar %u: Clang %d (%s), checker %d (%s)\n", c, mode, scalar,
+                            oracle, expected != NULL ? expected : "", result, actual != NULL ? actual : "");
+                }
+                free(actual);
+            }
+            free(expected);
+        }
+    }
+    unlink(path);
+}
+
+static void check_test_driver_symbol_pragma_objects(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "#define SOURCE weak_data\n#pragma weak SOURCE\nint weak_data=4;\n"
+        "#pragma weak weak_function\nint weak_function(void){return 3;}\n"
+        "int weak_tentative;\n#pragma weak weak_tentative\n"
+        "#pragma weak weak_constant\nconst int weak_constant=5;\n"
+        "#pragma weak weak_tls\n_Thread_local int weak_tls=6;\n"
+        "extern int weak_after_reference;\nint read_weak(void){return weak_after_reference;}\n"
+        "#pragma weak weak_after_reference\nint weak_after_reference=7;\n"
+        "extern int weak_missing(void);\n#pragma weak weak_missing\nint read_missing(void){return weak_missing ? weak_missing() : -1;}\n"
+        "int strong_after=8;\n#pragma weak strong_after\nint strong_function(void){return 8;}\n#pragma weak strong_function\n"
+        "#define DEST renamed\n#pragma redefine_extname original DEST\nint original=9;\n"
+        "int original_function(void);\n#pragma redefine_extname original_function renamed_function\nint original_function(void){return 10;}\n"
+        "int rename_tentative;\n#pragma redefine_extname rename_tentative renamed_tentative\n"
+        "int defined_before=11;\n#pragma redefine_extname defined_before not_emitted\n"
+        "#pragma redefine_extname first_pending first_name\n#pragma redefine_extname first_pending second_name\nint first_pending=12;\n"
+        "#pragma redefine_extname explicit_name not_chosen\nint explicit_name asm(\"chosen\")=13;\n"
+        "extern int prior_asm asm(\"chosen_prior\");\n#pragma redefine_extname prior_asm not_prior\nint prior_asm=14;\n"
+        "int main(void){return weak_data+weak_function()+original+weak_constant+weak_tls;}\n";
+    static const char strong[] = "int weak_data=40; int weak_function(void){return 30;} const int weak_constant=20; _Thread_local int weak_tls=30;\n";
+    static const char* const names[] = {
+        "weak_data", "weak_function", "weak_tentative", "weak_constant", "weak_tls", "weak_after_reference", "weak_missing",
+        "strong_after", "strong_function", "renamed", "renamed_function", "renamed_tentative", "defined_before", "first_name", "chosen", "chosen_prior",
+    };
+    static const char* const absent[] = { "original", "original_function", "rename_tentative", "not_emitted", "second_name", "not_chosen", "not_prior" };
+    char path[512];
+    char strong_path[512];
+    char strong_object[512];
+    char objects[3][512] = { { 0 } };
+    char binary[512];
+    snprintf(path, sizeof(path), "%s/symbol-pragmas.c", directory);
+    snprintf(strong_path, sizeof(strong_path), "%s/symbol-pragmas-strong.c", directory);
+    snprintf(strong_object, sizeof(strong_object), "%s/symbol-pragmas-strong.o", directory);
+    snprintf(binary, sizeof(binary), "%s/symbol-pragmas-run", directory);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1) && parse_test_write(strong_path, strong, sizeof(strong) - 1);
+    char* text = NULL;
+    char* strong_arguments[] = { (char*)clang, "-std=gnu17", "-c", strong_path, "-o", strong_object, NULL };
+    const bool override = written && check_test_driver_spawn(strong_arguments, &text) == 0;
+    check_test_expect(test, override, "symbol pragma strong override fixture compiles");
+    free(text);
+    for (uint32_t producer = 0; written && producer < 3; producer += 1)
+    {
+        snprintf(objects[producer], sizeof(objects[producer]), "%s/symbol-pragmas-%u.o", directory, producer);
+        char* arguments[] = { (char*)(producer == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[producer],
+                              producer == 2 ? "--scalar" : NULL, NULL };
+        text = NULL;
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        check_test_expect(test, compiled, "symbol pragmas compile through Clang and both checker paths");
+        if (!compiled)
+        {
+            fprintf(stderr, "symbol pragma producer %u: %s\n", producer, text != NULL ? text : "");
+        }
+        free(text);
+        for (uint32_t n = 0; compiled && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+        {
+            uint16_t ours = 0;
+            uint16_t theirs = 0;
+            const bool same = check_test_visibility_symbol(objects[producer], names[n], &ours) &&
+                              check_test_visibility_symbol(objects[0], names[n], &theirs) && ours == theirs;
+            check_test_expect(test, same, names[n]);
+        }
+        for (uint32_t n = 0; compiled && n < BUSTER_ARRAY_LENGTH(absent); n += 1)
+        {
+            uint16_t flags = 0;
+            check_test_expect(test, !check_test_visibility_symbol(objects[producer], absent[n], &flags), "symbol renaming emits only the selected name");
+        }
+        for (uint32_t replaced = 0; compiled && override && replaced < 2; replaced += 1)
+        {
+            char* link[] = { (char*)clang, objects[producer], "-o", binary, replaced != 0 ? strong_object : NULL, NULL };
+            text = NULL;
+            const bool linked = check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char* run[] = { binary, NULL };
+            text = NULL;
+            const int status = linked ? check_test_driver_spawn(run, &text) : -1;
+            check_test_expect(test, linked && status == (replaced != 0 ? 129 : 27), "pragma weak definitions yield to external strong definitions while renamed references link");
+            free(text);
+        }
+    }
+    check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "symbol pragma scalar and vector objects match byte for byte");
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        unlink(objects[i]);
+    }
+    unlink(path);
+    unlink(strong_path);
+    unlink(strong_object);
+    unlink(binary);
+}
+
 static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char target_ignored[] =
@@ -287,7 +437,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        { "#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL, NULL },
+        { "extern int old; int use(void){return old;}\n#pragma redefine_extname old new\nint old;\n", "redefine_extname", NULL, NULL, NULL },
+        { "#pragma weak alias = target\nint target;\n", "weak", NULL, NULL, NULL },
         { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
         { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },
@@ -369,6 +520,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     check_test_driver_pragma_system(test, clang, executable, directory);
     check_test_driver_pragma_execution(test, executable, directory);
     check_test_driver_fp_pragma_errors(test, clang, executable, directory);
+    check_test_driver_symbol_pragma_diagnostics(test, clang, executable, directory);
+    check_test_driver_symbol_pragma_objects(test, clang, executable, directory);
     unlink(source);
     unlink(object);
 }

@@ -1304,6 +1304,8 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void __attribute__((stdcall)) ([[gnu::noinline]] *p)(void);\n",
         "void ([[gnu::x]] *p)(void) __attribute__((noinline));\n",
         "void f(int ([[gnu::x]] *p) __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] *p __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] const p __attribute__((cold))) __attribute__((stdcall));\n",
         "__attribute__((noinline)) void ([[gnu::x]] ([[gnu::y]] *p))(void);\n",
         // A handler's preliminary warning precedes its own error, after the completed type's warnings and any
         // earlier declaration attributes. Kernel-only checks follow the entire attribute list.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original source-point packing fixtures. The ordinary -E cases compare with Clang; semantic output has explicit
+// Original source-point pragma fixtures. The ordinary -E cases compare with Clang; semantic output has explicit
 // expected expanded tokens, checked against both producer schedules and their complete expansion histories.
 
 static bool pp_test_semantic_pragmas(const char* directory, bool with_clang)
@@ -42,6 +42,26 @@ static bool pp_test_semantic_pragmas(const char* directory, bool with_clang)
             "#define N 1\n#pragma pack(push,N)\n#undef N\n#define N 4\n#pragma pack(push,N)\n#pragma pack(pop)\n#pragma pack(pop)\n",
             "#pragma pack(push,N)\n#pragma pack(push,N)\n#pragma pack(pop)\n#pragma pack(pop)\n",
             "#pragma pack(push,1)\n#pragma pack(push,4)\n#pragma pack(pop)\n#pragma pack(pop)\n",
+        },
+        {
+            "#define SOURCE value\n#define DEST first\n#pragma weak SOURCE\n#pragma redefine_extname SOURCE DEST\n#undef DEST\n#define DEST second\n_Pragma(\"redefine_extname SOURCE DEST\")\n",
+            "#pragma weak SOURCE\n#pragma redefine_extname SOURCE DEST\n#pragma redefine_extname SOURCE DEST\n",
+            "#pragma weak value\n#pragma redefine_extname value first\n#pragma redefine_extname value second\n",
+        },
+        {
+            "#define fp unused\n#define MODE(x) x\n#define STATE strict\n#pragma clang fp exceptions(MODE(STATE))\n#undef STATE\n#define STATE ignore\n_Pragma(\"clang fp exceptions(STATE)\")\n",
+            "#pragma clang fp exceptions(MODE(STATE))\n#pragma clang fp exceptions(STATE)\n",
+            "#pragma clang fp exceptions(strict)\n#pragma clang fp exceptions(ignore)\n",
+        },
+        {
+            "#define float_control unused\n#define KIND except\n#define STATE on\n#pragma float_control(KIND,STATE,push)\n#undef STATE\n#define STATE off\n#pragma float_control(KIND,STATE)\n#pragma float_control(pop)\n",
+            "#pragma float_control(KIND,STATE,push)\n#pragma float_control(KIND,STATE)\n#pragma float_control(pop)\n",
+            "#pragma float_control(except,on,push)\n#pragma float_control(except,off)\n#pragma float_control(pop)\n",
+        },
+        {
+            "#define MODE on\n#pragma ms_struct MODE\n#undef MODE\n#define MODE reset\n#pragma ms_struct MODE\n",
+            "#pragma ms_struct MODE\n#pragma ms_struct MODE\n",
+            "#pragma ms_struct on\n#pragma ms_struct reset\n",
         },
     };
     bool passed = true;

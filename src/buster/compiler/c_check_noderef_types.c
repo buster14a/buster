@@ -34,6 +34,15 @@ struct CheckNoderefMember
     uint32_t token;
 };
 
+// Only annotated K&R parameters need a source spelling apart from their binding's identifier-list token.
+typedef struct CheckNoderefDeclaration CheckNoderefDeclaration;
+struct CheckNoderefDeclaration
+{
+    const CheckNoderefDeclaration* next;
+    uint32_t declaration;
+    uint32_t token;
+};
+
 // Initializer warnings need only one bit per source graph value, plus the original destination's source shape.
 // No expression-only shadow pointer survives the graph warning pass.
 typedef struct CheckNoderefInitializer CheckNoderefInitializer;

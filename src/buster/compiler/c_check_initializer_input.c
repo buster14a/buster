@@ -623,7 +623,7 @@ static bool check_initializers_warning_context(CheckWarningBuffer* events, const
     for (uint32_t i = 0; !context && i < events->count; i += 1)
     {
         const CheckWarningEvent* event = events->events + i;
-        context = event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION ||
+        context = event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
                   (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0);
     }
     const bool ready = !context || check_input_warning_queries(&reader);
@@ -631,7 +631,7 @@ static bool check_initializers_warning_context(CheckWarningBuffer* events, const
     {
         CheckWarningEvent* event = events->events + i;
         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
-        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION || selected)
+        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || selected)
         {
             reader.warning_bound_open = BUSTER_CHECK_NONE;
             for (uint32_t vla = 0; vla < input->vla_count; vla += 1)
