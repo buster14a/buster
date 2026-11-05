@@ -1213,6 +1213,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_float_tests(&test);
             tier1_induction_tests(&test);
             tier1_storage_tests(&test);
+            tier1_storage_phi_tests(&test);
             tier1_emit_test_overlong(&test);
             printf("tier1 fragment emission: %" PRIu64 " checks, %" PRIu64 " failures; stores=%" PRIu64 " reloads=%" PRIu64 " rematerializations=%" PRIu64 "\n", test.checks, test.failures, test.stores, test.loads, test.copies);
             arena_release(&test.input);
