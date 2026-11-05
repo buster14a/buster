@@ -40,8 +40,7 @@ static bool tier1_cert_oracle_shapes(const Tier1CertProgram* program, const Tier
     {
         for (uint32_t j = 0; valid && j < i; j += 1)
         {
-            valid = facts[i].value != facts[j].value;
-            if (valid && facts[i].location != BUSTER_CERT_NONE && facts[j].location != BUSTER_CERT_NONE)
+            if (facts[i].location != BUSTER_CERT_NONE && facts[j].location != BUSTER_CERT_NONE)
             {
                 const Tier1CertLocation a = program->locations[facts[i].location];
                 const Tier1CertLocation b = program->locations[facts[j].location];
@@ -83,21 +82,67 @@ static void tier1_cert_oracle_kill(Tier1CertOracle* oracle, uint64_t* state, uin
     oracle->report->unit_writes += l.extent;
 }
 
-static void tier1_cert_oracle_abi(const Tier1CertProgram* program, uint64_t* state)
+// Independent dense closure of equal-span names. This is used only for ABI
+// inputs and the local sufficiency pass AFTER inference proves the assertions;
+// block certificates still never seed the CFG fixpoint. Multiple homes can
+// connect previously separate alias sets, regardless of assertion order.
+static void tier1_cert_oracle_assertions(const Tier1CertProgram* program, uint64_t* state, const Tier1CertFact* facts, uint32_t count)
 {
     const uint32_t values = program->value_count;
-    for (uint32_t f = 0; f < program->entry_count; f += 1)
+    uint64_t aliases[BUSTER_CERT_ORACLE_VALUES];
+    for (uint32_t v = 0; v < values; v += 1)
     {
-        const Tier1CertFact fact = program->entry[f];
-        if (fact.location != BUSTER_CERT_NONE)
+        aliases[v] = UINT64_C(1) << v;
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        for (uint32_t j = 0; j < i; j += 1)
         {
-            const Tier1CertLocation l = program->locations[fact.location];
-            for (uint32_t lane = 0; lane < l.width; lane += 1)
+            if (facts[i].location != BUSTER_CERT_NONE && facts[j].location != BUSTER_CERT_NONE)
             {
-                state[(size_t)(l.unit + lane) * values + fact.value] |= UINT64_C(1) << lane;
+                const Tier1CertLocation a = program->locations[facts[i].location];
+                const Tier1CertLocation b = program->locations[facts[j].location];
+                if (a.unit == b.unit && a.width == b.width)
+                {
+                    aliases[facts[i].value] |= UINT64_C(1) << facts[j].value;
+                    aliases[facts[j].value] |= UINT64_C(1) << facts[i].value;
+                }
             }
         }
     }
+    for (uint32_t via = 0; via < values; via += 1)
+    {
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            if ((aliases[v] & (UINT64_C(1) << via)) != 0)
+            {
+                aliases[v] |= aliases[via];
+            }
+        }
+    }
+    for (uint32_t f = 0; f < count; f += 1)
+    {
+        const Tier1CertFact fact = facts[f];
+        if (fact.location != BUSTER_CERT_NONE)
+        {
+            const Tier1CertLocation l = program->locations[fact.location];
+            uint64_t names = aliases[fact.value];
+            while (names != 0)
+            {
+                const uint32_t value = (uint32_t)__builtin_ctzll(names);
+                for (uint32_t lane = 0; lane < l.width; lane += 1)
+                {
+                    state[(size_t)(l.unit + lane) * values + value] |= UINT64_C(1) << lane;
+                }
+                names &= names - 1;
+            }
+        }
+    }
+}
+
+static void tier1_cert_oracle_abi(const Tier1CertProgram* program, uint64_t* state)
+{
+    tier1_cert_oracle_assertions(program, state, program->entry, program->entry_count);
 }
 
 static bool tier1_cert_oracle_facts(Tier1CertOracle* oracle, const uint64_t* state, const Tier1CertFact* facts, uint32_t count)
@@ -430,8 +475,32 @@ static bool tier1_cert_oracle_rename(Tier1CertOracle* oracle, uint64_t* state, T
         {
             valid = rename.destination != edge.renames[previous].destination;
         }
-        // An undefined source (BUSTER_CERT_NONE) is any bits, so every byte of every unit holds the destination's: the
-        // edge constrains nothing of it.
+        if (oracle->checking && rename.source == BUSTER_CERT_NONE)
+        {
+            // An unconstrained phi cannot establish equality between different homes. Inspect this obligation only
+            // in the local checking pass: certificates still do not participate in the independent CFG inference.
+            const Tier1CertBlock block = oracle->program->blocks[edge.destination];
+            uint32_t first = BUSTER_CERT_NONE;
+            for (uint32_t f = 0; valid && f < block.certificate_count; f += 1)
+            {
+                const Tier1CertFact fact = block.certificate[f];
+                if (fact.value == rename.destination && fact.location != BUSTER_CERT_NONE)
+                {
+                    if (first == BUSTER_CERT_NONE)
+                    {
+                        first = fact.location;
+                    }
+                    else
+                    {
+                        const Tier1CertLocation a = oracle->program->locations[first];
+                        const Tier1CertLocation b = oracle->program->locations[fact.location];
+                        valid = a.unit == b.unit && a.width == b.width;
+                    }
+                }
+            }
+        }
+        // An undefined source (BUSTER_CERT_NONE) is any bits, so inference gives every byte of every unit the
+        // destination's bits. The local check above prevents this from forging equality between physical homes.
         const uint64_t width = oracle->program->values[rename.destination].width;
         const uint64_t all = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
         for (uint32_t u = 0; valid && u < units; u += 1)
@@ -574,6 +643,7 @@ static Tier1CertError tier1_certificate_oracle(const Tier1CertProgram* program, 
             if (valid)
             {
                 memset(work, 0, cells * sizeof(uint64_t));
+                tier1_cert_oracle_assertions(program, work, block.certificate, block.certificate_count);
                 for (uint32_t f = 0; f < block.certificate_count; f += 1)
                 {
                     const Tier1CertFact fact = block.certificate[f];
@@ -582,14 +652,6 @@ static Tier1CertError tier1_certificate_oracle(const Tier1CertProgram* program, 
                     {
                         oracle.establishments[fact.value] = b + 1;
                         oracle.base_generations[fact.value] = oracle.generations[value.dependency];
-                    }
-                    if (fact.location != BUSTER_CERT_NONE)
-                    {
-                        const Tier1CertLocation l = program->locations[fact.location];
-                        for (uint32_t lane = 0; lane < l.width; lane += 1)
-                        {
-                            work[(size_t)(l.unit + lane) * values + fact.value] |= UINT64_C(1) << lane;
-                        }
                     }
                 }
             }

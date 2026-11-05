@@ -27,7 +27,8 @@ requirements. [Command index](README.md). The event protocol it resolves is
   supplies `test-emitted-code [--seed N] [--count N] [--cross-check] [--keep]`:
   row programs against the fixed writer for every descriptor, Tier 0's programs
   and the Tier 1 planner's every flag against the previous readers byte for byte,
-  mutants refuted, the 2 GB edge's limit (unsupported, #1149) and
+  mutants refuted, `emitted_code_limits_test.c`'s near-2 GB frames with wide CFA values (#1149), compile-only
+  `-c`/`--verify` coverage, overflow-safe verifier tracking and
   `emitted_unwind_same`'s resource answer, uncovered forms' verdicts and
   `--verify -c` of `monitorx`'s
   and `mwaitx`'s leaves, and with `--cross-check` a probe frame natively under

@@ -6292,9 +6292,11 @@ Unknown `STDC` directives warn by default. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.
-GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
-`optimize` use the unknown-pragma policy, as in the Clang oracle.
-The same policy covers plain and GCC `scalar_storage_order`, `GCC target`,
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`,
+`reset_options`, `target`, and `optimize` use the unknown-pragma policy, as in
+the pinned Clang 23.1.4 oracle. In particular, accepting `GCC target("avx2")`
+does not enable AVX2; use the implemented per-function `target` attribute.
+The same policy covers plain and GCC `scalar_storage_order`,
 unqualified `section`, `code_seg`, `data_seg`, `bss_seg`, `const_seg`, `init_seg`
 and `fenv_access` in the accepted Linux mode. Their arguments do not change
 layout, symbol placement or floating evaluation, even when malformed; enabling
@@ -6325,12 +6327,25 @@ already emitted name. Source-time macro expansion applies to both directives'
 operands. Malformed forms use `-Wignored-pragmas`, including missing names and
 trailing tokens. These lexical warnings survive parser recovery.
 
-Renaming after an earlier evaluated reference remains explicitly refused: Clang
-may already have cached a symbol name when it emitted that reference, and the
-reader does not yet have that emission/control-flow proof. `#pragma weak ALIAS =
-TARGET` also remains refused because it can create a typed alias declaration
-without a C declarator. These boundaries are separate from ordinary weak binding
-and renaming before use.
+For a rename after a parsed use, emission selection decides whether an earlier
+emitted reference has already fixed the original name. It reads the compact live
+references of eager function bodies and static initializers once, with each
+body's definition-completion point. Constant-dead statements, unselected operands,
+unevaluated expressions and deferred functions do not block a later rename. A
+directive inside an eager function still precedes that function's emission. This
+cost and its cold per-pragma decisions exist only in units with a late rename;
+the declaration's retained asm-label fact and source coordinates stay immutable.
+The object oracle covers 26 late-rename shapes, including eager/deferred static
+data, and compares scalar/vector objects and poisoned multi-lane objects.
+
+`#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
+declaration without a C declarator. This is separate from ordinary weak binding.
+
+With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
+deferred body is conservatively refused because its binding was not checked;
+unrelated deferred bodies do not suppress weak or renamed symbol metadata.
+The unified handler retains the literal handler's allocation rollback, native
+ELF, separately linked strong-override, and selected-header regressions.
 
 `#pragma ms_struct on`, `off` and `reset` select the layout sampled by subsequent
 record definitions. The state follows source order across function boundaries;

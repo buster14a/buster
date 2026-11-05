@@ -362,6 +362,68 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
     return ordered;
 }
 
+// The first emitted reference of each object, for the rare unit with a source-time rename after a parsed use. A
+// selected body's compact references already exclude constant-dead statements and operands. Deferred bodies are
+// emitted at the unit's end; an eager body's references appear when its complete definition is handed to codegen,
+// so a directive inside that body precedes all of them. Data references follow their owning body's emission, or the
+// file-scope object's eager/deferred rule. One pass over each compact reference view avoids a scan per directive.
+static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataPrepared* data, Arena* output, Arena* scratch)
+{
+    const uint64_t temporary = scratch->length;
+    const CheckInput* input = program->input;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    uint32_t* first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->object_count);
+    program->symbol_pragma_originals = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, history->count);
+    bool valid = first != NULL && program->symbol_pragma_originals != NULL;
+    if (valid)
+    {
+        memset(first, 0xff, (uint64_t)program->object_count * sizeof(uint32_t));
+        memset(program->symbol_pragma_originals, 0, history->count);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            const CheckProgramBody* body = program->bodies + b;
+            const uint32_t point = program->body_eager[b] ? program->parser->tree.parents[body->opening] + 1 : BUSTER_CHECK_NONE;
+            for (uint32_t r = 0; r < body->reference_count; r += 1)
+            {
+                const uint32_t object = program->references[body->reference_first + r];
+                first[object] = point < first[object] ? point : first[object];
+            }
+        }
+        for (uint32_t d = 0; d < data->count; d += 1)
+        {
+            const CheckDataObject* object = data->objects + d;
+            const uint32_t body = check_program_token_body(program, object->token);
+            uint32_t point = BUSTER_CHECK_NONE;
+            if (body != 0)
+            {
+                point = program->body_eager[body - 1] ? program->parser->tree.parents[program->bodies[body - 1].opening] + 1 : BUSTER_CHECK_NONE;
+            }
+            else if (object->token < input->token_count)
+            {
+                const bool eager = check_input_linkage(input->declaration_bits, object->token) == 2 ||
+                                   check_program_attribute_eager(check_input_attributes_at(input, object->token));
+                point = eager ? object->token : BUSTER_CHECK_NONE;
+            }
+            for (uint32_t r = 0; r < data->reference_counts[d]; r += 1)
+            {
+                const uint32_t target = data->references[data->reference_offsets[d] + r];
+                first[target] = point < first[target] ? point : first[target];
+            }
+        }
+        for (uint32_t i = 0; i < history->count; i += 1)
+        {
+            const CheckInputSymbolPragma* record = history->records + i;
+            if (record->after_use && record->declaration < input->token_count)
+            {
+                const uint32_t object = input->objects[record->declaration];
+                program->symbol_pragma_originals[i] = object < program->object_count && first[object] <= record->token;
+            }
+        }
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                       bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
 {
@@ -379,17 +441,21 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                  objects == data->object_count && objects == (uint64_t)input->token_count + 1 && definitions64 < UINT32_MAX && references64 < UINT32_MAX &&
                  check_program_bodies_ordered(full);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
-    // Only code generation's check of target features reads CheckProgram.body_eager, in a unit with a target attribute
-    // (CheckProgram.attribute_keys) or an x86 builtin's call (#148), and the lowering of a lock-free query whose answer is
-    // its function's emission's (CheckBuiltinAtomicEffect.late_completion): others make none. It is made by
-    // check_program_body_eager, from each selected body's declarations up to its definition, not by the definitions'
-    // flags, which hold the unit's final ones.
+    // Code generation reads CheckProgram.body_eager for target features, an x86 builtin's call (#148), a lock-free
+    // query whose answer is its function's emission's (CheckBuiltinAtomicEffect.late_completion), and a symbol pragma
+    // after an earlier use. Other units make none. check_program_body_eager reads each selected body's declarations
+    // up to its definition, rather than the definitions' flags, which hold the unit's final ones.
     bool late = false;
     for (uint32_t i = 0; full->stream != 0 && i < full->stream->atomic_count; i += 1)
     {
         late |= full->stream->atomics[i].late_completion;
     }
-    const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late;
+    bool symbol_pragmas = false;
+    for (uint32_t i = 0; input != NULL && input->symbol_pragmas != NULL && !symbol_pragmas && i < input->symbol_pragmas->count; i += 1)
+    {
+        symbol_pragmas = input->symbol_pragmas->records[i].after_use;
+    }
+    const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late || symbol_pragmas;
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
@@ -822,6 +888,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             needed[alias->object] |= alias->kind != CHECK_PROGRAM_WEAKREF;
         }
         valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, BUSTER_SCALAR_PATH(scalar), output);
+        valid = valid && (!symbol_pragmas || check_program_symbol_pragmas(&candidate.program, &candidate.data, output, scratch));
     }
     if (valid)
     {

@@ -3,6 +3,8 @@
 // Original issue #1135 fixtures. Exercise the retained policy, not just directive acceptance, through both
 // parser schedules and tree-only input. The unsupported surface must continue to fail closed.
 
+#include "c_check_symbol_pragma_test.c"
+
 static void check_test_pragma_extension_history(CheckTest* test)
 {
     static InternTable identifiers;
@@ -265,7 +267,7 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma redefine_extname value renamed\nstatic int value=7;\n", .accepted = true },
         { .source = "#pragma weak\n#pragma weak alias=\n#pragma redefine_extname value\nint value;\n", .accepted = true },
         { .source = "#pragma weak alias=value\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
-        { .source = "extern int value; int f(void){return value;}\n#pragma redefine_extname value renamed\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "extern int value; int f(void){return value;}\n#pragma redefine_extname value renamed\nint value=7;\n", .accepted = true },
         { .source = "#define SOURCE value\n#pragma weak SOURCE\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma ms_struct on\nint value;\n", .ms_records = 1, .accepted = true },
         { .source = "#pragma ms_struct on\nstruct S{char head;unsigned a:3,b:5;char tail;};\n", .ms_records = 1, .accepted = true },
@@ -404,5 +406,6 @@ static void check_test_pragma_extensions(CheckTest* test)
 {
     check_test_pragma_extension_history(test);
     check_test_ms_pragma_history(test);
+    check_test_symbol_pragmas(test);
     check_test_pragma_extension_sources(test);
 }
