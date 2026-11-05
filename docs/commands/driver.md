@@ -44,7 +44,15 @@ requirements. [Command index](README.md).
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or
   `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
-  [unwind guide](../../docs/unwind.md)'s "The C driver's unwind tables"). Either
+  [unwind guide](../../docs/unwind.md)'s "The C driver's unwind tables").
+  `-fno-omit-frame-pointer`, the last of it and `-fomit-frame-pointer`, keeps a
+  frame pointer in every function by both tiers (`push rbp; mov rbp, rsp`
+  first, rbp no value's register), and with `-momit-leaf-frame-pointer`, the
+  last of it and `-mno-omit-leaf-frame-pointer`, in every function that calls
+  (`predefines_frame_pointer`, #177: [the frame guide](../../docs/tier1-frame.md)'s
+  "The frame pointer on request"); without it neither tier keeps one where its
+  frame doesn't need one, at every `-O` (clang keeps it at `-O0`).
+  `-fstack-clash-protection` stays refused: Tier 0's frames don't probe. Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](../../docs/function-lanes.md)): by default as many as the bodies'
   tokens pay for, up to one per core of the CPUs the process may run on, and

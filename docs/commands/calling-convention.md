@@ -105,7 +105,10 @@ output. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Four compiled runs
 (#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
-this compiler on our side: a world of what its C passes (integers to 64 bits,
+this compiler on our side, and each links our side by Tier 1 too (#177's
+cross-linking at Tier 1: `--tier1 --verify`, without a frame pointer and with
+`-fno-omit-frame-pointer`), whose program must pass the same checks, its line
+saying how many of our side's functions Tier 1 compiled: a world of what its C passes (integers to 64 bits,
 `_BitInt`s of every width (past 128 bits in memory, a limb at a time), `__int128`
 and `unsigned __int128`, enums, pointers,
 `nullptr_t` in clang's, `_Float16`, `__bf16`, `float`, `double`, `long double`,

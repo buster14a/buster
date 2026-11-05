@@ -103,6 +103,10 @@ static void check_test_driver_option_admission(CheckTest* test, const char* exec
         "-m64",
         "-mred-zone",
         "-mno-ms-bitfields",
+        // The frame pointer's defaults (#177): none kept, and the leaf rule alone keeps none either.
+        "-fomit-frame-pointer",
+        "-mno-omit-leaf-frame-pointer",
+        "-momit-leaf-frame-pointer",
     };
     for (uint32_t tier = 0; tier < 2; tier += 1)
     {

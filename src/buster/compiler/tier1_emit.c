@@ -103,6 +103,9 @@ struct Tier1EmitOptions
     // The xmm registers the CFG consumer's floating values may take (#141), of xmm0 to xmm14; 0 for all of them.
     uint32_t vector_register_mask;
     uint32_t frame_flags;
+    // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
+    // (-momit-leaf-frame-pointer's leaf rule, #177; tier1_emit_frame_flags).
+    bool omit_leaf_frame_pointer;
     bool vector;
     bool rematerialize;
     // How each symbol below `symbol_count` is reached (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*: directly,
@@ -120,6 +123,14 @@ struct Tier1EmitOptions
     bool certify;
     Tier1EmitDiagnostic* diagnostic;
 };
+
+// The frame's flags from the options' (#177): BUSTER_TIER1_FRAME_KEEP_POINTER but in a function without `calls` where the
+// options omit a leaf function's frame pointer (Tier1EmitOptions.omit_leaf_frame_pointer). A call here is one to a
+// function, a machine row's none (tier1_select_function_call), as Tier 0's frame counts them (tier0_kept_pointer).
+static uint32_t tier1_emit_frame_flags(const Tier1EmitOptions* options, bool calls)
+{
+    return options->frame_flags & (options->omit_leaf_frame_pointer && !calls ? ~BUSTER_TIER1_FRAME_KEEP_POINTER : ~0u);
+}
 
 static void tier1_emit_diagnose(const Tier1EmitOptions* options, Tier1EmitCause cause, uint32_t error)
 {
@@ -439,7 +450,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             },
             .calls = &prepared.call_abi,
             .call_count = prepared.call_count != 0,
-            .flags = options->frame_flags,
+            .flags = tier1_emit_frame_flags(options, prepared.call_count != 0),
         };
         Tier1FrameRequirements requirements;
         if (tier1_frame_requirements(&prospective, &requirements) != TIER1_FRAME_OK)
@@ -1670,7 +1681,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
             },
             .calls = &emitted.prepared.call_abi,
             .call_count = emitted.prepared.call_count != 0,
-            .flags = options->frame_flags,
+            .flags = tier1_emit_frame_flags(options, emitted.prepared.call_count != 0),
         };
         if (error == TIER1_EMIT_OK)
         {
