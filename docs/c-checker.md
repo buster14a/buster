@@ -70,9 +70,9 @@ unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
 units allocate no visibility history or object column.
 
 `__private_extern__` declarations use extern linkage and hidden ELF visibility.
-Uninitialized declarations warn under `-Wprivate-extern` with the suggested
+Uninitialized variable declarations warn under `-Wprivate-extern` with the suggested
 `visibility("hidden")` attribute as an attached note; initialized variables
-and function definitions retain hidden visibility without that warning. The
+and functions retain hidden visibility without that warning. The
 warning group, `-Werror`, source pragmas and suppression apply to the note
 with its primary. Later declarations preserve the linked entity's visibility.
 The visibility driver fixtures compare the resulting defined and undefined
@@ -1978,7 +1978,7 @@ What the lowering covers past scalars (#145's programs):
   implicit-return safeguard. A second walk selects constant conditions for
   `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
   suppression. Return warnings cover aggregate and scalar bodies; hosted
-  `main` keeps its implicit zero return. Ordinary direct calls can return,
+  `main` keeps its implicit zero return. Known ordinary direct calls can return,
   and declared `noreturn` calls and terminating builtins end their source
   paths through unconditional cast, conversion and condition wrappers.
   A terminating path beside a fall-off path selects Clang's "in all control
@@ -5485,7 +5485,9 @@ arguments against the function. The checker now gives these as clang does.
 - **GCC's positions.** On a function's definition, each GNU attribute after
   the declarator that GCC knows gets clang's parser warning "GCC does not
   allow 'X' attribute in this position on a function definition"
-  (`-Wgcc-compat`, `check_input_attribute_gcc_position`), at its name.
+  (`-Wgcc-compat`, `check_input_attribute_gcc_position`), at its name. The
+  warning precedes a type attribute's argument error (`regparm`, `pcs`),
+  even when argument processing prevents the declarator from completing.
 - **nonnull's indices.** As `handleNonNullAttr` checks them
   (`check_input_attribute_function`):
   - an index of no parameter is the error "'nonnull' attribute parameter N is
@@ -6204,9 +6206,6 @@ arguments against the function. The checker now gives these as clang does.
     of the wrong type is one error, where clang goes on to "unsupported
     machine mode" where both apply. A string argument with escapes names the
     piece of target's string from its spelling.
-  - Function definitions retain the GNU suffix's `-Wgcc-compat` warning
-    before a type attribute's argument error (`regparm`, `pcs`), even when
-    argument processing prevents the declarator from completing.
   - `annotate`'s arguments after its string must be constant expressions,
     clang's error with its evaluator's notes otherwise; they are taken here.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker

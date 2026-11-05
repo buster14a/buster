@@ -2438,6 +2438,7 @@ BUSTER_INLINE __m512i check_input_prefix_max16(__m512i values)
 
 #include "c_check_attribute.c"
 static const CheckInputAttribute* check_input_naked_attribute(const CheckInputAttributes* attributes);
+static uint32_t check_input_noreturn_keyword(const CheckInputAttributes* attributes);
 
 // Whether a declaration's attributes hold a noreturn one that isn't ignored: the _Noreturn keyword's, [[noreturn]],
 // [[_Noreturn]], GNU's noreturn, or an implicit library declaration's (CHECK_INPUT_FUNCTION_NORETURN).
@@ -3478,6 +3479,11 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         }
         if (check_input_attribute_starts(parser, i, end))
         {
+            if (name == C_NAME_NORETURN && check_input_noreturn_keyword(attributes) != BUSTER_CHECK_NONE)
+            {
+                // A type or storage specifier can split the keyword's attribute reads into separate lists.
+                check_input_duplicate_specifier(reader, i, C_NAME_NORETURN);
+            }
             valid &= check_input_read_attributes(reader, &i, end, &attributes);
             if (!valid)
             {
@@ -6673,8 +6679,8 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
     }
 }
 
-// Clang deprecates an uninitialized private-extern declaration, at its name, with the replacement as an attached
-// note. Definitions retain the same extern linkage and hidden visibility without this warning.
+// Clang deprecates an uninitialized private-extern variable declaration, at its name, with the replacement as an
+// attached note. Function declarations and definitions retain hidden visibility without this warning.
 static __attribute__((noinline, cold)) void check_input_private_extern_warning(CheckInputReader* reader, uint32_t token, uint32_t completion)
 {
     const CheckWarningEvent event =
@@ -7170,7 +7176,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 {
                     check_input_rare_claim(reader, &reader->declaration_storage[name]);
                     reader->declaration_storage[name] = C_NAME_PRIVATE_EXTERN;
-                    if (kind != PARSE_KIND_EQUAL && !(function && kind == PARSE_KIND_L_BRACE))
+                    if (!function && kind != PARSE_KIND_EQUAL)
                     {
                         check_input_private_extern_warning(reader, name, i);
                     }

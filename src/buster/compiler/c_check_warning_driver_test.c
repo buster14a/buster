@@ -30,6 +30,11 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "duplicate separated noreturn specifiers",
+        .source = "_Noreturn void _Noreturn f(void){for(;;){}}\n_Noreturn extern _Noreturn void g(void);\n",
+        .warnings = 2,
+    },
+    {
         .name = "duplicate parameter and pointer qualifiers",
         .source = "int f(const const int x,int *volatile volatile p){return x+*p;}\n",
         .warnings = 2,
@@ -132,8 +137,8 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     {
         .name = "private extern declarations",
         .source = "__private_extern__ int x;\n__private_extern__ int f(void);\nvoid g(void){__private_extern__ int y;}\n",
-        .warnings = 3,
-        .notes = 3,
+        .warnings = 2,
+        .notes = 2,
     },
     {
         .name = "private extern definitions",
