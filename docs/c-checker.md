@@ -3802,6 +3802,19 @@ selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
 functions only where `-Wreturn-type` is enabled.
 
+The graph's passes share one pass in graph order, `check_common_facts`, which
+gives each node its parent, whether another node uses its value, whether it is
+evaluated, a conditional's or comma's arm effect, and its reach: a bit each for
+whether its subtree holds a node whose own warning may fire, a division by a
+constant, or a comparison (#1340). The expression walk starts only at a root that
+reaches something or whose discarded expression may get the statement's
+unused-value warning, and enters only the subtrees that hold its walk's bit;
+every warning keeps its order. The token passes find their roles and kinds 64
+tokens at a time, the node passes their operators 16 nodes at a time through an
+operator bitset, and `-Wuninitialized`'s declaration loops a sparse column's
+next entry by its directory (`check_sparse_next`). Each scalar path, the twin,
+visits every item and runs the same tests.
+
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
 `-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
