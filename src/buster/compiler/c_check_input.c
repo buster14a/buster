@@ -1944,10 +1944,9 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
 // BUSTER_CHECK_NONE sentinel where its expression was a sizeof/alignof — clang's `__size_t` there — else the
 // typedef naming its operand declaration's specifier, else 0. `node` is the operand's own graph node, from the
 // graph walk directly or `token_nodes` at an action's token.
-static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
+static uint32_t check_input_operand_type_spelling(const CheckInput* input, const Parser* parser, uint32_t node)
 {
-    const CheckGraph* graph = &reader->output->graph;
-    const Parser* parser = reader->parser;
+    const CheckGraph* graph = &input->graph;
     uint32_t result = 0;
     if (node < graph->count)
     {
@@ -1970,10 +1969,10 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
                 }
                 for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
                 {
-                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && reader->output->declarations != 0 ?
-                                              reader->output->declarations[type_name] : 0;
-                    if (resolved != 0 && resolved < reader->output->token_count && reader->output->declaration_kinds != 0 &&
-                        reader->output->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != 0 ?
+                                              input->declarations[type_name] : 0;
+                    if (resolved != 0 && resolved < input->token_count && input->declaration_kinds != 0 &&
+                        input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
                     {
                         result = resolved;
                     }
@@ -1981,12 +1980,17 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
             }
             else
             {
-                result = token < reader->output->token_count && reader->output->declarations != 0 ?
-                         check_input_typedef_spelling(reader->output, reader->parser, reader->output->declarations[token]) : 0;
+                result = token < input->token_count && input->declarations != 0 ?
+                         check_input_typedef_spelling(input, parser, input->declarations[token]) : 0;
             }
         }
     }
     return result;
+}
+
+static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t node)
+{
+    return check_input_operand_type_spelling(reader->output, reader->parser, node);
 }
 
 static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
@@ -2141,6 +2145,8 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
         input->resource = true;
     }
 }
+
+#include "c_check_redefinition.c"
 
 // check_input_report of a message that reads `detail` (CheckInputReport.detail), at an attribute's first token. It is
 // published after the token, past the warnings an attribute's handler gives before it there (#147).
@@ -4948,7 +4954,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 const uint32_t identifier = parser->tokens.names[token];
                 if (reader->parameter_seen[identifier] == function->token + 1)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                    check_input_parameter_redefinition(reader, token, function->names);
                     valid = false;
                 }
                 function->identifier_list = true;
@@ -5281,7 +5287,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 if (reader->parameter_seen[identifier] == function->token + 1 ||
                                     (visible != 0 && reader->bindings.depth[visible - 1] == check_input_declaration_depth(reader)))
                                 {
-                                    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                                    check_input_parameter_redefinition(reader, token, function->names);
                                     valid = false;
                                 }
                                 reader->parameter_previous[token] = reader->parameter_seen[identifier];
@@ -7496,7 +7502,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) ||
             check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
         {
-            check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict);
         }
         else
         {
@@ -7544,7 +7550,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 (reader->definition_origins[token] && reader->definition_origins[previous]) ||
                 check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
             {
-                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict);
             }
             else
             {

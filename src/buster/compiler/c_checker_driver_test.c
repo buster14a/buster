@@ -6592,7 +6592,7 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
     char* conflict[] = { (char*)executable, "-std=c17", "-fsyntax-only", conflict_source, NULL };
     char* conflict_text = NULL;
     const int conflict_status = conflict_written ? check_test_driver_spawn(conflict, &conflict_text) : -1;
-    const bool conflict_said = conflict_text != NULL && strstr(conflict_text, "conflicting declaration") != NULL;
+    const bool conflict_said = conflict_text != NULL && strstr(conflict_text, "redefinition of 'same'") != NULL;
     free(conflict_text);
     check_test_expect(test, conflict_status == 1 && conflict_said, "C17 keeps the extern inline followed by a definition a redefinition");
     unlink(conflict_source);
@@ -7171,6 +7171,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_redefinition_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -7332,7 +7333,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             .name = "a function body after an alias is a redefinition",
             .source = "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
             .rejected = true,
-            .message = "conflicting declaration",
+            .message = "redefinition of 'h'",
             .column = 5,
         },
         {
@@ -7909,6 +7910,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+            if (executable != NULL)
+            {
+                check_test_driver_redefinitions(&test, clang, executable, directory);
+            }
         }
         if (!lazy && check_test_driver_takes())
         {

@@ -3286,6 +3286,15 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+Ordinary declaration conflicts retain their reason and previous source location
+(`c_check_redefinition.c`). The driver names a redefined variable, function or
+parameter; prints both types for a variable whose type changes; and distinguishes
+conflicting function types from a static declaration after an external one.
+The accompanying note identifies the previous declaration or definition.
+The binding rules and rejection boundary are unchanged. Fourteen original
+sources compare complete Clang diagnostics in scalar/vector paths and with one
+or three body lanes (`c_check_redefinition_driver_test.c`).
+
 The source driver caps its published errors as Clang 23 does (#669): nineteen
 ordinary errors by default, followed, only if another error occurs, by the fatal
 `too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
