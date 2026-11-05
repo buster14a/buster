@@ -145,6 +145,12 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "__private_extern__ int x=7;\n__private_extern__ int f(void){return x;}\n",
     },
     {
+        .name = "private extern thread local declaration",
+        .source = "__private_extern__ __thread int x;\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
         .name = "private extern redeclarations",
         .source = "__private_extern__ int x;int x;\nint y;__private_extern__ int y;\n__private_extern__ int z;int z=3;\n",
         .warnings = 3,

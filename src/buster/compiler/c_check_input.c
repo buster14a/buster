@@ -3794,7 +3794,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     valid &= implicit_int || (saw && typed);
     valid &= longs <= 2 && shorts <= 1 && !(longs && shorts);
     valid &= !*is_typedef || (storage == 0 && (!*is_inline || free_standing) && !thread_local);
-    valid &= !thread_local || (storage == 0 || storage == C_NAME_STATIC || storage == C_NAME_EXTERN);
+    valid &= !thread_local || (storage == 0 || storage == C_NAME_STATIC || storage == C_NAME_EXTERN || storage == C_NAME_PRIVATE_EXTERN);
     const bool plain_complex = complex && base == 0 && !integer_seen && !longs && !shorts && !signedness;
     if (base == 0)
     {
