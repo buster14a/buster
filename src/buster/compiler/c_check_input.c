@@ -687,6 +687,12 @@ struct CheckInput
     CheckInputMarkedMember* marked_members;
     uint32_t marked_member_count;
     uint32_t marked_member_capacity;
+    // Each record member's declarator name token, by its index in the type table (0 for an unnamed member, and past
+    // member_token_count for a record a deferred body's lane completes): __builtin_dump_struct's type names print a
+    // member's type as its declaration spells it, its typedef specifier's name kept (#148, check_lower_dump_prepare).
+    uint32_t* member_tokens;
+    uint32_t member_token_count;
+    uint32_t member_token_capacity;
     uint8_t* availability_contexts;
     CheckWarningEvents warning_events;
     // Directive-only warnings survive parser recovery independently of expression facts.
@@ -5283,6 +5289,41 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
     }
 }
 
+// A completed record's member `index`'s declarator name token (CheckInput.member_tokens): the column grows by doubling,
+// in the output arena, and members between the last recorded and `index` read 0.
+static void check_input_member_token(CheckInputReader* reader, uint32_t index, uint32_t token)
+{
+    CheckInput* input = reader->output;
+    if (index >= input->member_token_capacity && !input->resource)
+    {
+        uint32_t capacity = input->member_token_capacity != 0 ? input->member_token_capacity : 64;
+        while (capacity <= index && capacity < UINT32_MAX / 2)
+        {
+            capacity *= 2;
+        }
+        uint32_t* grown = capacity > index ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+        input->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (input->member_token_count != 0)
+            {
+                memcpy(grown, input->member_tokens, (uint64_t)input->member_token_count * sizeof(*grown));
+            }
+            input->member_tokens = grown;
+            input->member_token_capacity = capacity;
+        }
+    }
+    if (index < input->member_token_capacity)
+    {
+        for (uint32_t gap = input->member_token_count; gap < index; gap += 1)
+        {
+            input->member_tokens[gap] = 0;
+        }
+        input->member_tokens[index] = token;
+        input->member_token_count = index >= input->member_token_count ? index + 1 : input->member_token_count;
+    }
+}
+
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
 #include "c_check_counted_by_input.c"
@@ -5463,6 +5504,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     if (members[member].mark != 0)
                     {
                         check_input_mark_member(reader, position, members + member);
+                    }
+                    if (!reader->lane)
+                    {
+                        check_input_member_token(reader, position, members[member].member.name != 0 ? members[member].token : 0);
                     }
                     position += 1;
                 }
