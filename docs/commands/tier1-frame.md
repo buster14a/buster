@@ -29,3 +29,10 @@ requirements. [Command index](README.md).
   variadic saves and guarded page probes. [The frame guide](../../docs/tier1-frame.md)
   records reservations before allocation and pending corpus evidence. Take the shared 9700X lock per
   build/test/measurement and pin timing to CPU 2.
+- `-fno-omit-frame-pointer` and `-momit-leaf-frame-pointer` reach both tiers'
+  frames (the frame guide's "The frame pointer on request"); `test-checker-driver`'s
+  frame pointer fixture walks the rbp chain through them.
+- `measure-frames [--functions] LABEL=FILE...` (`frame_measure.c`) reads each
+  function's frame from an ELF object's or executable's code (pushes and `sub
+  rsp` in address order, at their deepest) and compares each file's with the
+  first's over the functions both have: #177's frame sizes against `clang -O2`.

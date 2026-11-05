@@ -296,10 +296,10 @@ static bool tier1_emit_cfg_incoming_object(const IrFunction* function, uint32_t 
     return overflow || stacked;
 }
 
-// The frame's flags: the options', and BUSTER_TIER1_FRAME_VARIADIC for a variadic definition with a register save area
-// (#789), which the frame reserves and its prologue fills from the argument registers (tier1_frame.c): the IR's save
-// area is that one (tier1_emit_cfg_object).
-static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tier1EmitOptions* options)
+// The frame's flags: the options' (tier1_emit_frame_flags, by whether the function `calls`), and
+// BUSTER_TIER1_FRAME_VARIADIC for a variadic definition with a register save area (#789), which the frame reserves and its
+// prologue fills from the argument registers (tier1_frame.c): the IR's save area is that one (tier1_emit_cfg_object).
+static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tier1EmitOptions* options, bool calls)
 {
     bool save_area = false;
     for (uint32_t s = 0; s < function->slot_count; s += 1)
@@ -317,7 +317,7 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
     // A function with its own ABI records (#789) stages an aggregate result's parts below rsp on its way out
     // (tier1_emit_cfg_aggregate_result), and one with vector constants (#141) builds them there
     // (tier1_emit_cfg_vector_constant): its frame stays out of the red zone.
-    return options->frame_flags | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) |
+    return tier1_emit_frame_flags(options, calls) | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) |
            (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
 }
 
@@ -650,7 +650,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             },
             .calls = &prepared->call_abi,
             .call_count = prepared->call_count != 0,
-            .flags = tier1_emit_cfg_frame_flags(plan->function, options),
+            .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count != 0),
         };
         Tier1FrameRequirements requirements = { 0 };
         const Tier1FrameError framed = tier1_frame_requirements(&request, &requirements);
@@ -1259,7 +1259,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
             .calls = &prepared->call_abi,
             .call_count = prepared->call_count != 0,
             .used_callee_saved = emitted->callee_used,
-            .flags = tier1_emit_cfg_frame_flags(plan->function, options),
+            .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count != 0),
         };
         const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);

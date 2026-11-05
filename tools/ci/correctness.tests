@@ -611,6 +611,26 @@ if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$d
     --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
 grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
 rm -rf "$errors" "$directory"
+== Measure the frames and keep the frame pointer on request
+# #177: measure-frames reads each function's frame from an object's code, and -fno-omit-frame-pointer keeps one in every
+# function, by Tier 0 and by Tier 1, a leaf among them, which -momit-leaf-frame-pointer leaves out; without the option
+# neither tier keeps one. A command without files prints its usage and fails.
+directory=$(mktemp -d)
+printf 'int g(char*);\nint f(int x) { char b[4096]; b[x & 4095] = 1; return g(b); }\nint leaf(int x) { return x + 1; }\n' > "$directory/f.c"
+"$BUSTER_COMPILER" -c -o "$directory/t0.o" "$directory/f.c"
+"$BUSTER_COMPILER" -c -fno-omit-frame-pointer -o "$directory/t0fp.o" "$directory/f.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -o "$directory/t1fp.o" "$directory/f.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -momit-leaf-frame-pointer -o "$directory/t1leaf.o" "$directory/f.c"
+"$BUSTER_COMPILER" measure-frames --functions t0="$directory/t0.o" t0fp="$directory/t0fp.o" t1fp="$directory/t1fp.o" t1leaf="$directory/t1leaf.o" > "$directory/frames.txt"
+grep -q "$(printf '^frame\tt0\tleaf\t0\t0\t0\t0$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt0fp\tleaf\t8\t0\t1\t0$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt1fp\tleaf\t8\t0\t1\t0$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt1leaf\tleaf\t0\t0\t0\t0$')" "$directory/frames.txt"
+awk -F'\t' '$1 == "frame" && $3 == "f" && $4 > 4096 && ($2 == "t0") == ($6 == 0) { found += 1 } END { exit found != 4 }' "$directory/frames.txt"
+grep -q "$(printf '^frames\tt1leaf\tfunctions=2\t')" "$directory/frames.txt"
+if "$BUSTER_COMPILER" measure-frames > /dev/null 2> "$directory/errors"; then exit 1; fi
+grep -q '^usage: compiler measure-frames' "$directory/errors"
+rm -rf "$directory"
 == Dispatch Tier 1's vector code measurement and refuse its incomplete commands
 # #1283's measure-tier1-rows runs on the 9700X only where `tier1_programs` changes, so its dispatch is checked here, on
 # every run, without timing anything: a command without --clang must print its usage and fail, and one whose --base isn't

@@ -1100,6 +1100,10 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
         function->symbol_access = run->access;
         function->symbol_count = run->access_count;
         function->entry_records = run->sources;
+        // The frame pointer the options ask for (#177), which Tier 0's frame and Tier 1's take.
+        _Static_assert(BUSTER_PREDEFINES_FRAME_POINTER_ALL == BUSTER_TIER0_FRAME_POINTER_ALL && BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF == BUSTER_TIER0_FRAME_POINTER_NON_LEAF &&
+                           BUSTER_PREDEFINES_FRAME_POINTER_NONE == BUSTER_TIER0_FRAME_POINTER_NONE, "the options' frame pointer is Tier 0's");
+        function->frame_pointer = run->program->frame_pointer;
         if (run->tier1_inline != NULL)
         {
             run->tier1_inline->ready[b] = 1;
