@@ -201,6 +201,15 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             check_test_vector_transport,
         },
         {
+            // The lowering's room for an element-wise reduction (check_lower_transport_room), in a unit with nothing
+            // else: a 1024-element vector of bool's maximum and minimum, its most entries an element.
+            "vector-transport-reduce-room",
+            "typedef _Bool b1024 __attribute__((ext_vector_type(1024)));"
+            "static int most(b1024 v){return __builtin_reduce_max(v);}static int least(b1024 v){return __builtin_reduce_min(v);}"
+            "int tested(int n){b1024 a,b;fill(&a,128,n);__builtin_memset(&b,n&1?0xff:0,128);b[(unsigned)n*37%1024]=n&2;"
+            "return most(a)+2*least(a)+4*most(b)+8*least(b);}",
+        },
+        {
             "vector-memory",
             "static v8si global_vector={1,2,3,4,5,6,7,8};static v4sf global_array[3];struct holder{int tag;v4si v;v8df d;};static struct holder global_holder;"
             "static v16su through(const v16su*p,int i){return p[i]+p[i+1];}"

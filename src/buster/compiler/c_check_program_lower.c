@@ -13231,7 +13231,8 @@ struct CheckLowerNodeCounts
 // The entries a node of a transport vector's type `type` (check_lower_transport_type) may write past a node's bounds, or
 // none for another type: an operator's, a splat's or a cast's pieces of 16 bytes at least (20 entries each), and a vector
 // of bool's bytes past its elements cleared (8 each); with `lanes` (an element-wise conversion, shuffle or reduction),
-// 20 an element.
+// 32 an element: a vector of bool's maximum or minimum takes the most, about 24 (its bit's address, load, shift and mask,
+// its conversions, and the mask's update), and as many tasks.
 static uint64_t check_lower_transport_room(const TypeTable* types, TypeId type, bool lanes)
 {
     const TypeId base = type != 0 ? type_conversion_operand(types, type) : 0;
@@ -13239,7 +13240,7 @@ static uint64_t check_lower_transport_room(const TypeTable* types, TypeId type, 
     if (base != 0 && check_lower_transport_type(types, base))
     {
         const uint64_t bytes = type_size(types, base);
-        room = 20 * (bytes / 16 + 2) + (check_lower_bool_vector(types, base) ? 8 * bytes : 0) + (lanes ? 20 * (uint64_t)check_builtin_vector_lanes(types, base) : 0) + 64;
+        room = 20 * (bytes / 16 + 2) + (check_lower_bool_vector(types, base) ? 8 * bytes : 0) + (lanes ? 32 * (uint64_t)check_builtin_vector_lanes(types, base) : 0) + 64;
     }
     return room;
 }

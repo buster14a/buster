@@ -676,7 +676,8 @@ scanned for one) takes the rules for every node too: such a node's operation,
 cast or element writes entries a piece, an element or a cleared byte at a
 time past a node's bounds (`check_lower_transport_room`: 20 entries for each
 16 bytes, 8 for each of a `bool` vector's bytes, and for an element-wise
-conversion, shuffle or reduction 20 an element). The intrinsics' headers have
+conversion, shuffle or reduction 32 an element, which a `bool` vector's maximum or
+minimum nearly fills). The intrinsics' headers have
 one, AMX's 1024-byte `_tile1024i`, whose nodes take about 900 entries each.
 
 After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
