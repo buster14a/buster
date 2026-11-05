@@ -8,7 +8,9 @@
 //
 // A READY prefix is not acceptance of the translation unit: the caller must retain every original parse diagnostic
 // and its failing status. In particular, an earlier semantic error inside the malformed declaration is unavailable;
-// recovery erased the whole declaration. The prefix never guesses missing punctuation or revives erased nodes.
+// recovery erased the whole declaration. A complete declaration whose only errors are missing parameter types can
+// retain its tree and use int for those parameters, as the parser explicitly records. The prefix never guesses
+// missing punctuation or revives erased nodes.
 // Elaborate it with check_input_prefix, not check_input: tentative objects may acquire a complete type later in the
 // original unit, so end-of-translation-unit obligations must not run on this view. Operation-site checks still run.
 // Include after c_parser.c. The view borrows no owning Parser arenas: release the caller's output arena, never call
@@ -148,6 +150,8 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
     *prefix = (CheckPrefix){ .status = CHECK_PREFIX_UNAVAILABLE, .diagnostic = BUSTER_PARSE_NONE };
     const uint32_t count = parser->tokens.count;
     uint32_t limit = count;
+    uint32_t first_error = count;
+    bool parameter_types = false;
     uint32_t end = 0;
     if (output == scratch)
     {
@@ -164,10 +168,18 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
             for (uint32_t i = 0; i < parser->diagnostic_count; i += 1)
             {
                 const ParseDiagnostic* diagnostic = parser->diagnostics + i;
-                if (diagnostic->error && (prefix->diagnostic == BUSTER_PARSE_NONE || diagnostic->token < limit))
+                const uint32_t at = diagnostic->token < count ? diagnostic->token : count;
+                const bool parameter = diagnostic->parameter_type &&
+                    (diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING);
+                if (diagnostic->error && (prefix->diagnostic == BUSTER_PARSE_NONE || at < first_error))
                 {
                     prefix->diagnostic = i;
-                    limit = diagnostic->token < count ? diagnostic->token : count;
+                    first_error = at;
+                    parameter_types = parameter;
+                }
+                if (diagnostic->error && !parameter && at < limit)
+                {
+                    limit = at;
                 }
             }
             if (prefix->diagnostic != BUSTER_PARSE_NONE)
@@ -184,6 +196,12 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
                              (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY))
                     {
                         end = token + 1;
+                        if (parameter_types && token >= first_error)
+                        {
+                            // Complete only the declaration containing the first error. Later declarations need
+                            // their own recovery decision, and any erased or structurally invalid node still cuts it.
+                            break;
+                        }
                     }
                 }
                 if (end != 0)
@@ -226,6 +244,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->options.tree_only = false;
         view->language = parser->language;
         view->preprocessor = parser->preprocessor;
+        view->recovered_parameter_types = parameter_types && end > first_error;
         memcpy(view->predeclared, parser->predeclared, sizeof(view->predeclared));
         view->tokens.count = end;
         view->tokens.capacity = end;

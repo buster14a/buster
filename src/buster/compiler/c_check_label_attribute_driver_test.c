@@ -1304,11 +1304,21 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void __attribute__((stdcall)) ([[gnu::noinline]] *p)(void);\n",
         "void ([[gnu::x]] *p)(void) __attribute__((noinline));\n",
         "void f(int ([[gnu::x]] *p) __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] *p __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] const p __attribute__((cold))) __attribute__((stdcall));\n",
         "__attribute__((noinline)) void ([[gnu::x]] ([[gnu::y]] *p))(void);\n",
         // A handler's preliminary warning precedes its own error, after the completed type's warnings and any
         // earlier declaration attributes. Kernel-only checks follow the entire attribute list.
         "void __attribute__((stdcall, unknown, amdgpu_num_sgpr(0))) f(void);\n",
         "void __attribute__((stdcall, unknown, amdgpu_num_vgpr(4294967296))) f(void);\n",
+        // A kernel attribute in the specifiers is rechecked after a function-type chunk, but one in the trailing
+        // declaration list is first applied after that chunk. Without a type attribute there is only one visit.
+        "void __attribute__((amdgpu_num_sgpr(0))) f(void);\n",
+        "void __attribute__((amdgpu_num_sgpr(0))) f(void) __attribute__((stdcall));\n",
+        "void __attribute__((stdcall)) f(void) __attribute__((amdgpu_num_sgpr(0)));\n",
+        // Availability diagnostics share the complete enclosing declarator's boundary, including every marked
+        // parameter type, and then advance to the next declarator after a comma.
+        "typedef int D __attribute__((deprecated));\n__attribute__((cold)) void (*f)(D, D), (*g)(D);\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {
