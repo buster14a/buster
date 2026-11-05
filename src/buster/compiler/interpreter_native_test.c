@@ -93,6 +93,110 @@ static __attribute__((noinline)) long double interpreter_native_test_long_double
     return result;
 }
 
+typedef struct InterpreterNativeTestRecord InterpreterNativeTestRecord;
+struct InterpreterNativeTestRecord
+{
+    uint64_t value;
+    uint64_t* calls;
+};
+
+typedef struct InterpreterNativeTestExtended InterpreterNativeTestExtended;
+struct InterpreterNativeTestExtended
+{
+    long double value;
+};
+
+static __attribute__((noinline)) long double interpreter_native_test_record_extended(InterpreterNativeTestRecord argument)
+{
+    *argument.calls += 1;
+    const long double result = argument.value + 0.5L;
+    return result;
+}
+
+static __attribute__((noinline)) InterpreterNativeTestExtended interpreter_native_test_extended_record(InterpreterNativeTestRecord argument)
+{
+    const InterpreterNativeTestExtended result = { .value = interpreter_native_test_record_extended(argument) };
+    return result;
+}
+
+// Argument records do not make a scalar x87 result an aggregate. Discard more than a stack's worth of returns,
+// checking TOP and the stack-fault flag after every call. Save/restore the full x87 state, including tags and values:
+// fesetenv restores exception/rounding state, not a broken bridge's leaked register stack.
+static void interpreter_native_test_typed_x87(InterpreterNativeTestTally* tally)
+{
+    uint64_t calls = 0;
+    const InterpreterNativeTestRecord argument = { .value = 11, .calls = &calls };
+    const InterpreterValue value = { .low = (uintptr_t)&argument };
+    const uint16_t type = IR_PTR;
+    const uint32_t size = sizeof(argument);
+    const AbiLocation place = {
+        .registers = { BUSTER_ABI_RDI, BUSTER_ABI_RSI },
+        .kind = BUSTER_ABI_LOCATION_REGISTERS,
+    };
+    const AbiCall call = {
+        .result = {
+            .kind = BUSTER_ABI_RESULT_REGISTERS,
+            .part_bytes = 16,
+            .registers = { BUSTER_ABI_REGISTER_X87, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE },
+        },
+        .integer_registers = 2,
+        .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+    };
+    const Tier0Function function = {
+        .calls = &call,
+        .argument_sizes = &size,
+        .argument_locations = &place,
+    };
+    InterpreterNativeBinding binding = { .address = (void*)interpreter_native_test_record_extended };
+    InterpreterNativeRequest request = {
+        .binding = &binding,
+        .types = &type,
+        .arguments = &value,
+        .argument_count = 1,
+        .named_count = 1,
+        .result_type = IR_VOID,
+    };
+    InterpreterValue result = { 0 };
+    struct
+    {
+        uint8_t bytes[108];
+    } state;
+    // FNSAVE's 32-bit operand form writes 108 bytes and initializes a masked, empty x87 stack.
+    __asm__ volatile("fnsave %0" : "=m"(state) : : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", "memory");
+    uint16_t before = 0;
+    __asm__ volatile("fnstsw %0" : "=m"(before));
+    bool ran = true;
+    bool balanced = true;
+    for (uint32_t i = 0; i < 17; i += 1)
+    {
+        ran &= interpreter_typed_native(&request, &function, 0, 0, 0, 0, &result);
+        uint16_t after = 0;
+        __asm__ volatile("fnstsw %0" : "=m"(after));
+        balanced &= ((before ^ after) & 0x3840) == 0;
+    }
+    __asm__ volatile("frstor %0" : : "m"(state) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", "memory");
+    interpreter_native_test_expect(tally, ran && calls == 17, "repeated ignored native long-double returns with a by-value struct argument execute");
+    interpreter_native_test_expect(tally, balanced, "ignored scalar x87 returns with argument records leave TOP and the stack-fault flag unchanged");
+    const long double expected = 11.5L;
+    const InterpreterValue expected_bits = interpreter_native_test_value(&expected, 10);
+    request.result_type = IR_F80;
+    bool ok = interpreter_typed_native(&request, &function, 0, 0, 0, 0, &result);
+    interpreter_native_test_expect(tally, ok && result.low == expected_bits.low && result.high == expected_bits.high,
+                                   "consumed scalar x87 result with a by-value struct argument retains its payload");
+    struct
+    {
+        uint64_t before;
+        InterpreterNativeTestExtended result;
+        uint64_t after;
+    } returned = { .before = UINT64_C(0x0123456789abcdef), .after = UINT64_C(0xfedcba9876543210) };
+    binding.address = (void*)interpreter_native_test_extended_record;
+    request.result_type = IR_VOID;
+    ok = interpreter_typed_native(&request, &function, 0, 0, (uintptr_t)&returned.result, sizeof(returned.result), &result);
+    interpreter_native_test_expect(tally, ok && memcmp(&returned.result, &expected, 10) == 0 && returned.before == UINT64_C(0x0123456789abcdef) &&
+                                           returned.after == UINT64_C(0xfedcba9876543210),
+                                   "aggregate x87 result with a by-value struct argument preserves its destination and canaries");
+}
+
 static __attribute__((noinline)) long double interpreter_native_test_variadic(uint64_t count, ...)
 {
     va_list args;
@@ -727,6 +831,7 @@ static __attribute__((unused)) int run_interpreter_native_tests(int argc, char**
     interpreter_native_test_registers(&tally);
     interpreter_native_test_limits(&tally);
     interpreter_native_test_wide(&tally);
+    interpreter_native_test_typed_x87(&tally);
     interpreter_native_test_varargs(&tally);
     interpreter_native_test_allocations(&tally);
     interpreter_native_test_copy_definedness(&tally);

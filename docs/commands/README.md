@@ -59,7 +59,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-import, benchmark-import` | `import.c` | [import](import.md) |
 | `test-ir, test-ir-lowering, benchmark-ir` | `ir.c` | [ir](ir.md) |
 | `test-ir-optimize, test-ir-gvn, test-ir-licm` | `ir_optimize.c` | [ir-optimization](ir-optimization.md) |
-| `test-ir-parse, reduce-ir, interpret-ir` | `ir_parse.c` | [ir-tools](ir-tools.md) |
+| `test-ir-parse, reduce-ir, interpret-ir, interpret-c` | `ir_parse.c`, `interpreter_source.c` | [ir-tools](ir-tools.md) |
 | `test-lanes, benchmark-lanes` | `lane.c` | [lanes](lanes.md) |
 | `test-lexer, benchmark-lexer` | `c_lexer.c` | [lexer](lexer.md) |
 | `test-link` | `link.c` | [link](link.md) |

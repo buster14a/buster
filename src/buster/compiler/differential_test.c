@@ -287,6 +287,30 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
     differential_test_check(tests, differential_contains(multi.last_case, "clang-o0-compile.json", "\"driver.c\",\"func.c\""), "all generated translation units compiled");
     differential_test_check(tests, differential_contains(multi.last_case, "input.json", "/init.h"), "generated header preserved");
     differential_test_check(tests, strcmp(first_directory, multi.directory) != 0, "independent campaign directory");
+    for (uint32_t generator = 0; generator < 2; generator += 1)
+    {
+        DifferentialOptions interpreted = differential_test_options(directory, fixture, "pass", generator);
+        interpreted.interpreter = true;
+        DifferentialSummary checked = {0};
+        differential_test_check(tests, differential_campaign(&interpreted, &checked) == 0 && checked.passed == 1, "interpreter participates in each generator's comparison");
+        differential_test_check(tests, differential_contains(checked.last_case, "buster-interpreter-run.json", "\"interpret-c\"") &&
+                                      differential_contains(checked.directory, "summary.json", "\"interpreter_campaign_passed\":0"), "interpreter execution retained without fixture campaign credit");
+        char* storage = malloc(BUSTER_DIFFERENTIAL_CONFIG_BYTES);
+        DifferentialOptions replay = differential_defaults();
+        differential_test_check(tests, storage != 0 && differential_load_config(checked.last_case, storage, BUSTER_DIFFERENTIAL_CONFIG_BYTES, &replay) && replay.interpreter,
+                                "interpreter selection survives exact replay configuration");
+        free(storage);
+    }
+    const char* const interpreter_scenarios[] = { "interpreter-mismatch", "interpreter-error" };
+    const char* const interpreter_signatures[] = { "buster-interpreter:mismatch", "buster-interpreter-run:exit" };
+    for (uint32_t scenario = 0; scenario < 2; scenario += 1)
+    {
+        DifferentialOptions interpreted = differential_test_options(directory, fixture, interpreter_scenarios[scenario], 0);
+        interpreted.interpreter = true;
+        DifferentialSummary checked = {0};
+        differential_test_check(tests, differential_campaign(&interpreted, &checked) == 1 && checked.passed == 0 &&
+                                      strcmp(checked.signature, interpreter_signatures[scenario]) == 0, "interpreter disagreement or refusal fails the whole comparison");
+    }
     options = differential_test_options(directory, fixture, "pass", 0);
     DifferentialSummary collision = {0};
     differential_test_check(tests, differential_campaign(&options, &collision) == 0 && strcmp(first_directory, collision.directory) != 0, "same seed does not overwrite earlier artifacts");

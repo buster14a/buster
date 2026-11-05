@@ -46,7 +46,9 @@
 #define BUSTER_SSA_SOURCE_MEMORY 0
 #define BUSTER_SSA_SOURCE_VECTOR 1
 #define BUSTER_SSA_SOURCE_SCALAR 2
-#define BUSTER_SSA_SOURCE_FORMS 3
+#define BUSTER_SSA_SOURCE_TYPED 3
+#define BUSTER_SSA_SOURCE_IR_FORMS 3
+#define BUSTER_SSA_SOURCE_FORMS 4
 // A run's time limit by default, in seconds, and its interpreter's steps, which bound a run first: c-testsuite's 8
 // queens (00040.c), 0.05 s natively at -O0, takes 1.35 billion steps with every local in memory, 27 s on a Zen 4
 // laptop. A detector's build is many times slower: MSan's, which tracks origins, took from 226 s to past 600 s for that
@@ -64,6 +66,7 @@ static const char* const ssa_source_forms[BUSTER_SSA_SOURCE_FORMS] = {
     "memory",
     "vector",
     "scalar",
+    "typed",
 };
 
 typedef struct SsaSourceTotals SsaSourceTotals;
@@ -107,6 +110,7 @@ struct SsaSourceLimits
     uint64_t steps;
     // The programs' lifetimes (--lifetimes, ir_source_prepare's `lifetimes`).
     bool lifetimes;
+    bool typed;
 };
 
 // What a run of a form gave: its process, its wait status (-1 if it couldn't be waited for), its output (malloc's), and
@@ -223,6 +227,8 @@ static uint32_t ssa_source_native_flags(const char* name)
     return flags;
 }
 
+#include "interpreter_source.c"
+
 // An internal child/setup/output failure must not look like a program's native exit(255). SIGKILL is neither
 // replaceable by a handler nor ignorable. If the self-kill unexpectedly returns, never manufacture a normal exit;
 // wait for termination under the surrounding command's deadline rather than accepting an ambiguous status.
@@ -233,6 +239,18 @@ static __attribute__((noreturn)) void ssa_source_child_failure(void)
         kill(getpid(), SIGKILL);
         pause();
     }
+}
+
+static __attribute__((noreturn)) void ssa_source_child_result(int descriptor, InterpreterResult result)
+{
+    const bool output_written = fflush(stdout) == 0;
+    const bool errors_written = fflush(stderr) == 0;
+    const bool written = write(descriptor, &result, sizeof(result)) == (ssize_t)sizeof(result);
+    if (!output_written || !errors_written || !written)
+    {
+        ssa_source_child_failure();
+    }
+    _exit(result.status == INTERPRETER_OK ? (int)(result.value.low & 0xff) : 255);
 }
 
 // The child of a run: the program of `file` in one form, `functions`, run from function `entry` (main) by the shared IR's
@@ -260,6 +278,15 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
         ssa_source_child_failure();
     }
     alarm(timeout);
+    if (functions == 0)
+    {
+        Arena arena = arena_reserve(UINT64_C(1) << 32);
+        InterpreterOptions options = interpreter_default_options();
+        options.check_undefined = false;
+        options.max_steps = steps;
+        const InterpreterResult result = interpreter_source_run(file, 1, &options, &arena);
+        ssa_source_child_result(result_file, result);
+    }
     const Link* original = file->link;
     const uint32_t count = file->count;
     Arena arena = arena_reserve(UINT64_C(1) << 32);
@@ -428,14 +455,7 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
                 name != 0 ? (int)original->names.length[name] : 0, name != 0 ? (const char*)original->names.bytes[name] : "", materialized.atom, materialized.fixup);
         result.status = INTERPRETER_SYMBOL;
     }
-    const bool output_written = fflush(stdout) == 0;
-    const bool errors_written = fflush(stderr) == 0;
-    const bool written = result_file >= 0 && write(result_file, &result, sizeof(result)) == (ssize_t)sizeof(result);
-    if (!output_written || !errors_written || !written)
-    {
-        ssa_source_child_failure();
-    }
-    _exit(result.status == INTERPRETER_OK ? (int)(result.value.low & 0xff) : 255);
+    ssa_source_child_result(result_file, result);
 }
 
 // Starts `file`'s program in one form (its functions `functions`, main the function `entry`) in a child of its own, whose
@@ -527,11 +547,12 @@ static bool ssa_source_same(const SsaSourceRun* a, const SsaSourceRun* b)
 static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* forms, uint32_t entry, const SsaSourceExpected* expected, const char* name, const char* work,
                                uint64_t index, const SsaSourceLimits* limits, bool keep, uint64_t* steps, int* statuses)
 {
+    const uint32_t form_count = limits->typed ? BUSTER_SSA_SOURCE_FORMS : BUSTER_SSA_SOURCE_IR_FORMS;
     char directories[BUSTER_SSA_SOURCE_FORMS][PATH_MAX];
     char directory[PATH_MAX];
     snprintf(directory, sizeof(directory), "%s/run-%" PRIu64 "-*", work, index);
     bool passed = true;
-    for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; form < form_count; form += 1)
     {
         snprintf(directories[form], sizeof(directories[form]), "%s/run-%" PRIu64 "-%s", work, index, ssa_source_forms[form]);
         passed = passed && mkdir(directories[form], 0755) == 0;
@@ -542,25 +563,26 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
     }
     SsaSourceRun runs[BUSTER_SSA_SOURCE_FORMS];
     memset(runs, 0, sizeof(runs));
-    for (uint32_t form = 0; passed && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; passed && form < form_count; form += 1)
     {
         ssa_source_start_form(&runs[form], file, forms[form], entry, directories[form], limits);
     }
-    for (uint32_t form = 0; passed && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; passed && form < form_count; form += 1)
     {
         ssa_source_finish_form(&runs[form], directories[form]);
     }
     *steps = runs[0].result.steps;
     steps[1] = runs[1].result.steps;
     steps[2] = runs[2].result.steps;
-    for (uint32_t form = 0; statuses != 0 && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    steps[3] = runs[3].result.steps;
+    for (uint32_t form = 0; statuses != 0 && form < form_count; form += 1)
     {
         statuses[form] = runs[form].status;
     }
     char text[256];
     // Matching alarms or other signals do not finish a comparison. A normal native exit may legitimately leave no
     // interpreter record; keep it, but reject every signaled/unwaited form and every recorded interpreter failure.
-    for (uint32_t form = 0; passed && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; passed && form < form_count; form += 1)
     {
         if (runs[form].status == -1 || !WIFEXITED(runs[form].status) || !runs[form].record_valid || (runs[form].recorded && runs[form].result.status != INTERPRETER_OK))
         {
@@ -569,7 +591,7 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
             passed = false;
         }
     }
-    for (uint32_t form = 1; passed && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 1; passed && form < form_count; form += 1)
     {
         if (!ssa_source_same(&runs[0], &runs[form]))
         {
@@ -591,11 +613,11 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
             passed = false;
         }
     }
-    for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; form < form_count; form += 1)
     {
         free(runs[form].output);
     }
-    for (uint32_t form = 0; passed && !keep && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; passed && !keep && form < form_count; form += 1)
     {
         c_testsuite_remove_directory(directories[form]);
     }
@@ -629,7 +651,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
     }
     IrFunction* forms[BUSTER_SSA_SOURCE_FORMS] = { 0 };
     bool checked = file.status == IR_SOURCE_PREPARED;
-    for (uint32_t form = 0; checked && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    for (uint32_t form = 0; checked && form < BUSTER_SSA_SOURCE_IR_FORMS; form += 1)
     {
         forms[form] = BUSTER_ARENA_PUSH_ARRAY(&arenas->tables, IrFunction, (uint64_t)file.count + 1);
         checked = forms[form] != 0;
@@ -708,7 +730,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
         const bool passed = ssa_source_execute(&file, forms, entry, wanted, name, work, totals->programs, limits, keep, steps, statuses);
         totals->programs += 1;
         totals->passed += passed;
-        snprintf(counted, sizeof(counted), " steps=%" PRIu64 "/%" PRIu64 "/%" PRIu64, steps[0], steps[1], steps[2]);
+        snprintf(counted, sizeof(counted), " steps=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64, steps[0], steps[1], steps[2], steps[3]);
         for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
         {
             totals->steps[form] += steps[form];
@@ -803,7 +825,7 @@ static void ssa_source_generated(SsaSourceTotals* totals, uint64_t seed, uint32_
 // no expected-output sidecar. In particular, the timeout must be three real SIGALRM outcomes with empty records, not
 // a fabricated wait status or a direct test of the acceptance predicate. Keep the directories until the controls have
 // checked every record; an unexpected failure keeps the whole work directory through the command's usual cleanup.
-static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work)
+static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work, bool typed)
 {
     typedef struct SsaSourceControl SsaSourceControl;
     struct SsaSourceControl
@@ -904,14 +926,16 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         int statuses[BUSTER_SSA_SOURCE_FORMS] = { -1, -1, -1 };
         if (checked)
         {
-            ssa_source_file(&totals, source, 0, 0, 0, arenas, directory, &test->limits, true, statuses);
+            SsaSourceLimits limits = test->limits;
+            limits.typed = typed;
+            ssa_source_file(&totals, source, 0, 0, 0, arenas, directory, &limits, true, statuses);
             const uint64_t functions = test->left_out ? 0 : test->functions != 0 ? test->functions : 1;
             // A file the preparation leaves out is counted as left out alone.
             checked = totals.files == (test->left_out ? 0 : 1) && totals.left_out == (uint64_t)test->left_out && totals.failed_files == 0 &&
                       totals.failures == 0 && totals.functions == functions && totals.programs == (test->left_out ? 0 : 1) &&
                       totals.passed == (uint64_t)test->passed;
         }
-        for (uint32_t form = 0; checked && !test->left_out && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+        for (uint32_t form = 0; checked && !test->left_out && form < (typed ? BUSTER_SSA_SOURCE_FORMS : BUSTER_SSA_SOURCE_IR_FORMS); form += 1)
         {
             char record[PATH_MAX];
             snprintf(record, sizeof(record), "%s/run-0-%s/ssa-source.record", directory, ssa_source_forms[form]);
@@ -947,6 +971,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     const char* clang = "clang";
     bool keep = false;
     bool lifetimes = false;
+    bool typed = false;
     bool self_test = false;
     bool valid = options != 0 && files != 0;
     for (int i = 0; valid && i < count; i += 1)
@@ -984,6 +1009,10 @@ static int run_ssa_source_tests(int count, char** arguments)
         {
             lifetimes = true;
         }
+        else if (strcmp(arguments[i], "--typed") == 0)
+        {
+            typed = true;
+        }
         else if (arguments[i][0] != '-')
         {
             files[file_count++] = arguments[i];
@@ -1016,9 +1045,9 @@ static int run_ssa_source_tests(int count, char** arguments)
     snprintf(work, sizeof(work), "%s/ssa-source-XXXXXX", temporary != 0 && temporary[0] == '/' ? temporary : "/tmp");
     valid = valid && mkdtemp(work) != 0;
     const bool epoch = valid && oracle_epoch_begin();
-    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps, .lifetimes = lifetimes };
+    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps, .lifetimes = lifetimes, .typed = typed };
     SsaSourceTotals totals = { 0 };
-    const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work);
+    const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work, typed);
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         ssa_source_file(&totals, files[i], options, option_count, 0, &arenas, work, &limits, keep, 0);
@@ -1033,9 +1062,9 @@ static int run_ssa_source_tests(int count, char** arguments)
     {
         printf("test-ssa-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " instructions=%" PRIu64
                " promoted=%" PRIu64 "/%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%" PRIu64 " programs=%" PRIu64 " passed=%" PRIu64 " steps=%" PRIu64
-               "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 "\n",
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.instructions, totals.promoted[0], totals.promoted[1], totals.phis[0],
-               totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.generated, totals.unbuilt);
+               totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt);
         oracle_cache_report(oracle_cache(), "test-ssa-source");
         if (!keep && passed)
         {
@@ -1048,8 +1077,8 @@ static int run_ssa_source_tests(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes] [--keep] [preprocessor options] "
-                        "[file...]\n       compiler test-ssa-source --self-test [--keep]\n");
+        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes] [--typed] [--keep] [preprocessor options] "
+                        "[file...]\n       compiler test-ssa-source --self-test [--typed] [--keep]\n");
     }
     oracle_epoch_end(epoch);
     for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
