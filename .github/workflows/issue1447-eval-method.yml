@@ -1,0 +1,58 @@
+name: Issue 1447 FP evaluation oracle
+on:
+  push:
+    branches: [codex/issue-1447-eval-oracle-01a1ad8e]
+permissions:
+  contents: read
+jobs:
+  evaluation-method:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out oracle sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang 23.1.4
+        run: bash tools/ci/setup-hosted.sh
+      - name: Probe source types, runtime arithmetic, and diagnostic boundaries
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          clang --version
+          for case in {1..56}; do
+            echo "EVAL CASE=$case"
+            clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" -S -emit-llvm tools/issue1447-eval-method.c -o "$RUNNER_TEMP/eval-probe.ll" 2>&1
+            status=$?
+            echo "IR_STATUS=$status"
+            if [ "$status" = 0 ]; then
+              grep -E '(^@|^define |f(add|sub|mul|div|cmp|pext|ptrunc)|llvm.experimental.constrained)' "$RUNNER_TEMP/eval-probe.ll" || true
+              clang -std=gnu17 -O0 -fno-caret-diagnostics -DCASE="$case" tools/issue1447-eval-method.c -o "$RUNNER_TEMP/eval-probe" 2>&1
+              status=$?
+              echo "LINK_STATUS=$status"
+              if [ "$status" = 0 ]; then "$RUNNER_TEMP/eval-probe"; echo "RUN_STATUS=$?"; fi
+            fi
+          done
+          for case in {1..3}; do
+            echo "EVAL OPTIMIZED CASE=$case"
+            clang -std=gnu17 -O2 -fno-caret-diagnostics -DCASE="$case" tools/issue1447-eval-method.c -o "$RUNNER_TEMP/eval-probe" 2>&1
+            status=$?
+            echo "COMPILE_STATUS=$status"
+            if [ "$status" = 0 ]; then "$RUNNER_TEMP/eval-probe"; echo "RUN_STATUS=$?"; fi
+          done
+          for method in source double extended; do
+            for case in {17..20}; do
+              echo "EVAL TYPEDEF METHOD=$method CASE=$case"
+              clang -std=gnu17 -ffp-eval-method="$method" -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-eval-method.c 2>&1
+              echo "COMPILE_STATUS=$?"
+            done
+          done
+          for flag in -ffast-math -freciprocal-math -fassociative-math; do
+            for case in 1 2 3; do
+              echo "EVAL UNSAFE FLAG=$flag CASE=$case"
+              clang -std=gnu17 "$flag" -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-eval-method.c 2>&1
+              echo "COMPILE_STATUS=$?"
+            done
+          done
+          exit 0
