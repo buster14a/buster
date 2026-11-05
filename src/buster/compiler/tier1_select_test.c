@@ -881,6 +881,112 @@ static void tier1_select_test_plans(Tier1SelectTest* test)
 // values seldom are), into a register of their own or an operand's. Emitted for x86-64-v3 (BMI1 and BMI2), both paths'
 // code runs natively against the test's evaluator where this machine has both; x86-64's baseline, which has neither,
 // refuses each as the target's.
+// Every form a vector operation's lanes select (#141's element types: tier1_select_lane_forms, _compares and _blends)
+// is one x86 semantics covers, whose effects the code certificate decodes (#939): an uncovered form's conservative
+// effects would read and write every register and fail --verify.
+static void tier1_select_test_lane_forms(Tier1SelectTest* test)
+{
+    uint32_t forms = 0;
+    uint32_t uncovered = 0;
+    for (uint32_t encoding = 0; encoding < 3; encoding += 1)
+    {
+        for (uint32_t operation = 0; operation < BUSTER_TIER1_VECTOR_OPERATIONS; operation += 1)
+        {
+            for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
+            {
+                for (uint32_t width = 0; width < 3; width += 1)
+                {
+                    const uint16_t form = tier1_select_lane_forms[encoding][operation][lane][width];
+                    forms += form != X86_FORM_NONE;
+                    if (form != X86_FORM_NONE && x86_effects(form)->operation == X86_OPERATION_NONE)
+                    {
+                        fprintf(stderr, "uncovered lane form %s (%u)\n", x86_form_description(form)->mnemonic, form);
+                        uncovered += 1;
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const uint16_t candidates[3] = { tier1_select_lane_compares[lane][0][width], tier1_select_lane_compares[lane][1][width], tier1_select_lane_blends[lane][width] };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                forms += candidates[k] != X86_FORM_NONE;
+                if (candidates[k] != X86_FORM_NONE && x86_effects(candidates[k])->operation == X86_OPERATION_NONE)
+                {
+                    fprintf(stderr, "uncovered lane form %s (%u)\n", x86_form_description(candidates[k])->mnemonic, candidates[k]);
+                    uncovered += 1;
+                }
+            }
+        }
+    }
+    tier1_select_test_expect(test, forms != 0 && uncovered == 0, "every form a vector operation's lanes select is one x86 semantics covers");
+}
+
+// A 16-byte vector's NOT, COMPARE and SELECT at a target without AVX (#1425's review): a NOT is pcmpeqd's every bit and
+// pxor, in the destination where the operand is elsewhere and in xmm15 where it is the destination; a COMPARE's and a
+// SELECT's records are AVX-512's, which the baseline's allow-list refuses, so that emission refuses the function rather
+// than give no records.
+static void tier1_select_test_sse_vectors(Tier1SelectTest* test)
+{
+    uint8_t* baseline = malloc(X86_FORM_COUNT);
+    if (baseline != NULL)
+    {
+        const X86Target base = { .architecture = X86_ARCH_BASELINE };
+        x86_target_forms(&base, baseline);
+        Tier1SelectHoles complement = {
+            .rule = TIER1_RULE_VECTOR,
+            .width = 16,
+            .scale = BUSTER_TIER1_VECTOR_NOT,
+            .sse = true,
+            .destination = 1,
+            .left = 2,
+        };
+        const Tier1SelectRecords apart = tier1_select_expand(&complement);
+        tier1_select_test_expect(test, apart.count == 2 && apart.records[0].form == X86_FORM_PCMPEQD_X_XM128 && apart.records[0].reg == 1 && apart.records[0].rm == 1 &&
+                                     apart.records[1].form == X86_FORM_PXOR_X_XM128 && apart.records[1].reg == 1 && apart.records[1].rm == 2,
+                                 "an SSE vector NOT into another register is pcmpeqd of the destination and pxor of the operand");
+        complement.left = 1;
+        const Tier1SelectRecords same = tier1_select_expand(&complement);
+        tier1_select_test_expect(test, same.count == 2 && same.records[0].form == X86_FORM_PCMPEQD_X_XM128 && same.records[0].reg == BUSTER_TIER1_SELECT_FLOAT_SCRATCH &&
+                                     same.records[0].rm == BUSTER_TIER1_SELECT_FLOAT_SCRATCH && same.records[1].form == X86_FORM_PXOR_X_XM128 && same.records[1].reg == 1 &&
+                                     same.records[1].rm == BUSTER_TIER1_SELECT_FLOAT_SCRATCH,
+                                 "an SSE vector NOT in place is pcmpeqd of xmm15 and pxor of it");
+        bool allowed = true;
+        for (uint32_t r = 0; r < 2; r += 1)
+        {
+            allowed &= x86_target_form_allowed(baseline, apart.records[r].form) && x86_target_form_allowed(baseline, same.records[r].form);
+        }
+        tier1_select_test_expect(test, allowed, "an SSE vector NOT's records are the baseline's");
+        const uint32_t kinds[2] = { BUSTER_TIER1_VECTOR_COMPARE, BUSTER_TIER1_VECTOR_SELECT };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const Tier1SelectHoles masked = {
+                .rule = TIER1_RULE_VECTOR,
+                .width = 16,
+                .scale = (uint8_t)kinds[k],
+                .sse = true,
+                .destination = 1,
+                .left = 2,
+                .right = 3,
+                .third = 4,
+                .condition = IR_LT,
+            };
+            const Tier1SelectRecords records = tier1_select_expand(&masked);
+            bool refused = records.count != 0;
+            for (uint32_t r = 0; r < records.count; r += 1)
+            {
+                refused &= !x86_target_form_allowed(baseline, records.records[r].form);
+            }
+            tier1_select_test_expect(test, refused, k == 0 ? "an SSE vector COMPARE's records are none the baseline allows" : "an SSE vector SELECT's records are none the baseline allows");
+        }
+        free(baseline);
+    }
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -3724,6 +3830,64 @@ static uint64_t tier1_select_test_variadic_oracle(uint32_t shape, const uint64_t
 // verification; and the uniform-register consumer, which has no frame to save the argument registers in, refusing it.
 // With its own ABI records (#789), its parameter's in rdi, it selects; with a record of a shape selection doesn't take, it
 // is refused whole.
+// A chained indirect call (#148) built as IR directly (#1411's review): its callee and its chain parameters, the call's
+// ABI record of the chain in r10. Selection takes it, through rax, but refuses it variadic, whose al would overwrite rax
+// before the call (tier1_select_call_supported), as the typed stream's adapter does.
+static void tier1_select_test_chained_variadic(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    const IrSizes sizes = {
+        .instruction_count = 4,
+        .block_count = 1,
+        .call_count = 1,
+        .call_type_count = 1,
+        .extra_count = 1,
+        .parameter_count = 2,
+        .abi_call_count = 1,
+        .passed_count = 1,
+    };
+    for (uint32_t variadic = 0; variadic < 2; variadic += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.block_offsets[1] = 4;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = IR_I64;
+            function.extra[0] = 1;
+            function.call_types[0] = IR_I64;
+            function.passed[0] = (IrPassed){ .location = { .registers = { BUSTER_ABI_R10, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS } };
+            function.abi_calls[0] = (IrAbiCall){ .call = { .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+                                                           .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } } } };
+            function.calls[0] = (IrCall){ .argument_count = 1, .parameter_count = 1, .result_type = IR_I64, .variadic = variadic != 0, .abi = 1 };
+            uint32_t next = 0;
+            const uint32_t callee = tier1_select_test_append(&function, &next, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_append(&function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t called = tier1_select_test_append(&function, &next, IR_CALL_INDIRECT, IR_I64, callee, 0, BUSTER_IR_NONE);
+            tier1_select_test_append(&function, &next, IR_RET, IR_VOID, called, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the chained indirect call's fixture is valid IR");
+        const bool supported = created && tier1_select_call_supported(&function, 2);
+        tier1_select_test_expect(test, supported == (variadic == 0),
+                                 variadic == 0 ? "a chained indirect call selects, through rax" : "a chained indirect variadic call is refused, its al rax's");
+        Tier1SelectPlan plan;
+        uint32_t failed = 0;
+        const Tier1SelectError planned = created ? tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_UNSUPPORTED;
+        tier1_select_test_expect(test, (planned == TIER1_SELECT_OK) == (variadic == 0),
+                                 variadic == 0 ? "a chained indirect call's function plans" : "a chained indirect variadic call's function is refused whole");
+        arena_pop_to(&input, 0);
+        arena_pop_to(&output, 0);
+        arena_pop_to(&scratch, 0);
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static void tier1_select_test_variadic(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -4341,6 +4505,8 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_intrinsics(&test);
+            tier1_select_test_lane_forms(&test);
+            tier1_select_test_sse_vectors(&test);
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
@@ -4362,6 +4528,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_indirect(&test);
             tier1_select_test_indirect_review(&test);
             tier1_select_test_variadic(&test);
+            tier1_select_test_chained_variadic(&test);
             tier1_select_test_burs(&test);
             if (manifest)
             {

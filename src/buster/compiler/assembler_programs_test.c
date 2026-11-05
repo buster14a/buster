@@ -274,6 +274,8 @@ static const char asm_test_both_frames_fixture[] =
 static const char asm_test_no_frames_fixture[] = ".cfi_sections\n.text\nf:\n.cfi_startproc\npushq %rbx\n.cfi_def_cfa_offset 16\npopq %rbx\nret\n.cfi_endproc\n";
 static const char asm_test_unused_frames_fixture[] = ".cfi_sections .debug_frame\n.text\nf: ret\n";
 
+#include "assembler_groups_test.c"
+
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
     static const struct
@@ -305,6 +307,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_no_frames_fixture, X86_ARCH_BASELINE },
         { asm_test_unused_frames_fixture, X86_ARCH_BASELINE },
     };
+    asm_test_groups(test, directory, cross_check);
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
     {
@@ -756,6 +759,8 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
         // -g's DWARF (#1115): the line table GNU as makes of .loc, GCC's view numbers and its location lists.
         { .name = "O0-g", .flags = { "-O0", "-march=x86-64", "-fPIE", "-g" }, .architecture = X86_ARCH_BASELINE },
         { .name = "O2-g", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g" }, .architecture = X86_ARCH_BASELINE },
+        // GCC's macro DWARF repeats .debug_macro in different COMDAT groups (#1268).
+        { .name = "O2-g3", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g3" }, .architecture = X86_ARCH_BASELINE },
         // Without unwind tables, -g's CFI is GNU as's .debug_frame (`.cfi_sections .debug_frame`).
         { .name = "O2-g-frame", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g", "-fno-asynchronous-unwind-tables" }, .architecture = X86_ARCH_BASELINE },
     };

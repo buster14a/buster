@@ -20,7 +20,8 @@ unit writes (#776 measured one cache and table for all the lanes, filled by
 #150's walk before the units and copied by each lane, and found it slower:
 the guide's "One cache for all the lanes, measured"). Each unit's diagnostics
 go to a stream of its own, printed in the command line's order after every
-unit has run. A lane keeps its three big
+unit has run, through the first unit with a fatal (including its notes and
+summary). Later buffers are released without printing. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
 release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED`, and
 the mappings and their writable prefixes kept for the next reservations they
@@ -66,7 +67,9 @@ exchange of the global names by their hashes' partitions, then the records
 copied at places that prefix sums give), whose exact twin `check_units_merge`
 is, and checks the bound link on them (`link_check_lanes`); with `-g`, each
 unit keeps its DWARF as `-c -g` writes it, and the merge joins them
-(`check_units_merge_debug`, #779). `-c -o`, the dumps, `--id-order` and two
+(`check_units_merge_debug`, #779). `--id-order N` primes each unit's lane-owned
+intern table before its real compile; the output must match an unprimed run.
+`-c -o`, the dumps and two
 units of one object's name are refused.
 
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
@@ -113,7 +116,12 @@ each alone, and with `--generate DIR` it writes a program of synth's shape
 measurements. The end-to-end single- and multi-unit contract, with the
 mixed-tier and actual command-team receipts, is
 [the multicore acceptance guide](../../docs/multicore-acceptance.md);
-`tests/driver/multicore.c` runs it in the shared correctness suite. What
+`tests/driver/multicore.c` runs it in the shared correctness suite, with changed
+identifier IDs in both single- and multi-file repeats. `test-check-units` also
+checks missing nested includes and `-Wfatal-errors` through the first fatal
+unit at 1/2/3/8 lanes, through both kernels with changed IDs and poisoned arenas,
+and the sequential multi-input `-E` text and diagnostics against the valid
+units' standalone bytes in both marker modes. What
 #149's remaining whole-process performance acceptance still needs is there
 too.
 

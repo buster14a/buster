@@ -2,7 +2,7 @@ name: CI latency report
 
 on:
   schedule:
-    - cron: '7 7 * * *'
+    - cron: '37 8 * * *'
       timezone: Europe/Madrid
   workflow_dispatch:
   pull_request:

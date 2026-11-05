@@ -245,6 +245,8 @@ static bool pp_test_builtin_targets(const char* directory)
                 const char* answer = line + 3 + info->name_length + 1;
                 result = index < count && (size_t)(end - line) > 3 + info->name_length && memcmp(line + 3, info->name, info->name_length) == 0;
                 const bool clang_yes = result && *answer != '0';
+                // clang's answer's value: 1, or a version (201802, __builtin_operator_new's and __builtin_operator_delete's).
+                const unsigned long clang_value = result ? strtoul(answer, NULL, 10) : 0;
                 const uint8_t* name = (const uint8_t*)info->name;
                 const CBuiltinLibraryPlain* plain = cbuiltin_library_plain(info->name, info->name_length);
                 const bool implemented = cbuiltin_has_capability(name, info->name_length, BUSTER_CBUILTIN_CAP_SOURCE) ||
@@ -265,10 +267,10 @@ static bool pp_test_builtin_targets(const char* directory)
                 // buster's).
                 const bool pinned = result && !reference && plain != NULL && (ours != 0) != clang_yes &&
                                     cbuiltin_library_table_differs(pp_test_clang_version, info->name, info->name_length);
-                const bool right = ((implemented ? (ours != 0) == clang_yes : ours == 0) || pinned) && (ours_constant == 0 || clang_constant);
+                const bool right = ((implemented ? ours == clang_value : ours == 0) || pinned) && (ours_constant == 0 || clang_constant);
                 if (result && !right)
                 {
-                    printf("builtin targets: %s under %s: %u %u, clang %s %s\n", info->name, configurations[c], ours, ours_constant, clang_yes ? "1" : "0",
+                    printf("builtin targets: %s under %s: %u %u, clang %lu %s\n", info->name, configurations[c], ours, ours_constant, clang_value,
                            clang_constant ? "1" : "0");
                 }
                 if (pinned)

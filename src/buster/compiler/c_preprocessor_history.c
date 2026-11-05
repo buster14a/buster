@@ -911,19 +911,20 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 5, 6))) void pp_
     va_end(arguments);
 }
 
-// pp_diagnose_output_at at the `offset`th character of the token's spelling after translation phases 1 and 2 (as
-// pp_spelling gives it), as clang's AdvanceToTokenCharacter places a diagnostic inside a numeric constant: a line splice
-// in the spelling moves the place past it.
-BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
-                                                                                                           uint32_t position, const char* format, ...)
+// The `offset`th character of a spelling after translation phases 1 and 2 (pp_spelling), in its source range.
+// Both #if's temporary tokens and the checker's output tokens use this mapping; neither counts a splice as a byte.
+static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location, uint32_t offset)
 {
-    uint32_t location = token < pp->output.count ? pp->output.locations[token] : 0;
-    const uint32_t range = token < pp->output.count ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const uint32_t range = pp_find_range(pp, location);
     if (range != BUSTER_PP_NONE)
     {
-        const PPRange* bytes = &pp->ranges[range];
-        uint32_t at = location - bytes->base;
-        for (uint32_t left = offset; left != 0 && at < bytes->length; left -= 1)
+        // The range is immutable throughout this scan; no helper can append or replace its storage here.
+        const PPRange* range_bytes = &pp->ranges[range];
+        const uint8_t* bytes = range_bytes->bytes;
+        const uint32_t length = range_bytes->length;
+        const uint32_t base = range_bytes->base;
+        uint32_t at = location - base;
+        for (uint32_t left = offset; left != 0 && at < length; left -= 1)
         {
             // Past the character, then past any splices after it: a backslash, perhaps spaces, and a line break.
             at += 1;
@@ -931,19 +932,27 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_
             while (spliced)
             {
                 uint32_t after = at;
-                spliced = at < bytes->length && bytes->bytes[at] == '\\';
+                spliced = at < length && bytes[at] == '\\';
                 after += spliced;
-                while (spliced && after < bytes->length && (bytes->bytes[after] == ' ' || bytes->bytes[after] == '\t'))
+                while (spliced && after < length && (bytes[after] == ' ' || bytes[after] == '\t'))
                 {
                     after += 1;
                 }
-                const uint32_t line = after < bytes->length && bytes->bytes[after] == '\r' ? 1 : 0;
-                spliced &= after + line < bytes->length && bytes->bytes[after + line] == '\n';
+                const uint32_t line = after < length && bytes[after] == '\r' ? 1 : 0;
+                spliced &= after + line < length && bytes[after + line] == '\n';
                 at = spliced ? after + line + 1 : at;
             }
         }
-        location = bytes->base + (at < bytes->length ? at : bytes->length);
+        location = base + (at < length ? at : length);
     }
+    return location;
+}
+
+// pp_diagnose_output_at at a character of the token's spelling, retaining its output origin and publication order.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
+                                                                                                           uint32_t position, const char* format, ...)
+{
+    const uint32_t location = token < pp->output.count ? pp_spelling_offset_location(pp, pp->output.locations[token], offset) : 0;
     va_list arguments;
     va_start(arguments, format);
     pp_diagnose_output_location(pp, severity, token, location, position, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);

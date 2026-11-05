@@ -6940,6 +6940,9 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             char output[BUSTER_ABI_TEST_PATH_BYTES];
             char errors[BUSTER_ABI_TEST_PATH_BYTES];
             const char* name = run.name;
+            // The run's file and whether our side is compiled C, for Tier 1's builds below, where `run` is the program's argv.
+            const char* run_file = run.file;
+            const bool compiled_world = run.compiled;
             snprintf(source, sizeof(source), "%s/%s_%u.c", directory, run.file, vector_bytes);
             snprintf(ours, sizeof(ours), "%s/%s_%u_buster.c", directory, run.file, vector_bytes);
             snprintf(object, sizeof(object), "%s/%s_%u_buster.o", directory, run.file, vector_bytes);
@@ -7067,6 +7070,68 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                         {
                             printf("%-34s %s, %u-byte vectors: %u signatures, %u arguments, %.*s", "cross-check", name, vector_bytes, count, cross.argument_count,
                                    (int)(printed.pointer + printed.length - summary), summary);
+                        }
+                        // And our side by Tier 1 (#177: #137's cross-linking at Tier 1), without a frame pointer and with one in
+                        // every frame (-fno-omit-frame-pointer), linked with the same C side: the same program, whose checks
+                        // must pass the same way. Functions Tier 1 refuses stay Tier 0's (its report says how many it took).
+                        for (uint32_t variant = 0; compiled_world && variant < 2; variant += 1)
+                        {
+                            char tier1_object[BUSTER_ABI_TEST_PATH_BYTES];
+                            char tier1_program[BUSTER_ABI_TEST_PATH_BYTES];
+                            snprintf(tier1_object, sizeof(tier1_object), "%s/%s_%u_tier1_%u.o", directory, run_file, vector_bytes, variant);
+                            snprintf(tier1_program, sizeof(tier1_program), "%s/%s_%u_tier1_%u", directory, run_file, vector_bytes, variant);
+                            char* tier1_build[] = {
+                                (char*)buster,
+                                "--verify",
+                                "--tier1",
+                                "--tier1-report",
+                                variant != 0 ? "-fno-omit-frame-pointer" : "-fomit-frame-pointer",
+                                "-std=gnu23",
+                                (char*)march,
+                                "-w",
+                                "-c",
+                                "-o",
+                                tier1_object,
+                                ours,
+                                0,
+                            };
+                            char* tier1_link[] = {
+                                (char*)compiler,
+                                "-std=gnu23",
+                                "-O1",
+                                "-fno-strict-aliasing",
+                                (char*)march,
+                                "-w",
+                                "-o",
+                                tier1_program,
+                                c_object,
+                                tier1_object,
+                                "-latomic",
+                                0,
+                            };
+                            const int tier1_built = type_test_run(tier1_build, output, errors);
+                            // The report is the driver's line on its errors' stream (or its output's).
+                            const String8 reported = type_test_read_file(&world.types.arena, errors);
+                            const String8 report = reported.length != 0 && strstr(reported.pointer, "\tfunctions=") != 0 ? reported : type_test_read_file(&world.types.arena, output);
+                            const char* functions = report.length != 0 ? strstr(report.pointer, "\tfunctions=") : 0;
+                            const char* taken = report.length != 0 ? strstr(report.pointer, "\ttier1=") : 0;
+                            const int tier1_linked = tier1_built == 0 ? type_test_run(tier1_link, output, errors) : tier1_built;
+                            const int tier1_ran = tier1_linked == 0 ? type_test_run((char*[]){ tier1_program, 0 }, output, errors) : tier1_linked;
+                            const String8 tier1_printed = type_test_read_file(&world.types.arena, output);
+                            const char* tier1_summary = tier1_printed.length != 0 ? strstr(tier1_printed.pointer, "checks ") : 0;
+                            snprintf(detail, sizeof(detail), "%s, %u-byte vectors, Tier 1%s: built %d, linked %d, ran %d:\n%.4000s", name, vector_bytes,
+                                     variant != 0 ? " with frame pointers" : "", tier1_built, tier1_linked, tier1_ran, tier1_printed.length != 0 ? tier1_printed.pointer : "");
+                            if (abi_test_expect(tally, tier1_ran == 0 && tier1_summary != 0 && functions != 0 && taken != 0, "cross-check", detail))
+                            {
+                                printf("%-34s %s, %u-byte vectors, Tier 1%s: %u of %u functions Tier 1's, %.*s", "cross-check", name, vector_bytes,
+                                       variant != 0 ? " with frame pointers" : "", (unsigned)strtoul(taken + 7, 0, 10), (unsigned)strtoul(functions + 11, 0, 10),
+                                       (int)(tier1_printed.pointer + tier1_printed.length - tier1_summary), tier1_summary);
+                            }
+                            if (!keep && tally->failures == 0)
+                            {
+                                unlink(tier1_object);
+                                unlink(tier1_program);
+                            }
                         }
                     }
                     else if (parsed)

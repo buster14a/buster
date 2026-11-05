@@ -16,6 +16,53 @@ struct CheckLowerInitPool
     uint32_t part;
 };
 
+// __builtin_dump_struct's printing calls (#148, c_check_program_dump.c): an operand of a call's after the rest of the
+// builtin's arguments and the format, one of
+// - STRING, a string of the call's image at `value`;
+// - SIZE, the size_t `value` (a bit-field's width);
+// - VALUE, the value of the field of `type` at bit `value` of the record (a bit-field of `width` bits, else
+//   BUSTER_TYPE_NOT_BIT_FIELD), converted to `promoted`, as a variadic argument is promoted;
+// - ADDRESS, the address of the field at bit `value`.
+typedef enum CheckLowerDumpKind
+{
+    CHECK_LOWER_DUMP_STRING,
+    CHECK_LOWER_DUMP_SIZE,
+    CHECK_LOWER_DUMP_VALUE,
+    CHECK_LOWER_DUMP_ADDRESS,
+} CheckLowerDumpKind;
+
+typedef struct CheckLowerDumpOperand CheckLowerDumpOperand;
+struct CheckLowerDumpOperand
+{
+    uint64_t value;
+    TypeId type;
+    TypeId promoted;
+    uint32_t width;
+    uint8_t kind;
+};
+
+// A call: its format's offset in the image and its operands, `count` of them from `first`.
+typedef struct CheckLowerDumpLine CheckLowerDumpLine;
+struct CheckLowerDumpLine
+{
+    uint32_t format;
+    uint32_t first;
+    uint32_t count;
+};
+
+// A call of __builtin_dump_struct: its node, the pool of its strings' image (CheckLowerInitializers.items) and its calls,
+// or the reason its code is refused.
+typedef struct CheckLowerDump CheckLowerDump;
+struct CheckLowerDump
+{
+    uint32_t node;
+    uint32_t pool;
+    const CheckLowerDumpLine* lines;
+    uint32_t line_count;
+    const CheckLowerDumpOperand* operands;
+    const char* refusal;
+};
+
 typedef struct CheckLowerInitializers CheckLowerInitializers;
 struct CheckLowerInitializers
 {
@@ -23,6 +70,15 @@ struct CheckLowerInitializers
     uint32_t* first;
     uint32_t count;
     SymbolId symbol_base;
+    // The unit's __builtin_dump_struct calls, whose images are pools after the initializers' (first[count]
+    // on), and the room the lowering's writers take besides the per-node bounds: for those calls, which evaluate the
+    // printer and the rest of the arguments once a call, and for __builtin_os_log_format's data, evaluated once an item.
+    CheckLowerDump* dumps;
+    uint32_t dump_count;
+    uint64_t extra_entries;
+    uint64_t extra_calls;
+    uint64_t extra_arguments;
+    uint64_t extra_locals;
 };
 
 // Pooling and aggregate COPY share the frozen unit's by-value containment facts. Top-level qualifiers remain in
@@ -130,6 +186,8 @@ static bool check_lower_init_image(const CheckProgram* program, const CheckIniti
     return valid;
 }
 
+#include "c_check_program_dump.c"
+
 static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckProgram* program, const uint8_t* type_facts, uint32_t type_count,
                                    Arena* output, Arena* scratch)
 {
@@ -207,7 +265,7 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
         pools->first[count] = pools->count;
     }
     arena_pop_to(scratch, mark);
-    return valid;
+    return valid && check_lower_dump_prepare(pools, program, output, scratch);
 }
 
 static uint32_t check_lower_init_pool(const CheckLowerInitializers* pools, uint32_t plan, uint32_t part)

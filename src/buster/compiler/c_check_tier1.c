@@ -14,6 +14,8 @@
 
 #include "ir_optimize_verified.c"
 #include "ir_wide.c"
+#include "ir_truth.c"
+#include "c_check_tier1_inline.c"
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
                    BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
@@ -172,6 +174,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
     }
     arena_release(&lane->scratch);
     arena_release(&lane->forms);
+    arena_release(&lane->inline_cache);
     *lane = (CheckTier1Lane){ 0 };
 }
 
@@ -286,6 +289,17 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;
     }
+    // The calls of the unit's always_inline functions expanded, and the aggregates' slots split (#1282,
+    // c_check_tier1_inline.c), in steps[4] and steps[5]: what the solver and promotion take in place of the lowering.
+    IrFunction expanded = { 0 };
+    uint32_t inlined_calls = 0;
+    const CheckTier1Inline* inlining = lane->inlining;
+    const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
+    if (stage == CHECK_TIER1_COMPILED && inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count &&
+        check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, &expanded, &inlined_calls))
+    {
+        lowered = expanded;
+    }
     IrFunction promoted = { 0 };
     // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
     // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
@@ -322,6 +336,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
+    }
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
+        // No later consumer reads their old operands and no analysis revision has been published. Simplify before
+        // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
+        ir_truth_simplify(&wide.function, scalar);
     }
     IrOptimizeResult optimized = { 0 };
     IrVerifiedRevision revision = { 0 };
@@ -376,9 +397,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         Tier1EmitDiagnostic diagnostic = { 0 };
+        // The frame pointer the options ask for (#177, Tier0Function.frame_pointer), as Tier 0's frame keeps it, and
+        // stack-clash protection's probes (Tier0Function.probe_stack): the prologue's and the dynamic allocations'.
         const Tier1EmitOptions options = {
             .diagnostic = &diagnostic,
             .register_mask = tier1_liveness_register_mask(),
+            .frame_flags = (function->frame_pointer != BUSTER_TIER0_FRAME_POINTER_NONE ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0) |
+                           (function->probe_stack ? BUSTER_TIER1_FRAME_PROBE_STACK : 0),
+            .omit_leaf_frame_pointer = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF,
             .vector = !scalar,
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
@@ -463,6 +489,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
             .code_certified = emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK,
             .code_uncertified = emitted.code_checked && emitted.code_reason != TIER1_CERT_EMITTED_OK,
+            .machine_rows = emitted.machine_rows,
+            .row_moves = emitted.row_moves,
+            .inlined_calls = inlined_calls,
         };
         if (emitted.frame_event_count != 0)
         {
@@ -596,8 +625,8 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
-                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\n",
+                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
-            report->code_certified, report->code_uncertified);
+            report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls);
 }

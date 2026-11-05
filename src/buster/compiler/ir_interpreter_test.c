@@ -418,6 +418,14 @@ static void ir_interpreter_test_calls(IrInterpreterTestTally* tally, Arena* memo
     arena_pop_to(memory, mark);
 }
 
+// The static chain plus a narrow argument's 32 bits as its caller extended them (#1411's review): r10 plus edi
+// sign-extended, which reads a byte's -3 as -3 where the caller sign-extended it (0xfffffffd) and 253 where it
+// zero-extended it (0x000000fd).
+static __attribute__((naked, noinline)) int64_t ir_interpreter_test_chain_extended(signed char value __attribute__((unused)))
+{
+    __asm__("movslq %edi, %rax\n\taddq %r10, %rax\n\tret\n");
+}
+
 static __attribute__((noinline)) int64_t ir_interpreter_test_signed_native(signed char value)
 {
     return (int64_t)value * 3;
@@ -565,6 +573,56 @@ static void ir_interpreter_test_memory(IrInterpreterTestTally* tally, Arena* mem
         ir_interpreter_test_expect(tally, false, "native narrow-argument fixture allocation");
     }
     arena_pop_to(memory, mark);
+    // A static chain beside a signless i8 argument (#148, #1411's review): the call's records, the chain's in r10 and the
+    // byte's in rdi with its extension flag, which the interpreter keeps past the chain's (ir_interpreter_unchained), so
+    // that the bridge extends the byte as the flag says, with no extensions of the native's: 40 + -3 sign-extended, and
+    // 40 + 253 zero-extended.
+    IrFunction chained = { 0 };
+    const IrSizes chained_sizes = {
+        .instruction_count = 4,
+        .block_count = 1,
+        .constant_count = 2,
+        .call_count = 1,
+        .call_type_count = 2,
+        .extra_count = 2,
+        .abi_call_count = 1,
+        .passed_count = 2,
+    };
+    for (uint32_t flag = 0; flag < 2; flag += 1)
+    {
+        if (ir_create(memory, &chained_sizes, &chained) == IR_OK)
+        {
+            chained.result_type = IR_I64;
+            chained.block_offsets[1] = 4;
+            chained.constants[0].low = 40;
+            chained.constants[1].low = 0xfd;
+            chained.call_types[0] = IR_I64;
+            chained.call_types[1] = IR_I8;
+            chained.extra[0] = 0;
+            chained.extra[1] = 1;
+            chained.passed[0] = (IrPassed){ .location = { .registers = { BUSTER_ABI_R10, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS } };
+            chained.passed[1] = (IrPassed){ .location = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS,
+                                                          .flags = flag == 0 ? BUSTER_ABI_FLAG_SIGN : BUSTER_ABI_FLAG_ZERO } };
+            chained.abi_calls[0] = (IrAbiCall){ .call = { .integer_registers = 1, .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+                                                          .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } } },
+                                                .passed = 0 };
+            chained.calls[0] = (IrCall){ .argument_count = 2, .parameter_count = 2, .result_type = IR_I64, .abi = 1 };
+            ir_interpreter_test_instruction(&chained, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&chained, 1, IR_CONST, IR_I8, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&chained, 2, IR_CALL, IR_I64, 88, 0, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&chained, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const IrInterpreterFunction code = { .symbol = 71, .function = &chained };
+            const InterpreterNativeBinding binding = { .symbol = 88, .address = (void*)ir_interpreter_test_chain_extended };
+            const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .natives = &binding, .native_count = 1 };
+            ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = flag == 0 ? 37 : 293 },
+                                    flag == 0 ? "a chained native call's signed byte extended by its record's flag" : "a chained native call's byte zero-extended by its record's flag");
+        }
+        else
+        {
+            ir_interpreter_test_expect(tally, false, "chained narrow-argument fixture allocation");
+        }
+        arena_pop_to(memory, mark);
+    }
 }
 
 // #1059's atomic read/modify/writes, rmw, as one thread runs them: an addition and an exchange of an i32 in a slot return

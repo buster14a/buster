@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Pair Pair;
+struct Pair
+{
+    long first;
+    long second;
+};
+
+typedef struct Large Large;
+struct Large
+{
+    long values[65];
+};
+
+typedef struct Aligned Aligned;
+struct Aligned
+{
+    long value;
+} __attribute__((aligned(128)));
+
+static long collect_aligned(int ignored, ...)
+{
+    va_list values;
+    va_start(values, ignored);
+    const Aligned value = va_arg(values, Aligned);
+    va_end(values);
+    return value.value;
+}
+
+static Pair change_pair(Pair value)
+{
+    value.first += 7;
+    value.second *= 3;
+    return value;
+}
+
+static Large change_large(Large value)
+{
+    value.values[4] += value.values[0];
+    value.values[64] += value.values[0];
+    return value;
+}
+
+static long collect(int count, ...)
+{
+    va_list values;
+    va_start(values, count);
+    long total = 0;
+    for (int i = 0; i < count; i += 1)
+    {
+        total += va_arg(values, long);
+    }
+    const double fraction = va_arg(values, double);
+    const long double extended = va_arg(values, long double);
+    const Pair pair = va_arg(values, Pair);
+    va_end(values);
+    return total + (long)fraction + (long)extended + pair.first + pair.second;
+}
+
+static long stacked(long a, long b, long c, long d, long e, long f, long g, ...)
+{
+    va_list values;
+    va_start(values, g);
+    const long h = va_arg(values, long);
+    const long i = va_arg(values, long);
+    va_end(values);
+    return a + b + c + d + e + f + g + h + i;
+}
+
+static int labels(int index)
+{
+    static void* targets[] = { &&first, &&second };
+    goto *targets[index];
+first:
+    return 17;
+second:
+    return 29;
+}
+
+int main(void)
+{
+    Pair original = { 11, 13 };
+    Pair (*indirect)(Pair) = change_pair;
+    const Pair changed = indirect(original);
+    Large large = { { 2, 3, 5, 7, 11, [64] = 23 } };
+    const Large returned = change_large(large);
+    const div_t quotient = div(20, 6);
+    const long sum = collect(8, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 2.5, 4.75L, original);
+    const long tail = stacked(1, 2, 3, 4, 5, 6, 7, 8L, 9L);
+    const Aligned aligned = { 161 };
+    char bytes[64];
+    memset(bytes, 3, sizeof(bytes));
+    memmove(bytes + 1, bytes, sizeof(bytes) - 1);
+    const int passed = original.first == 11 && original.second == 13 && changed.first == 18 && changed.second == 39 &&
+                       large.values[4] == 11 && returned.values[4] == 13 && large.values[64] == 23 && returned.values[64] == 25 && returned.values[32] == 0 &&
+                       quotient.quot == 3 && quotient.rem == 2 &&
+                       sum == 66 && tail == 45 && collect_aligned(0, aligned) == 161 && labels(0) == 17 && labels(1) == 29 && bytes[63] == 3;
+    printf("typed source: %d\n", passed);
+    return passed ? 0 : 1;
+}

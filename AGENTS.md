@@ -237,14 +237,15 @@ import wrapper; do not raise the limits to accommodate module detail.
 
 ## Sharing the 9700X
 
-Agent sessions and CI share the Ryzen 7 9700X. Run **every build, test, benchmark
-and perf run there** through `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`.
-Set `EXCLUSIVE_TITLE` to the session title and `EXCLUSIVE_LINK` to its private
-session, PR or issue link. The runner hooks take the same lock; sessions and CI
-wait alike, with neither taking priority. Hold it **per run, never around a
-series of runs**: CI times out waiting after 10 minutes. Keep PR jobs short.
-Benchmark timings come from this host under that lock, not from cloud runners
-or the owner's desktop. The `cores` queue below does not replace this lock.
+Agent sessions and CI share the Ryzen 7 9700X, `benchpress`. Sessions reach it
+themselves: `tailscale ssh david@benchpress` ([guide](docs/commands/benchpress.md)).
+Run **every build, test, benchmark and perf run there** through
+`EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`, with
+`EXCLUSIVE_TITLE` (session title) and `EXCLUSIVE_LINK` (session, PR or issue).
+The runner hooks take the same lock; sessions and CI wait alike. Hold it **per
+run, never around a series of runs**: CI times out waiting after 10 minutes.
+Keep PR jobs short. Benchmark timings come from this host under that lock, not
+cloud runners or the owner's desktop. The `cores` queue doesn't replace it.
 
 Read [CI and benchmark selection](docs/commands/ci.md) before changing gates,
 suite inventory, benchmark steps or harness pins; it retains the full hosted
@@ -451,7 +452,7 @@ boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-import, benchmark-import` — `import.c` — [guide](docs/commands/import.md).
 - `test-ir, test-ir-lowering, benchmark-ir` — `ir.c` — [guide](docs/commands/ir.md).
 - `test-ir-optimize, test-ir-gvn, test-ir-licm` — `ir_optimize.c` — [guide](docs/commands/ir-optimization.md).
-- `test-ir-parse, reduce-ir, interpret-ir` — `ir_parse.c` — [guide](docs/commands/ir-tools.md).
+- `test-ir-parse, reduce-ir, interpret-ir, interpret-c` — [IR tools](docs/commands/ir-tools.md).
 - `test-lanes, benchmark-lanes` — `lane.c` — [guide](docs/commands/lanes.md).
 - `test-lexer, benchmark-lexer` — `c_lexer.c` — [guide](docs/commands/lexer.md).
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
@@ -469,7 +470,7 @@ boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-ssa, test-ssa-ir, test-ssa-source` — `ssa.c` — [guide](docs/commands/ssa.md).
 - `test-streaming, benchmark-streaming` — `streaming.c` — [guide](docs/commands/streaming.md).
 - `test-tier0, benchmark-backend, benchmark-backend-source` — `tier0.c` — [guide](docs/commands/tier0.md).
-- `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` — `tier1_select.c` — [guide](docs/commands/tier1.md).
+- `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs, measure-tier1-rows` — `tier1_select.c` — [guide](docs/commands/tier1.md).
 - `test-tier1-allocation, benchmark-tier1-allocation` — `tier1_allocate.c` — [guide](docs/commands/tier1-allocation.md).
 - `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
 - `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).

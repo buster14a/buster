@@ -10,7 +10,9 @@
 // c_lowering_prepare validates the input, copies flags and stably counting-sorts retained references into CSR.
 // EXTERNAL means an actual external definition that must emit, not merely external linkage. INLINE_ONLY means a
 // function body without an emitted definition (for example a C99 inline definition): neither a reference to it nor
-// its own references cause local emission. USED/CONSTRUCTOR/DESTRUCTOR/ALIAS_TARGET do not override INLINE_ONLY.
+// its own references cause local emission. USED/CONSTRUCTOR/DESTRUCTOR/ALIAS_TARGET do not override INLINE_ONLY. OPTIONAL
+// means an object the producer made only for what references it (a constant CFString's record, #148), of no root flag:
+// never a root, in C_LOWERING_ALL either, where the traversal then runs from the other definitions to reach it.
 // Calls/addresses that bind only to an external symbol and unevaluated references never create local graph edges.
 // This classification does not suppress checking a body or initializer; all diagnostics precede this module.
 //
@@ -52,8 +54,9 @@
 #define BUSTER_C_LOWERING_CONSTRUCTOR UINT32_C(32)
 #define BUSTER_C_LOWERING_DESTRUCTOR UINT32_C(64)
 #define BUSTER_C_LOWERING_ALIAS_TARGET UINT32_C(128)
+#define BUSTER_C_LOWERING_OPTIONAL UINT32_C(256)
 #define BUSTER_C_LOWERING_ROOT_FLAGS (BUSTER_C_LOWERING_EXTERNAL | BUSTER_C_LOWERING_USED | BUSTER_C_LOWERING_CONSTRUCTOR | BUSTER_C_LOWERING_DESTRUCTOR | BUSTER_C_LOWERING_ALIAS_TARGET)
-#define BUSTER_C_LOWERING_ALL_FLAGS (BUSTER_C_LOWERING_FUNCTION | BUSTER_C_LOWERING_OBJECT | BUSTER_C_LOWERING_INLINE_ONLY | BUSTER_C_LOWERING_ROOT_FLAGS)
+#define BUSTER_C_LOWERING_ALL_FLAGS (BUSTER_C_LOWERING_FUNCTION | BUSTER_C_LOWERING_OBJECT | BUSTER_C_LOWERING_INLINE_ONLY | BUSTER_C_LOWERING_OPTIONAL | BUSTER_C_LOWERING_ROOT_FLAGS)
 #define BUSTER_C_LOWERING_ID_LANES 16u
 #define BUSTER_C_LOWERING_EDGE_LANES 8u
 #define BUSTER_C_LOWERING_WORD_BITS 64u
@@ -144,6 +147,7 @@ static CLoweringStatus c_lowering_prepare(Arena* arena, CLoweringInput input, CL
         valid = (flags & ~BUSTER_C_LOWERING_ALL_FLAGS) == 0 && (kind == BUSTER_C_LOWERING_FUNCTION || kind == BUSTER_C_LOWERING_OBJECT);
         valid = valid && (!inline_only || (kind == BUSTER_C_LOWERING_FUNCTION && (flags & BUSTER_C_LOWERING_EXTERNAL) == 0));
         valid = valid && ((flags & (BUSTER_C_LOWERING_CONSTRUCTOR | BUSTER_C_LOWERING_DESTRUCTOR)) == 0 || kind == BUSTER_C_LOWERING_FUNCTION);
+        valid = valid && ((flags & BUSTER_C_LOWERING_OPTIONAL) == 0 || (kind == BUSTER_C_LOWERING_OBJECT && (flags & BUSTER_C_LOWERING_ROOT_FLAGS) == 0));
         roots += !inline_only && (flags & BUSTER_C_LOWERING_ROOT_FLAGS) != 0;
     }
     uint32_t edges = 0;
@@ -249,7 +253,7 @@ static uint32_t c_lowering_store_ids(uint32_t* destination, __m512i ids, __mmask
     return count;
 }
 
-static uint32_t c_lowering_seed_vector(CLowering* plan, CLoweringMode mode)
+static uint32_t c_lowering_seed_vector(CLowering* plan, CLoweringMode mode, bool* optional)
 {
     uint32_t count = 0;
     __m512i ids = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -259,7 +263,9 @@ static uint32_t c_lowering_seed_vector(CLowering* plan, CLoweringMode mode)
         const __mmask16 valid = remaining >= BUSTER_C_LOWERING_ID_LANES ? UINT16_MAX : (__mmask16)((UINT32_C(1) << remaining) - 1);
         const __m512i flags = _mm512_maskz_loadu_epi32(valid, plan->definition_flags + base);
         const __mmask16 eligible = valid & ~_mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_C_LOWERING_INLINE_ONLY));
-        const __mmask16 roots = mode == C_LOWERING_ALL ? eligible : eligible & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_C_LOWERING_ROOT_FLAGS));
+        const __mmask16 optionals = eligible & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_C_LOWERING_OPTIONAL));
+        const __mmask16 roots = mode == C_LOWERING_ALL ? eligible & ~optionals : eligible & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_C_LOWERING_ROOT_FLAGS));
+        *optional = *optional || optionals != 0;
         plan->reached[base / BUSTER_C_LOWERING_WORD_BITS] |= (uint64_t)roots << (base % BUSTER_C_LOWERING_WORD_BITS);
         count += c_lowering_store_ids(plan->queue + count, ids, roots);
         ids = _mm512_add_epi32(ids, _mm512_set1_epi32(BUSTER_C_LOWERING_ID_LANES));
@@ -301,9 +307,10 @@ static CLoweringStatus c_lowering_vector(CLowering* plan, CLoweringMode mode)
         {
             memset(plan->reached, 0, plan->word_count * sizeof(uint64_t));
         }
-        uint32_t tail = c_lowering_seed_vector(plan, mode);
+        bool optional = false;
+        uint32_t tail = c_lowering_seed_vector(plan, mode, &optional);
         uint32_t begin = 0;
-        uint32_t end = mode == C_LOWERING_ALL ? 0 : tail;
+        uint32_t end = mode == C_LOWERING_ALL && !optional ? 0 : tail;
         while (begin < end)
         {
             plan->statistics.rounds += 1;
@@ -381,11 +388,14 @@ static CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode)
             memset(plan->reached, 0, plan->word_count * sizeof(uint64_t));
         }
         uint32_t tail = 0;
+        bool optional = false;
         for (uint32_t definition = 0; definition < plan->definition_count; definition += 1)
         {
             const uint32_t flags = plan->definition_flags[definition];
             const bool eligible = (flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0;
-            const bool root = eligible && (mode == C_LOWERING_ALL || (flags & BUSTER_C_LOWERING_ROOT_FLAGS) != 0);
+            const bool optional_one = eligible && (flags & BUSTER_C_LOWERING_OPTIONAL) != 0;
+            const bool root = eligible && !optional_one && (mode == C_LOWERING_ALL || (flags & BUSTER_C_LOWERING_ROOT_FLAGS) != 0);
+            optional = optional || optional_one;
             plan->visited[definition] = root;
             if (root)
             {
@@ -393,7 +403,7 @@ static CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode)
             }
         }
         uint32_t begin = 0;
-        uint32_t end = mode == C_LOWERING_ALL ? 0 : tail;
+        uint32_t end = mode == C_LOWERING_ALL && !optional ? 0 : tail;
         while (begin < end)
         {
             plan->statistics.rounds += 1;

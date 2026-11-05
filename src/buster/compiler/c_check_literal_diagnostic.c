@@ -7,6 +7,10 @@
 // refusal, once, as the driver prints it, so a constant that is valid costs nothing here. What clang accepts that the
 // checker doesn't (`1.5q`, C2y's `0o17`) has no error here, and the checker's own message stays.
 
+#ifndef BUSTER_CHECK_LITERAL_DIAGNOSTIC_C
+#define BUSTER_CHECK_LITERAL_DIAGNOSTIC_C
+
+// Shared by the checker and the preprocessor; only a refused constant reaches this cold scan.
 typedef enum CheckLiteralDiagnosticKind
 {
     CHECK_LITERAL_DIAGNOSTIC_NONE,
@@ -359,5 +363,13 @@ static __attribute__((noinline, cold)) bool check_literal_diagnose(const uint8_t
         }
     }
     *diagnostic = scan.error;
+    if (scan.error.kind == CHECK_LITERAL_DIAGNOSTIC_NONE)
+    {
+        // A well-formed floating constant is still forbidden in #if; keep the separator error
+        // above free to use this field for its start/end distinction.
+        diagnostic->floating = floating;
+    }
     return scan.error.kind != CHECK_LITERAL_DIAGNOSTIC_NONE;
 }
+
+#endif
