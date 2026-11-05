@@ -1365,11 +1365,12 @@ struct ParseFrame
     uint8_t asm_qualifiers;
 };
 
-// What a name is bound as: an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
+// Whether a name is unbound, an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
 // ordinary identifiers as far as parsing goes: one in the list being read, a definition's parameter its declarations
 // haven't declared yet, and one they have.
 typedef enum ParseMeaning
 {
+    PARSE_MEANING_UNBOUND,
     PARSE_MEANING_ORDINARY,
     PARSE_MEANING_TYPEDEF,
     PARSE_MEANING_KR_LISTED,
@@ -1439,7 +1440,7 @@ struct ParseTree
     uint32_t* parents;
 };
 
-// The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
+// The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_UNBOUND but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
 typedef struct ParseMeanings ParseMeanings;
 struct ParseMeanings
@@ -1505,6 +1506,8 @@ struct ParseScalar
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
     uint32_t errors;
+    // GNU attributes before an ordinary name need the complete file-scope bindings, which a fallback range lacks.
+    bool attribute_lookup;
     // Optional source-event recorder. Null for syntax-only parsing and the vector fallback.
     ParseBindingTrace* binding_trace;
 };
@@ -3257,9 +3260,20 @@ static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, Pa
     }
     else if (!head && !attributes && !statement && !expression)
     {
-        parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
-        // An attribute has already started the declaration: an extension marker is not a specifier here.
-        frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
+        const bool ordinary = kind == PARSE_KIND_IDENTIFIER && !parse_scalar_is_typedef_name(parser, i);
+        parser->attribute_lookup |= ordinary;
+        if (ordinary && parser->meanings[parser->names[i]] != PARSE_MEANING_UNBOUND)
+        {
+            // Clang annotates an existing ordinary name as an expression before the GNU prefix selects a declaration.
+            // Such an expression cannot be its declarator; an unbound name still starts an implicit-int declaration.
+            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_AT_TOKEN);
+        }
+        else
+        {
+            parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
+            // An attribute has already started the declaration: an extension marker is not a specifier here.
+            frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
+        }
     }
     else if (kind == PARSE_KIND_EXTENSION)
     {
@@ -5484,6 +5498,8 @@ struct ParseScalarResult
     bool out_of_memory;
     // A typedef name was declared again at file scope as an ordinary identifier, which changes how what follows parses.
     bool retyped;
+    // An attribute-only declaration's name was looked up, which needs earlier ordinary file-scope declarations too.
+    bool attribute_lookup;
 };
 
 // Parses tokens [0, count) into `tree`, whose arrays have `count` entries, with the scratch arena's memory for its
@@ -5581,6 +5597,7 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         }
         parse_scalar_restore(&parser, 0);
         result.errors = parser.errors;
+        result.attribute_lookup = parser.attribute_lookup;
         *diagnostic_count = parser.diagnostic_count;
     }
     arena_pop_to(scratch, mark);
@@ -8258,7 +8275,7 @@ struct ParseFallback
     uint32_t items;
     uint64_t tokens;
     // The scalar parser found an error in one, ran out of memory, or saw one declare a typedef name again as an ordinary
-    // identifier: the whole unit goes to the scalar parser.
+    // identifier, or needed earlier ordinary names after an attribute prefix: the whole unit goes to the scalar parser.
     bool errors;
 };
 
@@ -8276,9 +8293,10 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, 
     uint32_t diagnostic_count = 0;
     const ParseScalarResult parse = parse_scalar(input->kinds + begin, input->names + begin, input->flags + begin, end + 1 - begin, input->language, meanings, &tree,
                                                  input->scratch, input->diagnostics, input->diagnostic_capacity, &diagnostic_count);
-    // A declaration that made a file-scope typedef name an ordinary one changes how the rest of the unit parses, which
-    // the kernels' type names don't know: the whole unit goes to the scalar parser.
-    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped;
+    // A declaration that made a file-scope typedef name ordinary changes how the rest of the unit parses. An ordinary
+    // name after a GNU attribute prefix also needs earlier declarations, which the range imports only for typedefs.
+    // Both need the whole unit, even in C89 where an unbound name's implicit int is not an error.
+    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped || parse.attribute_lookup;
     for (uint32_t j = begin; j <= end; j += 1)
     {
         kernels->parents[j] = kernels->parents[j] == BUSTER_PARSE_ROOT ? BUSTER_PARSE_ROOT : kernels->parents[j] + begin;
@@ -8348,7 +8366,7 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
     }
     for (uint32_t i = 0; i < visible; i += 1)
     {
-        input->meanings->meanings[kernels->typedef_log[i]] = PARSE_MEANING_ORDINARY;
+        input->meanings->meanings[kernels->typedef_log[i]] = PARSE_MEANING_UNBOUND;
     }
     return result;
 }
@@ -12782,7 +12800,7 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
     }
 }
 
-// The meaning of every name the unit may use, ordinary but for clang's predeclared typedef names.
+// The meaning of every name the unit may use, unbound but for clang's predeclared typedef names.
 static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 {
     bool result = true;
@@ -12800,7 +12818,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     result = result && parser->meanings.meanings != 0;
     if (result)
     {
-        memset(parser->meanings.meanings, PARSE_MEANING_ORDINARY, capacity);
+        memset(parser->meanings.meanings, PARSE_MEANING_UNBOUND, capacity);
         for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
         {
             parser->meanings.meanings[predeclared[i]] = PARSE_MEANING_TYPEDEF;

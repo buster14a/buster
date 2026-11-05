@@ -894,6 +894,19 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int x) { switch (x) { default: __attribute__((__noinline__)) } }\n", "1:69: expected statement", 0 },
     { "void f(void) { __attribute__((__always_inline__, noinline)) }\n", "1:61: expected statement", 0 },
     { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // An existing ordinary name after a declaration's GNU prefix is an expression annotation, which clang cannot
+    // read as a declarator. Unbound names keep implicit int; typedefs, statement attributes and labels keep their paths.
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", 0 },
+    { "void f(int x) { __attribute__(()) x = 1; }\n", "1:35: expected identifier or '('", 0 },
+    { "void f(void) { int x; __attribute__((unused)) x; }\n", "1:47: expected identifier or '('", 0 },
+    { "enum { x }; void f(void) { __attribute__((unused)) x; }\n", "1:52: expected identifier or '('", 0 },
+    { "void g(void); void f(void) { __attribute__(()) g(); }\n", "1:48: expected identifier or '('", 0 },
+    { "void f(void) { { int x; } __attribute__(()) x; }\n", "1:45: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(void) { __attribute__(()) x = 1; }\n", "1:34: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int x; __attribute__(()) x = 1;\n", "1:26: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "typedef int T; void f(void) { __attribute__(()) T x; }\n", "", 0 },
+    { "int x; void f(void) { __attribute__(()) x = 1; }\n", "1:41: expected identifier or '('", "c89" },
+    { "void f(void) { __attribute__(()) x = 1; }\n", "", "c89" },
     { "void f(void) { __attribute__((unused)) __extension__ int x; }\n", "1:40: expected identifier or '('", 0 },
     { "void f(void) { L: __attribute__((unused)) __extension__ int x; }\n", "1:57: expected expression", 0 },
     // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.

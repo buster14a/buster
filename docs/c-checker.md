@@ -5199,8 +5199,11 @@ change, it refused such a declaration by name.
   tree, so a label's name is the token before its colon there
   (`check_input_label_name`). The parser reports clang's errors for C23
   attributes after GNU ones and before a block's `}`. Specifiers of
-  attributes alone have no type: an implicit int's error at the declarator's
-  name, but a member's "type name requires a specifier or qualifier" after
+  attributes alone have no type: an implicit int's error at an unbound
+  declarator's name. In a block, an already-declared ordinary name after GNU
+  attributes is instead "expected identifier or '('" there, since clang
+  annotates the name as an expression before attempting the declaration.
+  A member has "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
 - **Statement attributes' handlers.** As clang's SemaStmtAttr takes them

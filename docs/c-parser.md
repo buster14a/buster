@@ -187,8 +187,14 @@ and statement syntax until their following token is known. Attributes after a
 named label or a control head permit the following statement; at an ordinary
 block boundary, Clang's recognized statement-attribute names decide the
 declaration/expression ambiguity. The scalar state machine handles these
-prefixes, and the vector validator defers them to it. Applicability and effects
-remain the checker's responsibility.
+prefixes, and the vector validator defers them to it. An ordinary name already
+declared after a declaration's GNU prefix is clang's "expected identifier or
+'('" at that name; an unbound name still permits an implicit-int declaration.
+The existing meaning byte distinguishes those names without a binding-log
+scan. A fallback range that encounters this ambiguity retries the whole unit
+to include earlier ordinary file-scope declarations, including in C89 where
+implicit int alone does not require that retry. Applicability and effects remain
+the checker's responsibility.
 
 Each frame keeps the index of the frame its declarators' names belong to and
 what a comma at its top level is, so that no token costs more for what is open

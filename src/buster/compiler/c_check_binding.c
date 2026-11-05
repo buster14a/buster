@@ -492,7 +492,7 @@ static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
         valid = parser.meanings.meanings != 0;
         if (valid)
         {
-            memset(parser.meanings.meanings, PARSE_MEANING_ORDINARY, parser.meanings.capacity);
+            memset(parser.meanings.meanings, PARSE_MEANING_UNBOUND, parser.meanings.capacity);
             for (uint32_t name = 0; name < BUSTER_PARSE_PREDECLARED_TYPEDEFS; name += 1)
             {
                 valid &= parser.predeclared[name] < parser.meanings.capacity;

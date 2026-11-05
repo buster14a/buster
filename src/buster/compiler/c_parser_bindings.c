@@ -177,7 +177,7 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
         valid = meanings != 0;
         if (valid)
         {
-            memset(meanings, PARSE_MEANING_ORDINARY, parser->meanings.capacity);
+            memset(meanings, PARSE_MEANING_UNBOUND, parser->meanings.capacity);
             for (uint32_t p = 0; p < BUSTER_PARSE_PREDECLARED_TYPEDEFS; p += 1)
             {
                 const IdentId name = parser->predeclared[p];
