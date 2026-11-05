@@ -575,8 +575,11 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
             const uint32_t* words = (const uint32_t*)(file + section->sh_offset);
             if (valid)
             {
-                const char* signature = object_view_string(view->symbol_names, view->symbol_names_size, view->symbols[section->sh_info].st_name);
-                valid = (words[0] & ~GRP_COMDAT) == 0 && signature != 0 && signature[0] != 0;
+                const Elf64_Sym* entry = &view->symbols[section->sh_info];
+                const uint64_t defining = object_view_symbol_section(view, section->sh_info);
+                valid = ELF64_ST_TYPE(entry->st_info) != STT_SECTION || (defining != 0 && defining < view->section_count);
+                const char* signature = valid ? object_view_symbol_name(view, section->sh_info) : 0;
+                valid = valid && (words[0] & ~GRP_COMDAT) == 0 && signature != 0 && signature[0] != 0;
             }
             for (uint64_t j = 1; valid && j < section->sh_size / 4; j += 1)
             {
@@ -2904,7 +2907,7 @@ static const char* object_test_section_group(const ObjectView* view, uint64_t in
             }
         }
     }
-    return group != 0 ? object_view_string(view->symbol_names, view->symbol_names_size, view->symbols[view->sections[group].sh_info].st_name) : 0;
+    return group != 0 ? object_view_symbol_name(view, view->sections[group].sh_info) : 0;
 }
 
 // Where a relocation's symbol and addend point: the symbol's section by name (0 if undefined), its value, its name (0

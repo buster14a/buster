@@ -231,6 +231,78 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
     const AsmResult scalar_arrays = asm_assemble(array_source, test->index, (AsmOptions){0}, &test->scalar);
     const AsmResult vector_arrays = asm_assemble(array_source, test->index, (AsmOptions){.vectorized = true}, &test->vector);
     asm_test_check(test, scalar_arrays.error == 0 && vector_arrays.error == 0, "ordinary array section flags retain their entry size", vector_arrays.error);
+    static const char* const section_signatures[] = {
+        ".section foo,\"G\",@progbits,foo,comdat\n.long foo\n",
+        ".section foo,\"\",@progbits\n.section bar,\"G\",@progbits,foo,comdat\n.byte 1\n",
+        ".section bar,\"G\",@progbits,foo,comdat\n.byte 1\n.section foo,\"\",@progbits\n.byte 2\n",
+        ".section bar,\"G\",@progbits,.data,comdat\n.byte 3\n",
+        ".section foo,\"G\",@progbits,foo,comdat\n.byte 4\n",
+        ".long foo\n.section foo,\"G\",@progbits,foo,comdat\n.byte 5\n",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(section_signatures); i += 1)
+    {
+        const char* source = section_signatures[i];
+        const AsmResult assembled = asm_test_pair(test, (String8){.pointer = (char*)source, .length = strlen(source)}, 1, X86_ARCH_BASELINE);
+        if (assembled.error == 0)
+        {
+            const Object object = asm_object(&assembled, BUSTER_S8("section-signature.s"), &test->vector);
+            ObjectView view;
+            char error[256] = {0};
+            const bool opened = object.error == OBJECT_ERROR_NONE && object_view_open(&view, object.bytes, object.size, false, error, sizeof(error));
+            bool found = false;
+            for (uint64_t j = 1; opened && j < view.section_count; j += 1)
+            {
+                const Elf64_Shdr* group = &view.sections[j];
+                if (group->sh_type == SHT_GROUP)
+                {
+                    const Elf64_Sym* signature = &view.symbols[group->sh_info];
+                    const char* name = object_view_symbol_name(&view, group->sh_info);
+                    found = ELF64_ST_TYPE(signature->st_info) == STT_SECTION && name != 0 && strcmp(name, i == 3 ? ".data" : "foo") == 0;
+                }
+            }
+            asm_test_check(test, opened && found, "group uses a named section symbol as signature", error);
+            Link broken = assembled.link;
+            LinkGroup* groups = BUSTER_ARENA_PUSH_ARRAY(&test->vector, LinkGroup, broken.groups.count);
+            if (groups != 0)
+            {
+                memcpy(groups, broken.groups.data, broken.groups.count * sizeof(LinkGroup));
+                broken.groups.data = groups;
+                groups[1].signature_atom = broken.atoms.count;
+                asm_test_check(test, !link_groups_valid(&broken), "section signature atom out of range is rejected", 0);
+                if (broken.symbols.count > 1)
+                {
+                    groups[1] = assembled.link.groups.data[1];
+                    groups[1].signature = 1;
+                    asm_test_check(test, !link_groups_valid(&broken), "conflicting section and symbol signatures are rejected", 0);
+                    groups[1] = assembled.link.groups.data[1];
+                    if (broken.symbols.atom[1] == groups[1].signature_atom)
+                    {
+                        uint8_t* flags = BUSTER_ARENA_PUSH_ARRAY(&test->vector, uint8_t, broken.symbols.count);
+                        if (flags != 0)
+                        {
+                            memcpy(flags, broken.symbols.flags, broken.symbols.count);
+                            flags[1] = (flags[1] & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON;
+                            broken.symbols.flags = flags;
+                            ObjectUnits units;
+                            asm_test_check(test, !object_prepare(&units, &broken, 1, &test->vector), "a COMMON atom cannot be a section signature", 0);
+                        }
+                        else
+                        {
+                            asm_test_check(test, false, "section signature common mutation scratch", "arena exhausted");
+                        }
+                    }
+                }
+            }
+            else
+            {
+                asm_test_check(test, false, "section signature mutation scratch", "arena exhausted");
+            }
+        }
+        if (cross_check)
+        {
+            asm_test_oracle(test, source, directory, X86_ARCH_BASELINE);
+        }
+    }
     asm_test_group_metadata(test);
     asm_test_pair(test, (String8){.pointer = (char*)asm_test_group_signatures, .length = sizeof(asm_test_group_signatures) - 1}, 1, X86_ARCH_BASELINE);
     static const char* const rejected[] = {
@@ -249,9 +321,8 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
         ".section foo,\"G\",@progbits,g,comdat\n.comm foo,8,8\n",
         ".section foo,\"G\",@progbits,g,comdat\n.lcomm foo,8\n",
         ".section foo,\"G\",@progbits,g,comdat\n.set foo,1\n",
-        ".section foo,\"G\",@progbits,foo,comdat\n.long foo\n",
-        ".section foo,\"\",@progbits\n.section bar,\"G\",@progbits,foo,comdat\n",
-        ".section bar,\"G\",@progbits,foo,comdat\n.section foo,\"\",@progbits\n",
+        ".section foo,\"G\",@progbits,foo,comdat\n.weak foo\n",
+        ".section foo,\"G\",@progbits,g,comdat\n.section foo,\"\",@progbits\n.section bar,\"G\",@progbits,foo,comdat\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {

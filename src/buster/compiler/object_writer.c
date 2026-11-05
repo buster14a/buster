@@ -568,6 +568,12 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
             }
         }
     }
+    // A COMMON atom has no section in this object, so it cannot supply an STT_SECTION group signature.
+    for (uint32_t g = 1; prepared && commons != 0 && g < link->groups.count; g += 1)
+    {
+        const AtomId atom = link->groups.data[g].signature_atom;
+        prepared = atom == 0 || commons[atom] == 0;
+    }
     if (prepared)
     {
         // Atoms by unit and class: count each key's atoms after its entry, add up, then place them in id order.
@@ -1192,6 +1198,17 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
         const LinkGroup group = link->groups.data[g];
         if (group.unit == builder->unit)
         {
+            if (group.signature_atom != 0)
+            {
+                ObjectSection* section = &sections[units->atom_section[group.signature_atom]];
+                const ObjectAtomSection* descriptor = section->explicit_section;
+                const char* section_name = descriptor != 0 ? descriptor->name.pointer : object_class_sections[section->class].name;
+                const uint64_t section_length = descriptor != 0 ? descriptor->name.length : strlen(section_name);
+                result = !(descriptor == 0 && builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT) &&
+                         section_length == link->names.length[group.name] && memcmp(section_name, link->names.bytes[group.name], section_length) == 0;
+                section->symbol = 1;
+                continue;
+            }
             const SymbolId target = group.signature;
             const uint64_t info = target != 0 ? symbol_info[target] : 0;
             const uint32_t code = (uint32_t)info;
@@ -1577,8 +1594,13 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
             if (placed->index != 0)
             {
                 const SymbolId signature = placed->signature;
+                const AtomId signature_atom = builder->link->groups.data[g].signature_atom;
                 uint64_t symbol = synthetic;
-                if (signature == 0)
+                if (signature_atom != 0)
+                {
+                    symbol = builder->sections[builder->units->atom_section[signature_atom]].symbol;
+                }
+                else if (signature == 0)
                 {
                     synthetic += 1;
                 }
@@ -2038,7 +2060,7 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
     {
         const LinkGroup group = link->groups.data[g];
         const ObjectGroup placed = builder->groups[g];
-        if (placed.index != 0 && placed.signature == 0)
+        if (placed.index != 0 && placed.signature == 0 && group.signature_atom == 0)
         {
             entries[placed.symbol] = (Elf64_Sym){
                 .st_name = (uint32_t)name,

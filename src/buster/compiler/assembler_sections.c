@@ -246,11 +246,6 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 {
                     asm_fail(parser, location, "expected section group signature");
                 }
-                else if ((signature_name.length == name.length && memcmp(signature_name.pointer, name.pointer, name.length) == 0) ||
-                         (parser->section_name_slots != 0 ? asm_find_latest_section(parser, signature_name) : asm_find_section(parser, signature_name, 0)) != 0)
-                {
-                    asm_fail(parser, location, "section group signatures that name sections are not supported");
-                }
                 else
                 {
                     parser->at += 1;
@@ -357,6 +352,20 @@ static void asm_object_groups(AsmParser* parser)
     Link* link = &parser->result.link;
     if (parser->group_count != 0 && parser->result.error == 0 && link->error == LINK_ERROR_NONE)
     {
+        // A section used only as a signature still needs an atom, including an untouched default section.
+        for (uint32_t i = 1; i < parser->symbol_count && parser->result.error == 0; i += 1)
+        {
+            const AsmSymbol* symbol = &parser->symbols[i];
+            if (symbol->group != 0)
+            {
+                const uint32_t section = parser->section_name_slots != 0 ? asm_find_latest_section(parser, symbol->name) : asm_find_section(parser, symbol->name, 0);
+                if (section != 0 && parser->sections[section].atom == 0)
+                {
+                    AsmSection* target = &parser->sections[section];
+                    target->atom = link_add_atom(link, target->class, target->alignment, 0, 0, 0);
+                }
+            }
+        }
         const uint32_t count = parser->group_count + 1;
         LinkGroup* groups = BUSTER_ARENA_PUSH_ARRAY(parser->arena, LinkGroup, count);
         uint32_t* atoms = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, link->atoms.count);
@@ -377,11 +386,18 @@ static void asm_object_groups(AsmParser* parser)
                     {
                         asm_fail(parser, symbol->location, "unsupported section group signature definition");
                     }
+                    const uint32_t section = parser->section_name_slots != 0 ? asm_find_latest_section(parser, symbol->name) : asm_find_section(parser, symbol->name, 0);
+                    const bool section_signature = section != 0;
+                    if (section_signature && (parser->sections[section].name_ambiguous || symbol->explicit_binding || symbol->has_size || symbol->flags != 0))
+                    {
+                        asm_fail(parser, symbol->location, "ambiguous or attributed section group signature");
+                    }
                     const NameId name = symbol->link != 0 ? link->symbols.name[symbol->link] :
                                         link_add_name(link, (const uint8_t*)symbol->name.pointer, symbol->name.length);
                     groups[symbol->group] = (LinkGroup){
                         .name = name,
-                        .signature = symbol->link,
+                        .signature = section_signature ? 0 : symbol->link,
+                        .signature_atom = section_signature ? parser->sections[section].atom : 0,
                         .flags = symbol->group_flags,
                     };
                 }

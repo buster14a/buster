@@ -926,11 +926,7 @@ static void asm_bind_forward_section(AsmParser* parser, String8 name, uint32_t s
     if (id != 0)
     {
         AsmSymbol* symbol = &parser->symbols[id];
-        if (symbol->group != 0)
-        {
-            asm_fail(parser, symbol->location, "section group signatures that name sections are not supported");
-        }
-        else if ((symbol->defined && !symbol->absolute && !symbol->alias) || symbol->common != 0)
+        if ((symbol->defined && !symbol->absolute && !symbol->alias) || symbol->common != 0)
         {
             asm_fail(parser, symbol->location, "section name already defined as a symbol");
         }

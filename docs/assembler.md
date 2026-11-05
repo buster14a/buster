@@ -315,9 +315,9 @@ Sections with the same name in different groups, and an ungrouped section of
 that name, remain distinct. Reopening one preserves its group and attributes;
 `.pushsection`, `.popsection` and `.previous` retain the full section identity.
 The same path handles executable `"axG"`, mergeable `"aMSG"` and TLS zero-fill
-groups. Other linkage spellings, changes to an existing group's flags, and group
-signatures that name sections are diagnosed. The last case needs the writer to
-use an ELF section symbol as the group signature. Bare section-name expressions
+groups. A uniquely named section can itself be a group signature; its section
+symbol is used. Attributed section signatures, other linkage spellings and changes
+to an existing group's flags are diagnosed. Bare section-name expressions
 are diagnosed once multiple section identities have that name: GNU as versions
 2.46 and 2.47 resolve those references differently.
 
@@ -580,8 +580,9 @@ counts members and relocation members, then places all `SHT_GROUP` sections
 before their members. Each member and its relocation section has `SHF_GROUP`.
 The group's `sh_link` names the symbol table and `sh_info` names its signature.
 
-A group-only signature is a local NOTYPE symbol in the `.group` section. An
-ordinary global, referenced undefined or defined symbol retains its identity.
+A group-only signature is a local NOTYPE symbol in the `.group` section. A
+section-name signature uses that section's local STT_SECTION symbol. An ordinary
+global, referenced undefined or defined symbol retains its identity.
 As GNU as does, an unused weak signature, or a temporary local definition that
 normal symbol lowering elides, instead receives the synthetic group-local
 signature. A temporary definition needed by a relocation remains its original

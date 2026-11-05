@@ -486,8 +486,9 @@ struct LinkPriorities
 
 // Optional immutable section groups, published after the producer has built its atoms and symbols. Group 0 and
 // atom_groups[0] are null. Every other group belongs to one unit, and its atoms share its COMDAT selection. An absent
-// signature symbol (signature == 0) asks the object writer for a local NOTYPE symbol in the group's own section;
-// otherwise signature is an ordinary Link symbol, including an explicitly global undefined signature.
+// signature symbol (signature == 0 and signature_atom == 0) asks the object writer for a local NOTYPE symbol in
+// the group's own section. Otherwise signature is an ordinary Link symbol, or signature_atom identifies the section
+// whose STT_SECTION symbol is the signature. At most one of the two can be nonzero.
 #define BUSTER_LINK_GROUP_COMDAT 1u
 
 typedef struct LinkGroup LinkGroup;
@@ -495,6 +496,7 @@ struct LinkGroup
 {
     NameId name;
     SymbolId signature;
+    AtomId signature_atom;
     uint32_t unit;
     uint32_t flags;
 };
@@ -1434,12 +1436,14 @@ static bool link_groups_valid(const Link* link)
                  groups.count > 1 && groups.data != 0 && groups.atom_groups != 0 && groups.atom_count == link->atoms.count;
     if (valid && groups.count != 0)
     {
-        valid = groups.atom_groups[0] == 0 && groups.data[0].name == 0 && groups.data[0].signature == 0 && groups.data[0].unit == 0 && groups.data[0].flags == 0;
+        valid = groups.atom_groups[0] == 0 && groups.data[0].name == 0 && groups.data[0].signature == 0 && groups.data[0].signature_atom == 0 && groups.data[0].unit == 0 && groups.data[0].flags == 0;
     }
     for (uint32_t g = 1; valid && g < groups.count; g += 1)
     {
         const LinkGroup group = groups.data[g];
-        valid = group.name != 0 && group.name < link->names.count && group.signature < link->symbols.count && (group.flags & ~BUSTER_LINK_GROUP_COMDAT) == 0;
+        valid = group.name != 0 && group.name < link->names.count && group.signature < link->symbols.count && group.signature_atom < link->atoms.count &&
+                (group.signature == 0 || group.signature_atom == 0) && (group.flags & ~BUSTER_LINK_GROUP_COMDAT) == 0 &&
+                (group.signature_atom == 0 || link->atoms.unit[group.signature_atom] == group.unit);
         if (valid)
         {
             valid = link->names.length[group.name] != 0;
