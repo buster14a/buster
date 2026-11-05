@@ -1,0 +1,84 @@
+name: Issue 1447 continuation qualification
+on:
+  push:
+    branches: [codex/issue-1447-continuation-validation]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang
+        run: bash tools/ci/setup-hosted.sh
+      - name: Record Clang diagnostics
+        run: |
+          mkdir -p build/issue1447-continuation
+          for probe in $(seq 1 29); do
+            standard=gnu23
+            if [ "$probe" -ge 20 ] && [ "$probe" -le 23 ]; then standard=gnu17; fi
+            for policy in plain error; do
+              flags=()
+              if [ "$policy" = error ]; then flags=(-Werror); fi
+              for mode in clang; do
+                program=clang
+                extra=()
+                if [ "$mode" != clang ]; then program=build/compiler; fi
+                if [ "$mode" = scalar ]; then extra=(--scalar); fi
+                printf '\nPROBE %s %s %s\n' "$probe" "$policy" "$mode"
+                set +e
+                "$program" -std="$standard" -fsyntax-only -fno-color-diagnostics -fno-caret-diagnostics -fdiagnostics-show-option "${flags[@]}" "${extra[@]}" -DCASE="$probe" tools/issue1447-continuation-probes.c > "build/issue1447-continuation/$probe-$policy-$mode.log" 2>&1
+                status=$?
+                set -e
+                cat "build/issue1447-continuation/$probe-$policy-$mode.log"
+                printf 'STATUS %s\n' "$status"
+              done
+            done
+          done
+  comparison:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build diagnostic snapshot
+        run: ./build.sh --config Release
+      - name: Compare source diagnostics
+        run: |
+          mkdir -p build/issue1447-continuation
+          for probe in $(seq 1 29); do
+            standard=gnu23
+            if [ "$probe" -ge 20 ] && [ "$probe" -le 23 ]; then standard=gnu17; fi
+            for policy in plain error; do
+              flags=()
+              if [ "$policy" = error ]; then flags=(-Werror); fi
+              for mode in clang default scalar; do
+                program=clang
+                extra=()
+                if [ "$mode" != clang ]; then program=build/compiler; fi
+                if [ "$mode" = scalar ]; then extra=(--scalar); fi
+                printf '\nPROBE %s %s %s\n' "$probe" "$policy" "$mode"
+                set +e
+                "$program" -std="$standard" -fsyntax-only -fno-color-diagnostics -fno-caret-diagnostics -fdiagnostics-show-option "${flags[@]}" "${extra[@]}" -DCASE="$probe" tools/issue1447-continuation-probes.c > "build/issue1447-continuation/$probe-$policy-$mode.log" 2>&1
+                status=$?
+                set -e
+                cat "build/issue1447-continuation/$probe-$policy-$mode.log"
+                printf 'STATUS %s\n' "$status"
+              done
+            done
+          done
+      - name: Keep comparison diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue1447-continuation-probes
+          path: build/issue1447-continuation
