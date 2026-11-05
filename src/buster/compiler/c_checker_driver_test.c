@@ -6748,6 +6748,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
 #include "c_check_symbol_driver_test.c"
+#include "c_check_symbol_pragma_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
 #include "c_check_attribute_effects_driver_test.c"
@@ -7993,6 +7994,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_symbols(&test, clang, executable, directory);
+                check_test_driver_symbol_pragmas(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
