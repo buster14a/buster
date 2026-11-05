@@ -1,37 +1,29 @@
-name: Issue 1447 continuation qualification
+name: Issue 1447 pragma oracles
 on:
   push:
-    branches: [codex/issue-1447-continuation-validation]
+    branches: [codex/issue-1447-pragma-oracles-01a1ad8e]
 permissions:
   contents: read
 jobs:
-  combined-correctness:
+  ms-struct-oracle:
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_ORACLE_CACHE: check
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 618fc926a14b7ff8e5c65239f811cac1df28e602
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Build combined revision
-        run: ./build.sh --config Release --jobs 4
-      - name: Check parser
-        if: success() || failure()
-        run: build/compiler test-parser
-      - name: Check types
-        if: success() || failure()
-        run: build/compiler test-types
-      - name: Check binding and input paths
-        if: success() || failure()
-        run: build/compiler test-checker --part 1/4
-      - name: Check complete driver diagnostics and emission
-        if: success() || failure()
-        run: build/compiler test-checker-driver --executable ./build/compiler
-      - name: Check translation units
-        if: success() || failure()
-        run: build/compiler test-check-units
+      - name: Probe Microsoft record layout
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          for case in {1..44}; do
+            echo "LAYOUT CASE=$case"
+            clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics -DCASE="$case" tools/issue1447-ms-struct.c -o "$RUNNER_TEMP/ms-probe" 2>&1
+            status=$?
+            echo "COMPILE_STATUS=$status"
+            if [ "$status" = 0 ]; then "$RUNNER_TEMP/ms-probe"; echo "RUN_STATUS=$?"; fi
+          done
+          exit 0
