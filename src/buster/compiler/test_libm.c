@@ -98,6 +98,7 @@ static TestHostSymbol test_host_symbols[] = {
     BUSTER_TEST_HOST_SYMBOL(atol),
     BUSTER_TEST_HOST_SYMBOL(abs),
     BUSTER_TEST_HOST_SYMBOL(labs),
+    BUSTER_TEST_HOST_SYMBOL(div),
     BUSTER_TEST_HOST_SYMBOL(exit),
     BUSTER_TEST_HOST_SYMBOL(abort),
     BUSTER_TEST_HOST_SYMBOL(qsort),

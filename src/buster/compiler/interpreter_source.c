@@ -119,7 +119,8 @@ static InterpreterResult interpreter_source_run(const IrSourceFile* files, uint3
                 spelling[link->names.length[name]] = 0;
                 void* native = dlsym(RTLD_DEFAULT, spelling);
                 native = native != 0 ? native : test_libm(spelling);
-                if (native == 0)
+                // A static executable must use its own host table; loading libgcc_s would bring a second libc.
+                if (native == 0 && !BUSTER_HOST_STATIC_EXECUTABLE)
                 {
                     gcc_s = gcc_s != 0 ? gcc_s : dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_LOCAL);
                     native = gcc_s != 0 ? dlsym(gcc_s, spelling) : 0;
