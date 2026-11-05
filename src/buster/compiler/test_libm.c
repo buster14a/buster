@@ -38,6 +38,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -149,7 +150,17 @@ static TestHostSymbol test_host_symbols[] = {
     BUSTER_TEST_HOST_SYMBOL(fmemopen),
     BUSTER_TEST_HOST_SYMBOL(open_memstream),
     BUSTER_TEST_HOST_SYMBOL(fileno),
-    // The process's identity, which tools/ci/correctness.tests binds.
+    // The kernel's file descriptors, through this C library's calls, whose errno is the process's (test-ssa-source's
+    // self-test closes them all), and the process's identity, which tools/ci/correctness.tests binds.
+    BUSTER_TEST_HOST_SYMBOL(open),
+    BUSTER_TEST_HOST_SYMBOL(close),
+    BUSTER_TEST_HOST_SYMBOL(read),
+    BUSTER_TEST_HOST_SYMBOL(write),
+    BUSTER_TEST_HOST_SYMBOL(lseek),
+    BUSTER_TEST_HOST_SYMBOL(dup),
+    BUSTER_TEST_HOST_SYMBOL(dup2),
+    BUSTER_TEST_HOST_SYMBOL(pipe),
+    BUSTER_TEST_HOST_SYMBOL(unlink),
     BUSTER_TEST_HOST_SYMBOL(getpid),
     // libm's: the programs' (00174.c's sin), the math helpers' oracles (c_builtin_math_helpers_test.c), host_math.h's
     // oracles and the other tests'.
