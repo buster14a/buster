@@ -637,6 +637,173 @@ static void check_builtin_misc_test_constraints(CheckBuiltinMiscTest* test, Type
     }
 }
 
+// Whether `count` os_log items are `expected`'s, field by field.
+static bool check_builtin_misc_test_os_log_same(const CheckOSLogItem* items, const CheckOSLogItem* expected, uint32_t count)
+{
+    bool result = true;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        result = items[i].kind == expected[i].kind && items[i].flags == expected[i].flags && items[i].source == expected[i].source &&
+                 items[i].argument == expected[i].argument && items[i].constant == expected[i].constant;
+    }
+    return result;
+}
+
+// Whether two runs of a format gave the same checks' facts.
+static bool check_builtin_misc_test_os_log_checks(const CheckOSLogFormat* a, const CheckOSLogFormat* b)
+{
+    return a->invalid_mask == b->invalid_mask && memcmp(a->taken, b->taken, sizeof(a->taken)) == 0;
+}
+
+// One format's layout in arenas of three sizes after 8 bytes already pushed: a large one, one exactly as large as its
+// items, and, where it has items, one a byte short of them. The first two hold its items right after those 8 bytes and
+// nothing past them, the same items each time (and `expected`'s, unless null). The third leaves the layout unknown, the
+// arena as it was, and the checks' facts the same.
+static void check_builtin_misc_test_os_log_arenas(CheckBuiltinMiscTest* test, const char* format, uint32_t length, uint32_t arguments,
+                                                  const CheckOSLogItem* expected, uint32_t expected_count, const char* description)
+{
+    static uint64_t storage[1024];
+    const uint64_t before = 8;
+    Arena large = { .base = (uint8_t*)storage, .length = before, .capacity = sizeof(storage) };
+    const CheckOSLogFormat first = check_os_log_format(&large, (const uint8_t*)format, length, arguments, false);
+    const uint64_t bytes = (uint64_t)first.count * sizeof(CheckOSLogItem);
+    const bool exact = first.known && !first.resource && large.length == before + bytes &&
+                       first.items == (first.count != 0 ? (CheckOSLogItem*)((uint8_t*)storage + before) : NULL);
+    check_builtin_misc_test_expect(test, exact, description);
+    check_builtin_misc_test_expect(test, expected == NULL || (first.count == expected_count && check_builtin_misc_test_os_log_same(first.items, expected, expected_count)),
+                                   description);
+    CheckOSLogItem items[64];
+    const uint32_t kept = first.count < BUSTER_ARRAY_LENGTH(items) ? first.count : (uint32_t)BUSTER_ARRAY_LENGTH(items);
+    if (kept != 0)
+    {
+        memcpy(items, first.items, kept * sizeof(CheckOSLogItem));
+    }
+    Arena fitted = { .base = (uint8_t*)storage, .length = before, .capacity = before + bytes };
+    const CheckOSLogFormat second = check_os_log_format(&fitted, (const uint8_t*)format, length, arguments, false);
+    check_builtin_misc_test_expect(test, second.known && !second.resource && second.count == first.count && fitted.length == before + bytes &&
+                                         check_builtin_misc_test_os_log_same(second.items, items, kept) && check_builtin_misc_test_os_log_checks(&first, &second),
+                                   description);
+    if (first.count != 0)
+    {
+        Arena short_arena = { .base = (uint8_t*)storage, .length = before, .capacity = before + bytes - 1 };
+        const CheckOSLogFormat third = check_os_log_format(&short_arena, (const uint8_t*)format, length, arguments, false);
+        check_builtin_misc_test_expect(test, !third.known && third.resource && third.count == 0 && third.items == NULL && short_arena.length == before &&
+                                             check_builtin_misc_test_os_log_checks(&first, &third),
+                                       description);
+    }
+}
+
+// #1329: the os_log builtins' layout (check_os_log_format) takes the arena's room for its items alone, 16 bytes each,
+// never room per percent sign: escaped ones, those past the format's NUL and specifiers of fewer items take none. Fixed
+// formats of each kind of item, their items exact; 64 KiB formats of escaped percent signs and of percent signs past a
+// NUL, in arenas of no room; and generated formats, each run in arenas of three sizes.
+static void check_builtin_misc_test_os_log(CheckBuiltinMiscTest* test)
+{
+    const struct
+    {
+        const char* format;
+        uint32_t length;
+        uint32_t arguments;
+        uint32_t count;
+        CheckOSLogItem items[4];
+    } cases[] = {
+        { "%d %s", 5, 2, 2,
+          { { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 },
+            { .kind = BUSTER_CHECK_OS_LOG_STRING, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 1 } } },
+        { "%m %% %{private}d", 17, 1, 2,
+          { { .kind = BUSTER_CHECK_OS_LOG_ERRNO, .source = BUSTER_CHECK_OS_LOG_NONE },
+            { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .flags = BUSTER_CHECK_OS_LOG_PRIVATE, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%{public, mask.ab}*.*d", 22, 3, 4,
+          { { .kind = BUSTER_CHECK_OS_LOG_MASK, .source = BUSTER_CHECK_OS_LOG_CONSTANT, .constant = 'a' | ('b' << 8) },
+            { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 },
+            { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 1 },
+            { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .flags = BUSTER_CHECK_OS_LOG_PUBLIC, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 2 } } },
+        { "%.*s", 4, 2, 2,
+          { { .kind = BUSTER_CHECK_OS_LOG_COUNT, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 },
+            { .kind = BUSTER_CHECK_OS_LOG_STRING, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 1 } } },
+        { "%{private}.16s", 14, 1, 2,
+          { { .kind = BUSTER_CHECK_OS_LOG_COUNT, .flags = BUSTER_CHECK_OS_LOG_PRIVATE, .source = BUSTER_CHECK_OS_LOG_CONSTANT, .constant = 16 },
+            { .kind = BUSTER_CHECK_OS_LOG_STRING, .flags = BUSTER_CHECK_OS_LOG_PRIVATE, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%.8P", 4, 1, 2,
+          { { .kind = BUSTER_CHECK_OS_LOG_COUNT, .source = BUSTER_CHECK_OS_LOG_CONSTANT, .constant = 8 },
+            { .kind = BUSTER_CHECK_OS_LOG_POINTER, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%P %d", 5, 2, 1, { { .kind = BUSTER_CHECK_OS_LOG_POINTER, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%d %d", 5, 1, 1, { { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%2$s %1$d", 9, 2, 2,
+          { { .kind = BUSTER_CHECK_OS_LOG_STRING, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 1 },
+            { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%% %5% %{public}% %%%%", 22, 0, 0, { { 0 } } },
+        { "\0%d%d%d%d", 9, 4, 0, { { 0 } } },
+        { "%d\0%d%d", 7, 3, 1, { { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        // A %P without its length whose positional width has no argument: the layout's pointer item alone, and no item
+        // from the checks' pass, which has no arena (#1335's review: it pushed on a null arena).
+        { "%1$*2$P", 7, 1, 1, { { .kind = BUSTER_CHECK_OS_LOG_POINTER, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%2$*3$P %1$d", 12, 2, 1, { { .kind = BUSTER_CHECK_OS_LOG_POINTER, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 1 } } },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        check_builtin_misc_test_os_log_arenas(test, cases[i].format, cases[i].length, cases[i].arguments, cases[i].items, cases[i].count,
+                                             "an os_log format's items are exact, and take exactly their room");
+    }
+    // 64 KiB formats: escaped percent signs, and percent signs past a NUL, in an arena of no room; one specifier among
+    // escaped percent signs, in an arena of exactly its item.
+    enum { LONG = 65536 };
+    static char format[LONG];
+    memset(format, '%', LONG);
+    uint64_t storage[2];
+    Arena none = { .base = (uint8_t*)storage, .capacity = 0 };
+    CheckOSLogFormat result = check_os_log_format(&none, (const uint8_t*)format, LONG, 0, false);
+    check_builtin_misc_test_expect(test, result.known && !result.resource && result.count == 0 && none.length == 0,
+                                   "64 KiB of escaped percent signs take no room");
+    format[0] = 0;
+    result = check_os_log_format(&none, (const uint8_t*)format, LONG, 0, false);
+    check_builtin_misc_test_expect(test, result.known && !result.resource && result.count == 0 && none.length == 0,
+                                   "64 KiB of percent signs past the format's NUL take no room");
+    // 16383 escaped percent signs, then %d, a NUL and %d%d...
+    memset(format, '%', LONG);
+    format[LONG / 2 - 1] = 'd';
+    format[LONG / 2] = 0;
+    for (uint32_t i = LONG / 2 + 2; i < LONG; i += 2)
+    {
+        format[i] = 'd';
+    }
+    Arena one = { .base = (uint8_t*)storage, .capacity = sizeof(CheckOSLogItem) };
+    result = check_os_log_format(&one, (const uint8_t*)format, LONG, 1, false);
+    check_builtin_misc_test_expect(test, result.known && !result.resource && result.count == 1 && one.length == sizeof(CheckOSLogItem) &&
+                                         result.items[0].kind == BUSTER_CHECK_OS_LOG_SCALAR && result.items[0].argument == 0,
+                                   "a %d among 32 KiB of escaped percent signs, with more past its NUL, takes one item's room");
+    // Generated formats of the parse's pieces, arguments and all, against arenas of three sizes.
+    static const char* const pieces[] = {
+        "%", "%%", "d", "s", "P", "m", "*", ".", ".*", "1$", "2$", "*1$", "*2$", "*4$", ".*3$", "%1$*2$P", "%3$.*1$s", "{public}",
+        "{private, mask.ab}", "{mask.}", "{sensitive,public}", "{", "}", ",", "h", "ll", "8", " ", "x", "\0", "[tt]", "@", "S",
+    };
+    uint64_t state = 0x9e3779b97f4a7c15u;
+    for (uint32_t i = 0; i < 4096; i += 1)
+    {
+        char generated[96];
+        uint32_t length = 0;
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        const uint32_t count = (uint32_t)(state % 16);
+        for (uint32_t j = 0; j < count; j += 1)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            const char* piece = pieces[state % BUSTER_ARRAY_LENGTH(pieces)];
+            const uint32_t piece_length = *piece == 0 ? 1 : (uint32_t)strlen(piece);
+            if (length + piece_length <= sizeof(generated))
+            {
+                memcpy(generated + length, piece, piece_length);
+                length += piece_length;
+            }
+        }
+        check_builtin_misc_test_os_log_arenas(test, generated, length, (uint32_t)(state >> 32) % 6, NULL, 0,
+                                             "a generated os_log format's items take exactly their room, the same in any arena that holds them");
+    }
+}
+
 static void check_builtin_misc_test_pages(CheckBuiltinMiscTest* test, TypeTable* table)
 {
     enum { MAXIMUM = 17 };
@@ -857,6 +1024,7 @@ static __attribute__((unused)) int run_check_builtin_misc_tests(int argc, char**
             check_builtin_misc_test_constraints(&test, &types.table);
             check_builtin_misc_test_pages(&test, &types.table);
         }
+        check_builtin_misc_test_os_log(&test);
         check_test_types_close(&types);
         check_builtin_misc_test_clang(&test, clang);
     }

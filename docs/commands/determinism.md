@@ -29,11 +29,21 @@ order's, and `test-c-testsuite` each scalar build with its vector one;
 `test-checker-corpus --id-order N` checks a corpus so. The 9700X workflow runs
 these checks as part of the stage commands.
 
+Multi-file commands also accept `--id-order N`. `test-check-units` compares
+changed-ID objects, executables and debug information with their original
+references, and checks the first fatal unit's diagnostic cutoff at 1/2/3/8
+lanes, including notes and earlier jobs. It also compares the sequential
+multi-input `-E` driver's text and diagnostics with each input's standalone
+bytes, through both kernels and marker modes. `tests/driver/multicore.c`, in
+the same correctness inventory, perturbs IDs for single- and multi-file
+mixed-tier compilations at every available lane count through eight and
+requires actual team receipts.
+
 `./build/compiler benchmark-diagnostics [--only scalar|selected]
 [--after-scalar MS]` compares the
 ordering paths with 21 interleaved samples, in ns/key and invariant-TSC
 ticks/key. Run both isolated `--only selected` and
 `--only selected --after-scalar 100`, across several processes pinned to CPU 2
 under the host's lock. [The determinism guide](../../docs/determinism.md) specifies
-the caller's source-order and lifetime contracts and the integration still
-required by #151 and #152.
+the caller's source-order and lifetime contracts and the integrated source
+driver checks for #151 and #152.

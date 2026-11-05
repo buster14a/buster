@@ -9,7 +9,9 @@
 // isn't baked (a PIE, or one linked without build.sh) builds them as before. BUSTER_BAKED is for the state main.c's
 // units share (x86_64_encoder.c's BUSTER_X86_SHARED), and BUSTER_BAKED_UNIT for a module's static state, which is
 // baked only in the checker's unit, the C driver's: another unit's copy (the backend's tests') would only add its bytes
-// to the file. A unit of its own (a benchmark's) keeps its copies in .bss.
+// to the file. BUSTER_BAKED_FRONTEND is for the static state of a module whose home is the frontend's unit (main.c),
+// which every unit's calls reach through its entry points: the parser's tables (c_parser.c), baked in that unit alone.
+// A unit of its own (a benchmark's) keeps its copies in .bss.
 #ifndef BUSTER_BAKED_H
 #define BUSTER_BAKED_H
 #if defined(BUSTER_UNIT)
@@ -21,5 +23,10 @@
 #define BUSTER_BAKED_UNIT BUSTER_BAKED
 #else
 #define BUSTER_BAKED_UNIT
+#endif
+#if defined(BUSTER_UNIT) && BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+#define BUSTER_BAKED_FRONTEND BUSTER_BAKED
+#else
+#define BUSTER_BAKED_FRONTEND
 #endif
 #endif

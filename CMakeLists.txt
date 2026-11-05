@@ -51,7 +51,7 @@ include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
-message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}")
+message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}")
 if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
     message(FATAL_ERROR "buster: BUSTER_PGO builds the Release configuration alone; configure with CMAKE_CONFIGURATION_TYPES=Release")
 endif()
@@ -197,10 +197,13 @@ endforeach()
 # With BUSTER_HOST_RUNTIME, CI's emulated old CPU's runtime, linked explicitly: the host's startup objects and loader
 # can require a newer ISA even with -march=x86-64.
 # The link's arguments before the objects and after them, without BUSTER_HOST_RUNTIME, which buster_link adds itself:
-# into `before` and `after`.
+# into `before` and `after`. libm is a needed library only where the link references it (#652): the compiler's own
+# floating operations are host_math.h's and its tests' libm calls go through dlopen (test_libm.c), so that a compile
+# doesn't load libm.so.6 at its start, 24 microseconds and 12 page faults on the 9700X; a build whose code still calls
+# libm (the baseline host's rounding functions, a fuzzing runtime) takes it.
 function(buster_link_arguments before after)
     set(${before} ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags} PARENT_SCOPE)
-    set(${after} ${buster_fuzz_libraries} -lm -ldl PARENT_SCOPE)
+    set(${after} ${buster_fuzz_libraries} -Wl,--push-state,--as-needed -lm -Wl,--pop-state -ldl PARENT_SCOPE)
 endfunction()
 
 function(buster_link target)
@@ -213,8 +216,8 @@ function(buster_link target)
         set(support "${BUSTER_HOST_RUNTIME}/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a")
         target_link_options(${target} PRIVATE ${buster_link_mode} -nostdlib ${buster_linker_flags}
             "${library}/crt1.o" "${library}/crti.o")
-        target_link_libraries(${target} PRIVATE "${library}/libm.so.6" "${library}/libc.so.6" "${support}"
-            "${library}/crtn.o")
+        target_link_libraries(${target} PRIVATE -Wl,--push-state,--as-needed "${library}/libm.so.6" -Wl,--pop-state
+            "${library}/libc.so.6" "${support}" "${library}/crtn.o")
     else()
         buster_link_arguments(before after)
         target_link_options(${target} PRIVATE ${before})
@@ -223,12 +226,13 @@ function(buster_link target)
 endfunction()
 
 # The post-link step (cmake/BusterPostLink.cmake) of `target`'s linked file into `output`: the backend's tables baked
-# in, and the stack canary's absence checked. ARGUMENTS go to the step, which also depends on DEPENDS.
+# in, and the stack canary's absence checked in OBJECTS, the objects it links of the compiler's own code. ARGUMENTS go
+# to the step, which also depends on DEPENDS.
 function(buster_post_link target output)
-    cmake_parse_arguments(PARSE_ARGV 2 post "" "" "ARGUMENTS;DEPENDS")
+    cmake_parse_arguments(PARSE_ARGV 2 post "" "" "ARGUMENTS;DEPENDS;OBJECTS")
     add_custom_command(OUTPUT "${output}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_FILE:${target}>" "-DOUTPUT=${output}" "-DBAKE=${buster_bake}"
-            "-DNM=${BUSTER_NM}" ${post_ARGUMENTS} -P "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake"
+            "-DNM=${BUSTER_NM}" "-DOBJECTS=${post_OBJECTS}" ${post_ARGUMENTS} -P "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake"
         DEPENDS ${target} "${CMAKE_SOURCE_DIR}/cmake/BusterPostLink.cmake" ${post_DEPENDS}
         COMMENT "Baking and checking ${target}'s executable"
         VERBATIM)
@@ -331,7 +335,7 @@ set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
 add_executable(compiler_link ${objects} ${lexer_objects})
 set_target_properties(compiler_link PROPERTIES OUTPUT_NAME compiler.link)
 buster_link(compiler_link)
-buster_post_link(compiler_link "${compiler}")
+buster_post_link(compiler_link "${compiler}" OBJECTS ${objects} ${lexer_objects})
 add_custom_target(compiler ALL DEPENDS "${compiler}")
 
 # build.sh shifts: the same objects linked again with BUSTER_SHIFTS' bytes of padding in .text before
@@ -369,10 +373,10 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
         buster_link(compiler_shift_${bytes})
         set(output "${directory}/compiler-${bytes}")
         if(bytes EQUAL 0)
-            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1)
+            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 OBJECTS ${shift_objects})
         else()
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
-                DEPENDS "${compiler}")
+                DEPENDS "${compiler}" OBJECTS ${shift_objects})
         endif()
         list(APPEND shifted "${output}")
     endforeach()

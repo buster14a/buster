@@ -23,6 +23,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15); and
   the frame's address (`FRAME_ADDRESS`, #148's `__builtin_frame_address(0)`), its frame pointer.
+- **Stack-clash protection** (#177's `-fstack-clash-protection`, `Tier0Function.probe_stack`): a reservation of a page
+  or more, a realigned frame's and each `ALLOCA` touch every page below rsp before rsp passes it, with Tier 1's records
+  ([the frame guide](tier1-frame.md)'s "Stack-clash protection on request").
 - **Tail calls** (#147's musttail): a `TAIL_CALL` calls its row as the function's return, its arguments where the
   function's own arrived, the frame released before a jump ("Tail calls", below).
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
@@ -137,8 +140,8 @@ The ABI's locations come from `abi_assign`, which the front end runs once per un
 vectorized across the unit that way, and Tier 0 needs no type table. They name the convention's registers alone, and
 Tier 0 takes no others: a call's arguments and a function's parameters in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7,
 none in a register another argument of the call or another parameter takes, and results in rax, rdx, xmm0 and xmm1.
-The emitters rely on it: the prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters
-move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
+The emitters rely on it: the prologue sets a frame pointer's rbp, probes through r11 (#177), and copies through rax and
+xmm15 before the parameters move, and doesn't save a register a parameter stays in; a call sets al and calls through r11; the epilogue loads the
 result before it pops the callee-saved registers.
 
 **Expressions** are in postorder, so each entry's last operand is the entry before it, and both paths read that
@@ -499,9 +502,11 @@ A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of 
 them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
 its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
 does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
-and an element of one whose elements are bytes is read and written through that address. What would compute with one
-(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
-builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+and an element of one whose elements are bytes is read and written through that address. What computes with one writes
+its result into a frame object of its type, whose address is the result (`c_check_program_transport.c`, docs/c-lowering.md's
+"Computing with transport vectors"): ordinary entries an element at a time for a vector of 1 or 2 bytes, the ordinary
+vectors' `X86` rows a register's width at a time for one of more than 64 bytes, and integer or vector-row bitwise
+operations on a `bool` vector's bytes. What that doesn't take is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
 lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
 builtins on vectors, as on structs, call libatomic's generic functions.
 

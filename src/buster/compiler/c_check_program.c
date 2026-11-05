@@ -141,6 +141,12 @@ struct CheckProgramOptions
     // The blocks' objects' lifetimes (#177, c_check_program_lifetime.c): CHECK_CONTROL_LIFETIME entries, which the
     // lowering turns into its functions' lifetime events, for Tier 1's frame (the C driver's --tier1).
     bool lifetimes;
+    // The frame pointer the code keeps (#177, predefines_frame_pointer's BUSTER_PREDEFINES_FRAME_POINTER_*, which
+    // check_request_program_options takes from the predefines): every function's (Tier0Function.frame_pointer).
+    uint8_t frame_pointer;
+    // Whether the code probes the stack as it grows it (#177, -fstack-clash-protection, predefines_stack_clash): every
+    // function's (Tier0Function.probe_stack).
+    bool probe_stack;
     // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
     // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
     // statement's row and calls its helper as any function's.
@@ -275,6 +281,11 @@ struct CheckProgram
     // hold, and BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function is naked when that
     // declaration is at or before its definition, as clang takes it (check_program_asm_naked).
     uint32_t* object_naked;
+    // Per object, whether a declaration of the function has GNU's always_inline attribute (BUSTER_CHECK_PROGRAM_INLINE_ALWAYS)
+    // or noinline (BUSTER_CHECK_PROGRAM_INLINE_NEVER), not ignored; null in a unit without either. --tier1's inliner
+    // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
+    // the second: the x86 intrinsics' wrappers.
+    uint8_t* object_inline;
     // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
     // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
     // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
@@ -294,15 +305,24 @@ struct CheckProgram
     uint32_t asm_target_count;
     uint32_t object_count;
     uint32_t symbol_count;
+    // The unit's constant CFStrings' calls (#148, CheckDataPrepared's), each of which takes its canonical call's symbol
+    // (check_program_alias_number), and the object of the __CFConstantStringClassReference they point to, which is the
+    // program's own where `cfstring_class_own` (the emission names it, an undefined global).
+    const CheckDataCFString* cfstrings;
+    uint32_t cfstring_count;
+    uint32_t cfstring_class;
+    bool cfstring_class_own;
     uint32_t token;
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms and target.
+    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target, frame_pointer and probe_stack.
     bool unselected_operands;
     bool asm_helpers;
     uint32_t helper_forms;
     X86Target target;
+    uint8_t frame_pointer;
+    bool probe_stack;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
     // it runs, without the condition, when no label or case of an outer switch enters the other, as clang -O0's code
@@ -478,6 +498,11 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE 4u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS 8u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE 16u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE 32u
+// CheckProgram.object_inline's bits.
+#define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
+#define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
 // Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
@@ -497,7 +522,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
                                  BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
                              kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS :
                                  0;
-        bits |= attribute->ignored ? 0 : bit;
+        const uint32_t inlining = kind == CHECK_ATTRIBUTE_ALWAYS_INLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE : kind == CHECK_ATTRIBUTE_NOINLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining;
     }
     return bits;
 }
@@ -963,6 +989,20 @@ static bool check_control_musttail(const CheckInput* input, uint32_t token)
         high = before ? high : middle;
     }
     return low < input->musttail_count && input->musttails[low].statement == token;
+}
+
+// Whether a musttail return's value (`node`, the return's node: its conversion, then any selections) is a call of
+// __builtin_call_with_static_chain (#148), which clang's code generation makes an ordinary call of, the return after it:
+// no tail call, as for every builtin's call (c_check_musttail.c checked its signature).
+static bool check_control_static_chain(const CheckInput* input, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t value = node < graph->count && graph->ops[node] == CHECK_OP_CONVERT ? graph->operand0[node] : node;
+    for (uint32_t steps = 0; value < graph->count && steps < graph->count && graph->ops[value] == CHECK_OP_SELECT; steps += 1)
+    {
+        value = graph->operand0[value];
+    }
+    return value < graph->count && graph->ops[value] == CHECK_OP_BUILTIN_MISC && graph->members[value] == CBUILTIN_CALL_WITH_STATIC_CHAIN;
 }
 
 static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
@@ -1793,7 +1833,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         if (jump != BUSTER_CHECK_NONE)
         {
             const uint8_t kind = parser->tokens.kinds[jump];
-            if (kind == PARSE_KIND_RETURN && input->musttail_count != 0 && check_control_musttail(input, jump))
+            if (kind == PARSE_KIND_RETURN && input->musttail_count != 0 && check_control_musttail(input, jump) &&
+                !check_control_static_chain(input, input->token_nodes[jump]))
             {
                 // A musttail return's call, a tail call: no cleanup is in its scopes (c_check_musttail.c).
                 check_control_entry(writer, CHECK_CONTROL_RETURN, jump, input->token_nodes[jump], BUSTER_CHECK_CONTROL_TAIL);
@@ -2702,6 +2743,20 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         }
         else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
         {
+            if (op == CHECK_OP_BUILTIN_MISC && (graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || graph->members[node] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING))
+            {
+                // A constant CFString's call (#148), whose value is its object's address: a reference to its canonical
+                // record (check_data_cfstring_keys), whose symbol the call's object takes.
+                const CheckValue value = check_stream_value(program->stream, node);
+                const uint32_t object = value.constant_kind == CHECK_CONSTANT_ADDRESS && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 ?
+                                        check_data_cfstring_canonical(program->cfstrings, program->cfstring_count, value.object) : 0;
+                if (object != 0 && object < program->object_count && seen[object] != epoch)
+                {
+                    seen[object] = epoch;
+                    needed[object] = 1;
+                    references[reference_count++] = (uint64_t)object << 32;
+                }
+            }
             if (op == CHECK_OP_STATEMENT_VALUE)
             {
                 const uint32_t selected = program->input->expression_regions[graph->tokens[node]];
@@ -3128,6 +3183,25 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         {
             check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
         }
+        const uint32_t inlining = function_attributes & (BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE | BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE);
+        if (inlining != 0)
+        {
+            // The column comes with the unit's first such declaration, as object_naked's.
+            if (program->object_inline == 0 && room)
+            {
+                program->object_inline = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_inline != 0;
+                if (room)
+                {
+                    memset(program->object_inline, 0, (uint64_t)count + 1);
+                }
+            }
+            if (room)
+            {
+                program->object_inline[object] |= (uint8_t)(((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_ALWAYS : 0) |
+                                                            ((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_NEVER : 0));
+            }
+        }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
         {
             if (program->object_naked == 0 && room)
@@ -3414,8 +3488,17 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .token = BUSTER_CHECK_NONE,
+                               .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
+                               .probe_stack = options.probe_stack, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
+    // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
+    if (options.prepared_data != NULL)
+    {
+        program->cfstrings = options.prepared_data->cfstrings;
+        program->cfstring_count = options.prepared_data->cfstring_count;
+        program->cfstring_class = options.prepared_data->cfstring_class;
+        program->cfstring_class_own = options.prepared_data->cfstring_class_own;
+    }
     if (options.return_flow_work != NULL)
     {
         *options.return_flow_work = 0;
@@ -3868,7 +3951,13 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
         const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, &target_events) :
                                                               check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), &target_events);
-        for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
+        // The constant CFStrings' records' references, the last ones, are no roots (#148): a live record's are needed
+        // (check_program_alias_number).
+        const CheckDataPrepared* prepared = options.prepared_data;
+        const uint32_t roots = prepared != NULL && options.initializer_references == prepared->references &&
+                               prepared->cfstring_reference_first < options.initializer_reference_count ? prepared->cfstring_reference_first :
+                                                                                                          options.initializer_reference_count;
+        for (uint32_t i = 0; i < roots; i += 1)
         {
             const uint32_t object = options.initializer_references[i];
             if (object != 0 && object <= count)

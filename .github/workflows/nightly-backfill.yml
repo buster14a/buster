@@ -2,15 +2,15 @@ name: Nightly main measurements
 
 # The coordinator of main's nightly measurement backlog (#1207; docs/ci.md, "Nightly main measurements"). It harvests
 # each run's coverage record into a ledger, pins the cycle's snapshot of main, and dispatches .github/workflows/9700x.yml
-# on nightly/SHA branches: hosted qualifications before the window, then one 9700X run at a time inside 04:00-07:00
-# Europe/Madrid, the snapshot's comprehensive run first and then the oldest first-parent states that lack their
+# on nightly/SHA branches: hosted qualifications before the window, then one 9700X run at a time inside 02:00-08:00
+# Europe/Madrid (04:00-07:00 until 2026-11-05), the snapshot's comprehensive run first and then the oldest first-parent states that lack their
 # targeted measurements. It never holds the shared lock itself: each dispatched run's job takes it, and the job's own
 # timeout and window check keep it inside the window.
 #
 # GitHub starts this repository's scheduled runs hours late: in the week of 2026-10-28, 9700x.yml's 07:23 UTC run
 # started 6h22m to 9h53m late, and selfhost.yml's 05:47 UTC run 7h13m late. So the schedules run every two hours from
-# 16:07 to 04:07, then at 05:37 and 07:17: for any common delay up to about 14 hours, some run starts between 22:05 and
-# 06:35, and its `prepare` job either waits for the window (up to 5 hours 55 minutes) or is in it. A run that starts
+# 16:07 to 04:07, then at 05:37 and 08:17: for any common delay up to about 15 hours, some run starts between 20:05 and
+# 07:35, and its `prepare` job either waits for the window (up to 5 hours 55 minutes) or is in it. A run that starts
 # before 22:00 (an earlier schedule on time) pins and plans nothing: the cycle pins its snapshot from 22:00 Madrid the
 # evening before the window (tools/ci/nightly.c, BUSTER_NIGHTLY_PIN_HOUR). A later run waits in the concurrency group and, past the window,
 # reports. Until vars.BUSTER_NIGHTLY is `on`, every run is a dry run: it harvests, plans and reports, and dispatches
@@ -33,7 +33,7 @@ on:
       timezone: Europe/Madrid
     - cron: '37 5 * * *'
       timezone: Europe/Madrid
-    - cron: '17 7 * * *'
+    - cron: '17 8 * * *'
       timezone: Europe/Madrid
   workflow_dispatch:
     inputs:
@@ -43,7 +43,7 @@ on:
         options: [plan, run]
         default: plan
       override:
-        description: 'run: why to admit hardware work outside 04:00-07:00 Europe/Madrid (reported in each run); empty enforces the window'
+        description: 'run: why to admit hardware work outside 02:00-08:00 Europe/Madrid (reported in each run); empty enforces the window'
         type: string
         default: ''
   pull_request:
@@ -137,6 +137,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_OVERRIDE: ${{ inputs.override }}
           NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          # Creates and deletes the nightly/SHA branches alone, when the environment has it (docs/ci.md, "Refused branches").
+          NIGHTLY_BRANCH_TOKEN: ${{ secrets.BUSTER_NIGHTLY_BRANCH_TOKEN }}
           MODE: ${{ (github.event_name == 'schedule' && vars.BUSTER_NIGHTLY == 'on') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'run') }}
         run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode "$([ "$MODE" = true ] && echo run || echo dry-run)"
       - name: Keep the ledger and the report
@@ -157,21 +159,31 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.window == 'reachable'
     runs-on: ubuntu-26.04
-    # The window's three hours and the last run's end.
-    timeout-minutes: 200
+    # GitHub's six hours, nearly: the job starts when the window opens (02:00) and ends once no backlog run could still end
+    # by 08:00 (about 07:35, tools/ci/nightly.c, nightly_plan), whether or not a run is in flight, then publishes. The
+    # night the clocks go back, the window is 7 hours: after 345 minutes with the window still open, the job hands over
+    # to window-continued (tools/ci/nightly.sh, NIGHTLY_JOB_LIMIT), as the prepare job hands over to this one.
+    timeout-minutes: 355
     environment: nightly-ledger
     permissions:
       contents: write
       actions: write
+    outputs:
+      continue: ${{ steps.coordinate.outputs.continue }}
+      snapshot: ${{ steps.coordinate.outputs.snapshot }}
+      pending: ${{ steps.coordinate.outputs.pending }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Admit one hardware run at a time until 07:00 Europe/Madrid
+      - name: Admit one hardware run at a time until 08:00 Europe/Madrid
+        id: coordinate
         env:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_OVERRIDE: ${{ inputs.override }}
           NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          # Creates and deletes the nightly/SHA branches alone, when the environment has it (docs/ci.md, "Refused branches").
+          NIGHTLY_BRANCH_TOKEN: ${{ secrets.BUSTER_NIGHTLY_BRANCH_TOKEN }}
           # The snapshot the prepare job pinned, should its ledger not reach this job.
           NIGHTLY_SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
           # Its dispatches the runs may not show yet: without them this job plans nothing.
@@ -182,6 +194,44 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nightly-ledger-window-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly/ledger.tsv
+            ${{ runner.temp }}/nightly/report.md
+          if-no-files-found: warn
+          retention-days: 90
+
+  # The rest of a window longer than one job (the night the clocks go back): the window job's step again, from its
+  # ledger (the latest nightly-ledger-window-* artifact), its pending dispatches and the cycle's pin, with requests from
+  # 20001 so that none repeats the window job's. Two jobs hold any window: 7 hours at most against 345 minutes each.
+  window-continued:
+    name: Measure inside the window, continued
+    needs: [prepare, window]
+    if: needs.window.outputs.continue == 'reachable'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 355
+    environment: nightly-ledger
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Admit one hardware run at a time until 08:00 Europe/Madrid, continued
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_OVERRIDE: ${{ inputs.override }}
+          NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          NIGHTLY_BRANCH_TOKEN: ${{ secrets.BUSTER_NIGHTLY_BRANCH_TOKEN }}
+          NIGHTLY_SNAPSHOT: ${{ needs.window.outputs.snapshot || needs.prepare.outputs.snapshot }}
+          NIGHTLY_PENDING: ${{ needs.window.outputs.pending }}
+          NIGHTLY_SEQUENCE: '20001'
+        run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase window --mode run
+      - name: Keep the ledger and the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-ledger-window-continued-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/nightly/ledger.tsv
             ${{ runner.temp }}/nightly/report.md

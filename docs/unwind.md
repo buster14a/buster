@@ -141,7 +141,10 @@ functions. For any fixed shape's rows (a frame pointer's, tail calls', open
 ones) a row program is the fixed writer's bytes, which `test-emitted-code`
 checks for every descriptor `test-unwind` writes; so the driver's tables are the
 same bytes as before. A shape the fixed descriptor can't express, a probe loop's
-CFA in r11 between the loop's bound and its exit, is a row program only.
+CFA in r11 between the loop's bound and its exit, is a row program only: Tier 1's
+probed frames', and Tier 0's under `-fstack-clash-protection` without a frame
+pointer (#177), whose fixed reader checks the probed records and whose emission
+adds the loop's two rows (`emitted_tier0_probe_rows`).
 `unwind_rows_check` refuses rows the writer can't encode (a saved register's
 offset that isn't a multiple of the data alignment, a negative CFA offset, rsp's
 or the return address's own rule, states remembered deeper than 16), and

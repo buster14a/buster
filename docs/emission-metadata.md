@@ -434,9 +434,10 @@ Remaining beyond this change:
 - Statement-level rows and variable locations for Tier 1's code need source
   positions carried through the IR (lowering, SSA, the optimizer and selection),
   which it doesn't have.
-- The driver requests no probes (`BUSTER_TIER1_FRAME_PROBE_STACK`); the probe
-  frame's unwinding is proved and checked natively in isolation only, as the
-  issue asked, before any production option.
+- The driver requests probes (`BUSTER_TIER1_FRAME_PROBE_STACK`) under
+  `-fstack-clash-protection` (#177, [the frame guide](tier1-frame.md)'s
+  "Stack-clash protection on request"); `--verify` proves the probe frames'
+  events, and the probe loop's unwinding is checked natively in isolation.
 - The verifier's trust boundary (stores it doesn't follow, unreached code, rules
   past a form `x86_semantics.c` doesn't cover, which it leaves unproven) and its
   scalar implementation, which runs with `--verify` and in the tests alone.

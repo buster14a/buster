@@ -123,9 +123,8 @@ static void interpreter_test_copy_ranges(InterpreterTestTally* tally)
 
 static void interpreter_test_copy_dispatch(InterpreterTestTally* tally, Arena* scratch)
 {
-    // Typed frame objects (local_classes == VOID with local_sizes, the producer's struct-assignment path) are still
-    // refused by interpreter_typed_function_valid, so these fixtures use global bindings and value locals. Add a
-    // native object-local COPY fixture when #176 lands typed local objects.
+    // Global bindings and value locals exercise COPY independently of frame-object allocation. The native fixture
+    // below also transfers between frame objects, including their undefined representation padding.
     const uint64_t mark = scratch->length;
     const uint64_t capacity = (uint64_t)BUSTER_TIER0_MAX_COPY_BYTES + 2;
     uint8_t* source = arena_push(scratch, capacity, 1);
@@ -326,6 +325,8 @@ static void interpreter_test_copy_defined(InterpreterTestTally* tally, Arena* sc
 static void interpreter_test_copy_native(InterpreterTestTally* tally, Arena* scratch)
 {
     const uint8_t kinds[] = {
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_SET_LOCAL,
         BUSTER_TYPED_LOCAL_ADDRESS,
         BUSTER_TYPED_LOCAL_ADDRESS,
         BUSTER_TYPED_COPY,
@@ -333,6 +334,8 @@ static void interpreter_test_copy_native(InterpreterTestTally* tally, Arena* scr
         BUSTER_TYPED_RETURN,
     };
     const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
         BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_VOID,
@@ -340,20 +343,28 @@ static void interpreter_test_copy_native(InterpreterTestTally* tally, Arena* scr
         BUSTER_TYPED_CLASS_I64,
     };
     const uint64_t values[] = {
-        0,
         1,
-        8,
-        0,
+        2,
+        3,
+        2,
+        17,
+        3,
         0,
     };
     const uint8_t locals[] = {
         BUSTER_TYPED_CLASS_I64,
         BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_VOID,
     };
     const uint8_t flags[] = {
         BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
         BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
     };
+    const uint32_t sizes[] = { 0, 0, 17, 17 };
+    const uint8_t alignments[] = { 0, 0, 6, 7 };
     const AbiLocation parameters[] = {
         {
             .registers = {
@@ -378,6 +389,8 @@ static void interpreter_test_copy_native(InterpreterTestTally* tally, Arena* scr
         .local_classes = locals,
         .local_flags = flags,
         .local_count = BUSTER_ARRAY_LENGTH(locals),
+        .local_sizes = sizes,
+        .local_alignments = alignments,
         .parameter_count = BUSTER_ARRAY_LENGTH(parameters),
         .parameters = parameters,
         .result = {

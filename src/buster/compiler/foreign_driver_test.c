@@ -1978,12 +1978,16 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         const uint32_t threads = chosen && most > 1 && per_core < 2 ? 1 : lanes - 1;
         ForeignTestPath executable;
         ForeignTestPath counted;
+        ForeignTestPath lanes_counted;
         char preload[BUSTER_FOREIGN_TEST_PATH_BYTES + 16];
         char count_path[BUSTER_FOREIGN_TEST_PATH_BYTES + 16];
+        char lanes_path[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
         snprintf(executable, sizeof(executable), "%s/fdriver_threads_%u", directory, way);
         snprintf(counted, sizeof(counted), "%s/fdriver_threads_%u.count", directory, way);
+        snprintf(lanes_counted, sizeof(lanes_counted), "%s/fdriver_threads_%u.lanes", directory, way);
         snprintf(preload, sizeof(preload), "LD_PRELOAD=%s", library);
         snprintf(count_path, sizeof(count_path), "FDRIVER_THREADS=%s", counted);
+        snprintf(lanes_path, sizeof(lanes_path), "BUSTER_TEST_THREADS=%s", lanes_counted);
         char* arguments[16];
         uint32_t count = 0;
         arguments[count++] = (char*)"/proc/self/exe";
@@ -2018,33 +2022,41 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
             arguments[count++] = (char*)"--merge-strings";
         }
         arguments[count] = 0;
-        // The environment without its own LD_PRELOAD and FDRIVER_THREADS, and with the counter's.
+        // The environment without its own LD_PRELOAD, FDRIVER_THREADS and BUSTER_TEST_THREADS, and with the counter's
+        // and the lanes' own count's (lane_threads_report), which a static executable, where nothing is preloaded, gives
+        // alone.
         uint64_t inherited = 0;
         for (char** entry = environ; entry != 0 && *entry != 0; entry += 1)
         {
             inherited += 1;
         }
-        char** environment = BUSTER_ARENA_PUSH_ARRAY(arena, char*, inherited + 3);
+        char** environment = BUSTER_ARENA_PUSH_ARRAY(arena, char*, inherited + 4);
         uint64_t used = 0;
         for (uint64_t i = 0; environment != 0 && i < inherited; i += 1)
         {
-            if (strncmp(environ[i], "LD_PRELOAD=", strlen("LD_PRELOAD=")) != 0 && strncmp(environ[i], "FDRIVER_THREADS=", strlen("FDRIVER_THREADS=")) != 0)
+            if (strncmp(environ[i], "LD_PRELOAD=", strlen("LD_PRELOAD=")) != 0 && strncmp(environ[i], "FDRIVER_THREADS=", strlen("FDRIVER_THREADS=")) != 0 &&
+                strncmp(environ[i], "BUSTER_TEST_THREADS=", strlen("BUSTER_TEST_THREADS=")) != 0)
             {
                 environment[used] = environ[i];
                 used += 1;
             }
         }
         unlink(counted);
+        unlink(lanes_counted);
         int status = -1;
         if (environment != 0)
         {
             environment[used] = preload;
             environment[used + 1] = count_path;
-            environment[used + 2] = 0;
+            environment[used + 2] = lanes_path;
+            environment[used + 3] = 0;
             status = object_test_run_environment(arguments, output, errors, environment);
         }
         const String8 text = foreign_test_read(arena, counted);
+        const String8 lanes_text = foreign_test_read(arena, lanes_counted);
         char expected[32];
+        char lanes_expected[32];
+        snprintf(lanes_expected, sizeof(lanes_expected), "%u\n", threads);
 #if __has_feature(thread_sanitizer)
         // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
         const uint32_t detector = threads > 0 ? 1 : 0;
@@ -2052,10 +2064,15 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         const uint32_t detector = 0;
 #endif
         snprintf(expected, sizeof(expected), "%u\n", threads + detector);
-        const bool started = text.pointer != 0 && text.length == strlen(expected) && memcmp(text.pointer, expected, text.length) == 0;
-        char detail[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
-        snprintf(detail, sizeof(detail), "%s: %.*s thread(s) for %u lane(s)", executable, text.pointer != 0 ? (int)strcspn(text.pointer, "\n") : 0, text.pointer != 0 ? text.pointer : "",
-                 lanes);
+        // The preloaded counter's, but in a static executable, and the lanes' own, which doesn't see a sanitizer's thread.
+        const bool preloaded = BUSTER_HOST_STATIC_EXECUTABLE ||
+                               (text.pointer != 0 && text.length == strlen(expected) && memcmp(text.pointer, expected, text.length) == 0);
+        const bool started = preloaded && lanes_text.pointer != 0 && lanes_text.length == strlen(lanes_expected) &&
+                             memcmp(lanes_text.pointer, lanes_expected, lanes_text.length) == 0;
+        char detail[BUSTER_FOREIGN_TEST_PATH_BYTES + 128];
+        snprintf(detail, sizeof(detail), "%s: %.*s thread(s) preloaded, %.*s by the lanes, for %u lane(s)", executable,
+                 text.pointer != 0 ? (int)strcspn(text.pointer, "\n") : 0, text.pointer != 0 ? text.pointer : "",
+                 lanes_text.pointer != 0 ? (int)strcspn(lanes_text.pointer, "\n") : 0, lanes_text.pointer != 0 ? lanes_text.pointer : "", lanes);
         const bool ran = !on_large || large;
         foreign_test_expect(tally, !ran || (status == 0 && started), "link-foreign starts a thread per lane past the first, once for the command", detail);
         foreign_test_expect(tally, !ran || (status == 0 && foreign_driver_test_run(directory, executable, output, errors, arena) == 42), "a link on the command's threads runs",

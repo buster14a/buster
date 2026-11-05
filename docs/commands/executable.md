@@ -116,7 +116,10 @@ requirements. [Command index](README.md).
   when it has another link (which keeps its bytes), when it is a symbolic link,
   when a process runs it (which runs on), when it is someone else's (checked
   only when the test may `chown`, as root), past a file a killed link left
-  under the name without random digits, and with a name of `NAME_MAX` bytes;
+  under the name without random digits, and with a name of `NAME_MAX` bytes.
+  The running child's `/proc/PID/exe` must match the output's device and inode
+  before replacement: probing with a writable open can itself make `execve`
+  fail with `ETXTBSY` (#1421);
   and written in order into a FIFO, which a failed link leaves in place: for
   a reader that opens it and reads to the first end of file, with inotify
   counting one close after writing, and for one that holds the read end of a
@@ -512,3 +515,28 @@ static PIE", "GOT relaxation in every executable" and "The shared library") has
 the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
+
+## Dynamic image bounds (#1255)
+
+`test-dynamic` also binds all twelve image-bound names in a dynamic PIE:
+`__ehdr_start`, `__executable_start`, `__preinit_array_start`,
+`__preinit_array_end`, `_etext`, `etext`, `__etext`, `_edata`, `edata`,
+`__bss_start`, `_end` and `end`. The fixture has initialized data and an
+aligned, nonempty BSS, so the data end, BSS start and image end cannot be
+confused. It checks every resolved address against the output ELF headers
+and runs the executable to verify the relocated addresses. The ordinary
+lane-count, poisoned-scratch, exact-twin and RELR-disabled checks apply.
+Each write computes its expectations from its own headers: disabling RELR
+can move the sections. With `--cross-check`, GNU ld links the same object and
+lld compiles the same fixture without `__etext`, which it does not define.
+GNU ld and every direct write check all twelve names; lld checks its eleven
+built-in names. Their running executables must satisfy the same ELF-bound
+rules for their own layouts, except that lld places the absent preinit
+array's bounds at image offset zero. The direct writer retains GNU ld's
+choice of the init array's start.
+Kind-mask checks retain static-runtime selection, shared-library admission
+and the static executable's exclusive IPLT bounds.
+
+The fixture leaves the preinit array empty, as the direct path has no
+preinit atoms: both bounds coincide at the init array's start. It does not
+claim support for nonempty preinit arrays or new shared-library bounds.

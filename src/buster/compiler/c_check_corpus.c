@@ -698,6 +698,7 @@ static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
 static bool check_corpus_deferred_fail_merge;
+static bool check_corpus_deferred_fail_expressions;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_late_first;
@@ -838,6 +839,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     *path->deferred = (CheckDeferred){
                         .every_lane = check_corpus_deferred_every_lane,
                         .fail_after_replay = check_corpus_deferred_fail_merge,
+                        .fail_after_expressions = check_corpus_deferred_fail_expressions,
                         .hold_lanes = check_corpus_deferred_hold_lanes,
                         .late_first = check_corpus_deferred_late_first,
                         .scalar_merge = check_corpus_deferred_scalar_merge,
@@ -907,8 +909,21 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
         path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
+        const uint32_t reported = path->input.report_count;
         path->checked = path->checked && check_input_warning_graph(&path->input, view, &path->types, &path->stream, &path->output_arena, &path->scratch);
         path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
+        // The reports after checking: unavailable members' uses (check_input_member_uses, #147).
+        for (uint32_t report = reported; report < path->input.report_count; report += 1)
+        {
+            if (path->input.reports[report].token < path->token)
+            {
+                path->token = path->input.reports[report].token;
+                path->phase = "expression";
+                path->position = path->token;
+                path->pragma = 0;
+                snprintf(path->message, sizeof(path->message), "%s", check_driver_input_report_message(&path->input, path->input.reports + report));
+            }
+        }
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).
@@ -940,6 +955,17 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         path->initialized = check_initializers_run_events(&path->initializers, &path->input, &path->stream, view, &path->types,
                                                           &path->output_arena, &path->scratch, &path->warning_events, &path->warning_keys);
         path->resource |= path->initializers.status == CHECK_INIT_RESOURCE;
+        // An unavailable member's use is an error the walk stages with its warnings (check_init_member_use, #147).
+        for (uint32_t i = 0; path->initialized && i < path->warning_events.count; i += 1)
+        {
+            const CheckWarningEvent* event = path->warning_events.events + i;
+            if (event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
+            {
+                path->initialized = false;
+                path->initializers.status = CHECK_INIT_INVALID;
+                path->initializers.token = event->token;
+            }
+        }
         if (!path->initialized)
         {
             path->token = path->initializers.token;
@@ -2497,6 +2523,11 @@ struct CheckCorpusOutcome
     bool deferred_claiming;
     uint32_t deferred_claimed;
     uint64_t deferred_copies;
+    uint64_t deferred_expression_parts;
+    uint64_t deferred_expression_parallel_tokens;
+    uint64_t deferred_expression_serial_tokens;
+    uint64_t deferred_expression_worker_mask;
+    bool deferred_expression_retry;
     uint64_t deferred_lanes_ns;
     uint64_t deferred_dispatch_ns;
     uint64_t deferred_wake_ns;
@@ -2574,6 +2605,11 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_claiming = outcome->deferred && paths[2].deferred->claiming;
     outcome->deferred_claimed = outcome->deferred ? paths[2].deferred->claimed : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
+    outcome->deferred_expression_parts = outcome->deferred ? paths[2].deferred->expression_parts : 0;
+    outcome->deferred_expression_parallel_tokens = outcome->deferred ? paths[2].deferred->expression_parallel_tokens : 0;
+    outcome->deferred_expression_serial_tokens = outcome->deferred ? paths[2].deferred->expression_serial_tokens : 0;
+    outcome->deferred_expression_worker_mask = outcome->deferred ? paths[2].deferred->expression_worker_mask : 0;
+    outcome->deferred_expression_retry = outcome->deferred && paths[2].deferred->expression_retry;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;
     outcome->deferred_dispatch_ns = outcome->deferred ? paths[2].deferred->dispatch_ns : 0;
     outcome->deferred_wake_ns = outcome->deferred ? paths[2].deferred->wake_ns : 0;

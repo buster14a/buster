@@ -742,6 +742,29 @@ static IrType ir_lower_test_result_type(const Tier0Function* source, uint8_t res
     return (IrType)ir_typed_types[class];
 }
 
+static InterpreterResult ir_lower_test_production_typed(const Tier0Functions* sources, const Tier0Program* generated, const Tier0TestData* data, uint8_t* globals, const uint64_t* inputs, bool padding, Arena* execution)
+{
+    SymbolId symbols[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
+    InterpreterBinding bindings[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
+    for (uint32_t f = 0; f < generated->function_count; f += 1)
+    {
+        symbols[f] = generated->global_count + f + 1;
+    }
+    for (uint32_t g = 0; g < generated->global_count; g += 1)
+    {
+        bindings[g] = (InterpreterBinding){ .symbol = g + 1, .bytes = globals + data->offsets[g],
+                                           .size = (uint64_t)generated->global_elements[g] * tier0_class_bytes(generated->global_classes[g]), .writable = true };
+    }
+    const InterpreterProgram program = { .functions = sources->functions, .function_symbols = symbols, .function_count = generated->function_count,
+                                         .bindings = bindings, .binding_count = generated->global_count };
+    const InterpreterValue arguments[3] = { { .low = inputs[0] }, { .low = inputs[1] }, { .low = inputs[2] } };
+    InterpreterOptions options = interpreter_default_options();
+    options.check_undefined = !padding;
+    InterpreterResult result;
+    interpreter_typed_run(&program, symbols[generated->function_count - 1], arguments, 3, execution, &options, &result);
+    return result;
+}
+
 // With `records`, the generator's catalog of structs and unions passed and returned by value (#137) joins `options`.
 static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count, Tier0ProgramOptions options, bool records, const char* name)
 {
@@ -862,6 +885,17 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
             ok = ir_lower_test_expect(tally, !source_fault && !ir_fault, "typed and IR execution finish", program_seed, r);
             ok = ir_lower_test_expect(tally, expected == actual && memcmp(expected_globals, globals, data.size) == 0, "typed and IR results and global bytes agree", program_seed, r) && ok;
             ok = ir_lower_test_expect(tally, outcomes[r].result == actual && outcomes[r].globals == tier0_test_hash(globals, data.size), "native and IR results and global bytes agree", program_seed, r) && ok;
+            if (shared)
+            {
+                tier0_test_initial(program, &data, globals);
+                const InterpreterResult typed = ir_lower_test_production_typed(sources, program, &data, globals, arguments[r], !options.vlas, &execution);
+                ok = ir_lower_test_expect(tally, typed.status == INTERPRETER_OK && typed.value.low == expected && memcmp(expected_globals, globals, data.size) == 0,
+                                         "production typed execution agrees with the fixture, IR and native results and bytes", program_seed, r) && ok;
+                if (typed.status != INTERPRETER_OK)
+                {
+                    fprintf(stderr, "  production typed status %u, function %u, entry %u\n", typed.status, typed.function, typed.entry);
+                }
+            }
             if (!ok && tally->failures < 20)
             {
                 fprintf(stderr, "  expected %016" PRIx64 ", native %016" PRIx64 ", IR %016" PRIx64 ", faults %u/%u\n", expected, outcomes[r].result, actual, source_fault, ir_fault);
@@ -923,6 +957,32 @@ static bool ir_lower_test_wide_run(const IrFunction* function, uint8_t* const* b
         fprintf(stderr, "  shared IR status %u, instruction %u\n", result.status, result.entry);
     }
     return result.status == INTERPRETER_OK;
+}
+
+// Exercise the original typed columns too: comparing only lowered IR with a private fixture machine cannot check
+// the production typed oracle's independent execution or its object-backed/wide local storage (#176).
+static bool ir_lower_test_wide_typed_run(const Tier0Function* function, uint8_t* const* buffers, const uint64_t* sizes, uint32_t count, Arena* execution)
+{
+    const SymbolId symbol = 1;
+    InterpreterBinding bindings[4];
+    InterpreterValue arguments[4];
+    for (uint32_t b = 0; b < count; b += 1)
+    {
+        bindings[b] = (InterpreterBinding){ .symbol = 2 + b, .bytes = buffers[b], .size = sizes[b], .writable = true };
+        arguments[b] = (InterpreterValue){ .low = (uintptr_t)buffers[b] };
+    }
+    const InterpreterNativeBinding natives[2] = {
+        { .symbol = 8, .address = (void*)&tier0_test_x87_mix },
+        { .symbol = 9, .address = (void*)&tier0_test_x87_scale },
+    };
+    const InterpreterProgram program = { .functions = function, .function_symbols = &symbol, .function_count = 1, .bindings = bindings, .binding_count = count, .natives = natives, .native_count = 2 };
+    InterpreterResult result;
+    const bool ran = interpreter_typed_run(&program, 1, arguments, count, execution, 0, &result);
+    if (!ran)
+    {
+        fprintf(stderr, "  typed wide status %u, entry %u\n", result.status, result.entry);
+    }
+    return ran;
 }
 
 // Long double and the 128-bit integers (#131): Tier 0's own random programs of each class (tier0_x87_test.c and
@@ -988,6 +1048,14 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
                 same = memcmp(out + 16 * o, expected + 16 * o, tier0_class_bytes(wide->outputs[o])) == 0;
             }
             checked[0] += ir_lower_test_expect(tally, same, "a 128-bit program's outputs are its stack machine's", seed, p);
+            memset(out, 0xa5, sizeof(out));
+            const bool typed_ran = interpreted && ir_lower_test_wide_typed_run(&source, buffers, sizes, 3, &execution);
+            same = ir_lower_test_expect(tally, typed_ran, "the production typed interpreter runs a 128-bit program", seed, p);
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_INT128_OUTPUTS; o += 1)
+            {
+                same = memcmp(out + 16 * o, expected + 16 * o, tier0_class_bytes(wide->outputs[o])) == 0;
+            }
+            ir_lower_test_expect(tally, same, "typed 128-bit outputs match the independent stack machine", seed, p);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
@@ -1035,6 +1103,14 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
                 same = tier0_test_x87_same_output(x87->outputs[o], out + 16 * o, expected + 16 * o);
             }
             checked[1] += ir_lower_test_expect(tally, same, "a long double program's outputs are its stack machine's", seed, p);
+            memset(out, 0xa5, sizeof(out));
+            const bool typed_ran = interpreted && ir_lower_test_wide_typed_run(&long_double, buffers, sizes, 4, &execution);
+            same = ir_lower_test_expect(tally, typed_ran, "the production typed interpreter runs a long double program", seed, p);
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_X87_OUTPUTS; o += 1)
+            {
+                same = tier0_test_x87_same_output(x87->outputs[o], out + 16 * o, expected + 16 * o);
+            }
+            ir_lower_test_expect(tally, same, "typed long-double outputs match the independent stack machine", seed, p);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
@@ -1243,6 +1319,151 @@ static void ir_lower_test_cas_parameter(IrLowerTestTally* tally)
     arena_release(&twin_output);
     arena_release(&output);
     arena_release(&arena);
+}
+
+// The static chain's sum with its argument (#148): r10, where a chained call passes it, plus rdi.
+static __attribute__((naked, noinline)) int64_t ir_lower_test_chain_plus(int64_t x __attribute__((unused)))
+{
+    __asm__("leaq (%r10,%rdi), %rax\n\tret\n");
+}
+
+// The static chain's sum with its signed byte argument as the caller extended it (#1411's review): r10 plus edi's 32 bits
+// sign-extended, -3 where the caller sign-extended the byte. The typed stream's lowering widens it to 32 bits by its class
+// before the call (ir_typed_boundary_class); ir_interpreter_test.c's chained call of an i8 observes the record's flag.
+static __attribute__((naked, noinline)) int64_t ir_lower_test_chain_byte(int8_t x __attribute__((unused)))
+{
+    __asm__("movslq %edi, %rax\n\taddq %r10, %rax\n\tret\n");
+}
+
+// A call with a static chain (#148): its argument 0 in r10, which the IR keeps as its ABI record (ir_typed_aggregate_call)
+// on both lowerings, and which both interpreters pass to a native callee in r10: f() returns chain_plus(2) with the
+// chain 40, 42. And (#1411's review) the IR interpreter keeps the other arguments' records, a signed byte's extension
+// flag among them, with no extensions of the native's, and refuses an undefined chain where it checks definedness.
+static void ir_lower_test_chain(IrLowerTestTally* tally)
+{
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint64_t values[] = {
+        40,
+        2,
+        0,
+        0,
+    };
+    const uint8_t argument_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const AbiLocation locations[] = {
+        { .registers = { BUSTER_ABI_R10, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+    };
+    const AbiCall call = { .integer_registers = 1, .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } } };
+    const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } };
+    const SymbolId native_symbol = 2;
+    const uint32_t first = 0;
+    const uint32_t count = 2;
+    const uint8_t variadic = 0;
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .result = result,
+        .call_targets = &native_symbol,
+        .call_first = &first,
+        .call_argument_counts = &count,
+        .call_variadic = &variadic,
+        .calls = &call,
+        .argument_locations = locations,
+        .argument_classes = argument_classes,
+        .call_count = 1,
+        .argument_count = 2,
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    Arena execution = arena_reserve(1ull << 28);
+    const InterpreterNativeBinding native = { .symbol = native_symbol, .address = (void*)ir_lower_test_chain_plus };
+    const SymbolId symbol = 1;
+    const InterpreterProgram typed = { .functions = &function, .function_symbols = &symbol, .function_count = 1, .natives = &native, .native_count = 1 };
+    InterpreterResult typed_result;
+    const bool interpreted = interpreter_typed_run(&typed, symbol, 0, 0, &execution, 0, &typed_result);
+    ir_lower_test_expect(tally, interpreted && typed_result.value.low == 42, "the typed interpreter passes a static chain in r10", 0, 0);
+    IrFunction lowered = { 0 };
+    if (ir_lower_test_lower(tally, &function, IR_I64, 3, &output, &twin_output, &scratch, &lowered, 0, 0))
+    {
+        const IrCall* lowered_call = lowered.call_count == 1 ? &lowered.calls[0] : 0;
+        const bool recorded = lowered_call != 0 && lowered_call->abi != 0 && lowered.passed[lowered.abi_calls[lowered_call->abi - 1].passed].location.registers[0] == BUSTER_ABI_R10;
+        ir_lower_test_expect(tally, recorded, "a static chain's call keeps its r10 record in the IR", 0, 0);
+        const IrInterpreterFunction code = { .symbol = symbol, .function = &lowered };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .natives = &native, .native_count = 1 };
+        const InterpreterResult ir_result = ir_interpret(&program, symbol, 0, 0, 0, &execution);
+        ir_lower_test_expect(tally, ir_result.status == INTERPRETER_OK && ir_result.value.low == 42, "the IR interpreter passes a static chain in r10", 0, 0);
+        // An undefined chain (#1411's review): its constant made IR_UNDEF.
+        const uint32_t chain = lowered_call != 0 ? lowered.extra[lowered_call->argument_first] : BUSTER_IR_NONE;
+        if (chain < lowered.instruction_count)
+        {
+            lowered.op[chain] = IR_UNDEF;
+            lowered.a[chain] = BUSTER_IR_NONE;
+            InterpreterOptions checked = interpreter_default_options();
+            checked.check_undefined = true;
+            const InterpreterResult undefined = ir_interpret(&program, symbol, 0, 0, &checked, &execution);
+            ir_lower_test_expect(tally, ir_verify(&lowered, &scratch, 0).error == IR_OK && undefined.status == INTERPRETER_UNDEFINED,
+                                 "the IR interpreter refuses an undefined static chain where it checks definedness", 0, 0);
+        }
+    }
+    // A signed byte's argument beside the chain: -3, sign-extended by its record's flag, 37.
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    const uint8_t byte_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint64_t byte_values[] = {
+        40,
+        (uint64_t)-3,
+        0,
+        0,
+    };
+    const uint8_t byte_arguments[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+    };
+    const AbiLocation byte_locations[] = {
+        locations[0],
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS, .flags = BUSTER_ABI_FLAG_SIGN },
+    };
+    Tier0Function bytes = function;
+    bytes.classes = byte_classes;
+    bytes.values = byte_values;
+    bytes.argument_classes = byte_arguments;
+    bytes.argument_locations = byte_locations;
+    const InterpreterNativeBinding byte_native = { .symbol = native_symbol, .address = (void*)ir_lower_test_chain_byte };
+    IrFunction byte_lowered = { 0 };
+    if (ir_lower_test_lower(tally, &bytes, IR_I64, 3, &output, &twin_output, &scratch, &byte_lowered, 0, 1))
+    {
+        const IrInterpreterFunction code = { .symbol = symbol, .function = &byte_lowered };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .natives = &byte_native, .native_count = 1 };
+        const InterpreterResult byte_result = ir_interpret(&program, symbol, 0, 0, 0, &execution);
+        ir_lower_test_expect(tally, byte_result.status == INTERPRETER_OK && byte_result.value.low == 37,
+                             "the IR interpreter keeps a chained call's other records: a signed byte's extension", 0, 1);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&scratch);
+    arena_release(&execution);
 }
 
 static void ir_lower_test_fixtures(IrLowerTestTally* tally)
@@ -2014,11 +2235,17 @@ static void ir_lower_test_ignored_scan(IrLowerTestTally* tally)
         {
             locations[a].kind = (shape == 1 && a == place) || (shape == 2 && a % 8 == place % 8) ? BUSTER_ABI_LOCATION_IGNORE : locations[a].kind;
         }
+        // A static chain's location (#148), in r10, which the random registers sometimes give, is found as an ignored one is.
+        bool chained = false;
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            chained |= locations[a].kind == BUSTER_ABI_LOCATION_REGISTERS && locations[a].registers[0] == BUSTER_ABI_R10;
+        }
         const Tier0Function function = { .argument_locations = count != 0 ? locations : NULL, .argument_count = count };
-        const bool expected = count != 0 && shape != 0;
+        const bool expected = (count != 0 && shape != 0) || chained;
         agreed += ir_typed_ignored_arguments(&function, true) == expected && ir_typed_ignored_arguments(&function, false) == expected;
     }
-    ir_lower_test_expect(tally, agreed == 2000, "ir_typed_ignored_arguments' paths find an ignored argument where there is one", 141, 0);
+    ir_lower_test_expect(tally, agreed == 2000, "ir_typed_ignored_arguments' paths find an ignored argument or a static chain where there is one", 141, 0);
 }
 
 static void ir_lower_test_narrow(IrLowerTestTally* tally)
@@ -3364,6 +3591,53 @@ static void ir_lower_test_guarded(IrLowerTestTally* tally)
 // area's argument slots, the canaries, the object and the result. Kind 3 passes vectors, which the IR has no type for.
 // The stream reads the save area whole, whose other bytes the IR's frame leaves undefined: the interpreter runs without
 // undefined-byte checks.
+static InterpreterResult ir_lower_test_variadic_typed(const Tier0Function* callee, const uint16_t* arguments, uint32_t count, Tier0VfOutput* output, Arena* execution)
+{
+    uint8_t kinds[28];
+    uint8_t classes[28];
+    uint64_t values[28];
+    uint8_t argument_classes[26];
+    AbiLocation places[26];
+    uint32_t integers = 0;
+    uint32_t vectors = 0;
+    uint64_t stack_bytes = 0;
+    uint8_t alignment = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    for (uint32_t a = 0; a < count; a += 1)
+    {
+        const bool floating = arguments[a] >= 0x200;
+        argument_classes[a] = a < callee->parameter_count ? callee->local_classes[a] : floating ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_I64;
+        kinds[a] = a == 0 ? BUSTER_TYPED_GLOBAL_ADDRESS : BUSTER_TYPED_CONST;
+        classes[a] = argument_classes[a];
+        values[a] = a == 0 ? 4 : floating ? tier0_vf_fp_bits(arguments[a] - 0x200) : tier0_vf_gp(arguments[a] - 0x100);
+        places[a] = interpreter_native_place(floating ? IR_F64 : IR_I64, &integers, &vectors, &stack_bytes, &alignment);
+    }
+    kinds[count] = BUSTER_TYPED_CALL;
+    kinds[count + 1] = BUSTER_TYPED_RETURN;
+    classes[count] = classes[count + 1] = BUSTER_TYPED_CLASS_U64;
+    values[count] = values[count + 1] = 0;
+    const SymbolId target = 3;
+    const uint32_t first = 0;
+    const uint8_t variadic = callee->incoming_variadic != 0;
+    const AbiCall call = { .stack_bytes = (uint32_t)((stack_bytes + 7) & ~UINT64_C(7)), .stack_alignment_log2 = alignment,
+                          .integer_registers = (uint8_t)integers, .vector_registers = (uint8_t)vectors, .result = callee->result };
+    const Tier0Function functions[] = {
+        *callee,
+        { .kinds = kinds, .classes = classes, .values = values, .count = count + 2, .call_targets = &target, .call_first = &first,
+          .call_argument_counts = &count, .call_variadic = &variadic, .calls = &call, .argument_classes = argument_classes, .argument_locations = places,
+          .call_count = 1, .argument_count = count },
+    };
+    const SymbolId symbols[] = { 3, 5 };
+    const InterpreterBinding binding = { .symbol = 4, .bytes = (uint8_t*)output, .size = sizeof(*output), .writable = true };
+    const InterpreterNativeBinding clobber = { .symbol = 1, .address = (void*)&tier0_vf_clobber };
+    const InterpreterProgram program = { .functions = functions, .function_symbols = symbols, .function_count = 2, .bindings = &binding, .binding_count = 1,
+                                         .natives = &clobber, .native_count = 1 };
+    InterpreterOptions options = interpreter_default_options();
+    options.check_undefined = false;
+    InterpreterResult result;
+    interpreter_typed_run(&program, 5, 0, 0, execution, &options, &result);
+    return result;
+}
+
 static void ir_lower_test_variadic_frames(IrLowerTestTally* tally)
 {
     static const uint8_t kinds[] = { 0, 1, 2, 4, 5 };
@@ -3564,6 +3838,38 @@ static void ir_lower_test_variadic_frames(IrLowerTestTally* tally)
             }
             compared += 1;
         }
+        if (ok)
+        {
+            memset(interpreted, 0xa5, sizeof(*interpreted));
+            const InterpreterResult typed = ir_lower_test_variadic_typed(&stream->function, arguments[k], count, interpreted, &execution);
+            const Tier0VfOutput* o = interpreted;
+            const Tier0VfOutput* n = native_output;
+            bool same = typed.status == INTERPRETER_OK && typed.value.low == native_result && o->named[0] == (uintptr_t)o;
+            for (uint32_t p = 1; p < BUSTER_TIER0_VF_PARAMETERS; p += 1)
+            {
+                same = same && o->named[p] == n->named[p];
+            }
+            same = same && memcmp(o->values, n->values, sizeof(o->values)) == 0 && memcmp(o->copy_values, n->copy_values, sizeof(o->copy_values)) == 0 &&
+                   memcmp(o->canaries, n->canaries, sizeof(o->canaries)) == 0 && memcmp(o->object, n->object, sizeof(o->object)) == 0;
+            if (kind != 4)
+            {
+                AbiVaList lists[4];
+                memcpy(&lists[0], o->initial, sizeof(AbiVaList));
+                memcpy(&lists[1], o->final, sizeof(AbiVaList));
+                memcpy(&lists[2], n->initial, sizeof(AbiVaList));
+                memcpy(&lists[3], n->final, sizeof(AbiVaList));
+                same = same && lists[0].gp_offset == lists[2].gp_offset && lists[0].fp_offset == lists[2].fp_offset &&
+                       lists[1].gp_offset == lists[3].gp_offset && lists[1].fp_offset == lists[3].fp_offset &&
+                       lists[1].overflow_arg_area - lists[0].overflow_arg_area == lists[3].overflow_arg_area - lists[2].overflow_arg_area &&
+                       lists[0].reg_save_area == o->addresses[2] && lists[0].overflow_arg_area == o->addresses[3] &&
+                       memcmp(o->initial, o->copied, sizeof(o->initial)) == 0 && memcmp(o->final, o->copy_final, sizeof(o->final)) == 0;
+            }
+            ir_lower_test_expect(tally, same, "production typed variadic values, copies, named parameters, canaries and cursors match native execution", kind, 0);
+            if (typed.status != INTERPRETER_OK)
+            {
+                fprintf(stderr, "  production typed variadic status %u, function %u, entry %u\n", typed.status, typed.function, typed.entry);
+            }
+        }
         for (uint32_t path = 0; path < 2; path += 1)
         {
             for (uint32_t encoder = 0; encoder < 2; encoder += 1)
@@ -3651,6 +3957,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_local_roles(&tally);
         ir_lower_test_aggregates(&tally);
         ir_lower_test_ignored_scan(&tally);
+        ir_lower_test_chain(&tally);
         ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);
