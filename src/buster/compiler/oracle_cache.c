@@ -3395,12 +3395,16 @@ struct OracleReplay
 // as if their calls had, by bit (step n's is bit n - 1). A step that changes nothing fails before its call, a replay's
 // write or removal after it has changed its file, and a restoration before its call. And what another process does at
 // the take's boundaries: between its preparation and its replay, and as it puts back each file the replay changed,
-// before it does (`acting` false) and, for a file it moved aside or made, between the check of what is under the name
-// it moved it to and the call that acts on that (`acting` true): moving it back, or removing it.
+// before it does (`acting` false) and, for a file it moved aside, before moving it back (`acting` true). The created,
+// written and verifying hooks simulate changes immediately after creation, after a write, and between the created
+// descriptor's final content check and its path check.
 static uint64_t oracle_replay_faults;
 static uint32_t oracle_replay_steps;
 static void (*oracle_replay_between)(void);
 static void (*oracle_replay_restoring)(uint32_t file, bool acting);
+static void (*oracle_replay_created)(uint32_t file);
+static void (*oracle_replay_written)(uint32_t file);
+static void (*oracle_replay_verifying)(uint32_t file);
 
 // renameat2's flag that refuses to replace a file the new name has (<linux/fs.h>'s RENAME_NOREPLACE).
 #define BUSTER_ORACLE_RENAME_NOREPLACE 1u
@@ -3510,8 +3514,8 @@ static bool oracle_replay_unchanged(int fd, const struct stat* before, const uin
 
 // Before a take changes anything, and changing nothing (no file's inode, status-change time or directory): each of the
 // run's files as it is, into `replays`, so that the replay can tell another process's change since and a replay that
-// fails can put it back (oracle_replay_restore). False if the take would create or remove a file, if a file can't be
-// read, or if it is there but isn't a regular file (a directory or symbolic link the replay would write through).
+// fails can put it back (oracle_replay_restore). False if the take would remove a present file, if an existing file
+// can't be read, or if it isn't a regular file (a directory or symbolic link the replay would write through).
 static bool oracle_replay_prepare(const OracleRun* run, const OracleEntry* entry, OracleReplay* replays)
 {
     bool result = true;
@@ -3525,10 +3529,9 @@ static bool oracle_replay_prepare(const OracleRun* run, const OracleEntry* entry
         result = oracle_run_path(run, run->files[f], path, sizeof(path));
         replays[f].present = result && lstat(path, &status) == 0;
         result = result && (replays[f].present ? S_ISREG(status.st_mode) : errno == ENOENT);
-        // There is no atomic unlink-if-inode operation: a pathname can be replaced after its check,
-        // even under the temporary name. Refuse a take that might need to remove a file, before any
-        // replay has changed one. The tool handles creation and removal on a miss.
-        result = result && (replays[f].present == (length != UINT64_MAX));
+        // There is no atomic unlink-if-inode operation. Refuse a cached removal of a present path
+        // before replay changes anything. A created path is never removed by rollback either.
+        result = result && (length != UINT64_MAX || !replays[f].present);
         if (result && replays[f].present)
         {
             const int fd = oracle_replay_fault() ? -1 : open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
@@ -3592,12 +3595,22 @@ static bool oracle_replay_write(const OracleRun* run, const OracleEntry* entry, 
         }
         else
         {
-            // One made is opened to read too, which a file made with a mode that forbids reading allows its maker, so that
-            // a restoration can check it through this descriptor.
+            // Keep a readable descriptor of a created output even when its mode forbids later opens.
             const int fd = replay->present ? open(path, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
-            const bool same = replay->present ? oracle_replay_unchanged(fd, &replay->status, replay->bytes.bytes, 0, replay->bytes.length, true, &replay->attributes) : fd >= 0;
+            const bool created = !replay->present && fd >= 0;
+            const bool recorded = !created || fstat(fd, &replay->status) == 0;
+            if (created && recorded)
+            {
+                replay->attributes = oracle_replay_attributes(fd);
+                if (oracle_replay_created != 0)
+                {
+                    oracle_replay_created(f);
+                }
+            }
+            const bool same = replay->present ? oracle_replay_unchanged(fd, &replay->status, replay->bytes.bytes, 0, replay->bytes.length, true, &replay->attributes) : created && recorded;
             const bool emptied = same && (!replay->present || ftruncate(fd, 0) == 0);
-            replay->changed = emptied;
+            // Creation itself changes the filesystem, even if its initial fstat or later write fails.
+            replay->changed = replay->present ? emptied : created;
             result = emptied && !oracle_replay_fault() && oracle_write_whole(fd, bytes, length, &replay->put);
             if (replay->changed && fstat(fd, &replay->written) != 0)
             {
@@ -3611,6 +3624,43 @@ static bool oracle_replay_write(const OracleRun* run, const OracleEntry* entry, 
             {
                 result &= close(fd) == 0;
             }
+            if (result && oracle_replay_written != 0)
+            {
+                oracle_replay_written(f);
+            }
+        }
+    }
+    // A created file may have been changed or replaced while later files were replayed. Check its
+    // descriptor and then the final pathname before claiming a hit. The only remaining window is
+    // between that last check and publication, as with a tool that writes a file by pathname.
+    for (uint32_t f = 0; result && f < run->file_count; f += 1)
+    {
+        OracleReplay* replay = &replays[f];
+        if (!replay->present && replay->changed)
+        {
+            uint8_t* bytes = 0;
+            uint64_t length = 0;
+            char path[BUSTER_ORACLE_PATH_BYTES];
+            struct stat now;
+            oracle_entry_file(entry, f, &bytes, &length);
+            result = length != UINT64_MAX && replay->put == length && oracle_replay_unchanged(replay->descriptor, &replay->written, bytes, 0, length, true, 0);
+            result = result && replay->written.st_mode == replay->status.st_mode && replay->written.st_uid == replay->status.st_uid && replay->written.st_gid == replay->status.st_gid;
+            const OracleKey attributes = result ? oracle_replay_attributes(replay->descriptor) : (OracleKey){ 0 };
+            result = result && memcmp(attributes.bytes, replay->attributes.bytes, sizeof(attributes.bytes)) == 0;
+            if (result && oracle_replay_verifying != 0)
+            {
+                oracle_replay_verifying(f);
+            }
+            result = result && oracle_run_path(run, run->files[f], path, sizeof(path)) && lstat(path, &now) == 0 && oracle_replay_same(&now, &replay->written);
+            result = result && now.st_mode == replay->written.st_mode && now.st_uid == replay->written.st_uid && now.st_gid == replay->written.st_gid &&
+                     now.st_size == replay->written.st_size && oracle_replay_time(&now.st_mtim, &replay->written.st_mtim) && oracle_replay_time(&now.st_ctim, &replay->written.st_ctim);
+            if (result)
+            {
+                const bool failed = oracle_replay_fault();
+                const bool closed = close(replay->descriptor) == 0;
+                replay->descriptor = -1;
+                result = closed && !failed;
+            }
         }
     }
     return result;
@@ -3620,14 +3670,10 @@ static bool oracle_replay_write(const OracleRun* run, const OracleEntry* entry, 
 // checked, but only if it is as the replay left it (else another process has changed it since, whose change the take
 // doesn't undo). A rewritten one's bytes, permissions (whose set-user and set-group bits a write by a process that isn't
 // root takes) and times in place, then its kind and permissions, owner, size, modification time and extended
-// attributes as they were (a file capability a write took, which only root can give back, isn't); a moved one, checked
-// under the name it was moved to to be the file as the take found it, moved back where nothing has come since, and
-// checked again where it is (another process's, put under that name between the check and the move, going back under
-// it); and one it made moved aside, where no other process's file can be in its place, and removed if it is that file
-// as the replay left it, checked through its descriptor after (else moved back: another process's left, one the replay
-// made that another has written since, not). False if one can't be, with a line on the errors naming it (and the name a
-// moved one is kept under, then left). Status-change time and directory times may still differ; a take that touched a
-// file fails without starting the tool even after restoration succeeds.
+// attributes as they were (a file capability a write took, which only root can give back, isn't). A path the replay
+// created is never unlinked or renamed, since another process might replace it; it may remain after the failed run.
+// False if a file can't be restored, with a line on the errors naming it. Status-change time and directory times may
+// still differ; a take that touched a file fails without starting the tool even after restoration succeeds.
 static bool oracle_replay_restore(const OracleRun* run, const OracleEntry* entry, OracleReplay* replays, uint64_t take)
 {
     bool result = true;
@@ -3692,33 +3738,16 @@ static bool oracle_replay_restore(const OracleRun* run, const OracleEntry* entry
         }
         else if (!restored)
         {
-            // What is under the name is told by lstat, which needs no permission to read it, and checked through the
-            // descriptor the replay made the file with: a file that can't be told is never taken for another process's.
-            const bool tried = named && !oracle_replay_fault();
-            const bool moved = tried && syscall(SYS_renameat2, AT_FDCWD, path, AT_FDCWD, kept, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
-            const bool gone = tried && !moved && errno == ENOENT;
-            struct stat found;
-            const bool seen = moved && lstat(kept, &found) == 0;
-            const bool made = seen && oracle_replay_same(&found, &replay->written);
-            const bool left = made && oracle_replay_unchanged(replay->descriptor, &replay->written, bytes, 0, replay->put, false, 0);
-            if (left && oracle_replay_restoring != 0)
-            {
-                oracle_replay_restoring(f, true);
-            }
-            // Removed by the name, then checked through the descriptor to have been that file: no other process's put
-            // under the name between the check and the removal (the removal can't then be undone, but the run fails).
-            const bool unlinked = left && unlink(kept) == 0;
-            const bool removed = unlinked && fstat(replay->descriptor, &found) == 0 && found.st_nlink == 0;
-            const bool back = moved && !unlinked && syscall(SYS_renameat2, AT_FDCWD, kept, AT_FDCWD, path, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
-            replay->kept = moved && !unlinked && !back;
-            restored = gone || removed || (back && seen && !made);
+            // Never unlink or rename a created pathname: a check followed by either call could act
+            // on a concurrent replacement. The failed run leaves that pathname for its owner.
+            restored = false;
         }
         replay->lost = !restored;
         if (!restored)
         {
             const char* purpose = run->purpose != 0 ? run->purpose : "";
-            fprintf(stderr, "oracle cache: a take (%s) failed and couldn't put back %s%s%s, so the run fails without its tool\n", purpose, path,
-                    replay->kept ? ", kept as " : "", replay->kept ? kept : "");
+            fprintf(stderr, "oracle cache: a take (%s) failed and couldn't put back %s%s%s%s, so the run fails without its tool\n", purpose, path,
+                    replay->kept ? ", kept as " : "", replay->kept ? kept : "", !replay->present ? " (a created output may remain)" : "");
         }
         result &= restored;
     }

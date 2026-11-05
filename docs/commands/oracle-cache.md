@@ -217,25 +217,28 @@ to, and a test prints them at its end (`oracle_cache_report`).
 
 A take (`oracle_run_take`) prepares the result buffers and snapshots each
 existing output without changing files (#1317). It refuses a take before any
-replay when an entry would create an absent output or remove a present output.
-Linux has no atomic unlink-if-inode operation: even a name moved aside after an
-identity check can be replaced before `unlink`. The miss runs the tool, which
-performs its own creates and removals. This reduces cache hits for tests that
-remove an output before each run. A take can still rewrite an existing regular
-file in place, or leave an already-absent output absent. Non-regular files,
-including symlinks, also cause a miss.
+replay when an entry would remove a present output. Linux has no atomic
+unlink-if-inode operation: even a name moved aside after an identity check can
+be replaced before `unlink`. The miss runs the tool. A take can rewrite an
+existing regular file in place, create an absent output with `O_EXCL`, or leave
+an already-absent output absent. Non-regular files, including symlinks, and
+unreadable existing outputs also cause a miss.
 
 Before each rewrite, the take checks the inode, mode, owner, size, modification
 and status-change times, contents and extended attributes against the snapshot.
 Contents are compared in bounded chunks, without a second file-sized copy.
-If a write fails or a later output changed, the take restores each file it
-changed only if it remains as the replay left it. It restores bytes and mode
-in place, restores times, and verifies mode, owner, size, modification time and
-extended attributes. Because status-change and directory times cannot be fully
-restored, the run fails without starting the tool whenever the replay touched
-an output, even when restoration succeeds. A failure before any change remains
-a normal miss and runs the tool. There remains a window between a check and the
-following call, as for a tool that reads then writes its file.
+For a created output the take keeps its descriptor and, after all output writes,
+checks its contents, initial permissions, owner and attributes, and that the
+path still names the same unchanged file. If a write fails or a later output
+changed, it restores existing files only if they remain as the replay left them,
+rewriting their bytes and verifying their mode, owner, size, modification time
+and attributes. It never unlinks or renames a created path during failure recovery:
+it may have been replaced. A partial or complete created output can therefore
+remain, and the diagnostic names it. Because status-change and directory times
+cannot be fully restored, the run fails without starting the tool whenever the
+replay touched an output, even when restoration succeeds. A failure before any
+change remains a normal miss and runs the tool. There remains a window between
+a check and the following call, as for a tool that reads then writes its file.
 
 The twelve standalone `test-check-builtins` commands (the base command and
 `-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
@@ -384,14 +387,16 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   each directory, taken in use mode by the other directory's run, as the
   contract has it, and stale in check mode, which fails the run;
 - outputs: a run that reads its output before writing it takes the matching
-  entry; a missing output is instead produced by the tool;
+  entry, and a missing output is created by a successful take;
 - replays (#1317): fault injection for the result buffers, existing-file reads
   and each replay step verifies that unchanged files are left alone, changed
   ones are restored, and every touched replay fails without starting the tool.
   Paired failures assert which restorations fail. Concurrent replacements, in-place
   writes and a file appearing where the entry removes an absent output are left
-  to the tool or fail restoration. A present removal and an absent creation,
-  including a write-only creation under umask 0444, miss before any mutation;
+  to the tool or fail restoration. A present removal misses before mutation.
+  Two created outputs cover successful hits, a later foreign output, a failed
+  write, replacements during recovery and verification, an in-place change,
+  permission changes, and write-only creation under umask 0444;
 - large replays: an existing 16 MiB output is taken in a child with bounded
   memory, and a present output the entry removes is left to the tool;
 - listings (the test's program's `getdents64`, as `ls -i` lists): a file made
