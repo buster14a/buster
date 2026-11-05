@@ -4420,6 +4420,14 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
+// The driver's lanes (check_driver_command): 98 KB, almost all of it the lanes' arenas (CheckProgramLanes.arenas), in .bss
+// as the unit's preprocessor and parser are (check_driver_one_unit), so that a compile touches only the pages it uses: a
+// zeroed local touched them all, 24 pages of stack, each a page fault, even for an empty file's -fsyntax-only (#652). A
+// command after the process's first zeroes them again; only the tests' reusable routes run more than one, and only lane
+// 0 runs the command (run_check_command_mode).
+static CheckProgramLanes check_driver_lanes;
+static bool check_driver_lanes_taken;
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
@@ -4519,20 +4527,27 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
     // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
     // (check_driver_units).
-    CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
+    // The command's lanes, in .bss (check_driver_lanes): a command after the process's first zeroes them again.
+    CheckProgramLanes* const lanes = &check_driver_lanes;
+    if (check_driver_lanes_taken)
+    {
+        memset(lanes, 0, sizeof(*lanes));
+    }
+    check_driver_lanes_taken = true;
+    lanes->lanes = check_driver_cpus();
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
-    lanes.budget = &worker_budget;
+    lanes->budget = &worker_budget;
     // A test's hook, in every build (#673): the jobserver tokens a growing team's lane 0 supplies itself after its first
     // part (CheckProgramLanes.grow_supply), read only when it is set.
     const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
-    lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
+    lanes->grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
     // And another (#673): "LANE,MICROSECONDS", a lane (its index plus one) that sleeps that long at each part it takes,
     // before each part's lowering in a growing team (CheckProgramLanes.slow_lane), read only when it is set.
     const char* slow_lane = getenv("BUSTER_TEST_SLOW_LANE");
     char* slow_end = NULL;
-    lanes.slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
-    lanes.slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
+    lanes->slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
+    lanes->slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
     bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
@@ -4692,11 +4707,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (strcmp(arguments[i], "--tier1") == 0)
         {
-            lanes.tier1 = true;
+            lanes->tier1 = true;
         }
         else if (strcmp(arguments[i], "--tier1-strict") == 0)
         {
-            lanes.tier1_strict = true;
+            lanes->tier1_strict = true;
         }
         else if (strcmp(arguments[i], "--tier1-report") == 0)
         {
@@ -4704,12 +4719,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (strcmp(arguments[i], "--tier1-refusals") == 0)
         {
-            lanes.tier1_refusals = stderr;
+            lanes->tier1_refusals = stderr;
         }
         else if (strcmp(arguments[i], "--helper-report") == 0)
         {
             helper_report = true;
-            lanes.helper_reporting = true;
+            lanes->helper_reporting = true;
         }
         else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
         {
@@ -4721,24 +4736,24 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 fprintf(stderr, "error: --helper-forms= takes a comma-separated list of fence, atomic-access, atomic-rmw and asm, or all\n");
             }
             invalid_helper_forms |= forms == 0;
-            lanes.helper_forms = forms;
+            lanes->helper_forms = forms;
         }
         else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
         {
-            lanes.tier1_no_rematerialize = true;
+            lanes->tier1_no_rematerialize = true;
         }
         else if (strcmp(arguments[i], "--tier1-no-inline") == 0)
         {
-            lanes.tier1_no_inline = true;
+            lanes->tier1_no_inline = true;
         }
         else if (strcmp(arguments[i], "--tier1-gvn") == 0)
         {
-            lanes.tier1_gvn = true;
+            lanes->tier1_gvn = true;
             tier1_gvn = true;
         }
         else if (strcmp(arguments[i], "--tier1-no-lifetimes") == 0)
         {
-            lanes.tier1_no_lifetimes = true;
+            lanes->tier1_no_lifetimes = true;
         }
         else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
         {
@@ -4746,8 +4761,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             char* end = 0;
             const unsigned long lane_count = value != 0 ? strtoul(value, &end, 10) : 0;
             invalid_lanes |= value == 0 || end == value || *end != 0 || lane_count == 0 || lane_count > BUSTER_CHECK_EMIT_MAX_LANES;
-            lanes.lanes = (uint32_t)lane_count;
-            lanes.every_lane = true;
+            lanes->lanes = (uint32_t)lane_count;
+            lanes->every_lane = true;
         }
         else if (strcmp(arguments[i], "--worker-budget") == 0 || strncmp(arguments[i], "--worker-budget=", 16) == 0)
         {
@@ -4951,16 +4966,16 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .unwind_tables = unwind_tables,
         .output = output,
         .libraries = &libraries,
-        .tier1 = lanes.tier1,
-        .tier1_strict = lanes.tier1_strict,
-        .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
-        .tier1_gvn = lanes.tier1_gvn,
-        .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
-        .tier1_no_inline = lanes.tier1_no_inline,
-        .tier1_report = &lanes.tier1_report,
-        .tier1_refusals = lanes.tier1_refusals,
-        .helper_report = helper_report ? &lanes.helper_report : NULL,
-        .helper_forms = lanes.helper_forms,
+        .tier1 = lanes->tier1,
+        .tier1_strict = lanes->tier1_strict,
+        .tier1_no_rematerialize = lanes->tier1_no_rematerialize,
+        .tier1_gvn = lanes->tier1_gvn,
+        .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
+        .tier1_no_inline = lanes->tier1_no_inline,
+        .tier1_report = &lanes->tier1_report,
+        .tier1_refusals = lanes->tier1_refusals,
+        .helper_report = helper_report ? &lanes->helper_report : NULL,
+        .helper_forms = lanes->helper_forms,
     };
     if (worker_budget.dry_run)
     {
@@ -5004,17 +5019,17 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
-    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes || lanes.tier1_no_inline) &&
-             !lanes.tier1)
+    else if ((lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize || tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline) &&
+             !lanes->tier1)
     {
-        fprintf(stderr, "error: %s needs --tier1\n", lanes.tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
-                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
-                                                    lanes.tier1_no_lifetimes ? "--tier1-no-lifetimes" : "--tier1-no-inline");
+        fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
+                                                    lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
+                                                    lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : "--tier1-no-inline");
     }
     else
     {
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
-        if (lanes.tier1 && !check_tier1_ready)
+        if (lanes->tier1 && !check_tier1_ready)
         {
             check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
         }
@@ -5025,7 +5040,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             .inputs = inputs,
             .input_count = input_count,
             .path = path,
-            .lanes = &lanes,
+            .lanes = lanes,
             .stage_clock = stage_clock,
             .pp_ticks = pp_ticks,
             .arena = &arena,
@@ -5037,11 +5052,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         result = check_driver_run(&run, announced);
         if (tier1_report)
         {
-            check_tier1_print_report(stderr, &lanes.tier1_report);
+            check_tier1_print_report(stderr, &lanes->tier1_report);
         }
         if (helper_report)
         {
-            check_helper_print_report(stderr, &lanes.helper_report);
+            check_helper_print_report(stderr, &lanes->helper_report);
         }
     }
     if (release)
@@ -5059,7 +5074,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
                                worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
             fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tgrown=%u\tworked=%u\tfallback=%u\n", mode,
-                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, lanes.grown, lanes.worked, (uint32_t)lanes.again);
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes->active, lanes->grown, lanes->worked, (uint32_t)lanes->again);
         }
     }
     worker_budget_close(&worker_budget);

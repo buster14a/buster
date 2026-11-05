@@ -638,6 +638,10 @@ struct CheckProgramLanes
     CheckHelperReport helper_report;
     // --helper-forms' families (CheckProgramOptions.helper_forms): each one's operations take their helpers.
     uint32_t helper_forms;
+    // How many of the lanes' arenas, from lane 0's, an emission may have reserved (check_program_lanes_use): the ones
+    // check_program_lanes_release releases. Reading the others' would touch every page of the 98 KB they take, which a
+    // driver keeps in .bss so that a compile touches only those it uses (#652).
+    uint32_t arenas_used;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
@@ -673,15 +677,29 @@ static uint64_t check_program_lanes_now(void)
     return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
 }
 
+// Notes that an emission may reserve the arenas of the lanes below `count` (CheckProgramLanes.arenas_used): on lane 0,
+// before the other lanes run.
+static void check_program_lanes_use(CheckProgramLanes* lanes, uint32_t count)
+{
+    if (lanes != NULL && lanes->arenas_used < count)
+    {
+        lanes->arenas_used = count < BUSTER_CHECK_EMIT_MAX_LANES ? count : BUSTER_CHECK_EMIT_MAX_LANES;
+    }
+}
+
 // Releases the lanes' arenas: after the caller is done with the last emission's link.
 static void check_program_lanes_release(CheckProgramLanes* lanes)
 {
-    for (uint32_t lane = 0; lanes != NULL && lane < BUSTER_CHECK_EMIT_MAX_LANES; lane += 1)
+    for (uint32_t lane = 0; lanes != NULL && lane < lanes->arenas_used; lane += 1)
     {
         arena_release(&lanes->arenas[lane].output);
         arena_release(&lanes->arenas[lane].scratch);
         arena_release(&lanes->arenas[lane].bytes);
         check_tier1_lane_release(&lanes->arenas[lane].tier1);
+    }
+    if (lanes != NULL)
+    {
+        lanes->arenas_used = 0;
     }
 }
 
@@ -2373,6 +2391,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // #531, if it has their room: the calling thread runs the bodies when the lanes can't, and then needs no address space
     // past the caller's arenas.
     Arena own_columns = { 0 };
+    check_program_lanes_use(lanes, 1);
     Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
     const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
     if (column_bytes > reserved->capacity)
@@ -2486,6 +2505,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint64_t part_room = room > 1 ? per_lane * room : 1;
     // On the board, a state for the sharing lane and one for each lane that may take its parts, its place plus one.
     const uint32_t states = board != NULL && active > 1 ? (board->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? board->lanes + 1 : BUSTER_CHECK_EMIT_MAX_LANES) : room;
+    // Each lane state's arenas are its index's (check_program_emit_lane_arenas).
+    check_program_lanes_use(lanes, states);
     run.parts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitPart, part_room) : 0;
     run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, states) : 0;
     run.boundaries = valid && room > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
@@ -3846,7 +3867,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             *rows = (CheckProgramRows){ 0 };
         }
-        for (uint32_t lane = 1; lanes != NULL && lane < BUSTER_CHECK_EMIT_MAX_LANES; lane += 1)
+        for (uint32_t lane = 1; lanes != NULL && lane < lanes->arenas_used; lane += 1)
         {
             arena_pop_to(&lanes->arenas[lane].output, 0);
             arena_pop_to(&lanes->arenas[lane].scratch, 0);
