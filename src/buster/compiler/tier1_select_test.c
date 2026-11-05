@@ -697,7 +697,7 @@ static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1S
         const Tier1SelectPattern* q = &b->patterns[node];
         equal = p->immediate == q->immediate && memcmp(p->values, q->values, sizeof(p->values)) == 0 && p->displacement == q->displacement &&
                 p->stack_object == q->stack_object && p->rule == q->rule && p->operation == q->operation && p->width == q->width &&
-                p->source_width == q->source_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
+                p->source_width == q->source_width && p->storage_width == q->storage_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
                 p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->nops == q->nops;
         equal = equal && a->covered[node] == b->covered[node] && a->costs[node] == b->costs[node] && a->effective_use_offsets[node] == b->effective_use_offsets[node];
     }
@@ -2478,6 +2478,7 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
     {
         uint8_t operations[65];
         uint8_t void_types[65] = { 0 };
+        uint8_t storage[65] = { 0 };
         uint32_t operands[65] = { 0 };
         const uint8_t types[] = { IR_I1, IR_I8, IR_I16, IR_I32, IR_I64, IR_PTR, IR_F32 };
         const uint8_t widths[] = { 1, 8, 16, 32, 64, 64, 64 };
@@ -2494,12 +2495,14 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 tier1_select_known_bits(&function, 0, 0, 0, known, path != 0);
+                tier1_select_sign_requests(&function, storage, path != 0);
                 IrFunction scan = function;
                 scan.block_count = 2;
                 tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded type tails admit no induction certificate without a phi");
                 scan.op = type;
                 scan.type = void_types;
+                tier1_select_sign_requests(&scan, storage, path != 0);
                 tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, path != 0),
                                          "guarded opcode tails admit no induction certificate without an integer phi");
                 for (uint32_t n = 0; n < count; n += 1)
@@ -2537,7 +2540,7 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
         uint16_t known[4];
         uint8_t canonical[4];
         tier1_select_known_bits(&loop, 0, blocks, 0, known, true);
-        tier1_select_canonical(&loop, blocks, known, canonical);
+        tier1_select_canonical(&loop, blocks, known, canonical, true);
         tier1_select_test_expect(test, known[2] == (32 | 32 << 8) && canonical[2] == 0, "a backedge does not invent a range or register-storage proof");
     }
     arena_release(&input);

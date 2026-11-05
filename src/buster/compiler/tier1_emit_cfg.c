@@ -593,7 +593,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             const uint32_t mask_width = tier1_select_mask_width(function->type[node]);
             const uint32_t float_width = tier1_select_float_width(function->type[node]);
             const uint32_t vector_width = vectors ? tier1_select_vector_width(function->type[node]) : 0;
-            widths[node] = (uint8_t)tier1_select_width(function->type[node]);
+            widths[node] = (uint8_t)tier1_select_storage_width(plan, node);
             prepared->sizes[node] = widths[node] != 0 ? widths[node] : mask_width != 0 ? mask_width : float_width != 0 ? float_width : vector_width != 0 ? vector_width : 8;
             prepared->alignments[node] = prepared->sizes[node] < 16 ? prepared->sizes[node] : 16;
         }

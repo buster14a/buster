@@ -372,10 +372,22 @@ narrowing a load's memory access or assuming that the original value fits
 the truncated signed range.
 
 A separate byte certifies physical register storage. A 32-bit ALU result or
-load clears the upper half; an incoming `I32`, a call result and a machine row
+ordinary 32-bit load clears the upper half; an incoming `I32`, a call result and a machine row
 make no such promise. Copies and phis need their inputs' certificates. A shift
 whose count can be zero, multiplication or division by one, and a truncation
 to `I32` can leave a register untouched, so their proofs account for that.
+
+The same byte can instead certify a sign-preserving `I32` representation:
+all 64 register bits equal its signed value. A real signed-widening consumer
+requests it from an ordinary `I32` load or a byte/word sign extension to `I32`,
+through at most eight copies. The defining load or extension writes 64 bits
+once, preserving its exact memory width. Later signed widening is a copy;
+unsigned widening still clears the upper half. Copies, selects and phis
+propagate only proven representations, and a nonnegative value makes the two
+certificates equivalent. A sign-only value records eight-byte storage in its
+selected pattern: both native consumers preserve all eight bytes through
+spills, reloads and CFG edge moves. ABI inputs, calls and opaque rows receive
+no such certificate.
 
 With both facts, a nonnegative signed extension becomes a zero extension,
 and a zero extension of already canonical storage becomes a coalescible copy.
@@ -405,6 +417,10 @@ against protected pages. The bounds do not assume an ABI extension or infer a
 loop's numeric range from its initial value alone. `test-tier1-emit` executes
 positive and unsafe induction near-matches through both selection/allocation
 paths with constrained registers and independent unsigned-bit arithmetic.
+Mixed signed/unsigned widening tests keep eight loaded values live before
+either use, require real three-register spills, check the stored results
+independently, and put exact-width input at a protected page boundary. A
+volatile `I32` load checks the conservative representation.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
