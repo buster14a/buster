@@ -176,6 +176,10 @@ static void asm_test_group_link(AsmTest* test, const char* directory)
 
 static void asm_test_groups(AsmTest* test, const char* directory, bool cross_check)
 {
+    // Explicit flags must retain the conventional array entry sizes. In particular,
+    // the file-scope assembly path relies on accepting these before refusing their kind.
+    static const char arrays[] = ".section .init_array,\"aw\"\n.quad 0\n.section .fini_array,\"aw\"\n.quad 0\n";
+    asm_test_pair(test, (String8){.pointer = (char*)arrays, .length = sizeof(arrays) - 1}, 1, X86_ARCH_BASELINE);
     asm_test_group_metadata(test);
     asm_test_pair(test, (String8){.pointer = (char*)asm_test_group_signatures, .length = sizeof(asm_test_group_signatures) - 1}, 1, X86_ARCH_BASELINE);
     static const char* const rejected[] = {

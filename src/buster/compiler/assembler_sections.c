@@ -127,7 +127,6 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         {
             const String8 flags = asm_name_text(parser, parser->at++);
             object.flags = 0;
-            object.entry_size = 0;
             for (uint64_t i = 0; i < flags.length; i += 1)
             {
                 switch (flags.pointer[i])
@@ -141,6 +140,12 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 case 'G': object.flags |= SHF_GROUP; break;
                 default: asm_fail(parser, location, "unsupported section flag"); break;
                 }
+            }
+            // A grouped section is independent of an ungrouped namesake. Preserve the
+            // built-in entry size for ordinary sections such as .init_array.
+            if ((object.flags & SHF_GROUP) != 0)
+            {
+                object.entry_size = 0;
             }
             if (asm_take(parser, ','))
             {
