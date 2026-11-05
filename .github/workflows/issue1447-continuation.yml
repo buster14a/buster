@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  bool-vector-oracle:
+  pragma-oracle:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -14,55 +14,25 @@ jobs:
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
-      - name: Probe boolean elementwise behavior
+      - name: Probe Linux pragma diagnostics, effects and selectany aliases
         shell: bash
         run: |
           set +e
-          set -u
           ulimit -c 0
           mkdir -p build/issue1447-oracle
-          for op in {1..13}; do
-            for lanes in 1 3 8 65 1024; do
-              stem="build/issue1447-oracle/op${op}-lanes${lanes}"
-              echo "CASE op=$op lanes=$lanes"
-              if clang -O0 -march=x86-64 -std=gnu17 -Wno-psabi -DOP="$op" -DLANES="$lanes" tools/issue1447-bool-builtins.c -o "$stem" > "$stem.compile.log" 2>&1; then
-                timeout 10 "$stem"
-                echo "run status=$?"
-              else
-                echo "compile status=$?"
-                sed -n '1,16p' "$stem.compile.log"
+          for mode in linux microsoft; do
+            flags=()
+            if [ "$mode" = microsoft ]; then flags=(-fms-extensions); fi
+            for case in {1..48}; do
+              if [ "$mode" = microsoft ] && { { [ "$case" -gt 25 ] && [ "$case" -lt 33 ]; } || { [ "$case" -gt 36 ] && [ "$case" -lt 45 ]; }; }; then continue; fi
+              stem="build/issue1447-oracle/$mode-$case"
+              echo "PRAGMA mode=$mode CASE=$case"
+              clang -std=gnu17 -O0 -Wunknown-pragmas -fno-caret-diagnostics "${flags[@]}" -DCASE="$case" -S -emit-llvm tools/issue1447-pragmas.c -o "$stem.ll" > "$stem.log" 2>&1
+              echo "compile status=$?"
+              cat "$stem.log"
+              if [ -f "$stem.ll" ]; then
+                grep -E '^@|^define|fadd|fmul|fdiv|constrained|module.flags|fp-contract|reassociate|reciprocal' "$stem.ll" || true
               fi
             done
-            stem="build/issue1447-oracle/op${op}-ir"
-            if clang -O0 -march=x86-64 -std=gnu17 -Wno-psabi -DOP="$op" -DLANES=8 -S -emit-llvm tools/issue1447-bool-builtins.c -o "$stem.ll" > "$stem.log" 2>&1; then
-              sed -n '/define.*@operation/,/^}/p' "$stem.ll"
-            else
-              sed -n '1,12p' "$stem.log"
-            fi
-          done
-  diagnostic-occurrence-oracle:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-      - name: Install pinned Clang
-        run: bash tools/ci/setup-hosted.sh
-      - name: Probe diagnostic type spellings and recovery
-        shell: bash
-        run: |
-          set +e
-          ulimit -c 0
-          for case in {1..24}; do
-            echo "OCCURRENCE CASE=$case"
-            clang -std=c23 -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-diagnostic-occurrences.c 2>&1
-          done
-          for case in {1..24}; do
-            echo "RECOVERY CASE=$case"
-            standard=gnu17
-            if [ "$case" -eq 6 ]; then standard=c89; fi
-            if [ "$case" -eq 1 ] || [ "$case" -eq 21 ] || [ "$case" -eq 22 ]; then standard=c23; fi
-            clang -std="$standard" -fsyntax-only -fno-caret-diagnostics -DCASE="$case" tools/issue1447-recovery-oracles.c 2>&1
           done
           exit 0
