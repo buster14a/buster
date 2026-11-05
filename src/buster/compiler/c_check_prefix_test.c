@@ -362,26 +362,30 @@ static void check_test_prefix_lost_body(CheckTest* test)
 }
 
 // A diagnosed missing parameter type preserves its complete declaration's tree, but never admits a later
-// declaration, an unknown type, or a declaration whose syntax recovery erased nodes.
+// declaration, an unknown type outside a parameter, or a declaration whose syntax recovery erased nodes.
 static void check_test_prefix_parameter_types(CheckTest* test)
 {
     static const struct
     {
         const char* source;
         bool retain;
+        bool c23;
     } cases[] = {
         { "void f(const p);\nint later;\n", true },
         { "void f(const p, int q);\nint later;\n", true },
         { "void f(const p +);\nint later;\n", false },
         { "const p;\nint later;\n", false },
-        { "void f(Unknown p);\nint later;\n", false },
+        { "void f(Unknown p);\nint later;\n", true },
+        { "void f(const p);\nint later;\n", true, true },
+        { "Unknown p;\nint later;\n", false },
+        { "void f(Unknown p +);\nint later;\n", false },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         static InternTable identifiers;
         static Preprocessor pp;
         static Parser parser;
-        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+        const PPOptions options = { .language = { .standard = cases[c].c23 ? 2023 : 2017, .gnu = true }, .no_standard_includes = true };
         const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
                            pp_run_source(&pp, "prefix-parameter-types.c", (const uint8_t*)cases[c].source, strlen(cases[c].source));
         check_test_expect(test, ready, "parameter-type prefix fixture initializes");
@@ -413,6 +417,14 @@ static void check_test_prefix_parameter_types(CheckTest* test)
                 check_test_expect(test, !cases[c].retain || (end != 0 && end < parser.tokens.count && parser.diagnostic_count == 1 &&
                                                             parser.diagnostics[0].parameter_type),
                                   "parameter recovery is explicitly diagnosed and excludes the later declaration");
+                if (cases[c].retain && parser.diagnostic_count != 0 && parser.diagnostics[0].message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME)
+                {
+                    const uint32_t token = parser.diagnostics[0].token;
+                    check_test_expect(test, status == CHECK_PREFIX_READY && token < prefix.end &&
+                                          parser.tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser.tokens.names[token] != C_NAME_INT &&
+                                          prefix.parser.tokens.kinds[token] == PARSE_KIND_TYPE && prefix.parser.tokens.names[token] == C_NAME_INT,
+                                      "unknown parameter type substitution belongs only to the private diagnostic prefix");
+                }
             }
             parse_release(&parser);
             arena_release(&scratch);

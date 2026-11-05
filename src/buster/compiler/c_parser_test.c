@@ -1181,6 +1181,7 @@ static uint32_t parse_test_check_resumed(const char* directory)
         { "typedef int T;\nint x T;\n", "2:6 resumed expected ';' after top level declarator\n" },
         { "void f(const p);\n", "1:14 parameter type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
         { "const p;\n", "1:7 type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
+        { "void f(Unknown p);\n", "1:8 parameter unknown type name 'Unknown'\n" },
     };
     uint32_t failures = 0;
     char path[4096];
