@@ -12,7 +12,8 @@
 # the step.
 #
 # The executable must not reference the stack canary's runtime (#916): -fno-stack-protector pins the policy, and this
-# checks that the toolchain's configured default didn't add it back. With PADDING, it is a shifted link (build.sh
+# checks that the toolchain's configured default didn't add it back, in the compiler's objects (-DOBJECTS=LIST), or
+# without them in the executable. With PADDING, it is a shifted link (build.sh
 # shifts): its padding must be in it, and with UNSHIFTED, it must not be that executable byte for byte.
 #
 # OUTPUT is removed first and written last, by a rename of the finished file, so that a failed step leaves no
@@ -56,7 +57,17 @@ execute_process(COMMAND "${NM}" "${partial}" OUTPUT_VARIABLE symbols RESULT_VARI
 if(NOT status EQUAL 0)
     post_link_fail("${NM} couldn't read ${partial}")
 endif()
-string(FIND "${symbols}" "__stack_chk_fail" canary)
+# The canary in the compiler's own objects (OBJECTS) where they are given: a static link's libc.a defines and calls
+# __stack_chk_fail itself, as libc.so.6 does where the executable doesn't see it. Without OBJECTS, in the executable.
+if(DEFINED OBJECTS AND NOT OBJECTS STREQUAL "")
+    execute_process(COMMAND "${NM}" -u ${OBJECTS} OUTPUT_VARIABLE checked RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        post_link_fail("${NM} couldn't read the objects ${OUTPUT} links")
+    endif()
+else()
+    set(checked "${symbols}")
+endif()
+string(FIND "${checked}" "__stack_chk_fail" canary)
 if(NOT canary EQUAL -1)
     post_link_fail("${OUTPUT} references __stack_chk_fail; -fno-stack-protector didn't take effect")
 endif()

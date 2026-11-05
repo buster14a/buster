@@ -4,11 +4,22 @@
 // Original private-slot field splitting (#139), included after ir_optimize.c. The resulting typed scalar slots
 // feed the upstream ssa_ir_promote adapter; this module does not implement another SSA constructor.
 // Every observed pointer use must be understood before any field of a slot is rewritten.
+//
+// #1282's options take the by-value aggregates the typed stream leaves of vectors, which an inlined call's copies then
+// reach: `simd` takes a function with vectors, masks or machine rows (a vector field's slot is promoted whole), and
+// `flagged` takes an address-taken slot (the typed stream marks every object so) whose every use the provenance below
+// understands, since only its STACK_ADDR reaches a slot. Provenance follows an address through COPY, BITCAST, an
+// ADDRESS whose index is a constant, and the typed stream's PTRTOINT/INTTOPTR round trips; an integer of a slot's address
+// used otherwise escapes it. A store that a later store of the same slot in its block overwrites, with no load of the
+// slot between, is dead: it becomes a lifetime start of a sink slot no access reaches (which promotion then drops), so
+// that a zeroed object's stores don't overlap the vector field that overwrites them.
 
 typedef struct IrSroaOptions IrSroaOptions;
 struct IrSroaOptions
 {
     bool scalar;
+    bool simd;
+    bool flagged;
 };
 
 typedef struct IrSroaResult IrSroaResult;
@@ -36,6 +47,9 @@ struct IrSroaWork
     uint32_t* field_alignments;
     uint32_t* field_slots;
     uint32_t field_count;
+    // Per instruction, whether it is a dead store (ir_sroa_dead_stores), and how many there are.
+    uint8_t* dead;
+    uint32_t dead_count;
     IrSroaResult statistics;
 };
 
@@ -62,7 +76,8 @@ static uint16_t ir_sroa_escape_mask(const IrSroaUseBatch* batch)
         const __m512i flags = _mm512_maskz_loadu_epi32(valid, batch->flags);
         const __mmask16 first = valid & _mm512_cmpeq_epi32_mask(position, _mm512_setzero_si512());
         const __mmask16 memory = first & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)));
-        const __mmask16 forward_op = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COPY)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_BITCAST)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADDRESS));
+        const __mmask16 forward_op = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COPY)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_BITCAST)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADDRESS)) |
+                                     _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PTRTOINT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_INTTOPTR));
         const __mmask16 forward = first & forward_op & _mm512_cmpneq_epi32_mask(forwarded, _mm512_setzero_si512());
         const __mmask16 observable = memory & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_OBSERVABLE));
         result = valid & (~(memory | forward) | observable);
@@ -123,7 +138,16 @@ static __attribute__((unused)) IrSroaOptions ir_sroa_options(void)
     return options;
 }
 
-static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
+// A pointer's root and offset past `base`'s by `delta` bytes into *offset, or false where it would wrap.
+static bool ir_sroa_offset(uint64_t base, int64_t delta, uint64_t* offset)
+{
+    const uint64_t magnitude = delta < 0 ? -(uint64_t)delta : (uint64_t)delta;
+    const bool fits = delta < 0 ? base >= magnitude : base <= UINT64_MAX - magnitude;
+    *offset = fits ? (delta < 0 ? base - magnitude : base + magnitude) : 0;
+    return fits;
+}
+
+static void ir_sroa_provenance(IrSroaWork* work, bool scalar, bool flagged)
 {
     (void)scalar;
 
@@ -132,9 +156,13 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
     {
         memset(work->roots, 0xff, (uint64_t)f->instruction_count * 4);
     }
+    // With `flagged` (#1282), an address-taken slot is refused by its uses alone; a volatile one and the incoming frame's
+    // anchors (a variadic definition's) stay memory whatever their uses.
+    const uint32_t refusing = flagged ? BUSTER_IR_SLOT_VOLATILE | BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA :
+                                        BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE;
     for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
     {
-        work->refused[slot] = (f->slots[slot].flags & (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE)) != 0;
+        work->refused[slot] = (f->slots[slot].flags & refusing) != 0;
     }
     // These pointer definitions have only ordinary SSA operands, so RPO plus in-block order is topological.
     for (uint32_t r = 0; r < work->ir.dominators.reachable_count; r += 1)
@@ -153,15 +181,28 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
                 work->roots[i] = work->roots[f->a[i]];
                 work->offsets[i] = work->offsets[f->a[i]];
             }
-            else if (op == IR_ADDRESS && f->b[i] == BUSTER_IR_NONE && work->roots[f->a[i]] != BUSTER_IR_NONE)
+            else if (flagged && ((op == IR_PTRTOINT && f->type[i] == IR_I64 && f->type[f->a[i]] == IR_PTR) || (op == IR_INTTOPTR && f->type[f->a[i]] == IR_I64)))
             {
-                const int64_t delta = f->addresses[f->c[i]].offset;
-                const uint64_t base = work->offsets[f->a[i]];
-                const uint64_t magnitude = delta < 0 ? -(uint64_t)delta : (uint64_t)delta;
-                if (delta < 0 ? base >= magnitude : base <= UINT64_MAX - magnitude)
+                // The typed stream's addresses are integers between their memory accesses (#1282): a slot's address as
+                // an i64 that an inttoptr makes a ptr again is the same address. Any other use of the integer escapes.
+                work->roots[i] = work->roots[f->a[i]];
+                work->offsets[i] = work->offsets[f->a[i]];
+            }
+            else if (op == IR_ADDRESS && work->roots[f->a[i]] != BUSTER_IR_NONE)
+            {
+                // An index that is a constant (the typed stream's offsets, with `flagged`) moves the address by its value
+                // times the scale; any other index leaves the address unknown.
+                const IrAddress address = f->addresses[f->c[i]];
+                const uint32_t index = f->b[i];
+                const bool constant = index != BUSTER_IR_NONE && flagged && f->op[index] == IR_CONST && f->type[index] == IR_I64;
+                const int64_t scaled = constant ? (int64_t)(f->constants[f->a[index]].low * (uint64_t)address.scale) : 0;
+                const bool small = !constant || (f->constants[f->a[index]].low < (UINT64_C(1) << 32) && address.scale <= 8);
+                uint64_t moved = 0;
+                if ((index == BUSTER_IR_NONE || constant) && small && ir_sroa_offset(work->offsets[f->a[i]], address.offset, &moved) &&
+                    ir_sroa_offset(moved, scaled, &moved))
                 {
                     work->roots[i] = work->roots[f->a[i]];
-                    work->offsets[i] = delta < 0 ? base - magnitude : base + magnitude;
+                    work->offsets[i] = moved;
                 }
             }
         }
@@ -182,13 +223,82 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
                 if (root != BUSTER_IR_NONE)
                 {
                     const bool memory = operand.position == 0 && (f->op[i] == IR_LOAD || f->op[i] == IR_STORE);
-                    const bool forward = operand.position == 0 && (f->op[i] == IR_COPY || f->op[i] == IR_BITCAST || f->op[i] == IR_ADDRESS) && work->roots[i] == root;
+                    const bool forward = operand.position == 0 && (f->op[i] == IR_COPY || f->op[i] == IR_BITCAST || f->op[i] == IR_ADDRESS || f->op[i] == IR_PTRTOINT || f->op[i] == IR_INTTOPTR) &&
+                                         work->roots[i] == root;
                     if ((!memory && !forward) || (memory && (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0))
                     {
                         work->refused[root] = 1;
                     }
                 }
             }
+        }
+    }
+}
+
+// The bytes a load or a store at `i` accesses.
+static uint32_t ir_sroa_access_bytes(const IrFunction* f, uint32_t i)
+{
+    const uint32_t type = f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]];
+    return (ir_type_bits[type] + 7) / 8;
+}
+
+// The dead stores of the slots not refused (#1282, work->dead): walking each reachable block backwards, a slot's bytes
+// that later stores of the block write before any load of the slot reads them are covered, one interval a slot (the
+// latest stores', joined while they touch), and a store within it writes nothing any load reads. A slot not refused has
+// no other access (its address escapes nowhere), so nothing else reads its bytes; across blocks nothing is assumed.
+// `lows` and `highs` have a slot's room each; `touched` the block's instructions'.
+static void ir_sroa_dead_stores(IrSroaWork* work, uint64_t* lows, uint64_t* highs, uint32_t* touched)
+{
+    const IrFunction* f = work->ir.function;
+    for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
+    {
+        lows[slot] = 0;
+        highs[slot] = 0;
+    }
+    for (uint32_t r = 0; r < work->ir.dominators.reachable_count; r += 1)
+    {
+        const uint32_t block = work->ir.dominators.rpo[r];
+        uint32_t touched_count = 0;
+        for (uint32_t i = f->block_offsets[(uint64_t)block + 1]; i > f->block_offsets[block]; i -= 1)
+        {
+            const uint32_t node = i - 1;
+            const uint32_t op = f->op[node];
+            const uint32_t root = (op == IR_LOAD || op == IR_STORE) ? work->roots[f->a[node]] : BUSTER_IR_NONE;
+            if (root != BUSTER_IR_NONE && work->refused[root] == 0)
+            {
+                const uint64_t first = work->offsets[f->a[node]];
+                const uint64_t bytes = ir_sroa_access_bytes(f, node);
+                const uint64_t end = first <= UINT64_MAX - bytes ? first + bytes : UINT64_MAX;
+                if (lows[root] == highs[root])
+                {
+                    touched[touched_count++] = root;
+                }
+                if (op == IR_LOAD)
+                {
+                    // A load reads what the stores after it wrote over: none of the block's earlier ones are dead by them.
+                    highs[root] = lows[root];
+                }
+                else if (lows[root] < highs[root] && lows[root] <= first && end <= highs[root])
+                {
+                    work->dead[node] = 1;
+                    work->dead_count += 1;
+                }
+                else if (lows[root] < highs[root] && first <= highs[root] && lows[root] <= end)
+                {
+                    lows[root] = first < lows[root] ? first : lows[root];
+                    highs[root] = end > highs[root] ? end : highs[root];
+                }
+                else
+                {
+                    lows[root] = first;
+                    highs[root] = end;
+                }
+            }
+        }
+        for (uint32_t k = 0; k < touched_count; k += 1)
+        {
+            lows[touched[k]] = 0;
+            highs[touched[k]] = 0;
         }
     }
 }
@@ -251,12 +361,12 @@ static void ir_sroa_fields(IrSroaWork* work, bool scalar)
     const IrFunction* f = work->ir.function;
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
-        if ((f->op[i] == IR_LOAD || f->op[i] == IR_STORE) && work->roots[f->a[i]] != BUSTER_IR_NONE)
+        if ((f->op[i] == IR_LOAD || f->op[i] == IR_STORE) && work->roots[f->a[i]] != BUSTER_IR_NONE && work->dead[i] == 0)
         {
             const uint32_t root = work->roots[f->a[i]];
             const uint64_t offset = work->offsets[f->a[i]];
             const uint32_t type = f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]];
-            const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
+            const uint32_t bytes = ir_sroa_access_bytes(f, i);
             if (offset > f->slots[root].size || bytes > f->slots[root].size - offset)
             {
                 work->refused[root] = 1;
@@ -300,6 +410,14 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
     {
         slots += work->refused[work->field_roots[field]] == 0;
     }
+    // The dead stores' sink (#1282): a byte no access reaches, whose lifetime starts stand where they were.
+    bool sinking = false;
+    for (uint32_t i = 0; work->dead_count != 0 && i < f->instruction_count; i += 1)
+    {
+        sinking = sinking || (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0);
+    }
+    const uint32_t sink = (uint32_t)slots;
+    slots += sinking;
     IrError error = slots <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
     IrFunction view = *f;
     uint32_t* firsts = NULL;
@@ -311,6 +429,8 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
         view.a = ir_allocate(scratch, f->instruction_count, 4, &ok);
         view.b = ir_allocate(scratch, f->instruction_count, 4, &ok);
         view.c = ir_allocate(scratch, f->instruction_count, 4, &ok);
+        view.flags = ir_allocate(scratch, f->instruction_count, 1, &ok);
+        view.alignment_log2 = ir_allocate(scratch, f->instruction_count, 1, &ok);
         view.slots = ir_allocate(scratch, slots, sizeof(IrSlot), &ok);
         view.slot_count = slots;
         error = ok ? IR_OK : IR_ERROR_MEMORY;
@@ -342,9 +462,15 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
                 work->statistics.fields += 1;
             }
         }
+        if (sinking)
+        {
+            view.slots[sink] = (IrSlot){ .size = 1, .alignment = 1, .type = IR_I8 };
+        }
         for (uint32_t i = 0; i < f->instruction_count; i += 1)
         {
             view.op[i] = f->op[i];
+            view.flags[i] = f->flags[i];
+            view.alignment_log2[i] = f->alignment_log2[i];
             view.a[i] = f->a[i];
             view.b[i] = f->b[i];
             view.c[i] = f->c[i];
@@ -355,7 +481,18 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
                 view.a[i] = firsts[f->a[i]];
             }
             const uint32_t root = work->roots[i];
-            if (root != BUSTER_IR_NONE && work->refused[root] == 0)
+            if (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0)
+            {
+                view.op[i] = IR_LIFETIME;
+                view.flags[i] = 0;
+                view.alignment_log2[i] = 0;
+                view.a[i] = sink;
+                view.b[i] = 0;
+                view.c[i] = BUSTER_IR_NONE;
+            }
+            // Only a ptr becomes a field's address: a slot's address as an integer (#1282) has only inttoptrs' uses,
+            // which become addresses themselves, and goes with the dead code.
+            else if (root != BUSTER_IR_NONE && work->refused[root] == 0 && f->type[i] == IR_PTR)
             {
                 for (uint32_t field = 0; field < work->field_count; field += 1)
                 {
@@ -422,7 +559,7 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), false);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), options.simd);
     }
     if (check.error == IR_OK)
     {
@@ -438,12 +575,34 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
         work.field_sizes = ir_allocate(scratch, n, 4, &ok);
         work.field_alignments = ir_allocate(scratch, n, 4, &ok);
         work.field_slots = ir_allocate(scratch, n, 4, &ok);
+        work.dead = ir_allocate(scratch, n, 1, &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+        if (ok && n != 0)
+        {
+            memset(work.dead, 0, n);
+        }
     }
     IrFunction view = { 0 };
     if (check.error == IR_OK)
     {
-        ir_sroa_provenance(&work, BUSTER_SCALAR_PATH(options.scalar));
+        ir_sroa_provenance(&work, BUSTER_SCALAR_PATH(options.scalar), options.flagged);
+        if (options.flagged)
+        {
+            const uint64_t mark = scratch->length;
+            bool ok = true;
+            uint64_t* lows = ir_allocate(scratch, function->slot_count, 8, &ok);
+            uint64_t* highs = ir_allocate(scratch, function->slot_count, 8, &ok);
+            uint32_t* touched = ir_allocate(scratch, function->instruction_count, 4, &ok);
+            if (ok)
+            {
+                ir_sroa_dead_stores(&work, lows, highs, touched);
+            }
+            check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+            arena_pop_to(scratch, mark);
+        }
+    }
+    if (check.error == IR_OK)
+    {
         ir_sroa_fields(&work, BUSTER_SCALAR_PATH(options.scalar));
         check.error = ir_sroa_view(&work, scratch, &view);
     }

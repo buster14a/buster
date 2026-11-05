@@ -47,6 +47,9 @@ struct CheckBuiltinCall
     // Whether that literal is a UTF-8 one (u8"..."), which the CFString builtins refuse, and its first token.
     bool nan_payload_utf8;
     uint32_t nan_payload_token;
+    // A constant CFString's call's name (#148): its token and the `(` after it are the objects check_data_cfstring_keys
+    // takes, where it makes them, for the class reference and for the characters' UTF-16 array.
+    uint32_t cfstring_name;
     // __builtin_infer_alloc_token's token, where its arguments give one (check_input_alloc_token_evidence, #148).
     bool alloc_token_known;
     uint64_t alloc_token;
@@ -182,10 +185,63 @@ struct CheckGraphValidation
     uint32_t vector_blocks;
 };
 
+// A struct's or union's member that a deprecated or unavailable attribute marks (#147): its index in the type table's
+// members, its declaration's name, the attribute's first token (the deprecated note's place) and its message's string
+// (BUSTER_CHECK_WARNING_NO_SOURCE for none). Its uses are check_input_member_uses' and the initializers' walk's.
+typedef struct CheckInputMarkedMember CheckInputMarkedMember;
+struct CheckInputMarkedMember
+{
+    uint32_t member;
+    uint32_t name;
+    uint32_t attribute;
+    uint32_t message;
+    bool unavailable;
+};
+
+// A token's availability context (CheckInput.availability_contexts, #147): in a deprecated or an unavailable function's
+// body or declaration's declarator and initializer, where clang's ShouldDiagnoseAvailabilityInContext drops a use's
+// diagnostic (a deprecated context a deprecated use's, an unavailable one either's).
+#define BUSTER_CHECK_CONTEXT_DEPRECATED 0x01
+#define BUSTER_CHECK_CONTEXT_UNAVAILABLE 0x02
+// A deprecated use's or note's payload.data where its name is its payload.first_type's spelling (an anonymous tag's,
+// `struct (unnamed at FILE:LINE:COL)` or its typedef's name), not payload.name.
+#define BUSTER_CHECK_DEPRECATED_TYPE_NAME 1u
+
+// The marked member of the type table's member `member` among `members` (`count`, ascending by index), or null.
+static __attribute__((unused)) const CheckInputMarkedMember* check_marked_member(const CheckInputMarkedMember* members, uint32_t count, uint32_t member)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = members[middle].member < member;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    const CheckInputMarkedMember* result = low < count && members[low].member == member ? members + low : NULL;
+    return result;
+}
+
+// Whether a use of a marked member at a token of `context` (BUSTER_CHECK_CONTEXT_*) is dropped, as clang's context rules
+// drop it: a deprecated one's in a deprecated or unavailable context, an unavailable one's in an unavailable one.
+static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedMember* marked, uint8_t context)
+{
+    const bool result = (context & BUSTER_CHECK_CONTEXT_UNAVAILABLE) != 0 || (!marked->unavailable && (context & BUSTER_CHECK_CONTEXT_DEPRECATED) != 0);
+    return result;
+}
+
 struct CheckGraph
 {
-    // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0.
+    // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+    // and 0 for none.
+    const CheckInputMarkedMember* marked_members;
+    uint32_t marked_member_count;
+    const uint8_t* availability_contexts;
+    // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0;
+    // and then the object of its file-scope declaration of __CFConstantStringClassReference with external linkage, or 0.
     TypeId ns_constant_string;
+    uint32_t cfstring_class;
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
     // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf_of). Other nodes use types/member as
     // action data.
@@ -2403,6 +2459,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alloc_token_known = witness != NULL && witness->alloc_token_known,
             .alloc_token = witness != NULL ? witness->alloc_token : 0,
             .static_chain_call = witness != NULL && witness->static_chain_call,
+            .cfstring_object = graph->tokens != NULL && graph->tokens[node] < UINT32_MAX ? graph->tokens[node] + 1 : 0,
             .os_log_items = witness != NULL ? witness->os_log_items : NULL,
             .os_log_count = witness != NULL ? witness->os_log_count : 0,
             .os_log_known = witness != NULL && witness->os_log_known,

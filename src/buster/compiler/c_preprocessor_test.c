@@ -1304,6 +1304,11 @@ static const PPTestFile pp_test_files_stack[] = {
     { 0, 0 },
 };
 
+static const PPTestFile pp_test_files_conversion_system[] = {
+    { "sys/conversion.h", "#if -1 > 0u\ninside\n#endif\n" },
+    { 0, 0 },
+};
+
 // A file whose name is what a header name taken from the raw string literal R"(other.h)" would be.
 static const PPTestFile pp_test_files_raw_header[] = {
     { "\"(other.h)", "found_by_a_raw_string\n" },
@@ -1423,6 +1428,46 @@ static const PPTestFile pp_test_files_header_tails[] = {
 _Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 static const PPTestCase pp_test_cases[] = {
+    // Negative-to-unsigned conversions (#1291): all converting operators on both sides, live contexts, and
+    // controls. Both kernels check the warning counts; --clang checks the values and warning-policy outcomes.
+    { "#if negative conversions for each arithmetic, comparison and bitwise operator",
+      "#if -3 * 2u\ncase_0\n#endif\n#if 2u * -3\ncase_1\n#endif\n#if -3 / 2u\ncase_2\n#endif\n#if 2u / -3\ncase_3\n#endif\n"
+      "#if -3 % 2u\ncase_4\n#endif\n#if 2u % -3\ncase_5\n#endif\n#if -3 + 2u\ncase_6\n#endif\n#if 2u + -3\ncase_7\n#endif\n"
+      "#if -3 - 2u\ncase_8\n#endif\n#if 2u - -3\ncase_9\n#endif\n#if -3 < 2u\ncase_10\n#endif\n#if 2u < -3\ncase_11\n#endif\n"
+      "#if -3 <= 2u\ncase_12\n#endif\n#if 2u <= -3\ncase_13\n#endif\n#if -3 > 2u\ncase_14\n#endif\n#if 2u > -3\ncase_15\n#endif\n"
+      "#if -3 >= 2u\ncase_16\n#endif\n#if 2u >= -3\ncase_17\n#endif\n#if -3 == 2u\ncase_18\n#endif\n#if 2u == -3\ncase_19\n"
+      "#endif\n#if -3 != 2u\ncase_20\n#endif\n#if 2u != -3\ncase_21\n#endif\n#if -3 & 2u\ncase_22\n#endif\n#if 2u & -3\ncase_23\n"
+      "#endif\n#if -3 ^ 2u\ncase_24\n#endif\n#if 2u ^ -3\ncase_25\n#endif\n#if -3 | 2u\ncase_26\n#endif\n#if 2u | -3\ncase_27\n"
+      "#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_11\ncase_13\ncase_14\ncase_16\ncase_20\ncase_21\ncase_24\ncase_25\ncase_26\ncase_27\n", false, 28 },
+    { "#if signed, nonnegative and already unsigned controls",
+      "#if -3 < 0\ncase_0\n#endif\n#if 3 < 4u\ncase_1\n#endif\n#if 0u < 18446744073709551615u\ncase_2\n#endif\n#if -1u > 0\ncase_3\n"
+      "#endif\n#if -1 + -2 == -3\ncase_4\n#endif\n#if ~0u > 0\ncase_5\n#endif\n#if (-8 >> 1u) == -4\ncase_6\n#endif\n#if (-1 && 1u)\n"
+      "case_7\n#endif\n#if (0u || -1)\ncase_8\n#endif\n#if (-1, 1u)\ncase_9\n#endif\n#if (1u, -1)\ncase_10\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_10\n", false, 0 },
+    { "#if conditional common type without a conversion warning",
+      "#if (1 ? -1 : 0u) > 0\ncase_0\n#endif\n#if (0 ? 0u : -2) > 0\ncase_1\n#endif\n#if (0 ? -1 : 0u) == 0\ncase_2\n#endif\n"
+      "#if (1 ? 0u : -2) == 0\ncase_3\n#endif\n#if (0 ? 0u : (1 ? -1 : -2)) > 0\ncase_4\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\n", false, 0 },
+    { "#if conversions in unevaluated operands stay silent",
+      "#if 0 && (-1 > 0u)\ncase_0\n#endif\n#if 1 || (0u < -2)\ncase_1\n#endif\n#if 0 ? (-1 + 1u) : 1\ncase_2\n#endif\n"
+      "#if 1 ? 1 : (1u + -1)\ncase_3\n#endif\n#if 0 && (1 ? (-1 > 0u) : (0u < -2))\ncase_4\n#endif\n#if 1 || (0 ? (0u < -1) : (-2 > 0u))\n"
+      "case_5\n#endif\n#if 0 && (1 / 0 + (-1 > 0u))\ncase_6\n#endif\n#if 1 || (1 / 0 + (0u < -2))\ncase_7\n#endif\n",
+      0, "c17", "case_1\ncase_2\ncase_3\ncase_5\ncase_7\n", false, 0 },
+    { "#if conversion liveness restored across precedence and conditional nesting",
+      "#if 0 && (-1 > 0u) || (-2 > 0u)\ncase_0\n#endif\n#if (0 && (-1 > 0u)) + (-3 > 0u)\ncase_1\n#endif\n#if 1 ? (-1 > 0u) : (-2 > 0u)\n"
+      "case_2\n#endif\n#if 0 ? (-1 > 0u) : (-2 > 0u)\ncase_3\n#endif\n#if 0 ? (-1 > 0u) : 1 ? (0u < -2) : (-3 > 0u)\ncase_4\n#endif\n"
+      "#if 1 ? (0 ? (-1 > 0u) : (-2 > 0u)) : (-3 > 0u)\ncase_5\n#endif\n#if (1 || (-1 > 0u)) && (0u < -2)\ncase_6\n#endif\n"
+      "#if ((0u < -1) ? -2 : 3) > 0u\ncase_7\n#endif\n#if (-1 > 0u) && (-2 > 0u)\ncase_8\n#endif\n#if -'A' > 0u\ncase_9\n#endif\n",
+      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\n", false, 12 },
+    { "#if negative conversions become errors", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "", true, 0, "-Werror", .errors = 2 },
+    { "#if negative conversion warnings are suppressed by -w", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 0, "-w -Werror", .errors = 0 },
+    { "#if negative conversion warnings can be demoted", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Werror -Wno-error", .errors = 0 },
+    { "#if promoted conversion in a system header is suppressed", "#include <conversion.h>\n", 0, "c17", "inside\n", false, 0, "-Werror -isystem %d/sys", pp_test_files_conversion_system },
+    { "#if promoted conversion with system warnings enabled", "#include <conversion.h>\n", 0, "c17", "", true, 0, "-Werror -Wsystem-headers -isystem %d/sys", pp_test_files_conversion_system, .errors = 1 },
+    { "#if negative conversions are not sign-compare warnings", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Wno-sign-compare -Wno-sign-conversion", .errors = 0 },
+    { "#if conversion macros and evaluated #elif", "#define NEG (-1)\n#define GT >\n#define COMPARE(a,b) ((a) > (b))\n#if NEG GT 0u\nmacro_left\n#endif\n#if COMPARE(0u, -2)\nmacro_right\n#endif\n#if 0\n#if -3 > 0u\nskipped\n#endif\n#elif 0u < -4\nelif_taken\n#elif -5 > 0u\nskipped_elif\n#endif\n", 0, "c17", "macro_left\nelif_taken\n", false, 3 },
+    { "#if dead conversion operand still checks syntax", "#if 0 && (-1 > 0u + )\nwrong\n#endif\n", 0, "c17", "", true, 0 },
     // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
     // placemarkers, and variadic macros (the expected text is clang's output).
     { "rescanning, redefinitions and painting", "#define n 4\n#define twice(v) twice(n + (v))\n#undef n\n#define n 5\n#define alias twice\n#define box box{1}\n#define open alias(-\n#define call(f) f(k)\n#define k 7,8\n#define id(v) v\n#define kw() long\n#define one(v) v\n#define join(p,q) p ## q\n#define quote(v) # v\ntwice(a-1) * twice(twice(box)) + id(id(alias)(2) - id)(3);\nalias(n*(9,10)-k) & open 6) | call\n(twice)^call(call);\nkw() arr[one()] = { one(4), join(5,6), join(7,), join(,8), join(,) };\nchar s[2][4] = { quote(abc), quote() };\n",
@@ -1614,7 +1659,7 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\nX\n", false, 2 },
     { "#if arithmetic", "#if -1 < 0u\nunsigned\n#endif\n#if (2 || 1/0) && (0 ? 1/0 : 3) == 3 && 0x10 == 16 && 010 == 8 && 0b101 == 5 && 1'000 == 1000 && 'A' == 65 && '\\377' < 0\nok\n#endif\n"
                      "#if (-9223372036854775807 - 1) / -1 == (-9223372036854775807 - 1) && 18446744073709551615u == -1\nwraps\n#endif\n#if 1 ? 2 : 3 ? 4 : 5\nternary\n#endif\n",
-      0, "c23", "ok\nwraps\nternary\n", false },
+      0, "c23", "ok\nwraps\nternary\n", false, 2 },
     { "#elif chains and nesting", "#define A 2\n#if A == 1\none\n#elif A == 2\n#ifdef A\ntwo\n#else\nnot\n#endif\n#elif 1/0\nthree\n#else\nfour\n#endif\n#ifndef B\nb\n#elifdef A\nno\n#endif\n",
       0, "c23", "two\nb\n", false },
     // Argument scanning past its fast path's limits: an argument across two 64-token blocks, parentheses nested 70 deep,
@@ -1864,9 +1909,9 @@ static const PPTestCase pp_test_cases[] = {
     { "an unused definition whose # names no parameter", "#define F(x) # y\nOK\n",
       0, "c17", "", true, 0, 0, 0 },
     { "UTF-16, UTF-32 and wide character constants' signedness in #if", "#if u'a' < -1\nunsigned_char16\n#else\nwrong_signed_char16\n#endif\n#if U'a' < -1\nunsigned_char32\n#endif\n#if 'a' < -1\nwrong\n#else\nsigned_char\n#endif\n#if L'a' < -1\nwrong\n#else\nsigned_wchar\n#endif\n",
-      0, "gnu17", "unsigned_char16\nunsigned_char32\nsigned_char\nsigned_wchar\n", false, 0, 0, 0 },
+      0, "gnu17", "unsigned_char16\nunsigned_char32\nsigned_char\nsigned_wchar\n", false, 2, 0, 0 },
     { "UTF-8 character constants' signedness in #if (C23)", "#if u8'a' < -1\nunsigned_char8\n#else\nwrong_signed_char8\n#endif\n",
-      0, "c23", "unsigned_char8\n", false, 0, 0, 0 },
+      0, "c23", "unsigned_char8\n", false, 1, 0, 0 },
     { "standard features in C99", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
       0, "c99", "0 0 0 0 0 0 0\n1 1 1 1\n", false, 0, 0, 0 },
     { "standard features in GNU17", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
@@ -6338,13 +6383,15 @@ static const char* const pp_test_clang_headers[] = { "immintrin", "x86intrin", "
 
 #define BUSTER_PP_TEST_HEADER_TEXT (1u << 20)
 
+#include "c_preprocessor_header_diagnostics_test.c"
+
 // buster's headers among the C library's and clang's other ones (pp_test_system_headers, pp_test_clang_headers), in
 // one mode, hosted or `freestanding`: two units, the others first and then buster's 11, and buster's first, each
 // followed by `checks` (the mode's check lines, whose #include lines then include nothing). clang preprocesses each
 // with its own headers, and with buster's in the search --buster-headers makes (-nobuiltininc -isystem `ours` -isystem
 // `links`: pp_test_buster_search), both with -Wsystem-headers, and:
-// - with buster's, clang warns about nothing in the headers (with its own, glibc's C23 widths in <limits.h> and the
-//   line comments of <stdckdint.h> in strict C89 give warnings), and gives the unit itself the same diagnostics;
+// - with buster's, clang adds no header warning beyond those with its own headers (including clang/glibc warnings
+//   such as glibc 2.39's __INT64_C redefinition), and gives the unit itself the same diagnostics;
 // - each compared macro expands to the same tokens with either. The declarations aren't compared: clang's freestanding
 //   <stdint.h> leaves helper macros defined (__int_least16_t and the like) that rename glibc's typedefs of those names
 //   after it;
@@ -6357,8 +6404,8 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
     const bool strict_c89 = strcmp(mode, "-std=c89") == 0;
     char path[4096];
     snprintf(path, sizeof(path), "%s/header-orders.c", directory);
-    char* theirs[4];
-    char* mine[9];
+    char* theirs[6];
+    char* mine[11];
     int their_count = 0;
     int my_count = 0;
     theirs[their_count++] = (char*)mode;
@@ -6371,6 +6418,10 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
     my_count += pp_test_buster_search(mine + my_count, ours, links);
     theirs[their_count++] = "-Wsystem-headers";
     mine[my_count++] = "-Wsystem-headers";
+    theirs[their_count++] = "-fno-caret-diagnostics";
+    mine[my_count++] = "-fno-caret-diagnostics";
+    theirs[their_count++] = "-fno-color-diagnostics";
+    mine[my_count++] = "-fno-color-diagnostics";
     theirs[their_count++] = "-P";
     mine[my_count++] = "-P";
     uint32_t result = 0;
@@ -6392,14 +6443,12 @@ static uint32_t pp_test_header_orders(const char* directory, const char* ours, c
         PPClangOutput their_text = same ? pp_test_clang_process("clang", theirs, their_count, path, false) : (PPClangOutput){ 0 };
         PPClangOutput my_text = same ? pp_test_clang_process("clang", mine, my_count, path, false) : (PPClangOutput){ 0 };
         same = same && their_text.status == PP_CLANG_ACCEPTED && my_text.status == PP_CLANG_ACCEPTED;
-        // No warning in the headers with buster's, and the unit's own diagnostics (ATOMIC_VAR_INIT is deprecated in
-        // C17) as with clang's.
-        uint32_t primary = 0;
-        uint32_t elsewhere = 0;
-        pp_test_count_diagnostics(my_text.diagnostics, path, &primary, &elsewhere);
-        if (same && elsewhere != 0)
+        // Subtract only identical reference header warnings, one occurrence at a time. The unit's own diagnostics
+        // (ATOMIC_VAR_INIT is deprecated in C17) still compare independently below; neither run may fail.
+        if (same && !pp_test_header_warnings(their_text.diagnostics, my_text.diagnostics, path))
         {
-            printf("%s: with ours, clang warns in the headers:\n%s", label, my_text.diagnostics);
+            printf("%s: with ours, clang adds header diagnostics:\nreference:\n%s\nours:\n%s", label,
+                   their_text.diagnostics != NULL ? their_text.diagnostics : "", my_text.diagnostics != NULL ? my_text.diagnostics : "");
             same = false;
         }
         static char their_diagnostics[1 << 16];
@@ -7235,6 +7284,7 @@ static bool pp_test_buster_tree(void)
 static bool pp_test_headers(const char* directory)
 {
     char ours[PATH_MAX];
+    const bool diagnostics = pp_test_header_warning_fixtures() && pp_test_header_warning_oracle(directory);
     const bool trees = pp_test_buster_tree();
     bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
@@ -7278,7 +7328,7 @@ static bool pp_test_headers(const char* directory)
            failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), order_failures,
            (unsigned long)(4 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
-    return trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
+    return diagnostics && trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
 static bool pp_fuzz_checks(const PPFuzzOptions* options);
@@ -7378,12 +7428,14 @@ static bool pp_test_implemented_features(const char* directory)
         "G __has_attribute(cleanup) __has_builtin(__atomic_load) __has_c_attribute(nodiscard)\n"
         "I __has_attribute(__cleanup__) __has_attribute(__constructor__) __has_attribute(__destructor__) __has_attribute(__weak__) __has_attribute(__overloadable__) "
         "__has_c_attribute(gnu::__cleanup__) __has_c_attribute(gnu::__constructor__) __has_c_attribute(gnu::__destructor__) __has_c_attribute(gnu::__weak__) __has_c_attribute(clang::__overloadable__)\n"
-        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
+        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n"
+        // A version, not 1, as clang answers it (pp_implemented_builtin_query).
+        "J __has_builtin(__builtin_operator_new)\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\nJ 201802L\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\nJ 201802L\n",
     };
     static const uint32_t standards[] =
     {
@@ -7909,7 +7961,10 @@ static bool pp_test_implemented_features(const char* directory)
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
             // clang makes __builtin_c23_va_start a builtin in C23 alone (#148).
             const bool language = inventory[i].id != CBUILTIN_C23_VA_START || standards[mode] >= 2023;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == (inventory[i].source && language);
+            // operator_new's and operator_delete's answer is a version, as clang's (pp_implemented_builtin_query).
+            const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+            const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == answer;
             result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == (inventory[i].constant && language);
         }
     }
@@ -8045,7 +8100,9 @@ static bool pp_test_implemented_features(const char* directory)
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
                 // In gnu17, where __builtin_c23_va_start is no builtin (#148).
                 const bool language = inventory[i].id != CBUILTIN_C23_VA_START;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == (inventory[i].source && language);
+                const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+                const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == answer;
                 result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == (inventory[i].constant && language);
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;

@@ -457,12 +457,50 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char return_stack[] =
         "int *a(void) { int x[3]; return &x[0]; }\n"
         "struct S { int m; };\n"
-        "int *c(void) { struct S s; return &s.m; }\n";
+        "int *c(void) { struct S s; return &s.m; }\n"
+        // What a returned address goes through: kept by casts and pointer arithmetic, consumed by a dereference, a member
+        // access, a subscript or a comparison.
+        "int d(struct S s) { return (&s)->m; }\n"
+        "int e(void) { int a[2] = { 0 }; return (&a[0])[1] + a[0]; }\n"
+        "int f(int *p) { int x = 0; return &x == p; }\n"
+        "int g(struct S s) { return *(&s.m); }\n"
+        "int *h(void) { int x = 0; return &x + 1; }\n"
+        "long i(void) { int x = 0; return (long)&x; }\n"
+        "int *j(void) { int a[2]; return a; }\n"
+        "int *k(int c) { int x = 0, y = 0; return c ? &x : &y; }\n"
+        // A comma's left operand and a conditional's condition are not what is returned; its right operand and an arm are.
+        "int *l(int *p) { int x; return (&x, p); }\n"
+        "int *m(int *p) { int x; return &x ? p : p; }\n"
+        "int *n(int *p) { int x; return (p, &x); }\n"
+        "int *o(int c, int *p) { int x; return c ? &x : p; }\n"
+        "int *q(int *p) { int x; return &x ?: p; }\n"
+        "int *r(int c, int *p) { int x; return (c ? &x : p) ? p : p; }\n"
+        "int *s(int *p) { int x; return (p, (&x, p)); }\n"
+        "int *t(int c, int *p) { int x; return c ? p : (p, &x); }\n"
+        "int *u(int *p) { int x; return (p, p, &x); }\n"
+        "int *v(int *p) { int x; return (p, &x, p); }\n"
+        "int *w(int *p) { int x; return &x, p; }\n"
+        // A selection returns the arm it selects alone: not its controlling expression, nor an arm it does not select.
+        "int *y(int *p) { int x; return _Generic(0, int: &x, default: p); }\n"
+        "int *z(int *p) { int x; return _Generic(0, int: p, default: &x); }\n"
+        "int *aa(int *p) { int x; return _Generic(&x, int *: p); }\n"
+        "int *ab(int *p) { int x; return _Generic(0, int: (p, &x)); }\n"
+        "int *ac(int *p) { int x; return __builtin_choose_expr(1, &x, p); }\n"
+        "int *ad(int *p) { int x; return __builtin_choose_expr(0, &x, p); }\n"
+        "int *ae(int *p) { int x; return _Generic(0, int: p, default: _Generic(0, int: &x)); }\n";
     static const char generic_selection[] =
         "int a(void) { int x; return _Generic(1, int: x, default: 0); }\n"
         "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"
         "int c(void) { int x; return __builtin_choose_expr(1, 0, x); }\n"
         "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n";
+    // A marked K&R definition's parameter declarations take its mark as their context (#147,
+    // check_input_availability_contexts); an unmarked one's keep their uses' warnings.
+    static const char kr_deprecated[] =
+        "typedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((deprecated)) int f(a) D a; { return a; }\n"
+        "int g(b) D b; { return b; }\n"
+        // A tag's use is diagnosed once for each of a K&R parameter declaration's declarators.
+        "struct __attribute__((deprecated(\"t\"))) S { int m; };\nint h(c, e) struct S c, e; { return 0; }\n";
     static const char self_initialization[] =
         "int a(void) { int x = x; return x; }\n"
         "int b(void) { int x = x + 1; return x; }\n";
@@ -791,8 +829,10 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_chains, { "-Wall", NULL, NULL, NULL } },
         { unused_values, { "-Wall", NULL, NULL, NULL } },
         { statement_expressions, { "-Wall", NULL, NULL, NULL } },
-        { return_stack, { "-Wall", NULL, NULL, NULL } },
+        // buster gives no -Wpointer-bool-conversion, which clang gives for `&x ? p : p`.
+        { return_stack, { "-Wall", "-Wno-pointer-bool-conversion", NULL, NULL } },
         { generic_selection, { "-Wall", NULL, NULL, NULL } },
+        { kr_deprecated, { NULL, NULL, NULL, NULL } },
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },

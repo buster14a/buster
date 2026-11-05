@@ -261,14 +261,11 @@ static bool compile(const char* compiler, unsigned lanes, bool scalar, bool mult
     }
     if (perturb)
     {
+        arguments[used++] = "--id-order";
+        arguments[used++] = "149";
         if (multiple)
         {
             arguments[used++] = "--poison-arenas";
-        }
-        else
-        {
-            arguments[used++] = "--id-order";
-            arguments[used++] = "149";
         }
     }
     if (object)

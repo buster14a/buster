@@ -45,6 +45,8 @@ static int check_test_driver_hardening_command(const char* executable, const cha
     return check_test_driver_spawn(arguments, text);
 }
 
+#include "c_check_options_driver_test.c"
+
 static void check_test_driver_hardening(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "int helper(int x) { return x + 7; }\nint main(void) { return helper(3) != 10; }\n";
@@ -105,6 +107,10 @@ static void check_test_driver_hardening(CheckTest* test, const char* executable,
     snprintf(reference, sizeof(reference), "%s/hardening-driver.reference", directory);
     const bool written = parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(saved, sentinel, sizeof(sentinel) - 1);
     check_test_expect(test, written, "hardening source and output sentinel are written");
+    if (written)
+    {
+        check_test_driver_option_admission(test, executable, directory, source, output, saved, reference, sentinel);
+    }
     // The refusal happens before the source is read: a missing source does not replace the hardening diagnostic.
     snprintf(missing, sizeof(missing), "%s/hardening-driver-missing.c", directory);
     unlink(missing);

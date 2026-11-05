@@ -16,9 +16,42 @@ the merge's pass over the binding events and the token columns runs on the
 lanes the bodies ran on, each a share of whole bodies by their tokens
 (`check_deferred_pass_items`). A unit it can't merge yet (a body whose
 declaration with linkage changes its entity's linked state, one that makes a
-union of the top level's transparent, one whose walk reports an error, and a
-unit with overloadable functions) is checked in source order, with the reason.
-The driver still checks in source order.
+union of the top level's transparent, one whose walk reports an error, one
+whose redeclaration writes an attribute its entity's other declarations decide
+(#147), and a unit with overloadable functions) is checked in source order, with the reason.
+The C driver reads a whole unit this way with `--deferred-bodies`
+(`check_input_deferred_compile`, #151): the bodies' walks, the merge's pass and
+the post-merge rounds below
+are rounds of the command's flow (`CheckDeferred.flow`, `CheckDeferredFlow`),
+on the session's lanes, as the emission's are, of no more lanes than the grant
+gives (the session's and the worker budget's) before the top level's walk; a
+unit whose bodies take one lane, a prefix, a repair and `-flazy-system-headers`'
+selection are read in source order. [docs/function-lanes.md](../../docs/function-lanes.md)'s
+"The checker's bodies on lanes" has the measurements and the default.
+
+After a successful merge, controls, binding answers and constant contexts run
+on whole-body groups. The expression graph is built in complete parser-forest
+parts after binding recovery, selections, complete uses, region setup and
+`sizeof` preparation. Independent parts have private graph counters, value
+chains, append lists, warnings and immutable type-table views. The caller
+publishes them in source order, using bounded vector relocation and its scalar
+twin; runtime VLA/region work, type insertion and other exceptional actions
+stay ordered. Graph purity and summary records are built with each part.
+Any post-merge error or allocation failure discards the partial result and
+repeats the complete source-order reader, preserving its diagnostic recovery.
+The driver's lane lease lasts through these rounds and is returned once.
+It is returned when the final expression round joins, before ordered graph
+publication and serial finishing. A reading that uses the original expression
+walk returns it before that walk; the outer cleanup covers earlier errors.
+Warning interval summaries are private to each lane; token-local warning-count
+changes are reduced during publication. Expression numbering and per-action
+timing requests retain the original complete-unit expression walk.
+
+`--time-stages` reports `deferred-expression-parts`,
+`deferred-expression-parallel-tokens`, `deferred-expression-serial-tokens`,
+`deferred-expression-workers`, `deferred-expression-retry` and the planning, lane-round, ordered-work and
+publication times. `expressions` remains elapsed wall time; the detailed
+`expressions.work.*` fields sum work across lanes, rather than elapsed time.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
 (and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
@@ -38,7 +71,7 @@ the lane's own at places they keep from one reading to the next
 walk, nor its binding events: a body's stream starts with proxies of the file
 scope's events its heads reach (`check_deferred_proxy`).
 
-`./build/compiler test-checker-deferred [--id-order N] [--keep]` checks 96
+`./build/compiler test-checker-deferred [--id-order N] [--keep]` checks the
 fixtures of the issue's cases through the scalar path, the vector path and the
 deferred reader on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct
 resolution, and on 8 with the identifiers' ids in another order (#153):
@@ -72,6 +105,11 @@ opening must be selected. The merge's scans of the token columns
 (`check_deferred_entries` and the others) must give their scalar twins'
 positions and counts on ranges ending at a protected page, and every merged
 fixture must merge alike with the twins (`CheckDeferred.scalar_merge`).
+Post-merge fixtures require actual parallel expression work, including builtins,
+local initializers and 15/16/17-leaf boundaries. An injected failure after the
+expression round must reproduce the complete source-order result.
+A delayed-caller fixture also checks the completed parts' lane identities,
+requiring real expression execution on the caller and at least one other lane.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units

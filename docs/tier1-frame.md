@@ -190,10 +190,115 @@ protected lowering and are not prologue steps. A probe's loop moves rsp a page a
 a time, which the fixed-frame descriptor can't describe: its frame events
 (#1056) put the CFA in r11, the loop's bound, from the subtraction that sets it
 to the loop's exit, where rsp equals it ("Unwind tables" below). The C driver
-asks for no probes; `test-emitted-code` proves and runs such frames in isolation.
+asks for them under `-fstack-clash-protection` ("Stack-clash protection on
+request" below); `test-emitted-code` proves and runs such frames in isolation.
 
 The plan has bounded step arrays and no instruction positions. Spill
 loads/stores belong to the instruction consumer.
+
+### The frame pointer on request
+
+`-fno-omit-frame-pointer` (the last of it and `-fomit-frame-pointer`) keeps a
+frame pointer in every function, and with `-momit-leaf-frame-pointer` (the last
+of it and `-mno-omit-leaf-frame-pointer`) in every function that calls, as
+clang's driver reads them (`predefines_frame_pointer`); without the option
+neither tier keeps one where its frame doesn't need one, at every `-O`, where
+clang keeps it at `-O0`. The checked program carries the choice
+(`CheckProgramOptions.frame_pointer`, from the predefines through
+`check_request_program_options`) into each function's `Tier0Function.frame_pointer`:
+
+- Tier 1's frame takes `KEEP_POINTER` (`Tier1EmitOptions.frame_flags`), and
+  with the leaf rule `Tier1EmitOptions.omit_leaf_frame_pointer`, which drops it
+  for a function without calls to functions, a machine row's none
+  (`tier1_emit_frame_flags`, both consumers).
+- Tier 0's frame keeps one as a frame that moves rsp has, though its rsp stays
+  put (`tier0_kept_pointer`, `tier0_frame_registers`): rbp no depth's register
+  (`tier0_integer_depth_count`'s, and the u64 conversions' scratch registers by
+  it), its places from rbp, its outgoing area at rsp. Its calls are its CALL
+  entries, as its selection counts them.
+
+Both publish the frame (`Tier0Code.frame_pointer`), so the unwind tables
+describe rbp's CFA. `test-checker-driver`'s frame pointer fixture
+(`c_check_frame_pointer_driver_test.c`) builds a chain of three functions (a
+frame object, a variadic definition, a 64-byte-aligned local and a double live
+across a call) between clang's main and a clang walker that follows rbp from
+its own frame. It checks each return address is in the function it expects and
+the chain ends at main's frame. That runs by Tier 0 and by `--tier1` with and
+without rematerialization, by each path, with the leaf rule and without, and
+each object starts each chain function with `push rbp; mov rbp, rsp`, the leaf
+function under the leaf rule never. `test-tier0` runs a quarter of its random
+programs with every frame's pointer and a quarter with the leaf rule's, against
+the same oracle.
+
+### Stack-clash protection on request
+
+`-fstack-clash-protection` (the last of it and `-fno-stack-clash-protection`,
+`predefines_stack_clash`; off by default, as clang's) makes every frame and
+every dynamic allocation of both tiers touch each page below rsp before rsp
+moves past it, so that none steps over a guard page. The checked program
+carries it (`CheckProgramOptions.probe_stack`) into each function's
+`Tier0Function.probe_stack`. A page is 4096 bytes; each touch is `or byte
+[rsp], 0`, which never crosses a page and changes no byte. The probes move rsp
+a page at a time rather than touch below it, since kernels before Linux 4.20
+refuse an access more than 64 KiB below rsp where the main thread's stack must
+grow.
+
+- **Tier 1's prologue** takes `PROBE_STACK` (`Tier1EmitOptions.frame_flags`):
+  the planner's `PROBE_ALLOCATE` and `PROBE_ALIGN` above, with their frame
+  events. `Tier1Frame.probe_stack` records it.
+- **Tier 1's dynamic allocations** (`TIER1_RULE_ALLOCA` and its immediate
+  form) are the CFG consumer's `tier1_emit_cfg_probed_allocation`: the rule's
+  records, but its subtraction from rsp, whose bytes a loop takes instead, in
+  the rule's own register (an immediate moved there first). While more than a
+  page is left, rsp moves a page and its byte is touched; then, unless nothing
+  is left, rsp moves by the rest and its byte is touched. Its branches target
+  its own records. No byte at or above the old rsp, the frame's own, is
+  touched, so the frame events' proof (`emitted_verify_frames`) keeps the
+  saved registers' slots.
+- **Tier 0's prologue** probes a reservation of a page or more, and a realigned
+  frame's whatever its size (`tier0_probes_reservation`), with Tier 1's records:
+  `tier0_emit_probed_reservation`, r11 set to rsp less the pages, rsp moved a
+  page and touched until it reaches r11, then the remainder's subtraction and
+  touch; a realigned frame touches after its `and`, or past a page's alignment
+  takes `tier1_frame_emit_probe_align`'s loop (`tier0_emit_probed_alignment`).
+  r11 is free there: nothing arrives in it and no parameter has moved yet.
+  The branches are the prologue's own (`tier0_put_local_branch`), counted by
+  `tier0_prologue_branches` in both paths, the body's after them.
+- **Tier 0's unwind tables:** `Tier0Code.frame_probe` publishes it, and the
+  fixed reader (`unwind_tier0_frame_tails`) checks the probed records against
+  Tier 0's own emitters' (a branch in either of the forms branch sizing leaves)
+  and takes the reservation's last record that moves rsp as its transition.
+  Without a frame pointer the loop's CFA is in r11, which no fixed shape says:
+  the emission adds the two rows Tier 1's frame events have
+  (`emitted_tier0_probe_rows`), r11's CFA from the bound's subtraction and
+  rsp's at the loop's exit, and the rows resolve into a row program.
+- **Tier 0's `ALLOCA`** (`tier0_emit_probed_allocation`) is Tier 1's loop in its
+  count's register, which the entry's address then takes: 13 records (its
+  rounding's two, the loop's ten, the address's one) and
+  three branches. It takes no other register, since every other one may hold
+  a deeper value (r11 is depth 8's) or a local's home. A deferred entry's
+  branches are now counted and kept in entry order outside deep entries too,
+  and the vector path sorts its columns in a probed function, as it does
+  around deep entries.
+
+Default output doesn't change: every probe is behind the flag.
+`test-checker-driver`'s stack-clash fixture (`c_check_stack_clash_driver_test.c`)
+runs a function on a stack of its own, a `PROT_NONE` page below its first, for
+each of a three-page frame, `alloca`, variable-length array, 64-byte-aligned
+frame and two-page-aligned frame. Each build prints what clang -O0's does:
+"skipped" past the guard without the option, "probed" at the guard with it.
+That holds by Tier 0 and by `--tier1` with and without rematerialization, by
+each path, with a frame pointer and without, under `--verify`, every function
+Tier 1's but the page-aligned one, which Tier 1's selection refuses with or
+without probes. Its probes fixture prints clang -O0's line through frames of
+pages, variable-length arrays and allocas in loops, an allocation of none, of
+a page and of a constant, recursion through two-page frames and a realigned
+frame. Each probed frame's function starts with the probes' loop; and the last
+of the pair wins, byte for byte. `test-emitted-code` proves probed Tier 0
+frames' events (every other round's programs, and frames of each size and
+alignment with a frame pointer and without, the loop's without one a row
+program) and refutes their mutants; `test-tier0` probes half its random
+programs, `ALLOCA`'s loop run natively against its interpreter.
 
 ## Slot sharing between objects
 

@@ -713,7 +713,8 @@ Mutations of the tables, each built and run once, are caught. Among them:
     vpmovd2m, vpmovq2m, vpmovmskb, vmovmskps, vmovmskpd, vpshufbitqmb; an
     opmask's bits into a vector's elements: vpmovm2b, vpmovm2w, vpmovm2d,
     vpmovm2q; the selects by a register's signs (vpblendvb, vblendvps,
-    vblendvpd) and by an opmask (vpblendmd, vpblendmq);
+    vblendvpd) and by an opmask (vpblendmd, vpblendmq, and AVX512BW's
+    vpblendmb and vpblendmw, #141's element types);
   - gathers and scatters: vpgatherdd, vpgatherdq, vpgatherqq, vpscatterdd,
     vpscatterqd, vpscatterqq (VEX and EVEX);
   - AES and GF(2^8): vaesenc, vaesenclast, vaesdec, vaesdeclast, vaesimc,

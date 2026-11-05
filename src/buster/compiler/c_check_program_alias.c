@@ -499,7 +499,7 @@ static bool check_program_aliases(CheckProgram* program, CheckProgramTargetEvent
 }
 
 // Numbers the `needed` objects' symbols (check_program_needed_number), into `program`'s columns from `output`, after its
-// weakrefs' references are moved to their targets: a referenced weakref with a target object takes the target's symbol
+// weakrefs' references (and its constant CFStrings' calls', to their canonical calls, #148) are moved to their targets: a referenced weakref with a target object takes the target's symbol
 // rather than one of its own, and makes the target needed, its undefined symbol weak in `states` (zero before) where
 // nothing else needs it (clang's GetWeakRefReference, whose extern_weak declaration an ordinary reference makes
 // external), which the first loop decides for every weakref before the second marks any target. Returns false where
@@ -521,6 +521,26 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
             needed[alias->object] = 0;
         }
     }
+    // A constant CFString's call (#148) takes its canonical call's symbol in the same way, one record of each literal's;
+    // and a needed record needs its class and characters, which no record unreferenced does (they are no roots).
+    for (uint32_t k = 0; k < program->cfstring_count; k += 1)
+    {
+        const CheckDataCFString* call = program->cfstrings + k;
+        if (call->canonical != call->object && needed[call->object])
+        {
+            needed[call->canonical] = 1;
+            needed[call->object] = 0;
+        }
+    }
+    for (uint32_t k = 0; k < program->cfstring_count; k += 1)
+    {
+        const CheckDataCFString* call = program->cfstrings + k;
+        if (call->canonical == call->object && needed[call->object] && call->characters != 0 && program->cfstring_class != 0)
+        {
+            needed[program->cfstring_class] = 1;
+            needed[call->characters] = 1;
+        }
+    }
     program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));
     program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
     const bool valid = program->symbol_count == 0 || program->symbol_objects != 0;
@@ -535,6 +555,11 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
         {
             program->object_symbols[alias->object] = program->object_symbols[alias->target_object];
         }
+    }
+    for (uint32_t k = 0; valid && k < program->cfstring_count; k += 1)
+    {
+        const CheckDataCFString* call = program->cfstrings + k;
+        program->object_symbols[call->object] = program->object_symbols[call->canonical];
     }
     return valid;
 }

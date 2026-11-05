@@ -76,7 +76,15 @@ static bool check_vector_assignable(const TypeTable* table, TypeId destination, 
     const bool tv = check_vector_type(table, target);
     const bool sv = check_vector_type(table, input);
     bool accepted = false;
-    if (tv && sv)
+    if (tv && sv && tk == BUSTER_TYPE_KIND_EXT_VECTOR && sk == BUSTER_TYPE_KIND_EXT_VECTOR && check_vector_element(table, target) == BUSTER_TYPE_BOOL &&
+        check_vector_element(table, input) != BUSTER_TYPE_BOOL && check_action_is_integer(table, check_vector_element(table, input)) &&
+        check_vector_count(table, target) == check_vector_count(table, input))
+    {
+        // Clang converts an extended vector of integers to one of bool of as many elements implicitly, each element its
+        // truth (#137): a compare's signed integer result becomes a mask so.
+        accepted = true;
+    }
+    else if (tv && sv)
     {
         accepted = tk == BUSTER_TYPE_KIND_VECTOR || sk == BUSTER_TYPE_KIND_VECTOR ?
                    check_vector_bits(table, target) == check_vector_bits(table, input) :

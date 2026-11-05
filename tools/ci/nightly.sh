@@ -100,8 +100,17 @@ evidence()
             fi
             ;;
         push)
-            # A push to main: its own native correctness and measurements, after its own hosted rows. It reuses nothing
-            # from its pull request, whose run measures without native correctness.
+            # A push to main: its full hosted rows here. In the nightly mode (the owner's choice on 2026-11-05) it keeps
+            # off the 9700X: its native correctness and targeted measurements are its first-parent state's, run in the
+            # 02:00-08:00 window, after these hosted rows. Before the nightly mode, it runs both here, after its hosted
+            # rows. Either way it reuses nothing from its pull request, whose run measures without native correctness.
+            if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
+                native=-
+                measurement=-
+                hardware=skip
+                reason=deferred
+                notes='the nightly mode defers a push'"'"'s native correctness and measurements to the 02:00-08:00 Europe/Madrid window'
+            fi
             ;;
         schedule)
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
@@ -372,16 +381,77 @@ harvest()
     "$tool" harvest --ledger "$ledger" --facts "$work/harvest.tsv" --states "$states" --records "$records" >> "$ledger"
 }
 
+# The nightly/SHA branches' writes (create, delete). With the nightly-ledger environment's BUSTER_NIGHTLY_BRANCH_TOKEN
+# (contents and workflows write on this repository alone, docs/ci.md), GitHub doesn't refuse the merges the workflow
+# token may not have; without it, the workflow token, and those states are skipped. Nothing else uses that token:
+# dispatches, cancellations and reads stay the workflow's. A branch token GitHub rejects as a credential (expired or
+# revoked: HTTP 401; without access to this repository: "not accessible by personal access token", or a 404 when the
+# token can't read the repository itself, since a branch another actor deleted is a 404 to a valid token too) is
+# dropped for the rest of the job, which then writes with the workflow token as if there were none, and says so once
+# (branch_token_warning). Its output is gh's, standard output and error together.
+branch_api()
+{
+    local answer status=0 fallback=true
+    if [ -n "${NIGHTLY_BRANCH_TOKEN:-}" ] && [ ! -e "$work/branch-token-rejected" ]; then
+        answer=$(GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "$@" 2>&1) || status=$?
+        fallback=false
+        local rejected=false
+        if [ "$status" -ne 0 ] && grep -E -q 'HTTP 401|Bad credentials|not accessible by personal access token' <<< "$answer"; then
+            rejected=true
+        elif [ "$status" -ne 0 ] && grep -F -q 'HTTP 404' <<< "$answer" && ! GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "repos/$repository" --jq .id > /dev/null 2>&1; then
+            rejected=true
+        fi
+        if [ "$rejected" = true ]; then
+            printf '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (%s), so this job makes the nightly branches with the workflow token (docs/ci.md, "Refused branches")\n' "$(tail -n 1 <<< "$answer")" > "$work/branch-token-rejected"
+            fallback=true
+            status=0
+        else
+            printf '%s\n' "$answer"
+        fi
+    fi
+    if [ "$fallback" = true ]; then
+        "$gh" api "$@" 2>&1 || status=$?
+    fi
+    return "$status"
+}
+
+# Says once a job that the branch token was rejected (branch_api runs inside command substitutions, which can't).
+branch_token_warning()
+{
+    if [ -s "$work/branch-token-rejected" ] && [ ! -e "$work/branch-token-warned" ]; then
+        cat "$work/branch-token-rejected"
+        : > "$work/branch-token-warned"
+    fi
+}
+
+# nightly/SHA at SHA: 0 when it is there. 2 when it can't be had for the rest of the job, which then stops asking for
+# it: GitHub refuses the workflow token the branch (HTTP 403, "Resource not accessible by integration", as it did on
+# 2026-11-05 for merges whose pull request's head lacked main's workflow changes), or the branch exists and points
+# elsewhere (until a person fixes it, never dispatched). 1 for anything else (a timeout, a 429 or 5xx, a failed
+# lookup), which a later step asks for again.
 ensure_branch()
 {
-    local commit=$1 found
+    local commit=$1 found answer result=0
     found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
     if [ -z "$found" ]; then
-        "$gh" api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" > /dev/null
+        if ! answer=$(branch_api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" 2>&1); then
+            # Made meanwhile (a 422 for a branch another step created): there now, at the commit, is success.
+            found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
+            if [ "$found" = "$commit" ]; then
+                result=0
+            elif grep -F 'Resource not accessible by integration' <<< "$answer" | grep -F -q 'HTTP 403'; then
+                result=2
+                printf '::warning title=Nightly branch::GitHub refused the workflow token nightly/%s, so nothing is dispatched for it in this job; later states are planned instead (docs/ci.md)\n' "$commit"
+            else
+                result=1
+                printf '::warning title=Nightly branch::nightly/%s could not be created (%s); a later step tries again\n' "$commit" "$(tail -n 1 <<< "$answer")"
+            fi
+        fi
     elif [ "$found" != "$commit" ]; then
-        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it\n' "$commit" "$found"
-        return 1
+        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it in this job, and planning later states instead\n' "$commit" "$found"
+        result=2
     fi
+    return "$result"
 }
 
 publish()
@@ -470,11 +540,18 @@ coordinate()
     [[ "$phase" == prepare || "$phase" == window ]]
     [[ "$mode" == run || "$mode" == dry-run ]]
     local coordinator=${GITHUB_RUN_ID:?} states="$work/states.tsv" facts="$work/facts.tsv" ledger="$work/ledger.tsv"
-    local refs="$work/refs.tsv" pending="$work/pending.tsv" main sequence=1 times cycle start deadline started
-    started=$(now)
+    local refs="$work/refs.tsv" pending="$work/pending.tsv" refused="$work/refused.tsv" main sequence=1 times cycle start deadline started
+    # The job's start; NIGHTLY_STARTED stands in for it in tests, as NIGHTLY_NOW does for the clock.
+    started=${NIGHTLY_STARTED:-$(now)}
+    # A window job hands over to the continuation job once it has run this long (345 minutes, inside GitHub's 360 and
+    # the job's 355-minute timeout) with the window still open: the night the clocks go back, the window is 7 hours.
+    local job_limit=${NIGHTLY_JOB_LIMIT:-20700} handoff=false
     : > "$pending"
+    # The states whose nightly/SHA branch this job couldn't create: the plan skips them for the rest of the job.
+    : > "$refused"
     if [ "$phase" = window ]; then
-        sequence=10001
+        # The window job's requests from 10001, its continuation's from 20001 (NIGHTLY_SEQUENCE): never the same token.
+        sequence=${NIGHTLY_SEQUENCE:-10001}
         # Without the prepare job's pending dispatches, a dispatch the runs don't show yet could be dispatched again:
         # nothing is planned. The next coordinator run plans when the runs show them.
         if ! pending_received "${NIGHTLY_PENDING:-}" "$pending"; then
@@ -498,7 +575,7 @@ coordinate()
         limit=1
     fi
     # A prepare job that will wait for the window keeps preparing while it waits, as hosted runs complete and free their
-    # slots (the planner admits no hardware before 04:00): every five minutes until the window opens.
+    # slots (the planner admits no hardware before 02:00): every five minutes until the window opens.
     local waits=false
     if [ "$phase" = prepare ] && [ "$mode" = run ] && [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
         waits=true
@@ -528,10 +605,12 @@ coordinate()
             sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
         "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
             --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" \
-            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" \
+            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" --refused "$refused" \
             $( [ "$phase" = prepare ] && printf -- '--prepare-only' ) > "$work/plan.tsv"
         cat "$work/plan.tsv"
         verdict=''
+        # A new refusal: nothing was launched for that state, so the next step plans at once, without the wait.
+        local replan=false
         while IFS= read -r line; do
             IFS=$'\t' read -r -a action <<< "$line"
             case "${action[0]}" in
@@ -543,7 +622,9 @@ coordinate()
                     sha "$commit"
                     # The cycle's pinned snapshot, the planner's: main's head may have moved on since the pin.
                     sha "$pinned"
-                    if ensure_branch "$commit"; then
+                    local branch=0
+                    ensure_branch "$commit" || branch=$?
+                    if [ "$branch" -eq 0 ]; then
                         local override_arguments=()
                         if [ -n "${NIGHTLY_OVERRIDE:-}" ]; then
                             override_arguments=(-f "override=$NIGHTLY_OVERRIDE")
@@ -551,6 +632,9 @@ coordinate()
                         "$gh" workflow run 9700x.yml --repo "$repository" --ref "nightly/$commit" -f "purpose=$purpose" \
                             -f "hardware=$hardware" -f "snapshot=$pinned" -f "request=$request" "${override_arguments[@]}"
                         printf 'pending\t%s\t%s\t%s\t%s\t%s\n' "$request" "$purpose" "$hardware" "$commit" "$(now)" >> "$pending"
+                    elif [ "$branch" -eq 2 ]; then
+                        printf '%s\n' "$commit" >> "$refused"
+                        replan=true
                     fi
                     sequence=$((sequence + 1))
                     ;;
@@ -558,7 +642,7 @@ coordinate()
                     "$gh" api -X POST "repos/$repository/actions/runs/${action[1]}/cancel" > /dev/null || true
                     ;;
                 prune)
-                    "$gh" api -X DELETE "repos/$repository/git/refs/heads/nightly/${action[1]}" > /dev/null || true
+                    branch_api -X DELETE "repos/$repository/git/refs/heads/nightly/${action[1]}" > /dev/null || true
                     ;;
                 alert)
                     printf '::warning title=Nightly backlog::%s\n' "${action[1]}"
@@ -571,8 +655,20 @@ coordinate()
                     ;;
             esac
         done < "$work/plan.tsv"
+        branch_token_warning
+        # Still waiting inside the window, but out of job time: the continuation job takes over from here, with this
+        # job's pending dispatches as its output.
+        if [ "$phase" = window ] && [ "$verdict" = wait ] && [ "$(( $(now) - started ))" -ge "$job_limit" ] &&
+            { [ -n "${NIGHTLY_OVERRIDE:-}" ] || [ "$(now)" -lt "$deadline" ]; }; then
+            handoff=true
+            printf 'The window is still open after %s minutes of this job: the continuation job takes over.\n' "$(( ($(now) - started) / 60 ))"
+            break
+        fi
         if [ -n "$limit" ] && [ "$iterations" -ge "$limit" ]; then
             break
+        fi
+        if [ "$replan" = true ]; then
+            continue
         fi
         if [ "$phase" = prepare ]; then
             # Preparing until the window opens, five minutes at a time; otherwise one step.
@@ -583,16 +679,20 @@ coordinate()
             sleep "${NIGHTLY_SLEEP:-$(( remaining < 300 ? remaining : 300 ))}"
             continue
         fi
-        # An override (a manual run's reason) admits past 07:00: the loop then ends when nothing more is admissible.
+        # An override (a manual run's reason) admits past 08:00: the loop then ends when nothing more is admissible.
         if [ "$verdict" != wait ] || { [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -ge "$deadline" ]; }; then
             break
         fi
         sleep "$pause"
     done
     summary < "$work/report.md"
-    if [ "$phase" = prepare ]; then
+    # The prepare job hands over to the window job, and a window job out of time to its continuation, the same way.
+    if [ "$phase" = prepare ] || [ "$handoff" = true ]; then
         output snapshot "$(awk -F '\t' -v cycle="$cycle" '$1 == "cycle" && $2 == cycle { print $3 }' "$ledger" | tail -n 1)"
         output pending "$(pending_handoff "$pending")"
+    fi
+    if [ "$phase" = window ]; then
+        output continue "$([ "$handoff" = true ] && echo reachable || echo closed)"
     fi
     # After the handoff's outputs, and never failing the job: the window job's night doesn't depend on buster-performance.
     publish "$cycle"

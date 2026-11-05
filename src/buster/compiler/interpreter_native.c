@@ -34,6 +34,8 @@ struct InterpreterNativeFrame
     InterpreterValue vector_result;
     InterpreterValue x87_result;
     uint64_t x87;
+    // The static chain (#148, InterpreterNativeRequest.chain), in r10 at the call.
+    uint64_t chain;
 };
 
 _Static_assert(BUSTER_ABI_INTEGER_ARGUMENTS == 6 && BUSTER_ABI_VECTOR_ARGUMENTS == 8, "the native bridge implements SysV x86-64");
@@ -46,6 +48,7 @@ _Static_assert(offsetof(InterpreterNativeFrame, integer_result) == 144, "native 
 _Static_assert(offsetof(InterpreterNativeFrame, vector_result) == 160, "native xmm result offset");
 _Static_assert(offsetof(InterpreterNativeFrame, x87_result) == 176, "native st0 result offset");
 _Static_assert(offsetof(InterpreterNativeFrame, x87) == 192, "native st0 flag offset");
+_Static_assert(offsetof(InterpreterNativeFrame, chain) == 200, "native static chain offset");
 
 // r12 owns the frame across the foreign call, and rbp owns the original stack. rsp is aligned before the call and
 // the outgoing area starts exactly at rsp; the call's return address therefore precedes its first stack argument.
@@ -79,6 +82,7 @@ static __attribute__((naked, noinline)) void interpreter_native_bridge(Interpret
         "movq 40(%r12), %r8\n"
         "movq 48(%r12), %r9\n"
         "movq 136(%r12), %rax\n"
+        "movq 200(%r12), %r10\n"
         "callq *%r11\n"
         "movq %rax, 144(%r12)\n"
         "movq %rdx, 152(%r12)\n"
@@ -565,6 +569,7 @@ static bool interpreter_native_invoke(const InterpreterNativeRequest* request, I
     if (ok)
     {
         frame.address = request->binding->address;
+        frame.chain = request->chain;
         frame.stack = stack;
         frame.x87 = request->result_type == IR_F80;
         if (aggregate_result)
