@@ -573,6 +573,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_validate.c"
 #include "buster/compiler/interpreter.c"
 #include "buster/compiler/interpreter_native.c"
+#include "buster/compiler/interpreter_typed_abi.c"
 #include "buster/compiler/interpreter_link.c"
 #include "buster/compiler/ir_parse.c"
 #include "buster/compiler/ir_interpreter.c"
@@ -706,6 +707,7 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // and each path's SSA), against its expected output.
 #include "buster/compiler/ssa_source_generate.c"
 #include "buster/compiler/ssa_source_test.c"
+#include "buster/compiler/interpreter_source_driver.c"
 
 // The other units' main_command, each in its own unit (at the top).
 int main_unit_x86(int argc, char** argv, bool* found);
@@ -1520,6 +1522,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-ir") == 0)
     {
         result = run_ir_interpreter(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-c") == 0)
+    {
+        result = run_typed_source(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir") == 0)
     {

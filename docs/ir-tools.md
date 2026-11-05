@@ -286,7 +286,7 @@ written bytes. This is the oracle's checking policy, with the language-level que
 about indeterminate values and padding discussed separately in
 [WG14 DR451](https://open-std.org/jtc1/sc22/wg14/www/docs/dr_451.htm).
 
-### Typed-front coverage and remaining acceptance
+### Typed execution from C
 
 `test-interpreter` includes aligned object storage/COPY, exact extent and
 undefined-padding checks, allocation rollback, repeated calls and expired
@@ -297,16 +297,59 @@ calls consume a pointer below their arguments and resolve it only against the
 program's interpreted-function tokens or explicitly registered native addresses;
 unregistered addresses are rejected, never executed. The existing
 Tier 0 comparison also copies actual object locals through the typed oracle.
-`test-ir-lowering` additionally runs each generated 128-bit/x87 program through
-the production typed front, checking its outputs against the independent
-fixture machine as well as checking the lowered IR.
+`test-ir-lowering` additionally runs generated 128-bit/x87, integer aggregate
+and dynamic-stack programs through the production typed front, checking their
+outputs against the independent fixture machine and native Tier 0. The incoming
+variadic-frame fixtures also compare the typed front's named and unnamed values,
+copies, canaries and cursor movement with Tier 0's native execution.
 
-These are typed-stream fixtures, not the source acceptance required to close
-[#176](https://github.com/buster14a/buster/issues/176). Typed by-value aggregate
-parameters/results, variadic definitions, indirect jumps and the
-source-facing c-testsuite/#142 integration remain unsupported. The IR front's
-aggregate/variadic support below does not imply support in the typed front.
-The native scalar bridge already accepts outgoing promoted variadic calls.
+The typed front copies aggregate parameters into aligned, frame-owned storage,
+including their byte-definedness; ignored empty parameters remain undefined.
+Register aggregate results copy their representation before reclaiming the
+callee. Hidden results receive the caller's object as parameter zero and return
+its pointer, which a void CALL discards. Incoming variadic definitions receive
+their call's register save and aligned overflow areas, including named stack
+arguments; the default promotions and named register counts are checked.
+Computed gotos accept only this function's issued label tokens with an empty
+operand stack. Native calls with actual aggregate arguments/results use the
+shared bridge's ABI records; ordinary scalar calls retain its scalar path even
+when an all-zero argument-size column is present. Ignored allocator/copy/fill
+pointer results still reach the bookkeeping bridge before being discarded.
+
+```sh
+./build/compiler interpret-c [--steps N] [--timeout SECONDS] [--check-undefined] [preprocessor options] file...
+./build/compiler test-ssa-source --typed tests/interpreter/source.c
+./build/compiler interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c
+```
+
+`interpret-c` prepares each translation unit through the existing checked-source
+adapter, then executes its retained typed streams directly. It constructs no IR
+for execution and never executes the emitted function bytes. Preparation still
+uses the existing emission adapter to retain typed streams, symbols and data;
+this command does not make previously unsupported source preparation available.
+Data atoms and fixups use `interpreter_link_materialize`; functions, aliases and
+library symbols resolve in the same namespace with strong-over-weak selection.
+Local symbols retain their unit identity. Function and label tokens live beside
+the data so relative jump-table fixups can reach them. A per-function symbol
+bias leaves the borrowed stream's original columns unchanged.
+
+The command prints the program's output and returns main's low exit byte. An
+interpreter or preparation failure returns 125 and reports its location; a native
+`exit` retains its ordinary process status. Main receives argc=1, argv containing
+`"program"`, and an empty environment. Defaults are 2^32 steps and the source
+runner's time bound. Bounds checks stay enabled. Undefined-byte checks default
+off because unflagged host library routines cannot report which bytes they
+initialized; `--check-undefined` enables them explicitly. SIMD machine rows,
+frame-address operations and tail-call intrinsics remain outside this typed
+consumer's model, and unsupported execution is never replaced with native code.
+
+`test-ssa-source --typed` adds this direct typed execution as a fourth form to the
+three IR forms. It requires matching output and process status, and rejects
+interpreter failures, alarms and missing records. Its CI runs cover the declared
+c-testsuite subset, generated C against Clang, and source execution controls.
+`test-differential --interpreter` adds `interpret-c` to both generators' normal
+compiled-tier comparison and retains its selection for replay; see
+[the differential guide](differential.md).
 
 ### Aggregates by value and variadic definitions
 
@@ -464,20 +507,12 @@ do not enter them.
 
 ## Acceptance boundaries
 
-The default source driver remains syntax-only. The checker currently publishes
-checked expressions and supported static data, and its owner is implementing
-the executable source-body/control-flow handoff in #133. No frontend work is
-replaced by generated streams or handwritten IR here.
-
-c-testsuite's programs run from checked C through the IR front: #134's
-`test-ssa-source` runs each program of the declared subset in three IR forms,
-every local in memory and each promotion path's SSA, against its expected
-output ([the SSA guide](ssa.md)'s "Real and generated C"). Running them from
-their typed streams (the typed front), whole-source-corpus structural roundtrips
-and real Csmith/YARPGen interpreter campaigns remain acceptance work. The
-callable oracles and text command are available for Tier 0, IR passes and the
-configurable #142 harness; passing synthetic execution tests does not establish
-them.
+The C source adapter and default compiling driver are available. The typed
+source command, source-suite comparison and external differential interpreter
+mode above are the #176 acceptance paths; their results must identify the
+source revision, exact selected inputs, exclusions and actual outcomes.
+Source preparation failures and interpreter refusals cannot count as passing
+executions. IR-only or synthetic results do not establish source acceptance.
 
 No interpreter speed claim is made: #176 deliberately specifies a scalar oracle
 off the compiler path. Parser throughput also requires separate target-host
