@@ -2067,10 +2067,12 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 
 #define BUSTER_TIER1_SELECT_CANONICAL_PASSES 8
 
+#include "tier1_select_ranges.c"
+
 // Compact, monotone range facts, shared by both selection paths. Unknown is the type's full width. Starting there
 // (including at phis) is essential: a loop must never prove its own invariant from an optimistic backedge. Bounded
 // sweeps handle forward block references too; facts not reached within the bound remain conservative.
-static void tier1_select_known_bits(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector)
+static void tier1_select_known_bits_passes(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector, bool seed)
 {
     const uint32_t count = function->instruction_count;
     // The caller's fresh scratch column is disjoint from this immutable IR and its arrays. Cache the stable array
@@ -2081,7 +2083,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
     const uint32_t* const inputs_b = function->b;
     const uint32_t* const inputs_c = function->c;
     const IrConstant* const constants = function->constants;
-    if (BUSTER_VECTOR_PATH(vector))
+    if (seed && BUSTER_VECTOR_PATH(vector))
     {
         // Independent seed classification, 32 nodes at a time. Both loads and stores are masked at the logical tail.
         for (uint32_t first = 0; first < count; first += 32)
@@ -2097,7 +2099,7 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
             _mm512_mask_storeu_epi16(known + first, active, _mm512_or_si512(bits, _mm512_slli_epi16(bits, 8)));
         }
     }
-    else
+    else if (seed)
     {
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -2203,10 +2205,13 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
                 }
                 unsigned_bits = unsigned_bits < bits ? unsigned_bits : bits;
                 signed_bits = signed_bits < bits ? signed_bits : bits;
+                const uint16_t previous = known[node];
+                unsigned_bits = unsigned_bits < (previous & 255) ? unsigned_bits : previous & 255;
+                signed_bits = signed_bits < (previous >> 8) ? signed_bits : previous >> 8;
                 // A zero sign bit is also a signed-range proof (including zero, which needs one signed bit).
                 signed_bits = unsigned_bits < signed_bits ? unsigned_bits + 1 : signed_bits;
                 const uint16_t next = (uint16_t)(unsigned_bits | (signed_bits << 8));
-                changed |= known[node] != next;
+                changed |= previous != next;
                 known[node] = next;
             }
         }
@@ -2214,6 +2219,15 @@ static void tier1_select_known_bits(const IrFunction* function, const uint32_t* 
         {
             break;
         }
+    }
+}
+
+static void tier1_select_known_bits(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector)
+{
+    tier1_select_known_bits_passes(function, blocks, known, vector, true);
+    if (tier1_select_induction_bounds(function, blocks, known, vector))
+    {
+        tier1_select_known_bits_passes(function, blocks, known, vector, false);
     }
 }
 

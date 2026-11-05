@@ -342,7 +342,18 @@ Selection keeps two semantic range bounds per integer value: the number of
 possibly nonzero low bits and the smallest signed width. Constants, masks,
 shifts, bounded arithmetic, extensions and truncations supply the bounds; copies, selects and phis
 propagate them. They start unknown, including on loop backedges, and improve
-in at most eight sweeps. Unresolved cycles retain the full range.
+in at most eight sweeps per round. Unresolved cycles retain the full range.
+
+A checked induction certificate can then establish a nonnegative I32 loop
+index. Every initial edge must supply a nonnegative constant. Every other edge
+must add a known nonnegative stride to that same phi, in its predecessor block,
+then take a strict upper-bound guard on the sum back to the phi. One maximum
+covers all starts and all admitted backedge values; adding the largest stride
+must still fit signed I32 before the guard. Unsigned guards also require a
+proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated
+tests, unknown strides and possible wrapping sums retain their extensions.
+Only a complete certificate supplies facts, followed by one additional bounded
+propagation round. The candidate scan is masked SIMD with a scalar twin.
 
 A separate byte certifies physical register storage. A 32-bit ALU result or
 load clears the upper half; an incoming `I32`, a call result and a machine row
@@ -375,7 +386,9 @@ sweeps on both selector paths. `test-tier1-select` checks poisoned ABI upper
 halves, signed boundaries, zero-count shifts, identity operations, retruncation,
 volatile and exact-width loads, cyclic phis, and every tail through 65 nodes
 against protected pages. The bounds do not assume an ABI extension or infer a
-loop's numeric range from its initial value alone.
+loop's numeric range from its initial value alone. `test-tier1-emit` executes
+positive and unsafe induction near-matches through both selection/allocation
+paths with constrained registers and independent unsigned-bit arithmetic.
 
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
