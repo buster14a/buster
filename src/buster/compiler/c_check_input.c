@@ -10368,29 +10368,6 @@ static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static void check_input_warning_policy(CheckInput* input, const PPOptions* options);
 
-// Skip attribute and underlying-type operands when finding the definition's own opening brace.
-static uint32_t check_input_enum_open(const Parser* parser, uint32_t token, uint32_t end)
-{
-    for (uint32_t at = token + 1; at < end; at += 1)
-    {
-        const uint8_t kind = parser->tokens.kinds[at];
-        if (kind == PARSE_KIND_L_BRACE)
-        {
-            return at;
-        }
-        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE)
-        {
-            const uint32_t close = parser->tree.parents[at];
-            if (close <= at || close >= end)
-            {
-                break;
-            }
-            at = close;
-        }
-    }
-    return BUSTER_CHECK_NONE;
-}
-
 // The target's facts a reading's table carries, which every phase after the reader reads from the table too: plain char's
 // signedness, and whether the target inlines 16-byte atomics (cx16), which the lock-free queries read. check_input_run
 // sets them on the table it reads with, and #113's deferred reader on the caller's, into which it merges (#1403's review).
@@ -11212,7 +11189,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (tag != 0 && reader.tag_ends[token] != 0 && type_kind(types, type_unqualified(tag)) == BUSTER_TYPE_KIND_ENUM)
                 {
                     const uint32_t end = reader.tag_ends[token] < count ? reader.tag_ends[token] : count;
-                    definition_count += check_input_enum_open(parser, token, end) != BUSTER_CHECK_NONE;
+                    for (uint32_t at = token + 1; at < end; at += 1)
+                    {
+                        if (parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
+                        {
+                            definition_count += 1;
+                            break;
+                        }
+                    }
                 }
             }
             if (definition_count != 0)
@@ -11227,14 +11211,17 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     if (tag != 0 && reader.tag_ends[token] != 0 && type_kind(types, type_unqualified(tag)) == BUSTER_TYPE_KIND_ENUM)
                     {
                         const uint32_t end = reader.tag_ends[token] < count ? reader.tag_ends[token] : count;
-                        const uint32_t open = check_input_enum_open(parser, token, end);
-                        if (open != BUSTER_CHECK_NONE)
+                        for (uint32_t at = token + 1; at < end; at += 1)
                         {
-                            definitions[at_definition++] = (CheckInputEnumDefinition){
-                                .type = tag,
-                                .open = open,
-                                .close = parser->tree.parents[open],
-                            };
+                            if (parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
+                            {
+                                definitions[at_definition++] = (CheckInputEnumDefinition){
+                                    .type = tag,
+                                    .open = at,
+                                    .close = parser->tree.parents[at],
+                                };
+                                break;
+                            }
                         }
                     }
                 }

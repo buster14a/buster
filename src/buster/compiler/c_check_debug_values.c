@@ -573,8 +573,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
             values.enum_definitions[type_index(definition.type)] = e + 1;
             values.local_ids[definition.open] = e;
         }
-        // Sweep opening braces in source order, which may differ from tag order when an enum's base type
-        // itself defines an enum. The innermost open definition owns each enumerator.
+        // Sweep opening braces in source order. The innermost open definition owns each enumerator.
         uint32_t depth = 0;
         uint32_t e = 0;
         for (uint32_t token = 0; token < tokens; token += 1)

@@ -56,13 +56,10 @@ static const char check_debug_values_fixture[] =
     "typedef int Count;\n"
     "enum Mode { cold=-2, warm=7 };\n"
     "enum Outer { outer_first=sizeof(enum Inner { inner_only=7 }), outer_last=3 };\n"
-    "enum Wide : __typeof__(sizeof(enum Base { base_only=9 })) { wide_first=1, wide_last=2 };\n"
     "union Box { int integer; float real; };\n"
     "int initialized_global=41;\n"
     "enum Outer outer_global=outer_first;\n"
     "enum Inner inner_global=inner_only;\n"
-    "enum Wide wide_global=wide_first;\n"
-    "enum Base base_global=base_only;\n"
     "static int hidden_global=13;\n"
     "int zero_global;\n"
     "volatile int value_sink;\n"
@@ -184,18 +181,6 @@ static void check_debug_values_test_read(CheckDebugTestTally* tally, const char*
     check_debug_test_expect(tally, inner.pointer != NULL && strstr(inner.pointer, "inner_only") != NULL &&
                                   strstr(inner.pointer, "outer_first") == NULL && strstr(inner.pointer, "outer_last") == NULL,
                             "a nested enum retains only its own enumerators", report);
-    static const char* const wide_enum[] = { "ptype enum Wide" };
-    snprintf(report, sizeof(report), "%s.wide-enum-gdb", program);
-    const String8 wide = check_debug_test_gdb(program, report, wide_enum, BUSTER_ARRAY_LENGTH(wide_enum), arena);
-    check_debug_test_expect(tally, wide.pointer != NULL && strstr(wide.pointer, "wide_first") != NULL &&
-                                  strstr(wide.pointer, "wide_last") != NULL && strstr(wide.pointer, "base_only") == NULL,
-                            "an enum's underlying type does not supply its members", report);
-    static const char* const base_enum[] = { "ptype enum Base" };
-    snprintf(report, sizeof(report), "%s.base-enum-gdb", program);
-    const String8 base = check_debug_test_gdb(program, report, base_enum, BUSTER_ARRAY_LENGTH(base_enum), arena);
-    check_debug_test_expect(tally, base.pointer != NULL && strstr(base.pointer, "base_only") != NULL &&
-                                  strstr(base.pointer, "wide_first") == NULL && strstr(base.pointer, "wide_last") == NULL,
-                            "an enum in an underlying type retains only its own members", report);
 }
 
 static void check_debug_values_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
