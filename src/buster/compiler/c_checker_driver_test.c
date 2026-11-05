@@ -498,7 +498,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return's
 // unwinding, which clang makes and this compiler doesn't, and an NSString of no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
-// va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; os_log's
+// va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
 // vector); dump_struct's generated calls; and
 // __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
@@ -522,8 +522,6 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
         { "void f(char** a, char** b) { __builtin_zos_va_copy(a, b); }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
-        { "int g(int);\nint f(void* p) { return __builtin_call_with_static_chain(g(1), p); }\n",
-          "unsupported: __builtin_call_with_static_chain, whose chain this compiler's calls don't pass in r10" },
         { "typedef float V __attribute__((vector_size(32)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
         { "void* f(void* b, _BitInt(200) w) { return __builtin_os_log_format(b, \"%d\", w); }\n",
@@ -1282,6 +1280,110 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
     for (uint32_t o = 0; o < 5; o += 1)
     {
         unlink(outputs[o]);
+    }
+}
+
+// __builtin_call_with_static_chain (#148): calls whose callees read the chain in r10 through naked functions (direct,
+// indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop; its callee, chain and
+// arguments evaluated in that order), built by both paths at Tier 0 and Tier 1 (--tier1 --verify, whose certificate
+// checks each call's sequence), each the output of clang -O0's build of the same program.
+static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "struct S { long a, b, c; };\n"
+                                  "__attribute__((naked, noinline)) long read_chain(void) { __asm__(\"movq %r10, %rax\\n\\tret\"); }\n"
+                                  "__attribute__((naked, noinline)) long chain_plus(long x) { __asm__(\"leaq (%r10,%rdi), %rax\\n\\tret\"); }\n"
+                                  "__attribute__((naked, noinline)) long chain_sum7(long a, long b, long c, long d, long e, long f, long g) { __asm__(\"leaq (%rdi,%rsi), %rax\\n\\taddq %rdx, %rax\\n\\taddq %rcx, %rax\\n\\taddq %r8, %rax\\n\\taddq %r9, %rax\\n\\taddq 8(%rsp), %rax\\n\\taddq %r10, %rax\\n\\tret\"); }\n"
+                                  "__attribute__((naked, noinline)) double chain_double(double x) { __asm__(\"cvtsi2sdq %r10, %xmm1\\n\\taddsd %xmm1, %xmm0\\n\\tret\"); }\n"
+                                  "__attribute__((naked, noinline)) struct S chain_struct(void) { __asm__(\"movq %rdi, %rax\\n\\tmovq %r10, (%rdi)\\n\\tmovq $2, 8(%rdi)\\n\\tmovq $3, 16(%rdi)\\n\\tret\"); }\n"
+                                  "__attribute__((naked, noinline)) long chain_variadic(int n, ...) { __asm__(\"movq %r10, %rax\\n\\taddq %rsi, %rax\\n\\tret\"); }\n"
+                                  "static int order[8]; static int at;\n"
+                                  "static long (*pick(long (*f)(long)))(long) { order[at++] = 1; return f; }\n"
+                                  "static char* chain_of(char* p) { order[at++] = 2; return p; }\n"
+                                  "static long arg(long x) { order[at++] = 3; return x; }\n"
+                                  "static char buffer[64];\n"
+                                  "static void target(void) {}\n"
+                                  "__attribute__((noinline)) long t_direct(char* p) { return __builtin_call_with_static_chain(read_chain(), p); }\n"
+                                  "__attribute__((noinline)) long t_plus(long x, char* p) { return __builtin_call_with_static_chain(chain_plus(x), p); }\n"
+                                  "__attribute__((noinline)) long t_swap(char* x, long p) { return __builtin_call_with_static_chain(chain_plus(p), x); }\n"
+                                  "__attribute__((noinline)) long t_sum(char* p) { return __builtin_call_with_static_chain(chain_sum7(1, 2, 3, 4, 5, 6, 7), p); }\n"
+                                  "__attribute__((noinline)) long t_indirect(long (*f)(long), char* p, long x) { return __builtin_call_with_static_chain(f(x), p); }\n"
+                                  "__attribute__((noinline)) long t_indirect_r10(char* p, long (*f)(long), long x) { return __builtin_call_with_static_chain(f(x), p) + 1; }\n"
+                                  "__attribute__((noinline)) long t_variadic(char* p) { return __builtin_call_with_static_chain(chain_variadic(1, 30L), p); }\n"
+                                  "__attribute__((noinline)) long t_variadic_indirect(long (*g)(int, ...), char* p) { return __builtin_call_with_static_chain(g(1, 5L), p); }\n"
+                                  "__attribute__((noinline)) long t_loop(char* p, int n) { long s = 0; for (int i = 0; i < n; i++) s += __builtin_call_with_static_chain(chain_plus(i), p + i); return s; }\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    char array[4];\n"
+                                  "    long k = argc;\n"
+                                  "    printf(\"%d %d %d\\n\", __builtin_call_with_static_chain(read_chain(), buffer) == (long)buffer, __builtin_call_with_static_chain(read_chain(), array) == (long)array, __builtin_call_with_static_chain(read_chain(), target) == (long)target);\n"
+                                  "    printf(\"%ld %ld %g\\n\", __builtin_call_with_static_chain(chain_plus(5 * k), (char*)100), __builtin_call_with_static_chain(chain_sum7(1, 2, 3, 4, 5, 6, 7), (char*)1000), __builtin_call_with_static_chain(chain_double(0.5), (char*)2));\n"
+                                  "    struct S s = __builtin_call_with_static_chain(chain_struct(), (char*)7);\n"
+                                  "    printf(\"%ld %ld %ld %ld\\n\", s.a, s.b, s.c, __builtin_call_with_static_chain(chain_variadic(1, 30L), (char*)12));\n"
+                                  "    long (*volatile f)(long) = chain_plus;\n"
+                                  "    long (*g)(int, ...) = chain_variadic;\n"
+                                  "    long q = __builtin_call_with_static_chain(pick(f)(arg(k)), chain_of((char*)40));\n"
+                                  "    printf(\"%ld %d%d%d %ld\\n\", q, order[0], order[1], order[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
+                                  "    printf(\"%ld %ld %ld %ld %ld\\n\", t_direct((char*)9), t_plus(5, (char*)100), t_swap((char*)100, 5), t_sum((char*)1000), t_indirect(chain_plus, (char*)40, k));\n"
+                                  "    printf(\"%ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4));\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[5][256];
+    snprintf(source, sizeof(source), "%s/static_chain.c", directory);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        snprintf(outputs[k], sizeof(outputs[k]), "%s/static_chain-%u", directory, k);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the static chain's program written");
+    char* text = NULL;
+    char* const reference[] = { (char*)clang, "-O0", "-o", outputs[4], source, NULL };
+    const int built = written ? check_test_driver_spawn(reference, &text) : 1;
+    free(text);
+    static char expected[4096];
+    const bool referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+    check_test_expect(test, referenced && strlen(expected) > 40, "clang's build of the static chain's program runs");
+    static const char* const names[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
+    for (uint32_t mode = 0; referenced && mode < 4; mode += 1)
+    {
+        char* arguments[16] = { (char*)executable };
+        uint32_t count = 1;
+        if ((mode & 1) != 0)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (mode >= 2)
+        {
+            arguments[count++] = "--tier1";
+            arguments[count++] = "--verify";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = outputs[mode];
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        static char captured[4096];
+        const bool ran = status == 0 && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
+        char description[256];
+        snprintf(description, sizeof(description), "the static chain's calls compute what clang's build of them does (%s)", names[mode]);
+        check_test_expect(test, ran && strcmp(captured, expected) == 0, description);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        else if (ran && strcmp(captured, expected) != 0)
+        {
+            fprintf(stderr, "static chain (%s):\n%s\nclang's build:\n%s\n", names[mode], captured, expected);
+        }
+        free(text);
+        text = NULL;
+    }
+    unlink(source);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        unlink(outputs[k]);
     }
 }
 
@@ -7553,6 +7655,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_dump_struct(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_static_chain(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

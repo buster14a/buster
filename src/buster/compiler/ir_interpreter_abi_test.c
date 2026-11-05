@@ -1039,8 +1039,9 @@ static void ir_interpreter_test_native_records(IrInterpreterTestTally* tally, Ar
         const IrInterpreterProgram program = { .functions = &function, .function_count = 1, .bindings = &binding, .binding_count = 1, .natives = natives, .native_count = BUSTER_ARRAY_LENGTH(natives) };
         ir_interpreter_test_run(tally, &program, 50, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = (uint64_t)tiny_result }, "natives with records, as clang's code takes and returns aggregates");
         ir_interpreter_test_expect(tally, memcmp(bytes, expected, sizeof(bytes)) == 0, "every aggregate result's bytes where C's calls put them");
-        // What the bridge can't place, each refused before the native runs.
-        caller.passed[0].location.registers[0] = BUSTER_ABI_R10;
+        // What the bridge can't place, each refused before the native runs: r11, which no argument takes (r10 is a static
+        // chain's, #148).
+        caller.passed[0].location.registers[0] = BUSTER_ABI_R11;
         ir_interpreter_test_run(tally, &program, 50, 0, 0, 0, execution, INTERPRETER_NATIVE, (InterpreterValue){ 0 }, "an argument in a register no argument goes in");
         caller.passed[0].location.registers[0] = BUSTER_ABI_RDI;
         caller.abi_calls[0].call.stack_alignment_log2 = 5;

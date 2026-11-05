@@ -863,13 +863,14 @@ static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
 #define BUSTER_TIER0_XMM_ALL 0xffff0000u
 // The convention's registers: arguments and parameters arrive in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7, and
 // results in rax, rdx, xmm0 and xmm1 (and xmm2 and xmm3, a vector's split across four: tier0_vector_result_parts, which
-// checks its registers itself). abi_assign's locations name no others, and the emitters take no others there: the
+// checks its registers itself), and a call's static chain in r10 (#148), which __builtin_call_with_static_chain's front
+// end puts there. abi_assign's locations name no others, and the emitters take no others there: the
 // prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters move, and doesn't save a
 // register a parameter stays in; a call sets al and calls through r11; the epilogue loads the result before it pops the
 // callee-saved registers.
 #define BUSTER_TIER0_ARGUMENT_REGISTERS                                                                                \
     (1u << X86_REGISTER_RDI | 1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX |               \
-     1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 0xffu << BUSTER_TIER0_XMM(0))
+     1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 | 0xffu << BUSTER_TIER0_XMM(0))
 #define BUSTER_TIER0_RESULT_REGISTERS (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 3u << BUSTER_TIER0_XMM(0))
 
 // The condition codes, as the encoder's Jcc and SETcc rows number them (their 4-bit tttn field).
@@ -1345,6 +1346,16 @@ static uint64_t tier0_incoming_bytes(const Tier0Function* function)
         end = reach > end ? reach : end;
     }
     return end;
+}
+
+// 1 for a call that passes a static chain (#148, __builtin_call_with_static_chain's): its argument 0 in r10, which a front
+// end puts there and nothing else does; else 0. A consumer that runs the call itself (the interpreters) passes the
+// chain in r10 to a native callee and nothing to an interpreted one, whose C parameters don't include it.
+static __attribute__((unused)) uint32_t tier0_call_chain(const Tier0Function* function, uint32_t c)
+{
+    const bool placed = function->argument_locations != 0 && function->call_argument_counts[c] != 0;
+    const AbiLocation location = placed ? function->argument_locations[function->call_first[c]] : (AbiLocation){ 0 };
+    return location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10 ? 1u : 0u;
 }
 
 // Whether call `c` is one a TAIL_CALL may make (Tier0Function.call_tails): neither it nor the function variadic, its

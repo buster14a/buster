@@ -2387,6 +2387,8 @@ static uint32_t tier1_select_argument_type(const IrFunction* function, const IrC
 // the k-th of the six general argument registers (`index` k, tier1_select_parameter_registers'), the k-th floating one
 // in xmm k of eight, and each one past its class's registers in the stack's next 8-byte slot (`index` the slot's).
 #define BUSTER_TIER1_PLACE_GENERAL 0
+// A static chain's general place (#148): r10, past the six argument registers.
+#define BUSTER_TIER1_SELECT_CHAIN_INDEX 6
 #define BUSTER_TIER1_PLACE_VECTOR 1
 #define BUSTER_TIER1_PLACE_STACK 2
 // A by-value aggregate's place (#789): its ABI record says where its bytes go (tier1_select_location_parts, or its stack
@@ -2439,6 +2441,21 @@ static const IrPassed* tier1_select_argument_record(const IrFunction* function, 
     return call->abi != 0 ? &function->passed[function->abi_calls[call->abi - 1].passed + argument] : 0;
 }
 
+// Whether a call passes a static chain (#148, __builtin_call_with_static_chain's): its argument 0's record in r10. An
+// indirect one calls through rax (tier1_select_callee_register), since its chain takes r10 and the moves' scratch r11.
+static bool tier1_select_call_chained(const IrFunction* function, const IrCall* call)
+{
+    const IrPassed* record = call->argument_count != 0 ? tier1_select_argument_record(function, call, 0) : 0;
+    return record != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS && record->location.registers[0] == BUSTER_ABI_R10;
+}
+
+// The register an indirect call calls through: r10, which no argument takes, or with a static chain (#148) rax, which
+// none does either and which a chained call's al doesn't take (ir_lower refuses a chained indirect variadic call).
+static uint8_t tier1_select_callee_register(const IrFunction* function, const IrCall* call)
+{
+    return tier1_select_call_chained(function, call) ? X86_REGISTER_RAX : X86_REGISTER_R10;
+}
+
 // Whether an ABI record is a by-value aggregate's (#789): its bytes aren't 0, or (#141) it is passed in no place at all
 // (IGNORE: an empty struct, or one of unnamed bit-fields), which only an aggregate is.
 static bool tier1_select_aggregate_record(const IrPassed* record)
@@ -2461,7 +2478,8 @@ static bool tier1_select_entry_parameter(const IrFunction* function, uint32_t no
 }
 
 // The place an ABI record gives a value (#789): a by-value aggregate's own, a register's (a general one's index among
-// the argument registers, an xmm one's number), or a stack slot's (its offset's 8-byte slot).
+// the argument registers, an xmm one's number), or a stack slot's (its offset's 8-byte slot). A static chain (#148), in
+// r10, is general index 6, past the argument registers (tier1_select_parameter_registers).
 static Tier1SelectPlace tier1_select_record_place(const IrPassed* record)
 {
     const uint8_t reg = record->location.registers[0];
@@ -2470,6 +2488,7 @@ static Tier1SelectPlace tier1_select_record_place(const IrPassed* record)
     {
         index += 1;
     }
+    index = reg == BUSTER_ABI_R10 ? BUSTER_TIER1_SELECT_CHAIN_INDEX : index;
     const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
     const uint8_t kind = tier1_select_aggregate_record(record)                   ? BUSTER_TIER1_PLACE_AGGREGATE
                          : record->location.kind == BUSTER_ABI_LOCATION_STACK ? BUSTER_TIER1_PLACE_STACK
@@ -2528,6 +2547,8 @@ struct Tier1SelectPart
 
 // The general argument registers', and the general result registers', bits.
 #define BUSTER_TIER1_SELECT_ARGUMENT_GENERAL ((1u << BUSTER_ABI_RDI) | (1u << BUSTER_ABI_RSI) | (1u << BUSTER_ABI_RDX) | (1u << BUSTER_ABI_RCX) | (1u << BUSTER_ABI_R8) | (1u << BUSTER_ABI_R9))
+// A value's record may be r10 too: a static chain's (#148, tier1_select_call_chained), which no aggregate's part is.
+#define BUSTER_TIER1_SELECT_VALUE_GENERAL (BUSTER_TIER1_SELECT_ARGUMENT_GENERAL | (1u << BUSTER_ABI_R10))
 #define BUSTER_TIER1_SELECT_RESULT_GENERAL ((1u << BUSTER_ABI_RAX) | (1u << BUSTER_ABI_RDX))
 // The largest aggregate a call copies whole into its stack slots, and the outgoing area's bytes a stack place's index
 // reaches (#789).
@@ -2664,7 +2685,7 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
     else if (record->size == 0)
     {
         const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
-                                (floating ? vector && (reg & 0x1fu) < BUSTER_ABI_VECTOR_ARGUMENTS : reg < 16 && ((BUSTER_TIER1_SELECT_ARGUMENT_GENERAL >> reg) & 1) != 0);
+                                (floating ? vector && (reg & 0x1fu) < BUSTER_ABI_VECTOR_ARGUMENTS : reg < 16 && ((BUSTER_TIER1_SELECT_VALUE_GENERAL >> reg) & 1) != 0);
         // A long double (#141) on the stack alone, its object's bytes copied into its 16 (tier1_emit_cfg_stack_argument).
         supported = (((floating || type == IR_I32 || type == IR_I64 || type == IR_PTR) && (registered || stacked)) || (type == IR_F80 && stacked)) &&
                     (location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
@@ -3013,8 +3034,11 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // registers its arguments take (tier1_emit_call). A call with ABI records (#789) passes each argument where its
         // record says: its aggregates' bytes in registers or in its stack slots, and its aggregate result's into the frame
         // object its into operand is the address of, as parts or through the hidden pointer (tier1_emit_call).
+        // A chained indirect variadic call (#148) isn't one (#1411's review): its callee would wait in rax
+        // (tier1_select_callee_register), which its al then overwrites; the typed stream's adapter refuses it too (ir_lower).
+        const bool clobbered = function->op[node] == IR_CALL_INDIRECT && call.variadic && tier1_select_call_chained(function, &call);
         supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_call_arity(&call) && tier1_select_call_result(function->type[node]) &&
-                    tier1_select_call_abi(function, node, &call);
+                    tier1_select_call_abi(function, node, &call) && !clobbered;
         // The aggregates' parts in registers wait in the red zone's staging slots, a 64-byte one in zmm16 and on instead
         // (tier1_select_argument_slots).
         uint32_t staged = 0;
@@ -4573,9 +4597,12 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     {
         bool supported = function->parameter_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_result_supported(function->result_abi, function->result_size) &&
                          (function->result_size == 0 || function->result_type == IR_PTR) && function->result_size <= BUSTER_TIER1_SELECT_MAX_RESULT_COPY;
+        // A parameter's record never r10, a static chain's (#148), which only a call's argument may be.
         for (uint32_t p = 0; supported && p < function->parameter_count; p += 1)
         {
-            supported = tier1_select_record_supported(tier1_select_parameter_record(function, p), function->parameter_types[p]);
+            const IrPassed* record = tier1_select_parameter_record(function, p);
+            supported = tier1_select_record_supported(record, function->parameter_types[p]) &&
+                        !(record->location.kind == BUSTER_ABI_LOCATION_REGISTERS && record->location.registers[0] == BUSTER_ABI_R10);
         }
         error = supported ? error : TIER1_SELECT_ERROR_UNSUPPORTED;
     }
@@ -4938,7 +4965,8 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
 
 // A leaf body's incoming System V integer arguments. Register assignment must pin these values from function entry;
 // an IR_PARAM does not emit a late copy from a register that earlier instructions may already have overwritten.
-static const uint8_t tier1_select_parameter_registers[6] =
+// Past them, index 6: r10, a call's static chain (#148, tier1_select_record_place), which no parameter has.
+static const uint8_t tier1_select_parameter_registers[7] =
 {
     X86_REGISTER_RDI,
     X86_REGISTER_RSI,
@@ -4946,6 +4974,7 @@ static const uint8_t tier1_select_parameter_registers[6] =
     X86_REGISTER_RCX,
     X86_REGISTER_R8,
     X86_REGISTER_R9,
+    X86_REGISTER_R10,
 };
 
 // The plan and allocation are validated internal compiler products. All records receive the same independent target,
