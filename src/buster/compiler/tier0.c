@@ -516,10 +516,11 @@ struct Tier0Operation
 //
 // A function that calls __builtin_eh_return (#148, `eh_return`) unwinds to a handler through a tail call's row of its
 // own, call_tails[c] BUSTER_TIER0_TAIL_EH: an indirect one, whose callee is the handler, of one U64 argument in rcx, the
-// offset, in a function that isn't variadic and has no other tail calls (tier0_tail_call_valid). Its frame has a frame
-// pointer and saves every callee-saved register and then rdx and rax (LLVM's CSR_64EHRet, which libgcc's unwinder,
+// offset (tier0_tail_call_valid). The function may be variadic, and its other tail calls musttail ones. Its frame has a
+// frame pointer and saves every callee-saved register and then rdx and rax (LLVM's CSR_64EHRet, which libgcc's unwinder,
 // uw_install_context, writes through the CFI), and its TAIL_CALL tears the frame down with them all, rsp the CFA plus
-// the offset, and jumps to the handler (tier0_emit_tail). Its ordinary returns leave rax and rdx as the body left them.
+// the offset, and jumps to the handler (tier0_emit_tail). Its ordinary returns and its musttail calls step over rax's and
+// rdx's slots and leave rax and rdx as the body left them (tier0_emit_teardown).
 //
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
 // compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
@@ -1381,7 +1382,8 @@ static __attribute__((unused)) uint32_t tier0_call_chain(const Tier0Function* fu
 // which it writes before it jumps.
 static bool tier0_tail_call_valid(const Tier0Function* function, uint32_t c)
 {
-    // __builtin_eh_return's row (Tier0Function.eh_return), in an eh_return function, whose tail calls are all its.
+    // __builtin_eh_return's row (Tier0Function.eh_return), in an eh_return function alone, which may be variadic (its
+    // unwinding passes none of the function's arguments on) and may make musttail calls too (#148).
     const bool eh = function->call_tails[c] == BUSTER_TIER0_TAIL_EH;
     const uint32_t first = function->call_first[c];
     const bool offset = function->call_argument_counts[c] == 1 && function->argument_classes[first] == BUSTER_TYPED_CLASS_U64 &&
@@ -1392,8 +1394,8 @@ static bool tier0_tail_call_valid(const Tier0Function* function, uint32_t c)
     const bool same = result.kind == own.kind && result.flags == own.flags && result.part_bytes == own.part_bytes &&
                       memcmp(result.registers, own.registers, sizeof(result.registers)) == 0;
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
-    return same && object == 0 && !function->call_variadic[c] && function->incoming_variadic == 0 &&
-           function->calls[c].stack_bytes <= tier0_incoming_bytes(function) && eh == function->eh_return &&
+    return same && object == 0 && !function->call_variadic[c] && (eh || function->incoming_variadic == 0) &&
+           function->calls[c].stack_bytes <= tier0_incoming_bytes(function) && (!eh || function->eh_return) &&
            (!eh || (function->call_targets[c] == 0 && offset && function->calls[c].stack_bytes == 0));
 }
 
@@ -3498,9 +3500,11 @@ struct Tier0Entries
     uint64_t record_count;
     // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
     uint64_t* words;
-    // The records every tail call of the function ends with but its stack arguments' copy (tier0_count_tail_finish), once
-    // the homes and the frame are known: the vector path's measuring of them (tier0_count_call's).
+    // The records every musttail call of the function ends with but its stack arguments' copy (tier0_count_tail_finish),
+    // once the homes and the frame are known, and every __builtin_eh_return's (eh_finish): the vector path's measuring of
+    // them (tier0_count_call's).
     uint32_t tail_finish;
+    uint32_t eh_finish;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and
     // full-width depths before every entry and at count, where the byte columns hold the depths its records are made at.
     uint8_t* deep;
@@ -5739,15 +5743,22 @@ static uint32_t tier0_count_teardown(const Tier0Frame* frame)
 
 // The records a function's tail calls end with besides their stack arguments' copy (tier0_emit_tail's): the hidden
 // pointer's move or load into rdi where the function's result goes through one (none where parameter 0 stays in rdi),
-// the teardown and the jump. The same for every tail call of a function, whose results are all its own; measuring's,
-// once the homes and the frame are known (Tier0Entries.tail_finish).
-static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes)
+// the teardown and the jump. The same for every musttail call of a function, whose results are all its own, and for
+// every __builtin_eh_return of one (`eh`); measuring's, once the homes and the frame are known (Tier0Entries.tail_finish
+// and eh_finish).
+static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, bool eh)
 {
     const bool hidden = function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0 &&
                         !(homes[0].is_register && homes[0].reg == X86_REGISTER_RDI);
     // __builtin_eh_return's (Tier0Frame.eh_return): the CFA's lea, the teardown with rax's and rdx's pops, rsp's mov and
     // the jump (tier0_emit_tail).
-    return frame->eh_return ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 : (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
+    return eh ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 : (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
+}
+
+// The records call `call`'s tail ends with besides its stack arguments' copy (Tier0Entries.tail_finish or eh_finish).
+static uint32_t tier0_tail_finish(const Tier0Function* function, const Tier0Entries* entries, uint32_t call)
+{
+    return function->call_tails[call] == BUSTER_TIER0_TAIL_EH ? entries->eh_finish : entries->tail_finish;
 }
 
 // A musttail call's last records (tier0_emit_tail's): the hidden pointer, the stack arguments' copy, the teardown and the
@@ -5811,7 +5822,7 @@ static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame
 static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call,
                                                      Tier0Writer* writer)
 {
-    if (frame->eh_return)
+    if (function->call_tails[call] == BUSTER_TIER0_TAIL_EH)
     {
         X86Instruction cfa = tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RCX, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE_INDEX(0), 16, 0);
         cfa.index = X86_REGISTER_RCX;
@@ -8593,7 +8604,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
+    count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -9625,7 +9636,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += indirect ? 1 : 0;
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
-        count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
+        count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         counts->references += indirect ? 0 : 1;
@@ -10066,7 +10077,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
         error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
-        entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes) : 0;
+        entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes, false) : 0;
+        entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame.eh_return ? tier0_count_tail_finish(function, &frame, homes, true) : 0;
     }
     if (error == TIER0_OK)
     {

@@ -359,6 +359,8 @@ struct PPOptions
     // fatal error and stops publication; -Wno-fatal-errors restores the ordinary error budget.
     bool fatal_errors;
     bool suppress_warnings;
+    // The default-on negative-to-unsigned #if warning has no individual Clang warning group.
+    bool negative_conversion_error;
     bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
@@ -15036,6 +15038,8 @@ static uint32_t pp_binary_operator(uint8_t kind)
     return result;
 }
 
+#include "c_preprocessor_literal.c"
+
 // Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
 // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
 static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
@@ -15128,9 +15132,7 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     valid &= digits || radix == 8;
     if (!valid)
     {
-        const bool floating = memchr(spelling, '.', length) != 0 || (radix != 16 && (memchr(spelling, 'e', length) != 0 || memchr(spelling, 'E', length) != 0));
-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, floating ? "floating point literal in preprocessor expression" : "invalid integer constant '%.*s' in preprocessor expression",
-                    (int)length, (const char*)spelling);
+        pp_diagnose_integer(pp, spelling, length, location);
     }
     else if (overflow)
     {
@@ -15549,8 +15551,18 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     return !error;
 }
 
+// The place and enclosing liveness of an operator. Reductions restore this state before another operator is
+// read, so &&, || and both arms of ?: suppress evaluation warnings without skipping syntax or losing signedness.
+typedef struct PPExpressionContext PPExpressionContext;
+struct PPExpressionContext
+{
+    uint32_t location;
+    uint32_t origin;
+    bool live;
+};
+
 // Applies an operator to the values on top of the stack (two for a binary one, three for ?:, which is COLON here).
-static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location)
+static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, uint32_t operator, uint32_t location, PPExpressionContext context)
 {
     bool result = true;
     const bool unary = operator == PP_OPERATOR_PLUS || operator == PP_OPERATOR_MINUS || operator == PP_OPERATOR_NOT || operator == PP_OPERATOR_COMPLEMENT;
@@ -15589,6 +15601,28 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
         PPValue r = { .is_unsigned = is_unsigned, .division_by_zero = a.division_by_zero || b.division_by_zero };
         const int64_t sa = (int64_t)a.bits;
         const int64_t sb = (int64_t)b.bits;
+        // Shifts, logical operators and comma do not apply the usual arithmetic conversions. ?: keeps its
+        // common unsigned type above, but clang does not warn for the conversion of its selected arm itself.
+        const bool converts = operator != PP_OPERATOR_SHIFT_LEFT && operator != PP_OPERATOR_SHIFT_RIGHT &&
+                              operator != PP_OPERATOR_LOGICAL_AND && operator != PP_OPERATOR_LOGICAL_OR && operator != PP_OPERATOR_COMMA;
+        if (context.live && is_unsigned && converts && ((!a.is_unsigned && sa < 0) || (!b.is_unsigned && sb < 0)))
+        {
+            const uint32_t saved_origin = pp->diagnostic_origin;
+            pp->diagnostic_origin = context.origin;
+            // A promoted warning must still obey -w and system-header suppression before it becomes an error.
+            const bool promoted = pp->options.negative_conversion_error && !pp->options.suppress_warnings &&
+                                  pp_diagnostic_warning_visible(pp, context.location, context.origin);
+            const PPSeverity severity = promoted ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+            if (!a.is_unsigned && sa < 0)
+            {
+                pp_diagnose(pp, severity, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
+            }
+            if (!b.is_unsigned && sb < 0)
+            {
+                pp_diagnose(pp, severity, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
+            }
+            pp->diagnostic_origin = saved_origin;
+        }
         switch (operator)
         {
             case PP_OPERATOR_MULTIPLY: r.bits = a.bits * b.bits; break;
@@ -15667,10 +15701,12 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
     const uint32_t saved_origin = pp->diagnostic_origin;
     PPValue values[BUSTER_PP_EXPRESSION_DEPTH];
     uint8_t operators[BUSTER_PP_EXPRESSION_DEPTH];
+    PPExpressionContext contexts[BUSTER_PP_EXPRESSION_DEPTH];
     uint32_t value_count = 0;
     uint32_t operator_count = 0;
     bool valid = true;
     bool expect_operand = true;
+    bool live = true;
     for (uint32_t i = begin; valid && i < end; i += 1)
     {
         const uint8_t kind = tokens->kinds[i];
@@ -15686,11 +15722,13 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             if (kind == C_TOKEN_PLUS || kind == C_TOKEN_MINUS || kind == C_TOKEN_EXCLAIM || kind == C_TOKEN_TILDE)
             {
                 operators[operator_count] = kind == C_TOKEN_PLUS ? PP_OPERATOR_PLUS : kind == C_TOKEN_MINUS ? PP_OPERATOR_MINUS : kind == C_TOKEN_EXCLAIM ? PP_OPERATOR_NOT : PP_OPERATOR_COMPLEMENT;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_L_PAREN)
             {
                 operators[operator_count] = PP_OPERATOR_PAREN;
+                contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                 operator_count += 1;
             }
             else if (kind == C_TOKEN_NUMERIC_CONSTANT || kind == BUSTER_PP_KIND_INTEGER)
@@ -15757,14 +15795,19 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_PAREN)
             {
                 operator_count -= 1;
-                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                live = contexts[operator_count].live;
+                valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
             }
             if (valid && operator_count == 0)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "unbalanced ')' in preprocessor expression");
                 valid = false;
             }
-            operator_count -= valid;
+            if (valid)
+            {
+                live = contexts[operator_count - 1].live;
+                operator_count -= 1;
+            }
         }
         else
         {
@@ -15787,7 +15830,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                         break;
                     }
                     operator_count -= 1;
-                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                    live = contexts[operator_count].live;
+                    valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                 }
                 // clang parses a #if line from ?:'s precedence on, so a comma is only an operator inside parentheses or
                 // between a '?' and its ':' (`#if 1, 2` is an error, `#if (1, 2)` isn't). Comma binds loosest, so the
@@ -15804,7 +15848,8 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     while (valid && operator_count != 0 && operators[operator_count - 1] != PP_OPERATOR_QUESTION && operators[operator_count - 1] != PP_OPERATOR_PAREN)
                     {
                         operator_count -= 1;
-                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location);
+                        live = contexts[operator_count].live;
+                        valid = pp_reduce(pp, values, &value_count, operators[operator_count], token_location, contexts[operator_count]);
                     }
                     if (valid && (operator_count == 0 || operators[operator_count - 1] != PP_OPERATOR_QUESTION))
                     {
@@ -15814,12 +15859,22 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
                     if (valid)
                     {
                         operators[operator_count - 1] = PP_OPERATOR_COLON;
+                        live = contexts[operator_count - 1].live && value_count >= 2 && values[value_count - 2].bits == 0;
                     }
                 }
                 else if (valid)
                 {
                     operators[operator_count] = (uint8_t)operator;
+                    contexts[operator_count] = (PPExpressionContext){ .location = token_location, .origin = pp->diagnostic_origin, .live = live };
                     operator_count += 1;
+                    if (operator == PP_OPERATOR_LOGICAL_AND || operator == PP_OPERATOR_QUESTION)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits != 0;
+                    }
+                    else if (operator == PP_OPERATOR_LOGICAL_OR)
+                    {
+                        live = live && value_count != 0 && values[value_count - 1].bits == 0;
+                    }
                 }
                 expect_operand = true;
             }
@@ -15841,7 +15896,7 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
         }
         else
         {
-            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location);
+            valid = pp_reduce(pp, values, &value_count, operators[operator_count], location, contexts[operator_count]);
         }
     }
     if (valid && value_count != 1)
@@ -21397,6 +21452,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     options->dependencies.only = dependency_modes != 0 && (dependency_modes & 12u) == 0;
     options->dependencies.include_system = (dependency_modes & 3u) != 0 ? (dependency_modes & 2u) == 0 : (dependency_modes & 8u) == 0;
     options->suppress_warnings |= (dependency_modes & 3u) != 0;
+    options->negative_conversion_error = warning_errors;
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;

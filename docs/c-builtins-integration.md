@@ -1735,6 +1735,29 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
 - **Ordinary returns** step over rax's and rdx's slots and keep the result.
   LLVM's pop the saved rax over it (`movl $42, %eax; popq %rax`), as GCC's
   epilogue doesn't.
+- **Where it may be:**
+  - **A variadic function.** Its register save area is stored after the
+    pushes, so rax's and rdx's slots stay where the CFI says, as in clang's
+    frame. The unwinding passes none of the function's arguments on
+    (`tier0_tail_call_valid`).
+  - **Beside musttail calls.** Each TAIL_CALL row has its own kind in
+    `Tier0Function.call_tails`. The lowering tells an eh_return's row by its
+    argument's ABI type, a `const void`. A musttail call's teardown steps
+    over rax's and rdx's slots, as an ordinary return does
+    (`tier0_count_tail_finish` and `tier0_emit_tail`, per row).
+    `unwind_tier0_frame_tails` reads each tail by its kind: an eh_return's
+    jump comes right after `mov rsp, rcx`. `emitted_tier0_eh_rows` restores
+    rax's and rdx's rules after a musttail call's release, as it does after
+    the epilogue's.
+  - **Within an expression** (`c + (__builtin_eh_return(o, h), 1)`). The
+    offset and the handler go into temporaries, the expression's pending
+    values are discarded, and the TAIL_CALL then has nothing under its
+    operands (`check_lower_eh_unwind`). The rest of the expression is dead.
+    Dead constants of the discarded values' classes stand in for them, as for
+    a terminal helper's call (`check_lower_terminate`). A unit that calls
+    `__builtin_eh_return` tracks its typed stacks for this
+    (`CheckLowerShared.terminal`). The pending values are evaluated before
+    the offset and the handler, as clang evaluates them.
 - **Its consumers:**
   - `unwind_tier0_frame_tails` reads the frame.
   - `emitted_verify_frames` proves its rows up to the `mov rsp, rcx`. At the
@@ -1742,14 +1765,15 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
     doesn't describe it either.
   - Tier 1 falls back to Tier 0 for the function, as for
     `__builtin_unwind_init`'s frame.
-- **Refused by name:** one that isn't an expression statement of its own (a
-  tail call leaves nothing under its operands), one in a variadic function,
-  and one beside a musttail call.
 - **Tests.** `test-checker-driver`'s eh_return program writes rax's and
   rdx's slots, then unwinds at offsets 0, 16 and 32 into a handler that
-  records the registers and rsp. It is built on both paths at Tier 0 and
-  with `--tier1`, all with `--verify`, and prints what clang `-O0`'s build
-  prints.
+  records the registers and rsp. It runs four functions: one with two
+  unwinding sites, a variadic one that reads its variadic argument first,
+  one that unwinds within expressions after a call, and one that makes a
+  musttail call where it doesn't unwind. For the last, the runner also
+  records the callee's result, the callee-saved registers and rsp. It is
+  built on both paths at Tier 0 and with `--tier1`, all with `--verify`, and
+  prints what clang `-O0`'s build prints.
 
 `__builtin___CFStringMakeConstantString(s)` and
 `__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are
@@ -1826,7 +1850,18 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
 - **Code.** As clang's code does, `-c` evaluates the callee, then the
   chain, then the arguments, and passes the chain in `r10`, SysV's static
   chain register (LLVM's `nest`). The call's own arguments and result stay
-  as they were. A musttail return of such a call is refused by name.
+  as they were.
+- **A musttail return of it.** Clang's Sema gives the builtin the type
+  `R(R, C)`, where R is the call's result and C the chain's type after the
+  usual unary conversions (`BuiltinCallWithStaticChain`), and checks the
+  return's musttail against that type.
+  - So the caller must be prototyped, not variadic and of the default
+    convention, return R and take exactly R and C, as similar types. The
+    messages name `__builtin_call_with_static_chain`
+    (`check_musttail_static_chain_rule`).
+  - Its code is the call, then the return. Clang's code generation emits no
+    musttail for a builtin's call, so the return is no tail call
+    (`check_control_static_chain`).
 - **The call's record.** The chain is the call's argument 0, of class `U64`.
   Its ABI type is `void`, which no other argument has and `abi_assign`
   ignores, so it takes no register of the convention's. After the batch,
@@ -1853,7 +1888,9 @@ value, as clang's `BuiltinCallWithStaticChain` checks it.
   - **SSA promotion** sees calls as opaque values and needs nothing.
 - **Tests.** `test-checker-driver`'s static chain program runs naked
   callees that read `r10`, direct and indirect, of aggregate, floating and
-  variadic calls, past six arguments and in a loop. It is built on both
+  variadic calls, past six arguments, in a loop and as a musttail return's
+  value. Its musttail error fixtures compare each rule's message with
+  clang's. It is built on both
   paths at Tier 0 and with `--tier1 --verify`, and each build prints what
   clang `-O0`'s does. `test-interpreter` and `test-ir-lowering` pass a chain
   to native and interpreted callees.
@@ -2161,8 +2198,9 @@ folds.
 
 `__builtin_stdarg_start` is the old name of `__builtin_va_start`, which clang's
 Sema checks as that: the catalogue resolves it to `va_start`'s entry
-(`cbuiltin_alias_entry`). In C23 it takes its second argument still, where
-`va_start` takes one alone; that difference is pending.
+(`cbuiltin_alias_entry`). Both take two arguments in every standard, as clang
+23's do. C23's `va_start` with one argument is `<stdarg.h>`'s, by
+`__builtin_c23_va_start`.
 
 Sixteen others are leaves, per-unit helpers of clang -O0's instructions
 (`c_builtin_x86_leaves.inc`), named in the supplementary scope with no
@@ -2224,9 +2262,9 @@ features. Their prototypes are clang's metadata's:
   clang's two errors at the call (`check_input_longjmp_argument`).
 
 A call's size of `memcpy_inline` and `memset_inline` must be an integer
-constant expression (the prototype's `I`). A non-constant one is refused at the
-argument, as the x86 builtins' are; clang's message ("argument to ... must be
-a constant integer", at the call) is pending for both.
+constant expression (the prototype's `I`). A non-constant one is clang's error
+"argument to '__builtin_memcpy_inline' must be a constant integer", at the call,
+as for the x86 builtins (`test-checker-driver`'s generic builtins' fixtures).
 
 `verbose_trap`'s two arguments must each be a constant string without a `$`,
 as clang's Sema reads them (`check_input_verbose_trap_arguments`, in the source

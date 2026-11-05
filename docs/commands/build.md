@@ -133,7 +133,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds |
 | `BUSTER_HOST_RUNTIME` | none | links CI's emulated old CPU's runtime from that root (`x86-64` alone) |
 | `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time |
-| `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path |
+| `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link lld, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path; lld links at `-O0` |
 | `BUSTER_BUILD_DEFINES` | none | whitespace-separated arguments every unit's compile adds |
 | `BUSTER_SANITIZER` | `none` | `address` (with UBSan and bounds), `undefined`, `thread`, `memory`: a PIE |
 | `BUSTER_SANITIZER_OPTIMIZATION` | `3` | a sanitizer build's Release optimization, `1` to `3` |
@@ -196,8 +196,12 @@ fuzzing build (libFuzzer's runtime needs C++'s shared libraries) and
 `BUSTER_HOST_RUNTIME`'s explicit runtime stay dynamic, and so does a link by
 wild: wild 0.10.0's static executables fault in glibc's `__ctype_init`, at
 their first TLS access, against Ubuntu's glibc, so a static build's `auto`
-linker is mold (or clang's default without it), and an explicit
-`BUSTER_LINKER=wild` links dynamically. The configure step's status line
+linker is lld, then mold (or clang's default without either), and an explicit
+`BUSTER_LINKER=wild` links dynamically. lld links at `-O0`, which keeps each
+object's strings in its order rather than merging the objects' in their hashes'
+order: a compile's comparisons of its options against their names then read a
+few pages of the pool, which took 7% to 14% off a small compile from a cold
+start on the 9700X, for 1.8 MB more of the executable. The configure step's status line
 says which (`static: TRUE`), and the units see it as `BUSTER_HOST_STATIC`. A static executable's `dlsym(RTLD_DEFAULT, ...)`
 finds nothing, so the host functions that the interpreter's programs and the
 tests' libm oracles name come from `test_libm.c`'s table there and nothing else:

@@ -1542,6 +1542,22 @@ than the dynamic one. The link wraps the registration into a function that does
 nothing, and libgcc finds the frames through `_dl_find_object`, as a dynamic
 executable's does.
 
+### Strings in their objects' order
+
+A static build's `auto` linker is lld, at `-O0` (`cmake/BusterSettings.cmake`).
+lld and mold merge every object's identical strings and lay the pool out in
+their hashes' order, so a compile's comparisons of its options and commands
+against their names (about 930 `strcmp` calls in an empty file's
+`-fsyntax-only`) read pages all over the pool: 55 of that compile's 319 faults
+were in mold's string pool. At `-O0` lld keeps each object's strings where the
+object has them, and the same compile faulted 28 pages of read-only data where
+mold's link of the same objects faulted 67, and 280 in all. From a cold start
+on the 9700X it took 13.8% less time than mold's link, `-E -P` 11.0%, a
+one-line `-c` 7.3%, a `-c` of a file that includes `stdio.h` 6.2%, and
+`sqlite3.c`'s `-fsyntax-only` the same. The strings that several objects repeat
+take 1.8 MB more of the executable. A first argument that starts with `-` also
+goes to the source commands at once, past the units' chains of command names.
+
 ## How it is measured
 
 **The stage clock.** `--time-stages` (`c_check_clock.c`) makes the C driver

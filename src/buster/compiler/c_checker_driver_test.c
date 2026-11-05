@@ -495,8 +495,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; eh_return where its
-// unwinding isn't made (a variadic function's, one within an expression, one beside a musttail call), and an NSString of
+// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; an NSString of
 // no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
@@ -516,11 +515,6 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
         { "struct S { char c[5000]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores" },
-        { "void f(int n, void* p, ...) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return in a variadic function" },
-        { "int f(void* p, int c) { return c + (__builtin_eh_return(8, p), 1); }\n",
-          "unsupported: __builtin_eh_return within an expression, not a statement of its own" },
-        { "int g(void* p, int c);\nint f(void* p, int c) { if (c) __builtin_eh_return(8, p); __attribute__((musttail)) return g(p, c); }\n",
-          "unsupported: a musttail call in a function that calls __builtin_eh_return" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
@@ -1342,9 +1336,10 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
 }
 
 // __builtin_call_with_static_chain (#148): calls whose callees read the chain in r10 through naked functions (direct,
-// indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop; its callee, chain and
-// arguments evaluated in that order), built by both paths at Tier 0 and Tier 1 (--tier1 --verify, whose certificate
-// checks each call's sequence), each the output of clang -O0's build of the same program.
+// indirect, of an aggregate result, a floating one, variadic, past six arguments, in a loop, a musttail return's, which
+// clang's code makes an ordinary call; its callee, chain and arguments evaluated in that order), built by both paths at
+// Tier 0 and Tier 1 (--tier1 --verify, whose certificate checks each call's sequence), each the output of clang -O0's
+// build of the same program.
 static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char program[] = "#include <stdio.h>\n"
@@ -1370,6 +1365,7 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "__attribute__((noinline)) long t_variadic(char* p) { return __builtin_call_with_static_chain(chain_variadic(1, 30L), p); }\n"
                                   "__attribute__((noinline)) long t_variadic_indirect(long (*g)(int, ...), char* p) { return __builtin_call_with_static_chain(g(1, 5L), p); }\n"
                                   "__attribute__((noinline)) long t_loop(char* p, int n) { long s = 0; for (int i = 0; i < n; i++) s += __builtin_call_with_static_chain(chain_plus(i), p + i); return s; }\n"
+                                  "__attribute__((noinline)) long t_tail(long x, char* p) { __attribute__((musttail)) return __builtin_call_with_static_chain(chain_plus(x), p); }\n"
                                   "int main(int argc, char** argv)\n"
                                   "{\n"
                                   "    (void)argv;\n"
@@ -1384,7 +1380,7 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
                                   "    long q = __builtin_call_with_static_chain(pick(f)(arg(k)), chain_of((char*)40));\n"
                                   "    printf(\"%ld %d%d%d %ld\\n\", q, order[0], order[1], order[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
                                   "    printf(\"%ld %ld %ld %ld %ld\\n\", t_direct((char*)9), t_plus(5, (char*)100), t_swap((char*)100, 5), t_sum((char*)1000), t_indirect(chain_plus, (char*)40, k));\n"
-                                  "    printf(\"%ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4));\n"
+                                  "    printf(\"%ld %ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4), t_tail(5, (char*)300));\n"
                                   "    return 0;\n"
                                   "}\n";
     char source[256];
@@ -1450,14 +1446,19 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
 // CFI and clang's say) and eh_returns from one of its two sites (#1420's review: the second after a branch to the first,
 // rax's slot written again), at offsets 0, 16 and 32, into an assembly handler that records the registers it
 // finds (the callee-saved ones restored, rax and rdx from their slots) and rsp (the CFA plus the offset); and one that
-// returns normally. Built by both paths at Tier 0 (with --verify, whose verifier proves its frame events) and with
-// --tier1 --verify (Tier 0's frame, which Tier 1 falls back to), each the output of clang -O0's build.
+// returns normally. The same of a variadic function that reads its variadic argument first, of one within an expression
+// whose left operand calls first, and of a function that makes a musttail call where it doesn't unwind, whose callee's
+// return the runner records too (its callee-saved registers restored, rsp back). Built by both paths at Tier 0 (with
+// --verify, whose verifier proves its frame events) and with --tier1 --verify (Tier 0's frame, which Tier 1 falls back
+// to), each the output of clang -O0's build.
 static void check_test_driver_eh_return(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char program[] = "#include <stdio.h>\n"
+    static const char program[] = "#include <stdarg.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <string.h>\n"
                                   "long seen[8];\n"
                                   "long before;\n"
-                                  "void thrower(long offset, void* h);\n"
+                                  "void* target;\n"
                                   "__attribute__((naked, noinline)) long run(long offset)\n"
                                   "{\n"
                                   "    __asm__(\n"
@@ -1466,8 +1467,11 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "        \"subq $40, %rsp\\n\"\n"
                                   "        \"movq %rsp, before(%rip)\\n\"\n"
                                   "        \"leaq handler(%rip), %rsi\\n\"\n"
-                                  "        \"call thrower\\n\"\n"
-                                  "        \"movq $-1, %rax\\njmp 1f\\n\"\n"
+                                  "        \"movq $77, %rdx\\nxorl %eax, %eax\\n\"\n"
+                                  "        \"call *target(%rip)\\n\"\n"
+                                  "        \"movq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\nmovq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\n\"\n"
+                                  "        \"movq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
+                                  "        \"jmp 1f\\n\"\n"
                                   "        \"handler:\\n\"\n"
                                   "        \"movq %rax, seen+0(%rip)\\nmovq %rdx, seen+8(%rip)\\nmovq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\n\"\n"
                                   "        \"movq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\nmovq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
@@ -1489,6 +1493,38 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "    if (pick) { frame[-7] = 0x5151 + offset; __builtin_eh_return(offset, h); }\n"
                                   "    __builtin_eh_return(offset, h);\n"
                                   "}\n"
+                                  "__attribute__((noinline)) void vthrower(long offset, void* h, ...)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    va_list ap;\n"
+                                  "    va_start(ap, h);\n"
+                                  "    long extra = va_arg(ap, long);\n"
+                                  "    va_end(ap);\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x2a2a + offset + extra;\n"
+                                  "    frame[-6] = 0x3b3b + churn(extra);\n"
+                                  "    if (pick) __builtin_eh_return(offset + extra - 77, h);\n"
+                                  "    __builtin_eh_return(offset, h);\n"
+                                  "}\n"
+                                  "__attribute__((noinline)) long ethrower(long offset, void* h)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x3c3c + offset;\n"
+                                  "    frame[-6] = 0x4d4d + offset;\n"
+                                  "    if (pick) return (long)sink * 2 + churn(offset) * (__builtin_eh_return(offset, h), 3);\n"
+                                  "    return churn(offset + 1) + (__builtin_eh_return(offset, (char*)h + 0), 1);\n"
+                                  "}\n"
+                                  "__attribute__((noinline)) long tailee(long offset, void* h) { sink = offset * 3; return offset + 1000 + (h != 0); }\n"
+                                  "__attribute__((noinline)) long mthrower(long offset, void* h)\n"
+                                  "{\n"
+                                  "    __builtin_unwind_init();\n"
+                                  "    long* frame = __builtin_frame_address(0);\n"
+                                  "    frame[-7] = 0x5e5e + offset;\n"
+                                  "    frame[-6] = 0x6f6f + churn(offset);\n"
+                                  "    if (pick) __builtin_eh_return(offset, h);\n"
+                                  "    __attribute__((musttail)) return tailee(offset, h);\n"
+                                  "}\n"
                                   "__attribute__((noinline)) void maybe(long offset, void* h, int go)\n"
                                   "{\n"
                                   "    __builtin_unwind_init();\n"
@@ -1497,11 +1533,17 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
                                   "}\n"
                                   "int main(void)\n"
                                   "{\n"
-                                  "    for (long offset = 0; offset <= 32; offset += 8)\n"
+                                  "    void* const functions[4] = { (void*)thrower, (void*)vthrower, (void*)ethrower, (void*)mthrower };\n"
+                                  "    for (int k = 0; k < 4; k += 1)\n"
                                   "    {\n"
-                                  "        pick = (offset & 8) != 0;\n"
-                                  "        long r = run(offset & ~8);\n"
-                                  "        printf(\"%ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld\\n\", r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before);\n"
+                                  "        target = functions[k];\n"
+                                  "        for (long offset = 0; offset <= 32; offset += 8)\n"
+                                  "        {\n"
+                                  "            memset(seen, 0, sizeof(seen));\n"
+                                  "            pick = (offset & 8) != 0;\n"
+                                  "            long r = run(offset & ~8);\n"
+                                  "            printf(\"%d %ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld sink=%ld\\n\", k, r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before, sink);\n"
+                                  "        }\n"
                                   "    }\n"
                                   "    maybe(0, 0, 0);\n"
                                   "    printf(\"normal return %ld\\n\", sink);\n"
@@ -1520,9 +1562,9 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
     char* const reference[] = { (char*)clang, "-O0", "-o", outputs[4], source, NULL };
     const int built = written ? check_test_driver_spawn(reference, &text) : 1;
     free(text);
-    static char expected[4096];
+    static char expected[8192];
     const bool referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
-    check_test_expect(test, referenced && strlen(expected) > 100, "clang's build of the eh_return program runs");
+    check_test_expect(test, referenced && strlen(expected) > 1000, "clang's build of the eh_return program runs");
     static const char* const names[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
     for (uint32_t mode = 0; referenced && mode < 4; mode += 1)
     {
@@ -1542,7 +1584,7 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
         arguments[count++] = source;
         arguments[count] = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        static char captured[4096];
+        static char captured[8192];
         const bool ran = status == 0 && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
         char description[256];
         snprintf(description, sizeof(description), "__builtin_eh_return unwinds to its handler as clang's build does (%s)", names[mode]);
@@ -3888,6 +3930,24 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
                               strstr(text, "unknown argument: --") == NULL,
                       "an input after -- is not an option; -E is read as a file");
     free(text);
+    // Both entry points must apply command-line policy to #if's ungrouped conversion warning.
+    static const char conversion[] = "#if -1 > 0u\nint a;\n#endif\n";
+    const bool conversion_made = parse_test_write(source, conversion, sizeof(conversion) - 1);
+    for (uint32_t action = 0; action < 2; action += 1)
+    {
+        for (uint32_t policy = 0; policy < 4; policy += 1)
+        {
+            char* arguments[] = { compiler, action == 0 ? "-E" : "-fsyntax-only", policy == 0 ? "-Wall" : "-Werror",
+                                  policy == 2 ? "-w" : policy == 3 ? "-Wno-error" : "-Wall", source, NULL };
+            text = NULL;
+            const int result = conversion_made ? check_test_driver_spawn(arguments, &text) : -1;
+            const bool warning = text != NULL && strstr(text, "warning: left side of operator converted") != NULL;
+            const bool error = text != NULL && strstr(text, "error: left side of operator converted") != NULL;
+            check_test_expect(test, result == (policy == 1 ? 1 : 0) && warning == (policy == 0 || policy == 3) && error == (policy == 1),
+                              "#if conversion warning follows command-line policy through -E and -fsyntax-only");
+            free(text);
+        }
+    }
     unlink(operand);
     unlink(output);
     unlink(source);
@@ -6492,6 +6552,46 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
     return same;
 }
 
+// #1250: the admitted exact q/Q subset must survive source-to-object emission.
+// Compare a named data section with clang for both checker paths and both routes.
+static void check_test_driver_quad_literals(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+#if BUSTER_CHECK_HAVE_QUAD_READER
+    static const char code[] =
+        "__float128 values[] __attribute__((section(\".quad_literals\"))) = {\n"
+        "  0.0q, -0.0Q, 1.5q, -0x1.8p0Q, 0x1.0000000000000002p0q,\n"
+        "  0x1p-16445Q, 0x1.fffffffffffffffep16383Q };\n";
+    const char* arguments[] = { "-std=gnu17" };
+    const CheckCorpusSymbols oracle = { .clang = clang, .arguments = arguments, .argument_count = BUSTER_ARRAY_LENGTH(arguments), .directory = directory };
+    char source[PATH_MAX], theirs[PATH_MAX], ours[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/quad-literals.c", directory);
+    snprintf(theirs, sizeof(theirs), "%s/quad-literals-clang.o", directory);
+    snprintf(ours, sizeof(ours), "%s/quad-literals.o", directory);
+    const bool reference = parse_test_write(source, code, sizeof(code) - 1) && check_corpus_clang_object(&oracle, source, theirs);
+    check_test_expect(test, reference, "quad literals: clang writes the reference object");
+    const uint32_t routes = executable != NULL ? 4u : 2u;
+    for (uint32_t route = 0; reference && route < routes; route += 1)
+    {
+        CheckCorpusOracle checked = { 0 };
+        uint32_t warnings = 0;
+        const bool built = check_test_driver_run(route >= 2 ? executable : NULL, source, ours, (route & 1) != 0, false, true, false, &checked, &warnings) &&
+                           !checked.rejected;
+        char difference[512] = { 0 }, description[1024];
+        const bool same = built && check_test_driver_same_sections(ours, theirs, ".quad_literals", true, difference, sizeof(difference));
+        snprintf(description, sizeof(description), "quad literals: route %u writes clang's exact data bytes (%s)", route, built ? difference : checked.message);
+        check_test_expect(test, same, description);
+        unlink(ours);
+    }
+    unlink(source);
+    unlink(theirs);
+#else
+    (void)test;
+    (void)clang;
+    (void)executable;
+    (void)directory;
+#endif
+}
+
 // #619's #pragma clang section against clang: each line's settings and errors, at clang's places with its messages, and
 // the section type conflicts between settings and section attributes in clang's order, by -fsyntax-only. What the checker
 // refuses by name instead: a name in a place clang reads expanded that was a macro's in the unit, and an error at the
@@ -7704,6 +7804,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (check_test_driver_takes())
         {
             check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_quad_literals(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
