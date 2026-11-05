@@ -64,7 +64,8 @@ patterns are:
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
   nests. A branch on such a chain is its comparison's `cmp` and `jcc`, and its
-  zero extension to an integer the comparison's `cmp`, `setcc` and `movzx`,
+  zero extension to an integer the comparison's zero-initialized destination,
+  `cmp` and `setcc` (an aliased destination is cleared by a flag-preserving move after `cmp`),
   negated for an odd number of `eq` links, where every link is consecutive and
   used only by the next, so that nothing the pattern doesn't compute runs
   between the comparison and its test. `if (a < b)` had been

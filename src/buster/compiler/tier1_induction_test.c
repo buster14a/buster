@@ -7,14 +7,15 @@
 static void tier1_induction_tests(Tier1EmitTest* test)
 {
     const uint32_t ordinary[] = { 0, 1, 2, 127, 255, 1024, UINT32_C(0x80000000), UINT32_MAX };
-    for (uint32_t shape = 0; shape < 12; shape += 1)
+    for (uint32_t shape = 0; shape < 14; shape += 1)
     {
+        const bool multiple_seeds = shape >= 12;
         const uint64_t input_mark = test->input.length;
         const IrSizes sizes = {
-            .instruction_count = 12,
-            .block_count = 3,
-            .constant_count = 3,
-            .extra_count = 4,
+            .instruction_count = multiple_seeds ? 15 : 12,
+            .block_count = multiple_seeds ? 4 : 3,
+            .constant_count = multiple_seeds ? 4 : 3,
+            .extra_count = multiple_seeds ? 6 : 4,
             .parameter_count = 1,
         };
         IrFunction function;
@@ -24,11 +25,12 @@ static void tier1_induction_tests(Tier1EmitTest* test)
         {
             const uint32_t initial = shape == 2 ? INT32_MAX - 2 : shape == 3 ? INT32_MAX : shape == 4 || shape == 5 ? INT32_MAX - 1 : shape == 11 ? UINT32_MAX : 0;
             const uint32_t stride = shape == 4 || shape == 10 ? 2 : 1;
-            const uint32_t mask = shape == 10 ? 65535 : UINT32_MAX;
+            const uint32_t mask = multiple_seeds ? 127 : shape == 10 ? 65535 : UINT32_MAX;
             const uint32_t compared = shape == 5 ? 6 : 7;
-            const uint32_t predicate = shape == 6 ? IR_LE : shape == 7 ? IR_GE : shape == 8 ? IR_GT : shape == 9 || shape == 10 ? IR_ULT : IR_LT;
+            const uint32_t predicate = shape == 6 ? IR_LE : shape == 7 ? IR_GE : shape == 8 ? IR_GT : shape == 9 || shape == 10 || multiple_seeds ? IR_ULT : IR_LT;
             const uint32_t returned = shape == 0 || shape == 11 ? 6 : 7;
-            const bool proven = shape <= 2 || shape == 7 || shape == 8 || shape == 10;
+            const bool proven = shape <= 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12;
+            const uint32_t widening = multiple_seeds ? 13 : 10;
             function.parameter_types[0] = IR_I32;
             function.result_type = IR_I64;
             function.constants[0].low = initial;
@@ -53,6 +55,32 @@ static void tier1_induction_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, 9, IR_CBR, IR_VOID, 8, shape == 7 ? 2 : 1, shape == 7 ? 1 : 2);
             tier1_select_test_node(&function, 10, IR_SEXT, IR_I64, returned, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            if (multiple_seeds)
+            {
+                // Two distinct entry edges select zero or a higher seed. The unsigned backedge guard terminates
+                // immediately if INT_MAX + 1 wraps; using the smaller seed as a common bound would miscompile it.
+                function.constants[3].low = shape == 12 ? 15 : INT32_MAX;
+                function.block_offsets[1] = 8;
+                function.block_offsets[2] = 9;
+                function.block_offsets[3] = 13;
+                function.block_offsets[4] = 15;
+                function.extra[0] = 0;
+                function.extra[1] = 5;
+                function.extra[2] = 1;
+                function.extra[3] = 1;
+                function.extra[4] = 2;
+                function.extra[5] = 10;
+                tier1_select_test_node(&function, 5, IR_CONST, IR_I32, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 6, IR_ICMP, IR_I1, 0, 1, IR_EQ);
+                tier1_select_test_node(&function, 7, IR_CBR, IR_VOID, 6, 2, 1);
+                tier1_select_test_node(&function, 8, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 9, IR_PHI, IR_I32, 0, 3, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 10, IR_ADD, IR_I32, 9, 2, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 11, IR_ICMP, IR_I1, 10, 4, IR_ULT);
+                tier1_select_test_node(&function, 12, IR_CBR, IR_VOID, 11, 2, 3);
+                tier1_select_test_node(&function, 13, IR_SEXT, IR_I64, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 14, IR_RET, IR_VOID, 13, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 for (uint32_t pressure = 0; pressure < 2; pressure += 1)
@@ -70,7 +98,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                     }
                     if (selected == TIER1_SELECT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[10].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
+                        tier1_emit_test_expect(test, plan.patterns[widening].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
                                                "only a complete nonoverflowing induction certificate removes signed widening");
                         const Tier1EmitOptions options = {
                             .certify = true,
@@ -104,7 +132,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                                         input = sample;
                                     }
                                     const uint32_t limit = input & mask;
-                                    uint32_t phi = initial;
+                                    uint32_t phi = multiple_seeds && input == 0 ? (shape == 12 ? 15 : INT32_MAX) : initial;
                                     uint32_t step = 0;
                                     bool again = true;
                                     for (uint32_t iteration = 0; again && iteration < 65538; iteration += 1)
