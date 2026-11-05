@@ -31,6 +31,12 @@ static void check_test_vector_actions(CheckTest* test, TypeTable* table)
     const TypeId es = type_vector(table, BUSTER_TYPE_SHORT, 4, true);
     const TypeId eb = type_vector(table, BUSTER_TYPE_BOOL, 4, true);
     const TypeId e3 = type_vector(table, BUSTER_TYPE_INT, 3, true);
+    const TypeId vc = type_vector(table, BUSTER_TYPE_CHAR, 16, false);
+    const TypeId vsc = type_vector(table, BUSTER_TYPE_SCHAR, 16, false);
+    const TypeId ec = type_vector(table, BUSTER_TYPE_CHAR, 2, true);
+    const TypeId esc = type_vector(table, BUSTER_TYPE_SCHAR, 2, true);
+    const TypeId ed = type_vector(table, BUSTER_TYPE_DOUBLE, 2, true);
+    const TypeId el = type_vector(table, BUSTER_TYPE_LONG, 2, true);
     check_test_expect(test, vi != 0 && vu != 0 && vf != 0 && vd != 0 && vs != 0 && vl != 0 && vll != 0 && ei != 0 && eu != 0 && ef != 0 && es != 0 && eb != 0 && e3 != 0,
                       "vector semantic fixtures create distinct GNU and extended types");
     struct VectorBinaryFixture
@@ -54,6 +60,11 @@ static void check_test_vector_actions(CheckTest* test, TypeTable* table)
         { CHECK_OP_NOT_EQUAL, vd, vd, vll, CHECK_DIAG_NONE },
         { CHECK_OP_GREATER, vl, vl, vll, CHECK_DIAG_NONE },
         { CHECK_OP_LESS_EQUAL, ef, ef, ei, CHECK_DIAG_NONE },
+        { CHECK_OP_EQUAL, vsc, vsc, vc, CHECK_DIAG_NONE },
+        { CHECK_OP_EQUAL, esc, esc, ec, CHECK_DIAG_NONE },
+        { CHECK_OP_NOT_EQUAL, ed, ed, el, CHECK_DIAG_NONE },
+        { CHECK_OP_LOGICAL_AND, esc, esc, ec, CHECK_DIAG_NONE },
+        { CHECK_OP_LOGICAL_OR, ed, ed, el, CHECK_DIAG_NONE },
         { CHECK_OP_BIT_AND, vi, vu, vi, CHECK_DIAG_NONE },
         { CHECK_OP_BIT_AND, vi, vf, 0, CHECK_DIAG_INTEGER_REQUIRED },
         { CHECK_OP_REMAINDER, vf, vf, 0, CHECK_DIAG_INTEGER_REQUIRED },
@@ -338,6 +349,22 @@ static void check_test_vector_oracles(CheckTest* test, const char* clang)
         { "I f(long x,I y){return x<<y;}\n", false },
         { "I f(I x){return !x;}\n", true },
         { "E f(E x){return !x;}\n", false },
+        { "typedef signed char C __attribute__((ext_vector_type(2)));typedef char M __attribute__((ext_vector_type(2)));"
+          "void f(C a,C b){_Static_assert(__builtin_types_compatible_p(__typeof__(!a),M),\"byte not mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(a&&b),M),\"byte and mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(a||b),M),\"byte or mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(a==b),M),\"byte comparison mask\");}\n", false },
+        { "typedef signed char C __attribute__((vector_size(16)));typedef char M __attribute__((vector_size(16)));"
+          "void f(C a,C b){_Static_assert(__builtin_types_compatible_p(__typeof__(a==b),M),\"GNU byte comparison mask\");}\n", false },
+        { "typedef double V __attribute__((ext_vector_type(2)));typedef long M __attribute__((ext_vector_type(2)));"
+          "void f(V a,V b){_Static_assert(__builtin_types_compatible_p(__typeof__(!a),M),\"double not mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(a&&b),M),\"double and mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(a||b),M),\"double or mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(a==b),M),\"double comparison mask\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_isfpclass(a,3)),M),\"double classification mask\");}\n", false },
+        { "typedef signed char C __attribute__((ext_vector_type(2)));C f(C a){return !a;}\n", true },
+        { "typedef double V __attribute__((ext_vector_type(2)));typedef long long M __attribute__((ext_vector_type(2)));"
+          "M f(V a){return !a;}\n", true },
         { "E f(E x){return ++x;}\n", true },
         { "E f(E x){return x++;}\n", true },
         { "I f(I x){return --x;}\n", true },

@@ -116,7 +116,7 @@ static const char check_test_vector_transport[] =
 static const char check_test_vector_logical[] =
     "typedef int I4 __attribute__((ext_vector_type(4)));typedef unsigned U4 __attribute__((ext_vector_type(4)));"
     "typedef float F4 __attribute__((ext_vector_type(4)));typedef int I32 __attribute__((ext_vector_type(32)));"
-    "typedef float F32 __attribute__((ext_vector_type(32)));typedef signed char C2 __attribute__((ext_vector_type(2)));"
+    "typedef float F32 __attribute__((ext_vector_type(32)));typedef char C2 __attribute__((ext_vector_type(2)));"
     "typedef short S1 __attribute__((ext_vector_type(1)));typedef _Float16 H1 __attribute__((ext_vector_type(1)));"
     "typedef _Bool B4 __attribute__((ext_vector_type(4)));typedef _Bool B32 __attribute__((ext_vector_type(32)));\n"
     "static int seen;static I32 held;"
@@ -144,7 +144,7 @@ static const char check_test_vector_logical[] =
     "seen=0;I4 e3=marks(2)||mark4(3);FOLD(e3);FOLD(seen);seen=0;I4 e4=mark4(1)?mark4(2):mark4(3);FOLD(e4);FOLD(seen);"
     "seen=0;I4 e5=mark4(1)?:mark4(2);FOLD(e5);FOLD(seen);seen=0;I32 e6=mark32(1)?mark32(2):mark32(3);FOLD(e6);FOLD(seen);\n"
     "#ifdef __SSE4_2__\n"
-    "typedef double D16 __attribute__((ext_vector_type(16)));typedef long long L16 __attribute__((ext_vector_type(16)));"
+    "typedef double D16 __attribute__((ext_vector_type(16)));typedef long L16 __attribute__((ext_vector_type(16)));"
     "D16 da,db;L16 dc;for(int i=0;i<16;i++){da[i]=i%3?(double)(i-n):-0.0;db[i]=(double)(n-i);dc[i]=i%3?1:-1;}"
     "L16 dl[]={!da,da&&db,da||db};D16 ds=dc?da:db;FOLD(dl);FOLD(ds);\n"
     "#endif\n"

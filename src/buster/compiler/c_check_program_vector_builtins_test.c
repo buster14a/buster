@@ -72,9 +72,9 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "typedef unsigned char U128 __attribute__((vector_size(128)));typedef short S64 __attribute__((vector_size(128)));"
             "typedef unsigned short H64 __attribute__((vector_size(128)));typedef int I32 __attribute__((vector_size(128)));"
             "typedef unsigned U32 __attribute__((vector_size(128)));typedef unsigned long long Q16 __attribute__((vector_size(128)));\n"
-            "#define U(f,v) {__typeof__(v) r=__builtin_elementwise_##f(v);FOLD(r);}\n"
-            "#define B(f,v,w) {__typeof__(v) r=__builtin_elementwise_##f(v,w);FOLD(r);}\n"
-            "#define T(f,v,w,c) {__typeof__(v) r=__builtin_elementwise_##f(v,w,c);FOLD(r);}\n"
+            "#define U(f,v) {__typeof__(v) result=__builtin_elementwise_##f(v);FOLD(result);}\n"
+            "#define B(f,v,w) {__typeof__(v) result=__builtin_elementwise_##f(v,w);FOLD(result);}\n"
+            "#define T(f,v,w,c) {__typeof__(v) result=__builtin_elementwise_##f(v,w,c);FOLD(result);}\n"
             "#define BITS(v,w) U(popcount,v)U(bitreverse,v)B(ctzg,v,w)B(clzg,v,w)B(pdep,v,w)B(pext,v,w)B(clmul,v,w)\n"
             "int tested(int n){unsigned h=2166136261u;U1 a1,b1;U2 a2,b2;S1 s1,t1;H1 h1,k1;U128 a,b;S64 s,t;H64 hs,ht;I32 i,j;U32 u,v,c;Q16 q,r;"
             "fill(&a1,1,n);fill(&b1,1,n+1);fill(&a2,2,n+2);fill(&b2,2,n+3);fill(&s1,2,n+4);fill(&t1,2,n+5);fill(&h1,2,n+6);fill(&k1,2,n+7);"
@@ -922,6 +922,8 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64-v4", "int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
           "vector bit reversal without GFNI", 2 },
         { "x86-64-v4", "__attribute__((target(\"gfni\"))) int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
+          "vector bit reversal of elements wider than a byte without AVX-512BW", 2 },
+        { "x86-64-v4", "__attribute__((target(\"gfni,avx512bw\"))) int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
           "vector leading zero counts of 8- and 16-bit elements without AVX-512 BITALG", 2 },
         { "znver5", "int tested(int n){v4ss a={n},b={1};v4ss c=__builtin_elementwise_sub_sat(a,b);return c[0];}",
           "saturating vector arithmetic of 32- and 64-bit elements", 3 },
