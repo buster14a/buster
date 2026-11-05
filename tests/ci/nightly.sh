@@ -237,28 +237,35 @@ expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
 
 # Landed merges, documentation-only revisions and direct pushes all get full hosted CI in either nightly mode (#1271).
-# Each checkout and GITHUB_SHA must agree, as the workflow's do. Pushes always run their own native correctness (#1272).
+# Each checkout and GITHUB_SHA must agree, as the workflow's do. In the nightly mode a push keeps off the 9700X, its
+# native correctness and measurements deferred to the window; before it, a push qualifies on hardware (#1272).
 for revision in "$merge" "$docs" "$head"; do
     git -C "$history" worktree add -q --detach "$work/main-push" "$revision"
-    for mode in on ''; do
-        GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=$mode run_evidence "$work/main-push"
-        expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a main push qualifies on hardware'
-    done
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=on run_evidence "$work/main-push"
+    expect_line "$GITHUB_OUTPUT" 'scope=full' 'a main push runs every hosted row in the nightly mode'
+    expect_line "$GITHUB_OUTPUT" 'hosted=run' 'its own'
+    expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'and keeps off the 9700X'
+    expect_line "$GITHUB_OUTPUT" 'hardware_reason=deferred' 'deferring it to the window'
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY='' run_evidence "$work/main-push"
+    expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a main push qualifies on hardware'
     git -C "$history" worktree remove "$work/main-push"
 done
 
-# A push to main runs its own native correctness, needing no pull request's native evidence, and reads no API.
+# A push to main needs no pull request's native evidence, and reads no API: before the nightly mode it runs its own
+# native correctness; in it, none here.
 tree=$(git -C "$history" rev-parse "$head^{tree}")
 other=$(printf 'other' | sha1sum | cut -c 1-40)
 now=$(madrid '2026-11-04 12:00')
 export NIGHTLY_NOW=$now
 : > "$fixtures/calls.log"
-for nightly in on ''; do
-    GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=$nightly run_evidence "$history"
-    expect_line "$GITHUB_OUTPUT" 'native=run' "a push runs native correctness (nightly mode '$nightly')"
-    expect_line "$GITHUB_OUTPUT" 'hardware=admit' "and is admitted (nightly mode '$nightly')"
-    expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
-done
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=run' 'before the nightly mode a push runs native correctness'
+expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
+expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=-' 'in the nightly mode a push runs no native correctness here'
+expect_line "$GITHUB_OUTPUT" 'measurement=-' 'and no measurements'
+expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run either'
 expect_no_match "$fixtures/calls.log" 'pulls|actions/' 'a push looks up no pull request run'
 
 # A nightly backlog dispatch: its commit's push run passed the plain rows, and the window decides.

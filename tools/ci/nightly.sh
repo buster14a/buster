@@ -100,8 +100,17 @@ evidence()
             fi
             ;;
         push)
-            # A push to main: its own native correctness and measurements, after its own hosted rows. It reuses nothing
-            # from its pull request, whose run measures without native correctness.
+            # A push to main: its full hosted rows here. In the nightly mode (the owner's choice on 2026-11-05) it keeps
+            # off the 9700X: its native correctness and targeted measurements are its first-parent state's, run in the
+            # 02:00-08:00 window, after these hosted rows. Before the nightly mode, it runs both here, after its hosted
+            # rows. Either way it reuses nothing from its pull request, whose run measures without native correctness.
+            if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
+                native=-
+                measurement=-
+                hardware=skip
+                reason=deferred
+                notes='the nightly mode defers a push'"'"'s native correctness and measurements to the 02:00-08:00 Europe/Madrid window'
+            fi
             ;;
         schedule)
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then

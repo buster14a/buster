@@ -13,8 +13,10 @@ cancellation. Hardware jobs still take the shared host lock. Hardware admission
 and the nightly measurement window do not reduce main's hosted suite:
 push evidence always reports `scope=full`, `hosted=run` and no hosted source.
 The selector's main-policy mutants and the nightly glue fixtures pin this
-contract; nightly benchmark scheduling is otherwise unchanged. Pushes run their
-own native correctness under #1272 rather than reusing PR native evidence.
+contract. A push reuses no PR native evidence (#1272). In the nightly mode it
+runs no 9700X job at all (the owner's choice on 2026-11-05): its native
+correctness and targeted measurements run in the 02:00-08:00 window as its
+first-parent state's (see "Nightly main measurements").
 Both selector push modes force correctness for every file class. The
 qualification self-test rejects a main push with an all-skipped suite: only
 pre-merge PRs can use the no-code exemption.
@@ -181,8 +183,11 @@ its coverage record and has no such context, and neither does a scheduled run
 the nightly mode retired.
 
 A push no longer reuses its pull request's native qualification: that run has
-none, so every push to main runs native correctness on the landed commit, and
-the `host-identity` job is gone.
+none, and the `host-identity` job is gone. Before the nightly mode, every push
+to main runs native correctness on the landed commit. In the nightly mode it
+runs none in the daytime, and has no `Build and execute on Ryzen 7 9700X`
+context: its state's nightly run qualifies it on the 9700X, recorded in the
+ledger.
 
 Draft PRs still run hosted correctness, but do not queue the 9700X. Both
 `ready_for_review` and `converted_to_draft` trigger the workflow, using the
@@ -223,7 +228,7 @@ Benchpress.
 
 ## CI latency baseline
 
-`.github/workflows/ci-timings.yml` runs entirely on hosted runners, at 07:07
+`.github/workflows/ci-timings.yml` runs entirely on hosted runners, at 08:37
 Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
 `9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
 median and nearest-rank 95th percentile of successful hardware jobs' queue,
@@ -305,8 +310,13 @@ reported, but they don't block measurement, which was the owner's choice on
 Every `9700x.yml` run has an `evidence` job, which must succeed:
 
 - **Pull request:** its draft state alone.
-- **Push:** admitted: its 9700X job runs native correctness and the
-  measurements on the landed commit. Since #1272 a pull request's 9700X job
+- **Push:** in the nightly mode, deferred (`hardware=skip`, reason
+  `deferred`, outcome `deferred`): the push runs its full hosted rows, and
+  the window runs its native correctness and targeted measurements as its
+  state's backlog run. Its plain hosted rows are the state's, so the state
+  is ready without a preparation. Before the nightly mode, admitted: its 9700X
+  job runs native correctness and the measurements on the landed commit.
+  Since #1272 a pull request's 9700X job
   skips native correctness, so a push reuses nothing from it; records from
   before then that say a push reused its pull request's run
   (`native-reused`, outcome `pending`) are still read by the harvest.
@@ -465,7 +475,7 @@ even with a hardware run in flight. That run ends by 08:00 under its own bound,
 and the next coordinator run harvests its record.
 
 **Late schedules.** GitHub starts this repository's scheduled runs hours late.
-In the week of 2026-10-28, the daily run's `23 7 * * *` started 6h22m to
+In the week of 2026-10-28, the former daily run's `23 7 * * *` started 6h22m to
 9h53m late, and `selfhost.yml`'s `47 5 * * *` started 7h13m late. So the
 coordinator has nine schedules:
 
@@ -518,11 +528,13 @@ where pushes measure most states during the day. The report's alert
 shows when they don't.
 
 **Rollout.** The switch is `vars.BUSTER_NIGHTLY`. Until it is `on`, scheduled
-coordinator runs are dry runs: they harvest, plan and report. Pushes measure
-every plain run, and the daily `23 7 * * *` run of `9700x.yml` runs as before.
-A dispatch with `mode: run` can try the coordinator first. With the switch on,
-pushes measure targeted, the coordinator dispatches, and the daily run's
-`evidence` job retires it.
+coordinator runs are dry runs: they harvest, plan and report, and pushes measure
+every plain run. A dispatch with `mode: run` can try the coordinator first. With
+the switch on, pushes run hosted rows alone and keep off the 9700X, and the
+coordinator dispatches their native correctness and targeted measurements into
+the window. `9700x.yml`'s daily `23 7 * * *` run is removed (2026-11-05): the
+snapshot's comprehensive run is the daily run, so with the switch off there is
+none, and a person dispatches `purpose: full` instead.
 
 **Open items** this repository can't close:
 

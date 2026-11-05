@@ -198,9 +198,11 @@ the policy. In short:
   out of scope. A state whose branch GitHub refuses to create is skipped for
   the rest of the job and reported (docs/ci.md, "Refused branches").
 - `vars.BUSTER_NIGHTLY` set to `on` is the switch. Before it, the coordinator
-  only harvests, plans and reports; pushes and the daily `23 7 * * *` run work
-  as before. With it, pushes measure targeted, the coordinator dispatches, and
-  the old daily run retires.
+  only harvests, plans and reports, and pushes work as before. With it, pushes
+  run hosted rows alone and keep off the 9700X, and the coordinator measures
+  each state (native correctness, then its targeted measurements) in the
+  02:00-08:00 window. `9700x.yml` has no daily schedule since 2026-11-05: the
+  snapshot's comprehensive run is the daily run.
 - Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
   and the glue against a fake `gh` and a merge history) and
   `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
@@ -210,8 +212,8 @@ the policy. In short:
 
 ## Queue and execution timing
 
-The hosted-only `CI latency report` workflow runs at 07:07 Europe/Madrid and on
-manual dispatch. It samples the latest 100 main CI workflow runs and reports the
+The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid, after
+the nightly window, and on manual dispatch. It samples the latest 100 main CI workflow runs and reports the
 median and nearest-rank p95 separately for PR, main-push, nightly targeted and
 full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
 run name. Besides queue and execution, it reports the host's occupation, from
