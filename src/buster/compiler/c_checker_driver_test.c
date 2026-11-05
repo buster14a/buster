@@ -5831,6 +5831,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // Compare a named data section with clang for both checker paths and both routes.
 static void check_test_driver_quad_literals(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+#if BUSTER_CHECK_HAVE_QUAD_READER
     static const char code[] =
         "__float128 values[] __attribute__((section(\".quad_literals\"))) = {\n"
         "  0.0q, -0.0Q, 1.5q, -0x1.8p0Q, 0x1.0000000000000002p0q,\n"
@@ -5858,6 +5859,12 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
     }
     unlink(source);
     unlink(theirs);
+#else
+    (void)test;
+    (void)clang;
+    (void)executable;
+    (void)directory;
+#endif
 }
 
 // #619's #pragma clang section against clang: each line's settings and errors, at clang's places with its messages, and

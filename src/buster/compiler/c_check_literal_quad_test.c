@@ -5,6 +5,7 @@
 
 static void check_test_literal_quad(CheckTest* test, Arena* scratch)
 {
+#if BUSTER_CHECK_HAVE_QUAD_READER
     const struct
     {
         const char* spelling;
@@ -92,4 +93,12 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark &&
                           !check_literal_warning_event(&literal, 17, &event), description);
     }
+#else
+    CheckLiteral literal = { 0 };
+    const uint64_t mark = scratch->length;
+    static const char spelling[] = "1.5q";
+    check_literal_number((const uint8_t*)spelling, sizeof(spelling) - 1, scratch, &literal);
+    check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark,
+                      "quad literals are refused without an exact binary128 reader");
+#endif
 }
