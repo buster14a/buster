@@ -19,6 +19,82 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "floating literal file and local initializers",
+        .source = "int a=1.5;\nint f(void){int b=2.5;return b;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "floating literal assignment return and call conversions",
+        .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal source formats",
+        .source = "int a=1.1f;int b=1.1;int c=1.1L;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal array and record initializer elements",
+        .source = "int values[2]={1.5,2.5};\nstruct S{int n;}object={1.5};\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal local brace initializer order",
+        .source = "int f(void){int a[2]={1.5,2.5};int b={3.5};return a[0]+b;}\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal range initializer warns once",
+        .source = "int values[4]={[0 ... 3]=1.5};\n",
+        .warnings = 1,
+    },
+    {
+        .name = "floating literal decimal and hexadecimal spelling",
+        .source = "int a=0.9999999999999999;int b=1e-30;int c=0x1.8p0;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal boolean conversions",
+        .source = "_Bool a=1.5;_Bool b=2.0;_Bool c=1.0;\n",
+        .warnings = 2,
+    },
+    {
+        .name = "floating literal out of range conversions",
+        .source = "unsigned char a=1000.5;unsigned b=-1.5;int c=1e30;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "floating literal macro expansion note",
+        .source = "#define VALUE 1.5\nint a=VALUE;\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "floating literal parentheses retain the literal warning",
+        .source = "int a=((1.5));int b=+2.5;int c=-3.5;\n",
+        .warnings = 3,
+    },
+    {
+        .name = "explicit and nonliteral floating conversions stay quiet by default",
+        .source = "int a=(double)1.5f;int b=(int)1.5;int c=2.5-1.0;int d=2.5+0.0;int e=1.0;\n"
+                  "int f(double a){return a;}int g(void){double a=1.5;return a;}\nint h=__builtin_nan(\"\");int i=__builtin_inf();\n",
+    },
+    {
+        .name = "floating literal conversion group disabled",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-literal-conversion" },
+    },
+    {
+        .name = "floating literal conversion parent group disabled",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-conversion" },
+    },
+    {
+        .name = "floating literal conversion source policy",
+        .source = "#pragma clang diagnostic error \"-Wliteral-conversion\"\nint a=1.5;\n",
+        .errors = 1,
+    },
+    {
         .name = "file initializer discards pointer qualifiers at its declaration",
         .source = "const int b=1;\nint *c=&b;\n",
         .warnings = 1,

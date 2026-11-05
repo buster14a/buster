@@ -120,6 +120,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wduplicate-decl-specifier", NULL, "duplicate declaration specifier" },
     { "-Winvalid-noreturn", NULL, "function declared 'noreturn' should not return" },
     { "-Wprivate-extern", NULL, "use of __private_extern__ on a declaration may not produce external symbol private to the linkage unit and is deprecated" },
+    { "-Wliteral-conversion", "-Wfloat-conversion", "implicit conversion of a floating literal changes value" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

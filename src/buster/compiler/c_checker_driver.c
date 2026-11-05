@@ -1168,7 +1168,8 @@ static const char* check_driver_pointer_conversion_message(const Parser* parser,
                     found = found || check_input_declaration_boundary(parser->tree.roles[at]);
                 }
             }
-            else if ((returning || op == CHECK_OP_ASSIGN) && token + 1 < parser->tokens.count)
+            // Assignment's sign warning points at its operator; its qualifier warning points at the source expression.
+            else if ((returning || (op == CHECK_OP_ASSIGN && warning == CHECK_WARNING_DISCARDED_QUALIFIERS)) && token + 1 < parser->tokens.count)
             {
                 *located = token + 1;
             }
