@@ -3831,6 +3831,15 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
+        else if (original < function->instruction_count && base.rule == TIER1_RULE_SIGN_EXTEND && tier1_select_tree_child(forest, node, a))
+        {
+            // sext(trunc(x)) reads x's low source-width bits directly. Drop only the register truncation; a wider
+            // load producing x keeps its original access width and ordering, even when all higher bits are discarded.
+            Tier1SelectPattern projected = base;
+            projected.values[0] = original;
+            tier1_select_fold(forest, node, a, &projected);
+            tier1_select_add_candidate(forest, node, &candidates, projected);
+        }
         // A bounded signed offset can be computed at 64 bits directly. Every skipped I32 add/sub must be proven not
         // to overflow; the remaining base must be nonnegative with physically zero upper bits, including after spills.
         // This covers Lua's signed instruction fields: sext64((masked_i32 - bias) + 1), without assuming I32 wrapping

@@ -366,6 +366,11 @@ tests, unknown strides and possible wrapping sums retain their extensions.
 Only a complete certificate supplies facts, followed by one additional bounded
 propagation round. The candidate scan is masked SIMD with a scalar twin.
 
+A sign extension of a single-use register truncation reads the original
+register's low bits directly. This removes the intermediate mask without
+narrowing a load's memory access or assuming that the original value fits
+the truncated signed range.
+
 A separate byte certifies physical register storage. A 32-bit ALU result or
 load clears the upper half; an incoming `I32`, a call result and a machine row
 make no such promise. Copies and phis need their inputs' certificates. A shift

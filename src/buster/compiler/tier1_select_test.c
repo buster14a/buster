@@ -2053,7 +2053,10 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
                                 }
                                 else
                                 {
-                                    tier1_select_test_expect(test, plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == converted - 1 && !plan->covered[converted], "conversion preserves its exact selected source use");
+                                    const bool projected = op == IR_SEXT && from < 4;
+                                    const uint32_t source = projected ? 0 : converted - 1;
+                                    tier1_select_test_expect(test, plan->effective_use_offsets[converted + 1] == first + 1 && plan->effective_use_values[first] == source && !plan->covered[converted] &&
+                                                               (!projected || plan->covered[converted - 1]), "conversion preserves its exact source use, projecting low bits past a single-use register truncation");
                                     const bool narrow_copy = op == IR_ZEXT && (from == 1 || from == 2);
                                     if (narrow_copy)
                                     {
