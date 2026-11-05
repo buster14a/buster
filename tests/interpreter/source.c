@@ -33,6 +33,16 @@ static long collect_aligned(int ignored, ...)
     return value.value;
 }
 
+static long collect_register_only(long first, ...)
+{
+    va_list values;
+    va_start(values, first);
+    const long second = va_arg(values, long);
+    const long third = va_arg(values, long);
+    va_end(values);
+    return first + second + third;
+}
+
 static Pair change_pair(Pair value)
 {
     value.first += 7;
@@ -100,7 +110,7 @@ int main(void)
     const int passed = original.first == 11 && original.second == 13 && changed.first == 18 && changed.second == 39 &&
                        large.values[4] == 11 && returned.values[4] == 13 && large.values[64] == 23 && returned.values[64] == 25 && returned.values[32] == 0 &&
                        quotient.quot == 3 && quotient.rem == 2 &&
-                       sum == 66 && tail == 45 && collect_aligned(0, aligned) == 161 && labels(0) == 17 && labels(1) == 29 && bytes[63] == 3;
+                       sum == 66 && tail == 45 && collect_register_only(3, 5L, 7L) == 15 && collect_aligned(0, aligned) == 161 && labels(0) == 17 && labels(1) == 29 && bytes[63] == 3;
     printf("typed source: %d\n", passed);
     return passed ? 0 : 1;
 }
