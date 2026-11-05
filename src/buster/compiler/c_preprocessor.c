@@ -359,6 +359,8 @@ struct PPOptions
     // fatal error and stops publication; -Wno-fatal-errors restores the ordinary error budget.
     bool fatal_errors;
     bool suppress_warnings;
+    // The default-on negative-to-unsigned #if warning has no individual Clang warning group.
+    bool negative_conversion_error;
     bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
@@ -15542,13 +15544,17 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
         {
             const uint32_t saved_origin = pp->diagnostic_origin;
             pp->diagnostic_origin = context.origin;
+            // A promoted warning must still obey -w and system-header suppression before it becomes an error.
+            const bool promoted = pp->options.negative_conversion_error && !pp->options.suppress_warnings &&
+                                  pp_diagnostic_warning_visible(pp, context.location, context.origin);
+            const PPSeverity severity = promoted ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
             if (!a.is_unsigned && sa < 0)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
+                pp_diagnose(pp, severity, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
             }
             if (!b.is_unsigned && sb < 0)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
+                pp_diagnose(pp, severity, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
             }
             pp->diagnostic_origin = saved_origin;
         }
@@ -21364,6 +21370,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     options->dependencies.only = dependency_modes != 0 && (dependency_modes & 12u) == 0;
     options->dependencies.include_system = (dependency_modes & 3u) != 0 ? (dependency_modes & 2u) == 0 : (dependency_modes & 8u) == 0;
     options->suppress_warnings |= (dependency_modes & 3u) != 0;
+    options->negative_conversion_error = warning_errors;
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;
