@@ -723,6 +723,7 @@ int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
 
+#if BUSTER_UNIT == BUSTER_UNIT_DRIVER
 #include "buster/compiler/c_driver_information.c"
 
 // Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
@@ -745,6 +746,7 @@ static bool main_preprocessing(int count, char** arguments)
     }
     return result;
 }
+#endif
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
 // is, so that the other units' branches fold to false (at the top). What no unit takes runs the compiler itself
@@ -1684,7 +1686,7 @@ static int main_driver(int argc, char** argv)
     // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
     // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
     // compile needs nothing else of.
-    if (!found && argc >= 2 && argv[1][0] == '-' && !main_assembly_source(argc - 1, argv + 1))
+    if (!found && argc >= 2 && argv[1][0] == '-')
     {
         result = main_source_command(argc, argv);
         found = true;
