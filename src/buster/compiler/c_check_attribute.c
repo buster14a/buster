@@ -1212,7 +1212,13 @@ static void check_input_attribute_conflict(CheckInputReader* reader, CheckInputA
         attributes->error = CHECK_ATTRIBUTE_ERROR_CONFLICT;
         attributes->error_first = attribute->first;
         attributes->error_end = attribute->end;
+        const uint32_t before = reader->output->report_count;
         check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_CONVENTIONS, (call & 0xffu) | (previous & 0xffu) << 8);
+        if (reader->output->report_count > before)
+        {
+            CheckInputReport* report = reader->output->reports + before;
+            report->completion = report->completion < reader->attribute_completion ? reader->attribute_completion : report->completion;
+        }
     }
 }
 
@@ -5399,7 +5405,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // After its subject's check, as clang's handleCommonAttributeFeatures has them (#147): an attribute already on the
         // declaration that excludes it (diagMutualExclusion), with the note at that one, then its count of arguments.
         const bool kept = valid && !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
-        const uint32_t excluding = kept ? check_input_attribute_excluding(reader, attributes, i) : UINT32_MAX;
+        const uint32_t excluding = kept ? check_input_attribute_excluding(reader, attributes, i - 1) : UINT32_MAX;
         if (excluding != UINT32_MAX)
         {
             const uint32_t before = reader->output->report_count;
