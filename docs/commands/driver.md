@@ -31,9 +31,11 @@ requirements. [Command index](README.md).
   `--tier1-report` and `--tier1-refusals` say which step refused the others
   (and with `--verify`, how many functions' code its certificate proved,
   `code_certified`, or left for a shape it doesn't decode, `code_uncertified`),
-  and `--tier1-no-rematerialize` compiles them without rematerialization and
-  `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
-  guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure
+  and `--tier1-no-rematerialize` compiles them without rematerialization,
+  `--tier1-no-lifetimes` without their objects' lifetimes and
+  `--tier1-no-inline` without expanding the unit's always_inline functions'
+  calls, which the report's `inlined` counts (#1282): [the Tier 1
+  guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
   optimization macros, not the tier; Tier 0 is the default), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
@@ -58,7 +60,13 @@ requirements. [Command index](README.md).
   they started, `lane_session_settle`), and kept parked until the process exits;
   the jobserver's slots are taken per wide region, never at the start, an
   emission short of its lanes taking more as other recipes give theirs back
-  (#673), and lanes that can't start leave the command on one. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
+  (#673), and lanes that can't start leave the command on one. The checker reads
+  a unit in source order; `--deferred-bodies` reads its function bodies apart on
+  those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
+  its bodies' tokens pay for four lanes or more (two with `--lanes N`), with
+  source order's result, and `--no-deferred-bodies` undoes it: the [lanes
+  guide](../../docs/function-lanes.md)'s "The checker's bodies on lanes" has why
+  it is off by default. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
   `-g`, its DWARF units' functions'). With several source files (#152,
   `c_checker_units.c`, the [translation units guide](../../docs/translation-units.md))
   the units compile on lanes instead, one unit a lane at a time, with lanes

@@ -27,7 +27,10 @@ requirements. [Command index](README.md).
   made by hand (gaps between atoms, an atom of no size, weak, hidden and
   protected symbols, pointers into a string pool, a call to and a pointer to a
   local IFUNC, units without atoms between and after the others) and of a link
-  without atoms, with and without function sections.
+  without atoms, with and without function sections; that link's
+  `object_prepare` pushes no more than a page (its part boundaries are two,
+  #1236, not `BUSTER_LANE_MAX_PARTS + 1`, which took `-c`'s scratch arena past
+  its base pages into a huge page).
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
   object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC` or

@@ -907,8 +907,21 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
         path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
+        const uint32_t reported = path->input.report_count;
         path->checked = path->checked && check_input_warning_graph(&path->input, view, &path->types, &path->stream, &path->output_arena, &path->scratch);
         path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
+        // The reports after checking: unavailable members' uses (check_input_member_uses, #147).
+        for (uint32_t report = reported; report < path->input.report_count; report += 1)
+        {
+            if (path->input.reports[report].token < path->token)
+            {
+                path->token = path->input.reports[report].token;
+                path->phase = "expression";
+                path->position = path->token;
+                path->pragma = 0;
+                snprintf(path->message, sizeof(path->message), "%s", check_driver_input_report_message(&path->input, path->input.reports + report));
+            }
+        }
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             // An x86 hard immediate's error is at the call's begin, ordered by its `)` (#1066).

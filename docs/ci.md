@@ -397,6 +397,38 @@ duplicates. A step whose run listing fails, even partly, plans nothing until a
 full listing succeeds; otherwise a run in flight it hid would be dispatched
 again. An admitted run older than two hours is cancelled.
 
+**Refused branches.** GitHub refuses (HTTP 403, "Resource not accessible by
+integration") to let the workflow token create some states' `nightly/SHA`
+branches. In the 2026-11-05 cycle it refused all four merges it was asked for
+whose pull request's head lacked a workflow change main already had, and none
+of the three other states (two merges whose heads had main's workflow files, one
+commit with a single parent). By that pattern, 27 of the cycle's 49 states would
+be refused. The token can't take the `workflows` permission that GitHub asks
+for to create such refs. A refused branch warns, the state is skipped for the
+rest of that coordinator job, and the job plans again at once: nothing was
+launched, so it doesn't wait as for a run in flight. The state neither keeps a
+preparation slot nor stays the oldest ready state while later states wait. Each
+job tries it once again. Any other failure to create a branch (a timeout, a 429
+or 5xx, a failed lookup) is not a refusal: it warns, and a later step tries
+again. A branch that another step made meanwhile is used. A `nightly/SHA`
+branch that already points at another commit is never dispatched; it is an
+error, and the state is skipped for the job as a refused one is, since it stays
+wrong until a person fixes it. The report counts
+and names the skipped states, with an alert. A refused snapshot is replaced by
+the newest eligible earlier state, as an ineligible one is. With the `nightly-ledger` environment's `BUSTER_NIGHTLY_BRANCH_TOKEN`, the
+coordinator creates and deletes the `nightly/SHA` branches with it instead. That
+token is a fine-grained token with only `Contents: Read and write` and
+`Workflows: Read and write` on this repository. Dispatches, cancellations
+and reads keep the workflow's token. Without the secret, the refused states are
+skipped as above. A token GitHub rejects as a credential (expired, revoked, or
+without access to this repository) is warned about once and dropped for the
+rest of the job, which then makes the branches with the workflow token, as
+without one. A 404 alone doesn't reject it: a branch someone else deleted
+before the prune is a 404 to a valid token too. The token is rejected only if
+it can't read the repository itself either. Branches created with it trigger workflows,
+unlike the workflow token's, but every workflow's `push` trigger is limited to
+`main`.
+
 **Time.** The tz database's Europe/Madrid is checked at three points:
 
 - at dispatch, by the coordinator's planner;
@@ -528,13 +560,15 @@ The source call-graph capture omits bootstrap sanitizer/coverage instrumentation
 whose runtime calls and generated globals are outside the source graph; its
 analyzer still runs inside the instrumented compiler.
 The other resource-exhaustion fixtures retain their cases and output/fallback comparisons.
-ASan, MSan and TSan builds inject compiler-owned arena-reservation and lane-start
-failures in place of process-wide address-space/process limits, which can prevent
-the detector from allocating shadow/fake-stack memory or starting its own threads.
-Ordinary builds and standalone UBSan retain the actual OS-limit tests. No detector
-is disabled for these cases; the injection controls are absent from normal builds.
-The injected limits are process-wide, since lanes reserve their arenas and start
-on their own threads.
+ASan, UBSan, MSan and TSan builds inject compiler-owned arena-reservation and
+lane-start failures in place of process-wide address-space/process limits. ASan,
+MSan and TSan need room for shadow/fake-stack memory and runtime threads; even
+standalone UBSan needs address space to report allocation failures. In particular,
+`RLIMIT_AS=0` caused the UBSan runtime to overflow its stack and fail to mmap its
+diagnostic buffer instead of reporting the compiler's intended reservation failure.
+Ordinary builds retain the actual OS-limit tests. No detector is disabled for these
+cases; injection controls are absent from normal builds. The injected limits are
+process-wide, since lanes reserve arenas and start on their own threads.
 A few fixtures run generated programs with FS pointing at the program's own TLS
 block. The detectors reach their per-thread state through FS, so the code that runs
 in that window (the link tests' libc stand-ins and C-runtime startup, and Tier 0's
@@ -545,9 +579,10 @@ Under ASan, MSan and TSan, the units driver's walk that fails each reservation i
 turn is not run: each detector maps shadow of its own, whose high-water mark the
 parent's `VmPeak` keeps above its `VmSize`, so a probe inherits a peak that hides
 the growth a limit would fail at, and a limit below the shadow stops the detector
-at its start. The parser driver's reservation check still runs in those builds,
-with their injected arena limit in place of `RLIMIT_AS`; UBSan and ordinary
-builds, whose peak is the run's own, still run the units walk with the OS limit.
+at its start. UBSan also skips that OS-limit walk, since its diagnostic runtime
+cannot safely run under an artificially exhausted address space. The parser
+driver's reservation check still runs under all sanitizers using injected arena
+limits; ordinary builds retain the OS-limit walk.
 TSan also kills a child that starts a thread after a fork from a process of
 several threads, so under it `test-lanes`' child forked from a session's lane 0
 (#905) runs a group of one.

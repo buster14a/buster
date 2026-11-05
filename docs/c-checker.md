@@ -3788,7 +3788,13 @@ struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
 declaration chain once, at its definition when it has one and otherwise at its
 first declaration; a shadowing local use does not keep a file-scope variable
 used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
-but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
+but not `&p->m` through a pointer. As clang's `checkExprLifetime`, it warns
+only for an address the return returns: through casts, pointer arithmetic, a
+comma's right operand, either arm of `?:` (a constant condition's too) and the
+arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
+comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
+selection's controlling expression and its other arms consume it or don't
+return it. `-Wempty-body` leaves an `if` that has an
 `else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
@@ -5000,12 +5006,19 @@ the declarator leave to the deduction rather than check against the
 placeholder's `int` (`check_input_attribute_type`'s `deduced`); and its clashes
 with the other specifiers where clang reports them: a second type specifier at
 itself, and a signedness or a width at its keyword, wherever it is in the list
-(`check_input_auto_type_clash`). Refused by name: what clang deduces as C++
-deduces a declarator's type and GCC refuses (a pointer declarator, and a
-declaration's second declarator); `_Atomic`, `restrict` and type attributes with
-`__auto_type`; a variably modified deduced type, whose sizes the declaration
-would have evaluated; and a variable with linkage that a declaration before it
-declared, whose types bind before the deduction.
+(`check_input_auto_type_clash`). What clang deduces as C++ deduces a
+declarator's type, and GCC refuses, is deduced as clang deduces it (#147): a
+pointer or function declarator (`__auto_type *p = &x`, with the specifiers'
+qualifiers at the placeholder), and a declaration's later declarators, which
+must deduce the same type, by C23 `auto`'s deduction below
+(`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
+`__auto_type`'s words in its errors). Declarators that deduce differently are
+clang's error at the declaration, in the checker's words ("'__auto_type'
+deduced types differ within one declaration"). Refused by name: `_Atomic`,
+`restrict` and type attributes with `__auto_type`; a variably modified deduced
+type, whose sizes the declaration would have evaluated; and a variable with
+linkage that a declaration before it declared, whose types bind before the
+deduction.
 
 `test-checker`'s source fixtures compare these with clang, their acceptance and
 first error's line, on both paths, and its programs (`local-labels`,
@@ -5020,10 +5033,10 @@ is deduced from its initializer as clang deduces it: the initializer is
 lvalue-converted and decayed at the top, then each pointer, array, function and
 aligned level of the declarator matches its own operands, an array's extent and
 a function's parameters must be the same, and the placeholder takes the type
-there with the specifiers' `const` and `volatile`. Unlike `__auto_type`, a
-pointer declarator (`auto *p = &x`) and a declaration's later declarators
-(`auto a = 1, b = 2`) are the language's, and each later declarator must
-deduce the same type; file scope and `static`, `extern` and `register` are
+there with the specifiers' `const` and `volatile`. A pointer declarator
+(`auto *p = &x`) and a declaration's later declarators (`auto a = 1, b = 2`)
+are the language's, and each later declarator must deduce the same type, as
+clang deduces `__auto_type`'s; file scope and `static`, `extern` and `register` are
 C23's. `auto` with another type specifier (`auto int x`) keeps its storage-class
 meaning, so `auto` and no initializer there is C's existing storage-class rule,
 not a deduction. Deduced declarations are refused by name where clang refuses
@@ -5568,15 +5581,82 @@ arguments against the function. The checker now gives these as clang does.
   (`-Wdeprecated-declarations`), or "'X' is deprecated: MESSAGE" with its
   string, and a note "'X' has been explicitly marked deprecated here" at the
   attribute. An `unavailable` one's use is clang's error "'X' is
-  unavailable", with its note at the declaration. An enumerator of a
-  deprecated enum is deprecated by its enum, which the note names. As clang's
-  context rules have it, there is none in the body of a function itself
-  deprecated (by any declaration before its body), in the specifiers of a
-  declaration whose declarator is deprecated, or in a bare declaration of a
-  tag. The pass runs after the bindings, only in a unit where some
+  unavailable", with its note at the name of the declaration the use's lookup
+  finds (a tag's latest declaration). An enumerator of a deprecated or
+  unavailable enum is marked by its enum, which the note names. Where both
+  attributes mark it, by one declaration or by several, the use is
+  unavailable, whatever their order, as clang's `Decl::getAvailability` takes
+  the worst; the message is the latest such declaration's. A use reads the
+  marks of the declarations up to the one its lookup finds, which inherits
+  those before it, as clang's redeclarations inherit their attributes; so a
+  block's later `extern` redeclaration that a use doesn't see doesn't mark it,
+  and a block's earlier one does mark a later file-scope redeclaration. As clang's
+  context rules have it, a deprecated context drops a deprecated use's
+  warning and an unavailable one an unavailable use's error too: the body of
+  a function itself marked (by any declaration before its body), with a K&R
+  definition's parameter declarations, a marked
+  declaration's declarator and initializer, and a marked declarator's
+  parameter lists and array bounds at any scope (a prototype's, a
+  definition's, a function pointer's, named parameters or not;
+  `check_input_availability_contexts`). A struct's, a union's or an enum's
+  body in a declarator's bound, parameter list or initializer keeps its own
+  context, as clang reads a member's or an enumerator's use through its tag to
+  the tag's parent; in a function's body it takes the function's. A marked
+  tag's own definition is its body's context, nested tags included: its mark
+  is its declarations' up to the body, and an enum's attributes after it, but
+  not a struct's (`check_input_availability_tag`). A fixed enum's base isn't
+  in it: a use in the base (`enum E : T { ... } x`) is diagnosed once, in the
+  declaration's first declarator's context, at any scope; in a declaration of
+  the enum alone (`enum E : T { ... };`, `enum E : T;`), in the enum's
+  (`check_input_enum_base_context`).
+  A tag definition's name is a use of the tag only where declarators follow
+  its body (`struct S { ... } x;`, its attributes after the body counting),
+  as clang diagnoses the specifiers' type for them; a standalone definition's
+  isn't. A tag's use in a declaration's specifiers is diagnosed once for each
+  declarator, at any scope, each in its declarator's context
+  (`check_input_tag_use_copies`): `struct S a, b;` warns twice, and
+  `struct S a __attribute__((deprecated)), b;` once, where a typedef name's
+  use is diagnosed once, in the first declarator's context. A declarator's
+  name is past the tag's body, a fixed enum's base (whose typedef name is
+  none) and attribute groups (whose names are none).
+  A file-scope declaration's specifiers take its declarator's worst mark as
+  their context too: a deprecated declaration's drop a deprecated typedef's or
+  tag's use but keep an unavailable one's error, and an unavailable
+  declaration's drop both. That is the specifiers' alone (`typeof`'s operand
+  and an attribute list included, with their commas): a `,` or `=` at the
+  declaration's own bracket level ends an initializer or an earlier
+  declarator, whose use keeps its own context, not a later declarator's mark.
+  The declarator is the declaration's own, outside every parameter list: a
+  parameter's mark is no context of its specifiers. A `{` ends the specifiers
+  only at the declaration's own level; a compound literal's in a group
+  (`typeof((T){0})`) is theirs. A tag's body in them isn't: an enumerator's
+  value keeps its own context. There
+  is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
-  the declaration its uses count by (its object's first, its tag's first).
+  the declaration its uses count by (its object's first, its tag's first),
+  chained in source order to the next of the same one.
+- **Deprecated and unavailable members** (`check_input_member_uses`). A
+  struct's or union's member that such an attribute marks is recorded when
+  its record is completed, by its index in the type table's members
+  (`CheckInput.marked_members`, ascending). After checking, in a unit with
+  one, each `.` or `->` whose member the operand's checked record finds by
+  its name (through anonymous members, as the checker found it) gets
+  clang's warning at the member's name, or the unavailable error (where it is
+  both, whatever the order) with its
+  note at the member's declaration: of any operand (a dereference, an
+  address, a call, a compound literal) and in `sizeof`'s. The error is a
+  reader report made after checking, which the driver and the corpus
+  comparison count. clang's context rules come from a byte per token
+  (`CheckInput.availability_contexts`, `check_input_availability_contexts`):
+  a deprecated or unavailable function's body, and a deprecated or
+  unavailable declaration's declarator and initializer; a deprecated context
+  drops a deprecated member's use, and an unavailable one either's.
+  `offsetof`'s member designator is no use, as in clang. An initializer's
+  uses are the initializers' walk's (`check_init_member_use`, through
+  `CheckGraph.marked_members`): a designator's member, at its name, and a
+  member a value takes by its position, at the value's first token, at each
+  level of elided braces, as SemaInit's `DiagnoseUseOfDecl` has them.
 - **Attributes without a rule** (`check_input_attribute_generic`). An
   attribute clang knows that the checker has no rule for is taken by its facts:
   - one clang ignores everywhere (`bounded`) is ignored without a word;
@@ -5963,7 +6043,8 @@ arguments against the function. The checker now gives these as clang does.
     types; type here is 'void'".
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
-    recovery errors and their "to match this '('" notes.
+    recovery errors and their notes (a first error's "to match this '('" is
+    the parser's: `docs/c-parser.md`).
   - GNU's `noderef` is refused by name.
   - A thread-safety attribute's argument is checked for its names alone: an
     expression of other errors (`g.x` of an `int`) is taken, where clang
@@ -6000,11 +6081,19 @@ arguments against the function. The checker now gives these as clang does.
   - When a GNU attribute of a declaration and a calling convention keyword
     on another type share the specifiers, the two warnings come in the
     attributes' order. Clang gives the type's first.
-  - A field's use (`m.x`) of a deprecated field gets no warning: its
-    declaration is found by the expression's type, which the uses' pass
-    doesn't have. Nor does an overloadable function's call that resolves to a
-    deprecated overload, which clang warns of (it doesn't at an address taken
-    through the overload set, and neither does the checker).
+  - A deprecated or unavailable member's use gets no diagnostic where the
+    reader's evaluator alone reads the access (`typeof`'s operand, an array
+    bound at file scope), and an unavailable member's in an initializer gets
+    no error (a designator's, or a value's by its position). Nor does an overloadable function's call that
+    resolves to a deprecated overload, which clang warns of (it doesn't at an
+    address taken through the overload set, and neither does the checker).
+    A struct member's own mark isn't its specifiers' and parameter lists'
+    context (`int (*m)(D) __attribute__((deprecated));` in a struct warns of
+    `D`), which clang drops: the member marks aren't the uses' pass's. Nor
+    does a deprecated anonymous struct's use in its own declaration warn
+    (`struct __attribute__((deprecated)) { ... } x;`, clang's "'struct
+    (unnamed at ...)' is deprecated" at its keyword, or its typedef's name
+    for `typedef struct __attribute__((deprecated)) { ... } T;`).
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations.
   - An argument count of a supported attribute is checked as its arguments are

@@ -7378,12 +7378,14 @@ static bool pp_test_implemented_features(const char* directory)
         "G __has_attribute(cleanup) __has_builtin(__atomic_load) __has_c_attribute(nodiscard)\n"
         "I __has_attribute(__cleanup__) __has_attribute(__constructor__) __has_attribute(__destructor__) __has_attribute(__weak__) __has_attribute(__overloadable__) "
         "__has_c_attribute(gnu::__cleanup__) __has_c_attribute(gnu::__constructor__) __has_c_attribute(gnu::__destructor__) __has_c_attribute(gnu::__weak__) __has_c_attribute(clang::__overloadable__)\n"
-        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
+        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n"
+        // A version, not 1, as clang answers it (pp_implemented_builtin_query).
+        "J __has_builtin(__builtin_operator_new)\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\nJ 201802L\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\nJ 201802L\n",
     };
     static const uint32_t standards[] =
     {
@@ -7909,7 +7911,10 @@ static bool pp_test_implemented_features(const char* directory)
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
             // clang makes __builtin_c23_va_start a builtin in C23 alone (#148).
             const bool language = inventory[i].id != CBUILTIN_C23_VA_START || standards[mode] >= 2023;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == (inventory[i].source && language);
+            // operator_new's and operator_delete's answer is a version, as clang's (pp_implemented_builtin_query).
+            const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+            const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == answer;
             result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == (inventory[i].constant && language);
         }
     }
@@ -8045,7 +8050,9 @@ static bool pp_test_implemented_features(const char* directory)
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
                 // In gnu17, where __builtin_c23_va_start is no builtin (#148).
                 const bool language = inventory[i].id != CBUILTIN_C23_VA_START;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == (inventory[i].source && language);
+                const bool version = inventory[i].id == CBUILTIN_OPERATOR_NEW || inventory[i].id == CBUILTIN_OPERATOR_DELETE;
+                const uint32_t answer = inventory[i].source && language ? (version ? 201802u : 1u) : 0u;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == answer;
                 result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == (inventory[i].constant && language);
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;

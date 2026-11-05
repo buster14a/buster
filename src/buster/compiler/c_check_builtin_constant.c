@@ -87,6 +87,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .string_cast = evidence.nan_payload_cast, .string_utf8 = evidence.nan_payload_utf8, .function_objects = evidence.function_objects,
             .function_object_count = evidence.function_object_count,
             .ns_constant_string = constant_string ? check_input_ns_constant_string(reader) : 0,
+            .cfstring_object = constant_string ? closing + 1 : 0,
             .alloc_token_known = evidence.alloc_token_known, .alloc_token = evidence.alloc_token,
             .os_log_items = evidence.os_log_items, .os_log_count = evidence.os_log_count, .os_log_known = evidence.os_log_known,
             .os_log_invalid_mask = evidence.os_log_invalid_mask,

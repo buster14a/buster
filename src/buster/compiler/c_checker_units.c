@@ -1791,6 +1791,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
+            .tier1_no_inline = command->tier1_no_inline,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
             .helper_reporting = command->helper_report != NULL,
             .units_lane = lane,
@@ -1800,7 +1801,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
+                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL);
         arena_small_floor = 0;
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
         if (command->helper_report != NULL)
@@ -1857,6 +1858,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_certified, unit_report->code_certified, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->machine_rows, unit_report->machine_rows, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };

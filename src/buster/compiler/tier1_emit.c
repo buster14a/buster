@@ -161,6 +161,16 @@ struct Tier1EmitPrepared
     // The widest vector a value of the function is (#141), 16, 32 or 64 bytes, or 0 without one: the vector class's
     // call-save rows and temporary slot take that width, and its moves of them that width's forms.
     uint32_t vector_bytes;
+    // The CFG consumer's target has no AVX512VL (#1281): its 16- and 32-byte vectors move, spill and compute by VEX forms
+    // (tier1_select_class_forms, Tier1SelectHoles.vex), and machine rows place their roles below xmm16
+    // (tier1_emit_cfg_row).
+    bool vex;
+    // The target has AVX512F (#1281's review): zmm16 and on and EVEX's 512-bit moves, which a 64-byte row's roles keep
+    // even without AVX512VL (Knights Landing's).
+    bool zmm;
+    // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
+    // (Tier1SelectHoles.avx2).
+    bool avx2;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other
@@ -169,6 +179,32 @@ struct Tier1EmitPrepared
     uint32_t x87_count;
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
+};
+
+// A machine row's placement as the CFG consumer claims it (#1284, tier1_emit_cfg_row): each of its roles' register, by
+// role, and the registers its records name by number renamed (k's at k). Untrusted: the code's certificate places the
+// row's records by it on its own, compares them with the emitted ones, checks that no two roles share a register but
+// where the row's semantics lets them (tier1_cert_emitted_row), and proves its operands are where it reads them.
+typedef struct Tier1RowPlacement Tier1RowPlacement;
+struct Tier1RowPlacement
+{
+    // VECTOR(j)'s register.
+    uint8_t vectors[BUSTER_TIER0_OPERATION_VECTORS];
+    // INTEGER(j)'s general register, or FLOATING(j)'s vector one; and MASK(j)'s opmask register.
+    uint8_t operands[BUSTER_TIER0_OPERATION_OPERANDS];
+    uint8_t masks[BUSTER_TIER0_OPERATION_OPERANDS];
+    uint8_t scratch[BUSTER_TIER0_SCRATCH];
+    uint8_t mask_scratch[BUSTER_TIER0_SCRATCH];
+    uint8_t integer_result;
+    uint8_t floating_result;
+    uint8_t mask_result;
+    uint8_t renamed[8];
+    // VECTOR(0)'s register up to the result's first write, record `split` (an index plus one, 0 for none), where the first
+    // operand is read in its own register (#1283: tier1_emit_cfg_row_place's `early`), and that write's field
+    // (BUSTER_X86_ROLE_REG, _RM or _VVVV): the fields naming VECTOR(0) before it, and that record's others, read `early`.
+    uint8_t early;
+    uint8_t split;
+    uint8_t position;
 };
 
 typedef struct Tier1EmitResult Tier1EmitResult;
@@ -199,6 +235,10 @@ struct Tier1EmitResult
     uint32_t symbol_access_count;
     uint32_t call_stores;
     uint32_t call_loads;
+    // The CFG consumer's machine rows (#141, tier1_emit_cfg_row), and the moves it wrote around them into their roles'
+    // registers and out of them (#1283): their operands' and their results'.
+    uint32_t machine_rows;
+    uint32_t row_moves;
     uint64_t retained_bytes;
     uint64_t transition_scratch_bytes;
     // A function the straight-line consumer doesn't take goes through tier1_emit_cfg.c, which leaves `liveness` and
@@ -244,6 +284,9 @@ struct Tier1EmitResult
     uint32_t* stub_records;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
     uint8_t* dropped;
+    // Each machine row's placement as the consumer claims it (#1284, tier1_emit_cfg_row), by node, in a function with rows;
+    // null otherwise.
+    Tier1RowPlacement* row_placements;
     // And the certificate of that code (tier1_certificate_emitted_check): its reason (Tier1CertEmittedReason: 0 where it
     // proved the code, a shape's it doesn't decode yet, or a refusal's, which fails the function), and its decoded edits
     // and nodes' instructions.
@@ -609,7 +652,8 @@ static uint32_t tier1_emit_class(const Tier1EmitPrepared* prepared, uint32_t val
 }
 
 // A value's spill or reload at its slot: a general register's mov of its width, a mask's kmov of its own (#179), which
-// writes or reads the mask's bytes alone, or a floating value's movss or movsd (#141).
+// writes or reads the mask's bytes alone, a floating value's movss or movsd (#141), or a vector's vmovdqu32 or, at a target
+// without AVX512VL, vmovdqu (#1281).
 static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1Frame* frame, uint32_t value, uint8_t reg, bool load)
 {
     const uint32_t width = prepared->sizes[value];
@@ -617,7 +661,7 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     const bool mask = class == BUSTER_TIER1_ALLOCATE_MASK;
     const bool vector = class == BUSTER_TIER1_ALLOCATE_VECTOR;
     const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
-    const Tier1SelectFloatForms* floats = tier1_select_float_forms(width);
+    const Tier1SelectFloatForms* floats = tier1_select_class_forms(width, prepared->vex);
     const uint16_t general = load ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : (width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32);
     const X86Instruction record = {
         .displacement = frame->offset[allocation->spill_ids[value]],

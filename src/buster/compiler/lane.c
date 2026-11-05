@@ -85,10 +85,11 @@
 #include <x86intrin.h>
 #include <cpuid.h>
 
-// Resource-exhaustion fixtures must leave the detector runtime free to allocate
-// shadow/fake-stack memory and start its own threads. Diagnostic builds inject
-// the same compiler-owned reservation/start failures instead of limiting the OS.
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+// Resource-exhaustion fixtures must leave sanitizer runtimes free to allocate
+// memory for diagnostics, map shadow/fake-stack memory and start their threads.
+// Even standalone UBSan can need allocations to report a forced stack overflow.
+// Inject compiler-owned reservation/start failures rather than limiting the OS.
+#if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
 #define BUSTER_SANITIZER_RESOURCES 1
 static bool arena_test_reservation_allowed(uint64_t bytes);
 #else

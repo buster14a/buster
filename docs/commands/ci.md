@@ -195,7 +195,8 @@ the policy. In short:
   `mode: run` gives an `override` reason. The snapshot's comprehensive run is
   required every cycle. States start at the epoch (the merge that added
   `tools/ci/nightly.c`); earlier ones predate the worker and are reported as
-  out of scope.
+  out of scope. A state whose branch GitHub refuses to create is skipped for
+  the rest of the job and reported (docs/ci.md, "Refused branches").
 - `vars.BUSTER_NIGHTLY` set to `on` is the switch. Before it, the coordinator
   only harvests, plans and reports; pushes and the daily `23 7 * * *` run work
   as before. With it, pushes measure targeted, the coordinator dispatches, and
