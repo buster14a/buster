@@ -4268,7 +4268,9 @@ static bool parse_scalar_attribute_string_error(ParseScalar* parser, uint32_t to
 #define BUSTER_CHECK_SUBJECT_C23(spelling, subjects, error, message)
 #define BUSTER_CHECK_FACT_GNU(spelling, flags, minimum, maximum) ((flags) & 0x20u) == 0 ? spelling : NULL,
 #define BUSTER_CHECK_FACT_C23(spelling, flags, minimum, maximum)
+#define BUSTER_CHECK_EXCLUSION(first, second)
 #include "c_check_attribute_subjects.inc"
+#undef BUSTER_CHECK_EXCLUSION
 #undef BUSTER_CHECK_FACT_C23
 #undef BUSTER_CHECK_FACT_GNU
 #undef BUSTER_CHECK_SUBJECT_C23
