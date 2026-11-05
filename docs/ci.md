@@ -419,8 +419,11 @@ the newest eligible earlier state, as an ineligible one is. With the `nightly-le
 coordinator creates and deletes the `nightly/SHA` branches with it instead. That
 token is a fine-grained token with only `Contents: Read and write` and
 `Workflows: Read and write` on this repository. Dispatches, cancellations
-and reads keep the workflow's token. Without the secret, or once it expires, the
-refused states are skipped as above. Branches created with it trigger workflows,
+and reads keep the workflow's token. Without the secret, the refused states are
+skipped as above. A token GitHub rejects as a credential (expired, revoked, or
+without access to this repository) is warned about once and dropped for the
+rest of the job, which then makes the branches with the workflow token, as
+without one. Branches created with it trigger workflows,
 unlike the workflow token's, but every workflow's `push` trigger is limited to
 `main`.
 

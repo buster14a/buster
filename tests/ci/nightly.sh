@@ -25,7 +25,13 @@ cat > "$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURES/calls.log"
-printf '%s %s\n' "${GH_TOKEN:-workflow-token}" "$*" >> "$FIXTURES/tokens.log"
+printf '%s %s\n' "${GH_TOKEN:-none}" "$*" >> "$FIXTURES/tokens.log"
+# An expired branch token: GitHub rejects every call made with it.
+if [ "${GH_TOKEN:-}" = expired-token ]; then
+    printf '{"message":"Bad credentials","status":"401"}\n'
+    printf 'gh: Bad credentials (HTTP 401)\n' >&2
+    exit 1
+fi
 if [ "$1" = workflow ]; then
     exit 0
 fi
@@ -120,6 +126,8 @@ SH
 chmod +x "$work/bin/gh"
 export FIXTURES="$work/fixtures"
 export NIGHTLY_GH="$work/bin/gh"
+# The workflow's own token, as the fake gh logs it beside each call (the branch token's calls log theirs).
+export GH_TOKEN=workflow-token
 export GITHUB_REPOSITORY=buster14a/buster
 fixtures="$work/fixtures"
 : > "$fixtures/calls.log"
@@ -675,6 +683,18 @@ expect_no_match "$fixtures/tokens.log" '^branch-token (workflow|api repos|api --
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'so the state the workflow token was refused is dispatched'
 expect_no_match "$work/coordinate.log" "Nightly branch::" 'without a warning'
 rm -f "$fixtures/refuse-$epoch" "$fixtures"/count-*
+# An expired branch token is rejected once, warned about once, and the job makes its branches with the workflow
+# token, as without one: a branch the workflow token may have is made and dispatched, one it is refused is skipped.
+: > "$fixtures/refuse-$merge"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+PATH="$work/sleeping:$PATH" NIGHTLY_BRANCH_TOKEN=expired-token GITHUB_RUN_ID=9669 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=300 NIGHTLY_PREPARATIONS=3 run_coordinator "$work/expired-token" prepare run
+test "$(grep -c '^expired-token ' "$fixtures/tokens.log")" -eq 1 || { cat "$fixtures/tokens.log" >&2; fail 'an expired branch token is tried once a job'; }
+test "$(grep -c '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (gh: Bad credentials (HTTP 401))' "$work/coordinate.log")" -eq 1 || fail 'and warned about once'
+expect_match "$fixtures/tokens.log" "^workflow-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'the workflow token makes the branches instead'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'a branch it may have is dispatched'
+expect_match "$work/coordinate.log" "::warning title=Nightly branch::GitHub refused the workflow token nightly/$merge" 'one it is refused is skipped, as without a branch token'
+rm -f "$fixtures/refuse-$merge" "$fixtures"/count-*
 # A branch another step made meanwhile (the POST fails, the branch is then there at the commit) is used as it is.
 printf '{"object":{"sha":"%s"}}\n' "$epoch" > "$fixtures/ref-$epoch.json.2"
 : > "$fixtures/refuse-$epoch"

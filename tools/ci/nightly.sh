@@ -372,24 +372,47 @@ harvest()
     "$tool" harvest --ledger "$ledger" --facts "$work/harvest.tsv" --states "$states" --records "$records" >> "$ledger"
 }
 
+# The nightly/SHA branches' writes (create, delete). With the nightly-ledger environment's BUSTER_NIGHTLY_BRANCH_TOKEN
+# (contents and workflows write on this repository alone, docs/ci.md), GitHub doesn't refuse the merges the workflow
+# token may not have; without it, the workflow token, and those states are skipped. Nothing else uses that token:
+# dispatches, cancellations and reads stay the workflow's. A branch token GitHub rejects as a credential (expired or
+# revoked: HTTP 401; without access to this repository: a 404 or "not accessible by personal access token") is
+# dropped for the rest of the job, which then writes with the workflow token as if there were none, and says so once
+# (branch_token_warning). Its output is gh's, standard output and error together.
+branch_api()
+{
+    local answer status=0 fallback=true
+    if [ -n "${NIGHTLY_BRANCH_TOKEN:-}" ] && [ ! -e "$work/branch-token-rejected" ]; then
+        answer=$(GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "$@" 2>&1) || status=$?
+        fallback=false
+        if [ "$status" -ne 0 ] && grep -E -q 'HTTP 401|HTTP 404|Bad credentials|not accessible by personal access token' <<< "$answer"; then
+            printf '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (%s), so this job makes the nightly branches with the workflow token (docs/ci.md, "Refused branches")\n' "$(tail -n 1 <<< "$answer")" > "$work/branch-token-rejected"
+            fallback=true
+            status=0
+        else
+            printf '%s\n' "$answer"
+        fi
+    fi
+    if [ "$fallback" = true ]; then
+        "$gh" api "$@" 2>&1 || status=$?
+    fi
+    return "$status"
+}
+
+# Says once a job that the branch token was rejected (branch_api runs inside command substitutions, which can't).
+branch_token_warning()
+{
+    if [ -s "$work/branch-token-rejected" ] && [ ! -e "$work/branch-token-warned" ]; then
+        cat "$work/branch-token-rejected"
+        : > "$work/branch-token-warned"
+    fi
+}
+
 # nightly/SHA at SHA: 0 when it is there. 2 when it can't be had for the rest of the job, which then stops asking for
 # it: GitHub refuses the workflow token the branch (HTTP 403, "Resource not accessible by integration", as it did on
 # 2026-11-05 for merges whose pull request's head lacked main's workflow changes), or the branch exists and points
 # elsewhere (until a person fixes it, never dispatched). 1 for anything else (a timeout, a 429 or 5xx, a failed
 # lookup), which a later step asks for again.
-# The nightly/SHA branches' writes (create, delete). With the nightly-ledger environment's BUSTER_NIGHTLY_BRANCH_TOKEN
-# (contents and workflows write on this repository alone, docs/ci.md), GitHub doesn't refuse the merges the workflow
-# token may not have; without it, the workflow token, and those states are skipped. Nothing else uses that token:
-# dispatches, cancellations and reads stay the workflow's.
-branch_api()
-{
-    if [ -n "${NIGHTLY_BRANCH_TOKEN:-}" ]; then
-        GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "$@"
-    else
-        "$gh" api "$@"
-    fi
-}
-
 ensure_branch()
 {
     local commit=$1 found answer result=0
@@ -611,6 +634,7 @@ coordinate()
                     ;;
             esac
         done < "$work/plan.tsv"
+        branch_token_warning
         if [ -n "$limit" ] && [ "$iterations" -ge "$limit" ]; then
             break
         fi
