@@ -8,7 +8,10 @@
 // PROBE_STACK and tier1_emit_cfg_probed_allocation), so that no frame or allocation steps over a guard page.
 //
 // The guard fixture runs a function on a stack of its own: one page, a PROT_NONE page under it, and mapped pages under
-// that. Each of its cases makes three pages below the first and writes only their lowest byte: a frame, an alloca, a
+// that, at a 64 KiB-aligned address, so that every build's realigned frames lie the same way against the guard
+// whatever address the mapping gets. clang builds its references with -fno-stack-protector, as ours have none: a
+// distribution's default stack protector (Arch's clang) writes a realigned frame's canary at its top, which the
+// realignment can put in the guard page. Each of its cases makes three pages below the first and writes only their lowest byte: a frame, an alloca, a
 // variable-length array, a frame realigned to 64 bytes and one realigned to two pages. Unprobed, the code steps over the
 // guard and prints "skipped"; probed, it faults on the guard page, whose handler (on a stack of its own) prints
 // "probed". Each build prints what clang -O0's does with the option and without it: by Tier 0 and by --tier1 (with and
@@ -24,6 +27,7 @@ static const char check_test_stack_clash_guard_source[] =
     "#define _GNU_SOURCE\n"
     "#include <alloca.h>\n"
     "#include <signal.h>\n"
+    "#include <stdint.h>\n"
     "#include <stdio.h>\n"
     "#include <stdlib.h>\n"
     "#include <sys/mman.h>\n"
@@ -110,7 +114,8 @@ static const char check_test_stack_clash_guard_source[] =
     "int main(int argc, char** argv)\n"
     "{\n"
     "    which = argc > 1 ? argv[1][0] - '0' : 0;\n"
-    "    char* region = mmap(NULL, 10 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
+    "    char* mapping = mmap(NULL, 26 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
+    "    char* region = (char*)(((uintptr_t)mapping + 16 * PAGE - 1) & ~(uintptr_t)(16 * PAGE - 1));\n"
     "    guard = region + 8 * PAGE;\n"
     "    mprotect(guard, PAGE, PROT_NONE);\n"
     "    stack_t alternate = { .ss_sp = malloc(65536), .ss_size = 65536, .ss_flags = 0 };\n"
@@ -336,17 +341,22 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
     bool referenced = written;
     for (uint32_t probed = 0; probed < 2; probed += 1)
     {
-        char* arguments[] = { (char*)clang, "-O0", probed != 0 ? "-fstack-clash-protection" : "-fno-stack-clash-protection", "-o", reference, guard, NULL };
+        char* arguments[] = { (char*)clang, "-O0", "-fno-stack-protector", probed != 0 ? "-fstack-clash-protection" : "-fno-stack-clash-protection", "-o", reference,
+                              guard, NULL };
         char* text = NULL;
         referenced = referenced && check_test_driver_spawn(arguments, &text) == 0 && check_test_stack_clash_verdicts(reference, expected[probed], sizeof(expected[probed]));
         free(text);
     }
-    check_test_expect(test, referenced && strcmp(expected[0], "skipped\nskipped\nskipped\nskipped\nskipped\n") == 0 &&
-                                strcmp(expected[1], "probed\nprobed\nprobed\nprobed\nprobed\n") == 0,
-                      "clang -O0 steps over the guard page unprobed, and faults on it with -fstack-clash-protection");
+    const bool clang_verdicts = referenced && strcmp(expected[0], "skipped\nskipped\nskipped\nskipped\nskipped\n") == 0 &&
+                                strcmp(expected[1], "probed\nprobed\nprobed\nprobed\nprobed\n") == 0;
+    check_test_expect(test, clang_verdicts, "clang -O0 steps over the guard page unprobed, and faults on it with -fstack-clash-protection");
+    if (referenced && !clang_verdicts)
+    {
+        fprintf(stderr, "  clang's verdicts unprobed:\n%s  and probed:\n%s", expected[0], expected[1]);
+    }
     char probes_expected[256] = { 0 };
     {
-        char* arguments[] = { (char*)clang, "-O0", "-fstack-clash-protection", "-o", reference, probes, NULL };
+        char* arguments[] = { (char*)clang, "-O0", "-fno-stack-protector", "-fstack-clash-protection", "-o", reference, probes, NULL };
         char* text = NULL;
         referenced = referenced && check_test_driver_spawn(arguments, &text) == 0 && check_test_driver_capture(reference, probes_expected, sizeof(probes_expected)) &&
                      probes_expected[0] != 0;
@@ -379,8 +389,12 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
                 const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
                 free(link_text);
                 char actual[128] = { 0 };
-                check_test_expect(test, linked && check_test_stack_clash_verdicts(program, actual, sizeof(actual)) && strcmp(actual, expected[1]) == 0,
-                                  "-fstack-clash-protection: frames, allocations and realigned frames fault on the guard page, as clang's");
+                const bool same_verdicts = linked && check_test_stack_clash_verdicts(program, actual, sizeof(actual)) && strcmp(actual, expected[1]) == 0;
+                check_test_expect(test, same_verdicts, "-fstack-clash-protection: frames, allocations and realigned frames fault on the guard page, as clang's");
+                if (linked && !same_verdicts)
+                {
+                    fprintf(stderr, "  ours:\n%s  clang's:\n%s", actual, expected[1]);
+                }
                 const bool computed = check_test_stack_clash_build(executable, probes, object, build != 0, build == 1, path != 0, options);
                 check_test_expect(test, computed, "the probes fixture compiles with -fstack-clash-protection");
                 link_text = NULL;
@@ -416,8 +430,12 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
         const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
         free(link_text);
         char actual[128] = { 0 };
-        check_test_expect(test, linked && check_test_stack_clash_verdicts(program, actual, sizeof(actual)) && strcmp(actual, expected[0]) == 0,
-                          "without the option, the guard fixture steps over the guard page, as clang's");
+        const bool same_verdicts = linked && check_test_stack_clash_verdicts(program, actual, sizeof(actual)) && strcmp(actual, expected[0]) == 0;
+        check_test_expect(test, same_verdicts, "without the option, the guard fixture steps over the guard page, as clang's");
+        if (linked && !same_verdicts)
+        {
+            fprintf(stderr, "  ours:\n%s  clang's:\n%s", actual, expected[0]);
+        }
         const bool off = compiled && check_test_stack_clash_build(executable, guard, other, build != 0, true, false, off_options);
         check_test_expect(test, off && check_test_stack_clash_same(object, other), "-fstack-clash-protection then -fno-stack-clash-protection: the default's object");
         const bool on = check_test_stack_clash_build(executable, guard, object, build != 0, true, false, probe_options) &&
