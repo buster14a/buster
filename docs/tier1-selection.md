@@ -336,6 +336,37 @@ arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
 "Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
+### Proven upper bits (#1219)
+
+Selection keeps two semantic range bounds per integer value: the number of
+possibly nonzero low bits and the smallest signed width. Constants, masks,
+shifts, extensions and truncations supply the bounds; copies, selects and phis
+propagate them. They start unknown, including on loop backedges, and improve
+in at most eight sweeps. Unresolved cycles retain the full range.
+
+A separate byte certifies physical register storage. A 32-bit ALU result or
+load clears the upper half; an incoming `I32`, a call result and a machine row
+make no such promise. Copies and phis need their inputs' certificates. A shift
+whose count can be zero, multiplication or division by one, and a truncation
+to `I32` can leave a register untouched, so their proofs account for that.
+
+With both facts, a nonnegative signed extension becomes a zero extension,
+and a zero extension of already canonical storage becomes a coalescible copy.
+A truncation of a value already in the unsigned destination range is a copy;
+sign extension can bypass a truncation of an already sign-extended value.
+A single-use ordinary load followed by sign extension becomes one exact-width
+`movsx`/`movsxd` load, under the existing memory-order and address-fold rules.
+Volatile and atomic accesses retain their separate access.
+
+The bounds occupy two scratch bytes per node and the storage certificate one.
+The independent range seeds are classified in 32-node SIMD batches with masked
+tails and an exact scalar twin; dependency propagation reuses bounded ordered
+sweeps on both selector paths. `test-tier1-select` checks poisoned ABI upper
+halves, signed boundaries, zero-count shifts, identity operations, retruncation,
+volatile and exact-width loads, cyclic phis, and every tail through 65 nodes
+against protected pages. The bounds do not assume an ABI extension or infer a
+loop's numeric range from its initial value alone.
+
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
 `cmp`/`test`, `setcc`, then `movzx`; clearing the destination before comparison
@@ -639,15 +670,16 @@ counts are reported separately as `call_stores` and `call_loads`.
 An `I32` value's upper half is unspecified in Tier 1's registers, as System V
 leaves an `int` parameter's and result's (#1116). Every rule reads an `I32`
 operand at 32 bits (an address's index is an `I64`), and a zero extension to
-`I64` always writes its `mov r32, r32`, even in place. So nothing else writes
-a move to clear it:
+`I64` writes its `mov r32, r32`, even in place, unless selection proves that
+the upper half is already zero (#1219). Nothing else needs to clear it:
 
 - an `I32` argument is passed as the argument moves leave its register;
 - an `I32` result stays in RAX;
 - a copy of an `I32`, and a truncation to `I32`, is nothing in its own register.
 
 Narrow values keep their canonical storage (#981): a narrow result is still
-zero-extended from RAX, and a narrow truncation still clears in place.
+zero-extended from RAX, and a narrow truncation clears in place unless its
+discarded bits are already proven zero.
 
 Call-containing functions disable the red zone and use the frame planner's
 System V call alignment, including zero-argument calls. The bounded register
