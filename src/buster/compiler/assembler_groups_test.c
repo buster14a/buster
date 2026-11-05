@@ -278,7 +278,7 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(section_signatures); i += 1)
     {
         const char* source = section_signatures[i];
-        const AsmResult assembled = asm_test_pair(test, (String8){.pointer = (char*)source, .length = strlen(source)}, 1, X86_ARCH_BASELINE);
+        AsmResult assembled = asm_test_pair(test, (String8){.pointer = (char*)source, .length = strlen(source)}, 1, X86_ARCH_BASELINE);
         if (assembled.error == 0)
         {
             const Object object = asm_object(&assembled, BUSTER_S8("section-signature.s"), &test->vector);
