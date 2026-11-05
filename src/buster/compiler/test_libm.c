@@ -8,9 +8,11 @@
 //   - linked dynamically, from libm.so.6 loaded on the first lookup, whose dependencies (libc.so.6) dlsym searches
 //     too. The process has one libm, this one or the one its link took, so its objects (signgam) are those its
 //     functions set;
-//   - linked statically, from the table below, which links in each function and object it names, the C library's that
-//     c-testsuite's programs and the generated ones call and libm's that the tests compare with. A dlopen'd libm would
-//     bring a C library of its own, whose errno its functions would set. A name the table doesn't have isn't found.
+//   - linked statically, from the table below first, which links in each function and object it names, the C
+//     library's that c-testsuite's programs and the generated ones call and libm's that the tests compare with, so
+//     that they are this process's own (its errno, its stdout). Any other name comes from libm.so.6 and the C library
+//     it brings, loaded as a linked-dynamically executable loads it: a second C library, with its own errno, stdio
+//     buffers and heap, which still binds every name the dynamic executable bound (interpret-ir's --bind contract).
 #ifndef BUSTER_TEST_LIBM_INCLUDED
 #define BUSTER_TEST_LIBM_INCLUDED
 
@@ -133,14 +135,13 @@ static __attribute__((unused)) void* test_libm(const char* name)
     {
         result = strcmp(test_host_symbols[i].name, name) == 0 ? test_host_symbols[i].address : NULL;
     }
-#else
+#endif
     static void* library = NULL;
-    if (library == NULL)
+    if (result == NULL && library == NULL)
     {
         library = dlopen("libm.so.6", RTLD_NOW | RTLD_LOCAL);
     }
-    result = library != NULL ? dlsym(library, name) : NULL;
-#endif
+    result = result == NULL && library != NULL ? dlsym(library, name) : result;
     return result;
 }
 
