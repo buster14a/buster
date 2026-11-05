@@ -670,6 +670,15 @@ The loop is the scalar twin (`check_lower_node_counts_scalar`, which
 fixture of its program tests, among them a vector's libm builtins, an
 `_Atomic` global (the rules) and the atomic builtins on plain objects (the
 masks, whose fixture's table the test requires to have no `_Atomic` kind).
+A unit whose type table has a transport vector type (#137, a vector of `bool`,
+of 1 or 2 bytes or of more than 64 bytes: only a unit with a vector kind is
+scanned for one) takes the rules for every node too: such a node's operation,
+cast or element writes entries a piece, an element or a cleared byte at a
+time past a node's bounds (`check_lower_transport_room`: 20 entries for each
+16 bytes, 8 for each of a `bool` vector's bytes, and for an element-wise
+conversion, shuffle or reduction 32 an element, which a `bool` vector's maximum or
+minimum nearly fills). The intrinsics' headers have
+one, AMX's 1024-byte `_tile1024i`, whose nodes take about 900 entries each.
 
 After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
 take their targets: their labels' entries. The loop compared every entry's
@@ -1228,6 +1237,94 @@ operand's op too. #1235's run at `38727492`
 put `lower.statements` at 7.264 ms and 7.298 against the base's 6.909, every
 round above every base round: the push's added lookups and the copy cost more
 than the shorter chain saved.
+
+## Computing with transport vectors (#137)
+
+Tier 0's VECTOR class holds vectors of 4, 8, 16, 32 and 64 bytes. The others,
+the transport vectors (`check_lower_transport_type`: a vector of `bool`, whose
+extended vectors pack a bit per element, one of 1 or 2 bytes, and one of more
+than 64 bytes, AMX's 1024-byte tile among them), are an aggregate's value, their
+object's address, which calls, copies and `va_arg` take by their bytes
+(docs/tier0.md). `c_check_program_transport.c` computes with them as clang -O0's
+code does, each result written into a frame object of its type whose address is
+the result, with the least new machinery: every entry it writes is an entry the
+lowering already writes for scalars or ordinary vectors.
+
+- **Vectors of 1 or 2 bytes** (one or two `char`s, a `short`, a `_Float16` or a
+  `__bf16`): an element at a time (`check_lower_transport_elements`). Each
+  element is loaded, promoted (to `int`, or to `float` for a half-precision one),
+  computed by C's operator and converted back, as LLVM's element-wise
+  operations give it after widening the vector into a register whose other
+  lanes no result reads. Wrapping arithmetic, shifts, division and remainder
+  are so exact. A compare's result is the negated `int` 0 or 1 in the result's
+  signed elements; a half-precision negation flips the sign bit, as `fneg`
+  does, and its arithmetic in `float` rounds once to the element as clang's
+  single operation does. At two elements, a vector row would cost more entries
+  than the elements' own.
+- **Vectors of more than 64 bytes**: a piece at a time, each the width of the
+  target's widest registers (64 bytes with AVX-512F and VL, 32 with AVX, else 16),
+  as LLVM legalizes them, by the ordinary vectors' rows at that width
+  (`check_vector_lower_element_row`, which takes an element and a width rather
+  than a type): `check_lower_transport_pieces` loads each operand's piece at its
+  offset, runs the row and sets the result's piece. A scalar operand is splat
+  once into a register-sized temporary that every piece reads. What the rows
+  refuse at a level (variable shifts without AVX2 or AVX-512BW, 64-bit compares
+  without SSE4.2, integer division, 8-bit multiplication) is refused by the same
+  names as the ordinary vectors'; bf16 elements, whose rows split by halves, are
+  refused by name.
+- **Vectors of `bool`**: their bits as clang's `<N x i1>` keeps them in memory,
+  element i at bit i % 8 of byte i / 8. Their operators are bitwise operations on
+  the bytes (`check_lower_transport_bools`): `&`, `|` and `^` themselves, `~` and
+  `!` a complement, and the compares, false below true as `i1`'s unsigned
+  compares order them, two steps each (`a < b` is `~a & b`, `a == b` is
+  `~(a ^ b)`, ...). Up to 8 bytes they are one integer's (in 32 or 64 bits), past
+  them the unsigned chars' vector rows a piece at a time. The bits past the last
+  element are cleared, as clang's stores of masks clear them where it doesn't
+  keep them in an opmask register: clang's own code leaves them either way (a
+  `<4 x i1>` complement through `knotb` sets them), so the tests fold a padded
+  vector's elements alone. An element is its bit: read by its byte's load, a
+  shift and a mask; written by the byte's other bits kept and its own set to the
+  value's truth.
+- **Casts, splats and constants** (`check_lower_transport_cast`): between
+  vectors of the same bytes, their bits (nothing between two transport vectors;
+  an ordinary vector's loaded from or set into an object); between a GNU C
+  vector and an integer of its bytes, their bits; a scalar's splat into every
+  element, converted to the element's type first (a `bool` vector's elements all
+  its truth). A constant the checker folds is an integer's bits (a cast of an
+  integer constant), stored into the object.
+- **Element-wise conversions, shuffles and reductions**: `__builtin_convertvector`
+  and the implicit conversion of an extended integer vector to a `bool` vector
+  of as many elements (clang's `icmp ne 0`, which the checker now accepts as
+  clang does; an explicit cast stays an error) convert element by element as C
+  converts a scalar (`check_lower_transport_convert`), and
+  `__builtin_shufflevector` gathers elements by its constant indices, either way
+  from or into an ordinary vector through a temporary, and into a `bool` vector a
+  byte of bits at a time (`check_lower_transport_gather`). The integer
+  reductions (`add`, `mul`, `and`, `or`, `xor`, `max`, `min`) fold the elements
+  first to last in their promoted type, a maximum or minimum by a mask without a
+  branch; a `bool` vector's sum is an exclusive or and its product a
+  conjunction, as `i1`'s arithmetic wraps.
+- **Compound assignments** compute into the result's object with the
+  destination's address as the left operand, then copy the result into the
+  destination (memmove past Tier 0's copy limit, for a tile).
+
+Refused by name (`check_lower_transport_refusal`, and the strings at their
+places): the elementwise and floating vector builtins and floating reductions of
+transport vectors; logical operators and vector conditions, as the ordinary
+vectors'; increments, as the ordinary vectors'; and compound assignments and
+increments of a `bool` vector's elements, whose clang 23 code is invalid IR (an
+`extractelement` of the vector's `i8`), which crashes clang on some (`^= 1`,
+`*= 2`, `--`) and computes no element's value on others: what clang itself
+doesn't compile. Element-wise conversions, shuffles and reductions take at most
+1024 elements, an entry run each, as clang's code is a run of each element's
+instructions.
+
+`test-checker --program-vectors` runs a program of all of these against clang
+-O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,
+x86-64-v2 and x86-64-v3 (`baseline-transport-compute`), on both paths; the
+refusals' fixtures name each refusal. The same programs pass by the driver
+with `--scalar`, by default and with `--tier1 --verify` at x86-64, x86-64-v3 and
+x86-64-v4.
 
 ## Against clang -O0's objects
 

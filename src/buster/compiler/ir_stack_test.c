@@ -585,7 +585,7 @@ static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output,
     }
     arena_pop_to(output, output_mark);
     arena_pop_to(twin, twin_mark);
-    // This is valid Tier0 metadata, rather than a malformed F80 constant declined before the dispatch boundary.
+    // The typed front now accepts F80 after dynamic effects, as does IR lowering. A malformed pool still fails at the constant.
     kinds[5] = BUSTER_TYPED_CONST;
     classes[5] = BUSTER_TYPED_CLASS_F80;
     source.count = sizeof(kinds);
@@ -596,7 +596,11 @@ static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output,
     ir_lower_test_expect(tally, valid.error == TIER0_OK, "F80 boundary fixture is valid Tier0", valid.error, valid.node);
     const uint64_t execution_mark = execution->length;
     result = interpreter_test_run(&source, execution, &options);
-    ir_lower_test_expect(tally, result.status == INTERPRETER_INVALID && result.entry == 5 && execution->length == execution_mark, "F80 declined after dynamic effects with arena cleanup", result.status, result.entry);
+    ir_lower_test_expect(tally, result.status == INTERPRETER_OK && execution->length == execution_mark, "F80 executes after dynamic effects with arena cleanup", result.status, result.entry);
+    source.x87_constant_count = 0;
+    result = interpreter_test_run(&source, execution, &options);
+    ir_lower_test_expect(tally, result.status == INTERPRETER_INVALID && result.entry == 5 && execution->length == execution_mark, "invalid F80 pool after dynamic effects still cleans up the arena", result.status, result.entry);
+    source.x87_constant_count = 1;
     // The IR lowers long double (#131): both paths give the constant its 80 bits, 1.0's, after the dynamic effects.
     arena_push(output, 24, 1);
     arena_push(scratch, 40, 1);

@@ -245,6 +245,44 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
 
 // `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is
 // checked before any is published: a use names a token, and sees no event at or after itself.
+// A use's retained answer. Declaration tokens carry immutable elaborated types; all writes belong to the use token.
+// The deferred handoff groups every event for the same use token in one body part, including repeated query uses.
+static void check_input_binding_answer(CheckInputReader* reader, const uint32_t* resolved, uint32_t event)
+{
+    CheckInput* output = reader->output;
+    const Parser* parser = reader->parser;
+    const CBindings* events = &reader->bindings;
+    const uint32_t count = parser->tokens.count;
+    if (events->operation[event] == C_BINDING_USE)
+    {
+        const uint32_t token = events->declaration[event];
+        const uint32_t handle = resolved[event];
+        const uint32_t declaration = handle != 0 ? events->declaration[handle - 1] : BUSTER_CHECK_NONE;
+        const uint32_t old = output->declarations[token];
+        const TypeId captured = reader->declared_types[token];
+        const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
+        output->declarations[token] = declaration;
+        if (events->key[event] / events->name_capacity == C_BINDING_ORDINARY)
+        {
+            reader->declared_types[token] = incomplete != 0 ? incomplete : declaration < count ?
+                (old == declaration && captured != 0 ? captured : reader->declared_types[declaration]) : 0;
+            const bool typedef_use = handle != 0 && events->kind[handle - 1] == C_BINDING_TYPEDEF;
+            if (declaration < count && (reader->declared_types[token] == 0 ||
+                (captured != 0 && old != declaration) ||
+                (typedef_use && parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
+            {
+                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+            }
+        }
+        if (declaration == BUSTER_CHECK_NONE)
+        {
+            check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+        }
+    }
+}
+
+static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputReader* reader, const uint32_t* resolved);
+
 static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t* resolved)
 {
     CheckInput* output = reader->output;
@@ -270,35 +308,12 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         output->binding_statistics.identifiers = identifiers;
         output->binding_statistics.declarations = declarations;
     }
-    for (uint32_t event = 0; valid && event < events->count; event += 1)
+    const bool deferred = valid && reader->deferred != NULL && check_deferred_binding_answers(reader->deferred, reader, resolved);
+    for (uint32_t event = 0; valid && !deferred && event < events->count; event += 1)
     {
-        if (events->operation[event] == C_BINDING_USE)
-        {
-            const uint32_t token = events->declaration[event];
-            const uint32_t handle = resolved[event];
-            const uint32_t declaration = handle != 0 ? events->declaration[handle - 1] : BUSTER_CHECK_NONE;
-            const uint32_t old = output->declarations[token];
-            const TypeId captured = reader->declared_types[token];
-            const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
-            output->declarations[token] = declaration;
-            if (events->key[event] / events->name_capacity == C_BINDING_ORDINARY)
-            {
-                reader->declared_types[token] = incomplete != 0 ? incomplete : declaration < count ?
-                    (old == declaration && captured != 0 ? captured : reader->declared_types[declaration]) : 0;
-                const bool typedef_use = handle != 0 && events->kind[handle - 1] == C_BINDING_TYPEDEF;
-                if (declaration < count && (reader->declared_types[token] == 0 ||
-                    (captured != 0 && old != declaration) ||
-                    (typedef_use && parser->tree.roles[token] == PARSE_ROLE_OPERAND && !reader->ignored[token])))
-                {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
-                }
-            }
-            if (declaration == BUSTER_CHECK_NONE)
-            {
-                check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
-            }
-        }
+        check_input_binding_answer(reader, resolved, event);
     }
+    valid &= !output->resource;
     const bool unused_columns = check_sparse_present(output->body_declarations) && check_sparse_present(output->parameters) &&
                                 check_sparse_present(output->parameter_next) && check_sparse_present(output->declaration_bodies) &&
                                 output->declaration_kinds != NULL && output->declaration_bits != NULL;

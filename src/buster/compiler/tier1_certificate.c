@@ -39,6 +39,8 @@
 #define BUSTER_CERT_AVX512DQ 2u
 #define BUSTER_CERT_AVX512BW 4u
 #define BUSTER_CERT_AVX2 8u
+// EVEX.128 and EVEX.256 forms (#1284): an edit of an xmm or ymm view of registers 16 to 31, a machine row's staging.
+#define BUSTER_CERT_AVX512VL 16u
 
 typedef enum Tier1CertClass
 {
@@ -512,9 +514,9 @@ static bool tier1_cert_target(const Tier1CertProgram* program, Tier1CertLocation
     bool valid = true;
     if (l.class == TIER1_CERT_VECTOR)
     {
-        const uint32_t needed = l.width == 64 || l.reg >= 16 ? BUSTER_CERT_AVX512F : l.width == 32 ? BUSTER_CERT_AVX2 : 0;
-        // The normalized edit vocabulary does not encode EVEX.128/256 forms.
-        valid = (program->features & needed) == needed && (l.reg < 16 || l.width == 64);
+        // Registers 16 to 31 are EVEX's alone, their xmm and ymm views AVX512VL's.
+        const uint32_t needed = (l.width == 64 || l.reg >= 16 ? BUSTER_CERT_AVX512F : l.width == 32 ? BUSTER_CERT_AVX2 : 0) | (l.reg >= 16 && l.width < 64 ? BUSTER_CERT_AVX512VL : 0);
+        valid = (program->features & needed) == needed;
     }
     else if (l.class == TIER1_CERT_MASK)
     {

@@ -514,6 +514,14 @@ struct Tier0Operation
 // through a hidden pointer goes where the function's own hidden pointer (parameter 0) points, which the call passes on.
 // Tier0Code.tail_records gives each one's jump.
 //
+// A function that calls __builtin_eh_return (#148, `eh_return`) unwinds to a handler through a tail call's row of its
+// own, call_tails[c] BUSTER_TIER0_TAIL_EH: an indirect one, whose callee is the handler, of one U64 argument in rcx, the
+// offset (tier0_tail_call_valid). The function may be variadic, and its other tail calls musttail ones. Its frame has a
+// frame pointer and saves every callee-saved register and then rdx and rax (LLVM's CSR_64EHRet, which libgcc's unwinder,
+// uw_install_context, writes through the CFI), and its TAIL_CALL tears the frame down with them all, rsp the CFA plus
+// the offset, and jumps to the handler (tier0_emit_tail). Its ordinary returns and its musttail calls step over rax's and
+// rdx's slots and leave rax and rdx as the body left them (tier0_emit_teardown).
+//
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
 // compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
 // requests to the form choice (Tier0Code.choice_records and the rest), for measuring the choice on real functions
@@ -564,6 +572,8 @@ struct Tier0Function
     // local in one (tier0_assign_homes) and no value of its stacks either (its integer depths are the caller-saved
     // registers' alone), and a realigned frame whose base is r15 is refused.
     bool returns_twice;
+    // Whether the function calls __builtin_eh_return (#148): its frame, and its TAIL_CALL of a BUSTER_TIER0_TAIL_EH row.
+    bool eh_return;
     const uint64_t* vector_constants;
     const uint8_t* vector_constant_bytes;
     uint32_t vector_constant_count;
@@ -589,9 +599,28 @@ struct Tier0Function
     const uint32_t* lifetime_entries;
     const uint32_t* lifetime_locals;
     uint32_t lifetime_count;
+    // The frame pointer the options ask for (#177, predefines_frame_pointer's BUSTER_TIER0_FRAME_POINTER_*): none (rbp
+    // set only where the function's entries move rsp or its frame is realigned), every frame's, or every frame's whose
+    // function calls (BUSTER_TIER0_FRAME_POINTER_NON_LEAF, -momit-leaf-frame-pointer's). A kept frame pointer is pushed
+    // first and set to rsp (tier0_frame_registers), so that rbp chains the frames, and is no depth's register. Tier 1's
+    // frame takes it too (c_check_tier1.c's Tier1EmitOptions.frame_flags).
+    uint8_t frame_pointer;
+    // Whether the frame and the allocations probe the stack as they grow it (#177, -fstack-clash-protection,
+    // predefines_stack_clash): each page below rsp touched before rsp moves past it (tier0_emit_probes,
+    // tier0_emit_stack), so that no frame or allocation steps over a guard page. Tier 1's frame takes it too
+    // (BUSTER_TIER1_FRAME_PROBE_STACK).
+    bool probe_stack;
 };
 
 #define BUSTER_TIER0_LIFETIME_END 0x80000000u
+#define BUSTER_TIER0_FRAME_POINTER_NONE 0
+#define BUSTER_TIER0_FRAME_POINTER_ALL 1
+#define BUSTER_TIER0_FRAME_POINTER_NON_LEAF 2
+// A call_tails value: a musttail call's row, or __builtin_eh_return's (Tier0Function.eh_return).
+#define BUSTER_TIER0_TAIL_CALL 1
+#define BUSTER_TIER0_TAIL_EH 2
+// The registers an eh_return function saves past the callee-saved ones, rdx's push then rax's (Tier0Frame.eh_return).
+#define BUSTER_TIER0_EH_PUSHES 2
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
 static bool tier0_is_object(const Tier0Function* function, uint64_t local)
@@ -706,6 +735,13 @@ struct Tier0Code
     uint8_t frame_alignment_log2;
     bool frame_base;
     bool frame_open;
+    // Whether the prologue probes (#177, Tier0Frame.probe): its reservation and realignment are then
+    // tier0_emit_probed_reservation's and tier0_emit_realignment's probed records (tier0_reservation_records and
+    // tier0_realignment_records count them), which the unwind tables' reader checks.
+    bool frame_probe;
+    // Whether the frame is an eh_return function's (Tier0Frame.eh_return): rdx and rax pushed after the callee-saved
+    // registers, and its tail calls' teardowns those of __builtin_eh_return (tier0_emit_tail).
+    bool frame_eh_return;
     Tier0Error error;
     uint32_t node;
 };
@@ -854,13 +890,14 @@ static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
 #define BUSTER_TIER0_XMM_ALL 0xffff0000u
 // The convention's registers: arguments and parameters arrive in rdi, rsi, rdx, rcx, r8, r9 and xmm0 to xmm7, and
 // results in rax, rdx, xmm0 and xmm1 (and xmm2 and xmm3, a vector's split across four: tier0_vector_result_parts, which
-// checks its registers itself). abi_assign's locations name no others, and the emitters take no others there: the
+// checks its registers itself), and a call's static chain in r10 (#148), which __builtin_call_with_static_chain's front
+// end puts there. abi_assign's locations name no others, and the emitters take no others there: the
 // prologue sets a frame pointer's rbp and copies through rax and xmm15 before the parameters move, and doesn't save a
 // register a parameter stays in; a call sets al and calls through r11; the epilogue loads the result before it pops the
 // callee-saved registers.
 #define BUSTER_TIER0_ARGUMENT_REGISTERS                                                                                \
     (1u << X86_REGISTER_RDI | 1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX |               \
-     1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 0xffu << BUSTER_TIER0_XMM(0))
+     1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 | 0xffu << BUSTER_TIER0_XMM(0))
 #define BUSTER_TIER0_RESULT_REGISTERS (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 3u << BUSTER_TIER0_XMM(0))
 
 // The condition codes, as the encoder's Jcc and SETcc rows number them (their 4-bit tttn field).
@@ -1338,19 +1375,37 @@ static uint64_t tier0_incoming_bytes(const Tier0Function* function)
     return end;
 }
 
+// 1 for a call that passes a static chain (#148, __builtin_call_with_static_chain's): its argument 0 in r10, which a front
+// end puts there and nothing else does; else 0. A consumer that runs the call itself (the interpreters) passes the
+// chain in r10 to a native callee and nothing to an interpreted one, whose C parameters don't include it.
+static __attribute__((unused)) uint32_t tier0_call_chain(const Tier0Function* function, uint32_t c)
+{
+    const bool placed = function->argument_locations != 0 && function->call_argument_counts[c] != 0;
+    const AbiLocation location = placed ? function->argument_locations[function->call_first[c]] : (AbiLocation){ 0 };
+    return location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10 ? 1u : 0u;
+}
+
 // Whether call `c` is one a TAIL_CALL may make (Tier0Function.call_tails): neither it nor the function variadic, its
 // result the function's own (so that its callee returns where the function returns, the same registers or the same
 // hidden pointer), no result object, and its stack arguments within the function's incoming ones (tier0_incoming_bytes),
 // which it writes before it jumps.
 static bool tier0_tail_call_valid(const Tier0Function* function, uint32_t c)
 {
+    // __builtin_eh_return's row (Tier0Function.eh_return), in an eh_return function alone, which may be variadic (its
+    // unwinding passes none of the function's arguments on) and may make musttail calls too (#148).
+    const bool eh = function->call_tails[c] == BUSTER_TIER0_TAIL_EH;
+    const uint32_t first = function->call_first[c];
+    const bool offset = function->call_argument_counts[c] == 1 && function->argument_classes[first] == BUSTER_TYPED_CLASS_U64 &&
+                        function->argument_locations[first].kind == BUSTER_ABI_LOCATION_REGISTERS && function->argument_locations[first].registers[0] == BUSTER_ABI_RCX &&
+                        (function->argument_sizes == 0 || function->argument_sizes[first] == 0);
     const AbiReturn result = function->calls[c].result;
     const AbiReturn own = function->result;
     const bool same = result.kind == own.kind && result.flags == own.flags && result.part_bytes == own.part_bytes &&
                       memcmp(result.registers, own.registers, sizeof(result.registers)) == 0;
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
-    return same && object == 0 && !function->call_variadic[c] && function->incoming_variadic == 0 &&
-           function->calls[c].stack_bytes <= tier0_incoming_bytes(function);
+    return same && object == 0 && !function->call_variadic[c] && (eh || function->incoming_variadic == 0) &&
+           function->calls[c].stack_bytes <= tier0_incoming_bytes(function) && (!eh || function->eh_return) &&
+           (!eh || (function->call_targets[c] == 0 && offset && function->calls[c].stack_bytes == 0));
 }
 
 // Call `c`'s locations and its aggregates' metadata (argument_sizes and call_result_objects), so that no emitter reads or
@@ -3454,9 +3509,11 @@ struct Tier0Entries
     uint64_t record_count;
     // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
     uint64_t* words;
-    // The records every tail call of the function ends with but its stack arguments' copy (tier0_count_tail_finish), once
-    // the homes and the frame are known: the vector path's measuring of them (tier0_count_call's).
+    // The records every musttail call of the function ends with but its stack arguments' copy (tier0_count_tail_finish),
+    // once the homes and the frame are known, and every __builtin_eh_return's (eh_finish): the vector path's measuring of
+    // them (tier0_count_call's).
     uint32_t tail_finish;
+    uint32_t eh_finish;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and
     // full-width depths before every entry and at count, where the byte columns hold the depths its records are made at.
     uint8_t* deep;
@@ -4018,6 +4075,13 @@ struct Tier0Frame
     // Whether the function has masks (Tier0Function.masks), whose slots, 8 bytes per depth of the mask stack from
     // `mask_area`, `mask_slots` of them, hold the masks past its registers and those a call or a row saves (#179).
     bool masks;
+    // Whether the frame and the allocations probe the stack (#177, Tier0Function.probe_stack): the prologue's reservation
+    // and realignment (tier0_probes_reservation, tier0_emit_probed_reservation, tier0_emit_realignment) and ALLOCA's
+    // (tier0_emit_stack).
+    bool probe;
+    // Whether the function calls __builtin_eh_return (#148, Tier0Function.eh_return): `pushes` counts rdx's and rax's,
+    // pushed after the callee-saved registers, which its ordinary teardown steps over and its eh_return's pops.
+    bool eh_return;
 };
 
 // A memory class's slot: 16 bytes for each integer depth, of which an x87 value takes 10 and a 128-bit integer 16.
@@ -4053,13 +4117,23 @@ static bool tier0_value_object(const Tier0Function* function, uint64_t local, ui
            function->local_sizes[local] >= tier0_class_bytes(class) && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
 }
 
-// The frame's registers, once selection knows whether the entries move rsp (`moves`): a frame pointer where they do or
-// the frame is realigned, a realigned frame's base (r15) where both, and the integer depths they leave the stack.
-static void tier0_frame_registers(Tier0Frame* frame, bool moves, int32_t depth_count)
+// Whether a frame that neither moves rsp nor is realigned keeps a frame pointer all the same (#177): where the options
+// ask for one (Tier0Function.frame_pointer), every frame's, or with the leaf rule one whose function `calls`; and an
+// eh_return function's (#148, Tier0Function.eh_return), from which its unwinding finds the CFA.
+static bool tier0_kept_pointer(const Tier0Function* function, bool calls)
+{
+    return function->eh_return || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
+}
+
+// The frame's registers, once selection knows whether the entries move rsp (`moves`) and whether the options keep a
+// frame pointer (`kept`, tier0_kept_pointer): a frame pointer where either or where the frame is realigned, a realigned
+// frame's base (r15) where it moves rsp too, and the integer depths they leave the stack. A kept frame pointer is one as
+// a frame that moves rsp has, rbp no depth's: its places from rbp, its outgoing area at rsp, which stays put.
+static void tier0_frame_registers(Tier0Frame* frame, bool moves, bool kept, int32_t depth_count)
 {
     const bool realigned = frame->alignment_log2 != 0;
     frame->moves = moves;
-    frame->pointer = moves || realigned;
+    frame->pointer = moves || realigned || kept;
     frame->based = moves && realigned;
     frame->depth_count = depth_count;
 }
@@ -4521,12 +4595,15 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     // __builtin_unwind_init's function saves them all (Tier0Function.unwind_init), rbp as the frame pointer where it is one,
     // and so does __builtin_setjmp's (Tier0Function.returns_twice), so that its return restores its caller's registers
     // whatever a longjmp left in them.
-    for (uint32_t c = 0; (function->unwind_init || function->returns_twice) && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    // So does __builtin_eh_return's (Tier0Function.eh_return), which pushes rdx and rax after them, counted with them.
+    const bool all = function->unwind_init || function->returns_twice || function->eh_return;
+    for (uint32_t c = 0; all && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         frame->saved |= tier0_callee_saved[c] != X86_REGISTER_RBP || !frame->pointer ? 1u << c : 0;
     }
     // The frame pointer's push, first, counts with the others.
-    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
+    frame->eh_return = function->eh_return;
+    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u) + (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0u);
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
@@ -5001,6 +5078,44 @@ static X86Instruction tier0_instruction(uint32_t form, uint8_t reg, uint8_t rm, 
     record.displacement = displacement;
     record.immediate = immediate;
     return record;
+}
+
+// Stack-clash protection's probes (#177, -fstack-clash-protection, Tier0Function.probe_stack): as rsp moves down, each
+// page below it is touched before rsp moves past it, so that a frame or an allocation never steps over a guard page.
+// They are Tier 1's (tier1_frame_emit.c's PROBE_ALLOCATE and PROBE_ALIGN, and for ALLOCA
+// tier1_emit_cfg_probed_allocation's): rsp moved a page at a time, each page touched by a byte's `or` with 0, which
+// never crosses a page and changes no byte, through r11, which no parameter arrives in and no prologue or allocation
+// reads otherwise. A page is 4096 bytes. They move rsp rather than touch below it: kernels before Linux 4.20 refuse an
+// access more than 64 KiB below rsp where the main thread's stack must grow. A few records per frame and per
+// allocation: scalar, as the rest of the prologue is.
+#define BUSTER_TIER0_PAGE_BYTES 4096u
+// The prologue's probed reservation's records: a loop over its pages, and its remainder's subtraction and touch.
+#define BUSTER_TIER0_PROBE_LOOP_RECORDS 6u
+#define BUSTER_TIER0_PROBE_REMAINDER_RECORDS 2u
+// A probed realignment past a page's alignment: tier1_frame_emit_probe_align's loop.
+#define BUSTER_TIER0_PROBE_ALIGN_RECORDS 12u
+// The largest alignment's log2 whose gap a single touch after the and covers: a page's.
+#define BUSTER_TIER0_PROBE_ALIGN_TOUCH_LOG2 12u
+
+// A branch within the code a writer writes (a probe's loop's): its record, a rel8 of displacement 0 as every branch's,
+// and its column's entry, its target's record index `target`. Returns its index in the columns.
+static uint32_t tier0_put_local_branch(Tier0Writer* writer, uint32_t form, uint32_t target)
+{
+    const uint32_t index = writer->branch_count;
+    if (writer->records != 0)
+    {
+        writer->branches[index] = writer->count;
+        writer->targets[index] = target;
+    }
+    writer->branch_count += 1;
+    tier0_put(writer, tier0_instruction(form, 0, 0, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    return index;
+}
+
+// A probe's touch of the byte at rsp: `or byte [rsp], 0`.
+static X86Instruction tier0_probe_touch(void)
+{
+    return tier0_instruction(X86_FORM_OR_RM8_IMM8, 0, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, 0, 0);
 }
 
 // Of an operation's imm8 and imm32 forms, the imm8's where its immediate keeps `value` (#221's rule,
@@ -5636,12 +5751,14 @@ static uint32_t tier0_tail_clobbers(const Tier0Function* function, uint32_t i)
 
 // The frame released (with a frame pointer, rsp back from rbp, past what the body allocated, or the reservation added
 // back) and the saved registers popped, rbp last with a frame pointer: the epilogue's before its ret, and a tail call's
-// before its jump (tier0_emit_tail).
-static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
+// before its jump (tier0_emit_tail). An eh_return function's (Tier0Frame.eh_return) steps over rax's and rdx's slots,
+// below the others, or with `unwinding` (its __builtin_eh_return's) pops them first.
+static void tier0_emit_teardown(const Tier0Frame* frame, bool unwinding, Tier0Writer* writer)
 {
+    const uint32_t stepped = frame->eh_return && !unwinding ? BUSTER_TIER0_EH_PUSHES : 0;
     if (frame->pointer)
     {
-        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1));
+        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1 - stepped));
         tier0_put(writer, pushed != 0 ? tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, -pushed, 0)
                                       : tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
@@ -5649,6 +5766,11 @@ static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
     {
         const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
+    }
+    if (frame->eh_return && unwinding)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RAX, 0, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RDX, 0, 0, 0));
     }
     for (uint32_t c = BUSTER_TIER0_CALLEE_SAVED; c > 0; c -= 1)
     {
@@ -5663,33 +5785,36 @@ static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
     }
 }
 
-// How many records tier0_emit_teardown writes: the release (an add, or with a frame pointer the lea or mov) and the pops.
+// How many records tier0_emit_teardown writes (without `unwinding`): the release (an add, or with a frame pointer the lea
+// or mov) and the pops.
 static uint32_t tier0_count_teardown(const Tier0Frame* frame)
 {
-    return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes;
+    return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes - (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0);
 }
 
 // The records a function's tail calls end with besides their stack arguments' copy (tier0_emit_tail's): the hidden
 // pointer's move or load into rdi where the function's result goes through one (none where parameter 0 stays in rdi),
-// the teardown and the jump. The same for every tail call of a function, whose results are all its own; measuring's,
-// once the homes and the frame are known (Tier0Entries.tail_finish).
-static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes)
+// the teardown and the jump. The same for every musttail call of a function, whose results are all its own, and for
+// every __builtin_eh_return of one (`eh`); measuring's, once the homes and the frame are known (Tier0Entries.tail_finish
+// and eh_finish).
+static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, bool eh)
 {
     const bool hidden = function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0 &&
                         !(homes[0].is_register && homes[0].reg == X86_REGISTER_RDI);
-    return (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
+    // __builtin_eh_return's (Tier0Frame.eh_return): the CFA's lea, the teardown with rax's and rdx's pops, rsp's mov and
+    // the jump (tier0_emit_tail).
+    return eh ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 : (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
 }
 
-// A tail call's last records, once its arguments are where its callee's parameters arrive (tier0_emit_call's): rdi set to
-// the function's own hidden pointer (parameter 0's home) for a result through one, which the callee then writes and
-// returns; the call's stack arguments copied from the outgoing area, where the call put them, to the function's own
-// incoming ones, where its callee's arrive (through rax and xmm15, no argument's register: neither the call nor the
-// function is variadic, so al passes nothing), after every argument has been read from wherever it was, the incoming
-// slots among them; the frame released and the saved registers popped (tier0_emit_teardown), which no argument's
-// register is; and the jump, through r11 for an indirect one, to the callee, which returns to the function's caller.
-// Out of line: tail calls are rare.
-static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call,
-                                                     Tier0Writer* writer)
+// The records call `call`'s tail ends with besides its stack arguments' copy (Tier0Entries.tail_finish or eh_finish).
+static uint32_t tier0_tail_finish(const Tier0Function* function, const Tier0Entries* entries, uint32_t call)
+{
+    return function->call_tails[call] == BUSTER_TIER0_TAIL_EH ? entries->eh_finish : entries->tail_finish;
+}
+
+// A musttail call's last records (tier0_emit_tail's): the hidden pointer, the stack arguments' copy, the teardown and the
+// jump.
+static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
 {
     if (function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0)
     {
@@ -5712,7 +5837,7 @@ static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* funct
         const int32_t incoming = frame->pointer ? 16 : frame->incoming;
         tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15);
     }
-    tier0_emit_teardown(frame, writer);
+    tier0_emit_teardown(frame, false, writer);
     if (function->call_targets[call] == 0)
     {
         tier0_put(writer, tier0_instruction(X86_FORM_JMP_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
@@ -5731,6 +5856,35 @@ static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* funct
         }
         writer->reference_count += 1;
         tier0_put(writer, tier0_instruction(X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    }
+}
+
+// A tail call's last records, once its arguments are where its callee's parameters arrive (tier0_emit_call's): rdi set to
+// the function's own hidden pointer (parameter 0's home) for a result through one, which the callee then writes and
+// returns; the call's stack arguments copied from the outgoing area, where the call put them, to the function's own
+// incoming ones, where its callee's arrive (through rax and xmm15, no argument's register: neither the call nor the
+// function is variadic, so al passes nothing), after every argument has been read from wherever it was, the incoming
+// slots among them; the frame released and the saved registers popped (tier0_emit_teardown), which no argument's
+// register is; and the jump, through r11 for an indirect one, to the callee, which returns to the function's caller.
+// __builtin_eh_return's (Tier0Function.eh_return, its offset in rcx and its handler in r11), as LLVM's EH_RETURN: rcx the
+// CFA (rbp + 16) plus the offset, the frame torn down with rax and rdx (tier0_emit_teardown's `unwinding`), rsp rcx and
+// the jump to the handler, which so runs as LLVM's ret from rcx - 8, where it stores the handler, makes it run. Out of
+// line: tail calls are rare.
+static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call,
+                                                     Tier0Writer* writer)
+{
+    if (function->call_tails[call] == BUSTER_TIER0_TAIL_EH)
+    {
+        X86Instruction cfa = tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RCX, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE_INDEX(0), 16, 0);
+        cfa.index = X86_REGISTER_RCX;
+        tier0_put(writer, cfa);
+        tier0_emit_teardown(frame, true, writer);
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RCX, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_JMP_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else
+    {
+        tier0_emit_tail_jump(function, frame, homes, call, writer);
     }
 }
 
@@ -6146,14 +6300,49 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
                entries->floating_depths[i]);
 }
 
-// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's).
+// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
+// are its add and and, tier0_emit_probed_allocation's ten (three of them branches) and its address's lea or mov: the
+// vector path's positions count them so, the scalar path's by running the emitter.
 #define BUSTER_TIER0_ALLOCA_RECORDS 4
+#define BUSTER_TIER0_PROBED_ALLOCATION_RECORDS 10
+#define BUSTER_TIER0_PROBED_ALLOCA_RECORDS (3 + BUSTER_TIER0_PROBED_ALLOCATION_RECORDS)
+#define BUSTER_TIER0_PROBED_ALLOCA_BRANCHES 3
 #define BUSTER_TIER0_STACK_RECORDS 1
+
+// A probed allocation of the bytes in `count` (#177, tier1_emit_cfg_probed_allocation's records): while more than a page
+// is left, rsp moved a page and its byte touched, the page taken from `count`; then, unless nothing is left, rsp moved by
+// the rest and its byte touched. Each page is touched before rsp passes it, and so is the allocation's lowest byte, from
+// which the next frame's or allocation's probes start; no byte at or above the old rsp, the frame's own, is touched. It
+// takes no register but `count`, which the entry's address then takes: every other one may hold a deeper value or a
+// local's home.
+static __attribute__((cold, noinline)) void tier0_emit_probed_allocation(uint8_t count, Tier0Writer* writer)
+{
+    const uint32_t loop = writer->count;
+    tier0_put(writer, tier0_instruction(X86_FORM_CMP_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+    const uint32_t rest = tier0_put_local_branch(writer, X86_FORM_JBE_REL8, 0);
+    tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+    tier0_put(writer, tier0_probe_touch());
+    tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+    tier0_put_local_branch(writer, X86_FORM_JMP_REL8, loop);
+    if (writer->records != 0)
+    {
+        writer->targets[rest] = writer->count;
+    }
+    tier0_put(writer, tier0_instruction(X86_FORM_TEST_RM64_R64, count, count, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    const uint32_t done = tier0_put_local_branch(writer, X86_FORM_JE_REL8, 0);
+    tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    tier0_put(writer, tier0_probe_touch());
+    if (writer->records != 0)
+    {
+        writer->targets[done] = writer->count;
+    }
+}
 
 // The stack's entries, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 (to a
 // realigned frame's alignment, so that rsp keeps it) and taken from rsp, and the allocation's address in its register,
-// above the outgoing area (add, and, sub and lea, or mov with no area); STACK_SAVE's rsp into the register at its depth,
-// STACK_RESTORE's back from the one at depth − 1, and FRAME_ADDRESS's rbp into the register at its depth.
+// above the outgoing area (add, and, sub and lea, or mov with no area), in a probed frame (#177) taken by
+// tier0_emit_probed_allocation instead of the sub; STACK_SAVE's rsp into the register at its depth, STACK_RESTORE's back
+// from the one at depth − 1, and FRAME_ADDRESS's rbp into the register at its depth.
 static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
@@ -6167,7 +6356,14 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
                                             alignment - 1));
         tier0_put(writer, tier0_instruction(tier0_immediate_form(X86_FORM_AND_RM64_IMM8, X86_FORM_AND_RM64_IMM32, -alignment), 0, count, BUSTER_X86_REGISTER_DIRECT, 0,
                                             -alignment));
-        tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        if (frame->probe)
+        {
+            tier0_emit_probed_allocation(count, writer);
+        }
+        else
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
         if (frame->outgoing != 0)
         {
             tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, count, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE, (int32_t)frame->outgoing, 0));
@@ -8501,7 +8697,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
+    count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -8529,7 +8725,7 @@ static __attribute__((noinline)) uint32_t tier0_count_tail_call(const Tier0Funct
 // emitter, so that the twins check the count. `memory` is tier0_emit_deferred_entry's: a constant at each of
 // tier0_measure_vector's two instances.
 static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool memory,
-                                                                           uint32_t* references)
+                                                                           uint32_t* references, uint32_t* branches)
 {
     const uint32_t kind = entries->key_kinds[i];
     uint32_t count = 0;
@@ -8590,7 +8786,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     }
     else if (tier0_moves_stack(kind))
     {
-        count = kind == BUSTER_TYPED_ALLOCA ? BUSTER_TIER0_ALLOCA_RECORDS : BUSTER_TIER0_STACK_RECORDS;
+        // A probed ALLOCA's loop (#177), its records and its three branches.
+        const bool probed = kind == BUSTER_TYPED_ALLOCA && function->probe_stack;
+        count = probed ? BUSTER_TIER0_PROBED_ALLOCA_RECORDS : kind == BUSTER_TYPED_ALLOCA ? BUSTER_TIER0_ALLOCA_RECORDS : BUSTER_TIER0_STACK_RECORDS;
+        *branches += probed ? BUSTER_TIER0_PROBED_ALLOCA_BRANCHES : 0;
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
@@ -8616,11 +8815,105 @@ static X86Instruction tier0_realignment(uint32_t alignment_log2)
     return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)mask);
 }
 
+// Whether a frame's prologue probes its reservation of `size` bytes: under stack-clash protection (`probe`), one of a page
+// or more; a realigned frame's whatever its size, so that its alignment's gap starts from a touched address; and a frame
+// with a frame pointer's (`pointer`) whatever its size, since every frame whose body moves rsp has one: an allocation
+// after an unprobed reservation under a page could otherwise take rsp past a guard page before its first touch (LLVM's
+// constraint: a dynamic allocation starts from a probed rsp). Tier 1's frame does the same. The unwind tables' reader
+// (unwind_tier0_frame_tails) asks it of the frame Tier0Code publishes.
+static bool tier0_probes_reservation(bool probe, uint32_t size, uint32_t alignment_log2, bool pointer)
+{
+    return probe && size != 0 && (size >= BUSTER_TIER0_PAGE_BYTES || alignment_log2 != 0 || pointer);
+}
+
+// The records of the prologue's reservation of `size` bytes (tier0_emit_prologue's): a sub, or probed, the pages' loop
+// and the remainder's subtraction and touch.
+static uint32_t tier0_reservation_records(bool probe, uint32_t size, uint32_t alignment_log2, bool pointer)
+{
+    const uint32_t pages = size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    const uint32_t probed = (pages != 0 ? BUSTER_TIER0_PROBE_LOOP_RECORDS : 0) + (size != pages ? BUSTER_TIER0_PROBE_REMAINDER_RECORDS : 0);
+    return tier0_probes_reservation(probe, size, alignment_log2, pointer) ? probed : size != 0 ? 1 : 0;
+}
+
+// The records of a realigned frame's rounding (tier0_emit_realignment's, but the base's mov): its and, and probed, a
+// touch after it, or past a page's alignment, tier0_emit_probed_alignment's loop.
+static uint32_t tier0_realignment_records(bool probe, uint32_t alignment_log2)
+{
+    const uint32_t probed = alignment_log2 > BUSTER_TIER0_PROBE_ALIGN_TOUCH_LOG2 ? BUSTER_TIER0_PROBE_ALIGN_RECORDS : 2;
+    return alignment_log2 == 0 ? 0 : probe ? probed : 1;
+}
+
+// The prologue's branches: a probed reservation's loop's, and a probed realignment's past a page.
+static uint32_t tier0_prologue_branches(const Tier0Frame* frame)
+{
+    const bool probed = tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2, frame->pointer);
+    return (probed && frame->size >= BUSTER_TIER0_PAGE_BYTES ? 1 : 0) + (frame->probe && frame->alignment_log2 > BUSTER_TIER0_PROBE_ALIGN_TOUCH_LOG2 ? 2 : 0);
+}
+
+// The prologue's probed reservation of `size` bytes (tier1_frame_emit_probe_allocate's records): r11 set to rsp less the
+// pages, rsp moved a page and the page touched until it reaches r11, then the remainder's subtraction and touch.
+static __attribute__((cold, noinline)) void tier0_emit_probed_reservation(uint32_t size, Tier0Writer* writer)
+{
+    const uint32_t pages = size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    if (pages != 0)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_R11, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)pages));
+        const uint32_t loop = writer->count;
+        tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+        tier0_put(writer, tier0_probe_touch());
+        tier0_put(writer, tier0_instruction(X86_FORM_CMP_RM64_R64, X86_REGISTER_R11, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        tier0_put_local_branch(writer, X86_FORM_JNE_REL8, loop);
+    }
+    if (size != pages)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)(size - pages)));
+        tier0_put(writer, tier0_probe_touch());
+    }
+}
+
+// A probed realignment past a page's alignment (tier1_frame_emit_probe_align's records): r11 the aligned rsp plus a page;
+// while rsp is at or above it, rsp moved a page and touched; then rsp the aligned address, touched. It never steps past
+// its target, and covers an rsp already aligned.
+static __attribute__((cold, noinline)) void tier0_emit_probed_alignment(uint32_t alignment_log2, Tier0Writer* writer)
+{
+    const int32_t alignment = (int32_t)(UINT32_C(1) << alignment_log2);
+    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_R11, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    tier0_put(writer, tier0_instruction(X86_FORM_AND_RM64_IMM32, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, -alignment));
+    tier0_put(writer, tier0_instruction(X86_FORM_ADD_RM64_IMM32, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+    tier0_put(writer, tier0_instruction(X86_FORM_CMP_RM64_R64, X86_REGISTER_R11, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    const uint32_t finish = tier0_put_local_branch(writer, X86_FORM_JB_REL8, 0);
+    const uint32_t loop = writer->count;
+    tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+    tier0_put(writer, tier0_probe_touch());
+    tier0_put(writer, tier0_instruction(X86_FORM_CMP_RM64_R64, X86_REGISTER_R11, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    tier0_put_local_branch(writer, X86_FORM_JAE_REL8, loop);
+    if (writer->records != 0)
+    {
+        writer->targets[finish] = writer->count;
+    }
+    tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_IMM32, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)BUSTER_TIER0_PAGE_BYTES));
+    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RSP, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    tier0_put(writer, tier0_probe_touch());
+}
+
 // A realigned frame's records after its reservation: rsp rounded down to its alignment, and with entries that move rsp
-// r15 set to it, its base. Out of line and cold, so that the prologue of a frame that isn't realigned keeps its code.
+// r15 set to it, its base. Probed, a touch after the and, or past a page's alignment, tier0_emit_probed_alignment's
+// loop. Out of line and cold, so that the prologue of a frame that isn't realigned keeps its code.
 static __attribute__((cold, noinline)) void tier0_emit_realignment(const Tier0Frame* frame, Tier0Writer* writer)
 {
-    tier0_put(writer, tier0_realignment(frame->alignment_log2));
+    if (frame->probe && frame->alignment_log2 > BUSTER_TIER0_PROBE_ALIGN_TOUCH_LOG2)
+    {
+        tier0_emit_probed_alignment(frame->alignment_log2, writer);
+    }
+    else
+    {
+        tier0_put(writer, tier0_realignment(frame->alignment_log2));
+        if (frame->probe)
+        {
+            tier0_put(writer, tier0_probe_touch());
+        }
+    }
     if (frame->based)
     {
         tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R15, BUSTER_X86_REGISTER_DIRECT, 0, 0));
@@ -8645,7 +8938,18 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, tier0_callee_saved[c], 0, 0, 0));
         }
     }
-    if (frame->size != 0)
+    // An eh_return function's rdx and rax, which its __builtin_eh_return pops (Tier0Frame.eh_return).
+    if (frame->eh_return)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RDX, 0, 0, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RAX, 0, 0, 0));
+    }
+    // The reservation, after every push: probed (#177), or a sub.
+    if (tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2, frame->pointer))
+    {
+        tier0_emit_probed_reservation(frame->size, writer);
+    }
+    else if (frame->size != 0)
     {
         const uint32_t form = tier0_immediate_form(X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
@@ -8745,7 +9049,8 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 // epilogue's are tier0_count_epilogue's.
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
-    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + (frame->size != 0 ? 1 : 0) + (frame->alignment_log2 != 0 ? 1 : 0) + (frame->based ? 1 : 0);
+    uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + tier0_reservation_records(frame->probe, frame->size, frame->alignment_log2, frame->pointer) +
+                     tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -8847,7 +9152,7 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_put(writer, tier0_memory_slot(X86_FORM_FLD_M80, frame, 0, 0));
     }
-    tier0_emit_teardown(frame, writer);
+    tier0_emit_teardown(frame, false, writer);
     tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
@@ -8999,8 +9304,11 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         }
         entries->templates[i] = entry;
     }
-    // The conversions' register forms' scratch registers, as the entries that move rsp decide them.
-    const Tier0Tops convert = convert_scratch[moves ? 1 : 0];
+    // The conversions' register forms' scratch registers, as the frame pointer decides them: the entries that move rsp,
+    // or the options' (`kept`, #177), whose rbp a frame that isn't realigned gives up as one that moves rsp does.
+    const bool kept = tier0_kept_pointer(function, calls);
+    const bool pointer_depths = moves || (kept && !realigned);
+    const Tier0Tops convert = convert_scratch[pointer_depths ? 1 : 0];
     integer_top = convert.integer > integer_top ? convert.integer : integer_top;
     floating_top = convert.floating > floating_top ? convert.floating : floating_top;
     // An aggregate's copies take each stack's first free register.
@@ -9010,7 +9318,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         integer_top = tops.integer;
         floating_top = tops.floating;
     }
-    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, moves));
+    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, pointer_depths));
     *error = integer_top >= depth_count || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_top;
     frame->floating_top = floating_top;
@@ -9018,7 +9326,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
-    tier0_frame_registers(frame, moves, depth_count);
+    tier0_frame_registers(frame, moves, kept, depth_count);
     *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
     return unsupported;
 }
@@ -9446,7 +9754,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_entries(c
             }
             length = counter.count;
             counts.references += counter.reference_count;
-            counts.branches += deep ? counter.branch_count : 0;
+            // A deep entry's branches, and outside deep entries a probed ALLOCA's loop's (#177).
+            counts.branches += counter.branch_count;
             counts.choices += deep ? counter.choice_count : 0;
         }
         else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
@@ -9524,7 +9833,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += indirect ? 1 : 0;
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
-        count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
+        count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         counts->references += indirect ? 0 : 1;
@@ -9545,7 +9854,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         }
         else
         {
-            count += tier0_count_deferred(function, entries, i, tier0_memory_function(function), &counts->references);
+            count += tier0_count_deferred(function, entries, i, tier0_memory_function(function), &counts->references, &counts->branches);
         }
     }
     return count;
@@ -9684,7 +9993,8 @@ static inline __attribute__((always_inline)) void tier0_emit_body_entries(const 
 {
     Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
-    uint32_t branches = 0;
+    // The body's branches after the prologue's (a probe's loop's, #177).
+    uint32_t branches = writer.branch_count;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         const uint16_t entry = entries->templates[i];
@@ -9700,7 +10010,10 @@ static inline __attribute__((always_inline)) void tier0_emit_body_entries(const 
             }
             else
             {
+                // A probed ALLOCA's loop's branches (#177), in entry order as a template's.
+                writer.branch_count = branches;
                 tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                branches = writer.branch_count;
             }
             code->deferred += 1;
         }
@@ -9911,6 +10224,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
 
     Tier0Frame frame;
     memset(&frame, 0, sizeof(frame));
+    // Stack-clash protection's probes (#177): the prologue's and ALLOCA's.
+    frame.probe = function->probe_stack;
     Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
     frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
@@ -9965,7 +10280,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
         error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
-        entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes) : 0;
+        entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes, false) : 0;
+        entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame.eh_return ? tier0_count_tail_finish(function, &frame, homes, true) : 0;
     }
     if (error == TIER0_OK)
     {
@@ -9975,12 +10291,16 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         {
             counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references), frame.memory);
             epilogue = tier0_count_epilogue(function, &frame);
+            // The prologue's branches: a probe's loop's (#177).
+            counts.branches += tier0_prologue_branches(&frame);
         }
         else
         {
             Tier0Writer counter = { 0, 0, 0, 0 };
             tier0_emit_prologue(function, &frame, homes, references, &counter);
+            const uint32_t prologue_branches = counter.branch_count;
             counts = tier0_measure(function, entries, &frame, homes);
+            counts.branches += prologue_branches;
             tier0_positions_scalar(function, entries, counter.count);
             counter.count = 0;
             tier0_emit_epilogue(function, &frame, &counter);
@@ -10029,6 +10349,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         code->frame_pointer = frame.pointer;
         code->frame_alignment_log2 = frame.alignment_log2;
         code->frame_base = frame.based;
+        code->frame_probe = frame.probe;
+        code->frame_eh_return = frame.eh_return;
     }
     return error;
 }
@@ -12364,7 +12686,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     {
         unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
     }
-    const Tier0Tops convert = convert_scratch[moves ? 1 : 0];
+    // The frame pointer's depths, as the scalar selection's (tier0_select_entries).
+    const bool kept = tier0_kept_pointer(function, calls);
+    const bool pointer_depths = moves || (kept && !realigned);
+    const Tier0Tops convert = convert_scratch[pointer_depths ? 1 : 0];
     deferred_integer_top = convert.integer > deferred_integer_top ? convert.integer : deferred_integer_top;
     deferred_floating_top = convert.floating > deferred_floating_top ? convert.floating : deferred_floating_top;
     if (function->argument_sizes != 0)
@@ -12379,7 +12704,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
     const int32_t floating_reached = vector_floating_top > deferred_floating_top ? (int32_t)vector_floating_top : deferred_floating_top;
     clobbers |= rdx ? 1u << X86_REGISTER_RDX : 0;
-    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, moves));
+    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, pointer_depths));
     *error = integer_reached >= depth_count || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_reached;
     frame->floating_top = floating_reached;
@@ -12387,7 +12712,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     frame->save_slots = save_slots;
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
-    tier0_frame_registers(frame, moves, depth_count);
+    tier0_frame_registers(frame, moves, kept, depth_count);
     *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
     return unsupported;
 }
@@ -12487,7 +12812,7 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
             const uint32_t lane = (uint32_t)__builtin_ctz(rest);
             rest &= rest - 1;
             const uint32_t records = deep && entries->deep[first + lane] != 0 ? tier0_count_deep(function, entries, homes, first + lane, &counts)
-                                                                              : tier0_count_deferred(function, entries, first + lane, memory, &counts.references);
+                                                                              : tier0_count_deferred(function, entries, first + lane, memory, &counts.references, &counts.branches);
             length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
         }
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
@@ -12579,7 +12904,8 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
     Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0 };
     tier0_emit_prologue(function, frame, homes, references, &writer);
-    uint32_t branches = 0;
+    // The body's branches after the prologue's (a probe's loop's, #177).
+    uint32_t branches = writer.branch_count;
     uint32_t requests = 0;
     uint32_t deferred_count = 0;
     const __m512i seven = _mm512_set1_epi64(7);
@@ -12694,7 +13020,10 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
                 }
                 else
                 {
+                    // A probed ALLOCA's loop's branches (#177), after its block's templates', as a deep entry's.
+                    writer.branch_count = branches;
                     tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                    branches = writer.branch_count;
                 }
                 deferred_count += 1;
             }
@@ -12715,7 +13044,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     }
     writer.count = positions[count];
     tier0_emit_epilogue(function, frame, &writer);
-    if (deep)
+    if (deep || frame->probe)
     {
         tier0_sort_branches(branch_records, targets, branches);
     }

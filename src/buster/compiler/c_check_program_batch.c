@@ -104,7 +104,9 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const CheckGraph* graph = &writer->program->input->graph;
     const CheckOp op = graph->ops[node];
     const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
-    const bool truth = op == CHECK_OP_NOT || op == CHECK_OP_CONDITION;
+    // A truth test, but a vector's !, which is check_lower_expand's (a vector of bool's complement, #137).
+    const bool truth = (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION) &&
+                       !check_lower_transport_is_vector(writer->program->types, stream->conversions[node].operands[0].type);
     const bool plain = (wrapper || truth) && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE;
     if (plain)
     {

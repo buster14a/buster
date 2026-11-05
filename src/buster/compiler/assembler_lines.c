@@ -459,9 +459,9 @@ static uint32_t asm_line_string(AsmParser* parser, String8 text)
 // are its error.
 static void asm_line_finish(AsmParser* parser)
 {
-    const uint32_t info = asm_find_section(parser, BUSTER_S8(".debug_info"));
+    const uint32_t info = asm_find_section(parser, BUSTER_S8(".debug_info"), 0);
     const bool described = asm_section_holds(parser, info);
-    const uint32_t existing = asm_find_section(parser, BUSTER_S8(".debug_line"));
+    const uint32_t existing = asm_find_section(parser, BUSTER_S8(".debug_line"), 0);
     const bool written = asm_section_holds(parser, existing);
     if (parser->line_row_count != 0 && !described)
     {

@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <math.h>
+#include "host_math.h"
 #include "host_isa.h"
 #include "c_check_warning_events.c"
 #include "c_check_warning_set.c"
@@ -695,8 +696,8 @@ static uint16_t check_action_half_bits(CheckHalf format, long double value)
     else if (value != 0)
     {
         int binary = 0;
-        const long double fraction = frexpl(fabsl(value), &binary);
-        bits = check_action_half_round(format, negative, (uint64_t)ldexpl(fraction, 64), binary - 64);
+        const long double fraction = host_frexpl(fabsl(value), &binary);
+        bits = check_action_half_round(format, negative, (uint64_t)host_ldexpl(fraction, 64), binary - 64);
     }
     return bits;
 }
@@ -709,8 +710,8 @@ static long double check_action_half_value(CheckHalf format, uint16_t bits)
     const uint32_t mantissa = bits & ((1u << (precision - 1)) - 1);
     const uint32_t field = (bits & 0x7fffu) >> (precision - 1);
     const long double magnitude = field == 2 * greatest + 1 ? (mantissa != 0 ? __builtin_nanl("") : __builtin_infl()) :
-                                  field == 0                ? ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
-                                                              ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
+                                  field == 0                ? host_ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
+                                                              host_ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
     return (bits & 0x8000u) != 0 ? -magnitude : magnitude;
 }
 

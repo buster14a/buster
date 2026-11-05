@@ -6,6 +6,7 @@
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include "host_math.h"
 static void check_data_integer_bytes(uint8_t* bytes, unsigned __int128 value, uint32_t size)
 {
     for (uint32_t i = 0; i < size; i += 1)
@@ -77,13 +78,13 @@ static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double v
             const long double magnitude = fabsl(value);
             if (magnitude < 0x1p-16382L)
             {
-                significand = (uint64_t)ldexpl(magnitude, 16445);
+                significand = (uint64_t)host_ldexpl(magnitude, 16445);
             }
             else
             {
                 int binary_exponent = 0;
-                const long double fraction = frexpl(magnitude, &binary_exponent);
-                significand = (uint64_t)ldexpl(fraction, 64);
+                const long double fraction = host_frexpl(magnitude, &binary_exponent);
+                significand = (uint64_t)host_ldexpl(fraction, 64);
                 exponent = (uint32_t)(binary_exponent + 16382);
             }
         }

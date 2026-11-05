@@ -325,17 +325,20 @@ static void ir_simd_typed_test_intrinsics(IrTestTally* tally)
 }
 
 // The machine rows (#141, ir_simd_typed_machine_row): rows the IR's own operations don't take decode as the row itself,
-// with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and of
-// their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a quadword
-// one), and nothing else: a byte addition's of two vectors, a masked store's of an address, a vector and a mask of no
-// result, and a shift's of a count from a general register. Without each feature, TARGET with the result untouched. A
-// row of a class no row call takes (a vector of 8 bytes, a long double, a 128-bit integer) is UNSUPPORTED.
+// with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and
+// of their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a
+// quadword one), and nothing else: a saturating byte addition's of two vectors (the IR's add has no saturation), a masked store's of an address, a vector and a
+// mask of no result, and a shift's of a count from a general register. Without each feature, TARGET with the result
+// untouched. An SSE carrier's (#1280: a vector of 8 or 4 bytes) row decodes with VL's moves. At a target without
+// AVX512VL (#1281), a 16- or 32-byte vector's moves are AVX's VEX ones: AVX2's saturating byte addition of two 32-byte vectors
+// takes AVX and AVX2 there, and nothing of AVX-512. A row of a class no row call takes (a vector of 2 or 12 bytes, a
+// long double, a 128-bit integer) is UNSUPPORTED.
 static void ir_simd_typed_test_machine(IrTestTally* tally)
 {
     const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
-    Tier0Operation rows[3];
+    Tier0Operation rows[4];
     memset(rows, 0, sizeof(rows));
-    rows[0].records[0] = (X86Instruction){ .form = X86_FORM_VPADDB_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    rows[0].records[0] = (X86Instruction){ .form = X86_FORM_VPADDUSB_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
     rows[0].record_count = 1;
     rows[0].operand_count = 2;
     rows[0].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
@@ -362,19 +365,33 @@ static void ir_simd_typed_test_machine(IrTestTally* tally)
     rows[2].operand_bytes[0] = 32;
     rows[2].result_class = BUSTER_TYPED_CLASS_VECTOR;
     rows[2].result_bytes = 32;
+    rows[3].records[0] = (X86Instruction){ .form = X86_FORM_VPADDUSB_Y_Y_YM256, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    rows[3].record_count = 1;
+    rows[3].operand_count = 2;
+    rows[3].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[3].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[3].operand_bytes[0] = 32;
+    rows[3].operand_bytes[1] = 32;
+    rows[3].result_class = BUSTER_TYPED_CLASS_VECTOR;
+    rows[3].result_bytes = 32;
     // Each row's features, written out: the forms' and the moves'.
-    const uint64_t expected[3] = {
+    const uint64_t expected[4] = {
         BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW),
         BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW),
         BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL),
+        BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2),
     };
-    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    // The last row's target: AVX's and AVX2's, no AVX-512.
+    const uint64_t targets[4] = { avx512, avx512, avx512, BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) };
+    static const uint64_t features[] = {
+        BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ), BUSTER_X86_FEATURE(AVX), BUSTER_X86_FEATURE(AVX2),
+    };
     char description[192];
-    for (uint32_t r = 0; r < 3; r += 1)
+    for (uint32_t r = 0; r < 4; r += 1)
     {
         IrSimdTypedOperation decoded;
         memset(&decoded, 0x5a, sizeof(decoded));
-        const IrSimdTypedStatus status = ir_simd_typed_row(&rows[r], avx512, &decoded);
+        const IrSimdTypedStatus status = ir_simd_typed_row(&rows[r], targets[r], &decoded);
         snprintf(description, sizeof(description), "machine row %u decodes as the row itself, its classes and its features", r);
         ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.machine && decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.mask_bytes == 0 && decoded.intrinsic == 0 &&
                               decoded.required_features == expected[r] && decoded.operand_count == rows[r].operand_count &&
@@ -386,15 +403,38 @@ static void ir_simd_typed_test_machine(IrTestTally* tally)
             memset(&without, 0x5a, sizeof(without));
             const IrSimdTypedOperation before = without;
             const bool needed = (expected[r] & features[f]) != 0;
-            const IrSimdTypedStatus refused = ir_simd_typed_row(&rows[r], avx512 & ~features[f], &without);
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&rows[r], targets[r] & ~features[f], &without);
             snprintf(description, sizeof(description), "machine row %u without feature %u is refused exactly where it needs it, the result untouched", r, f);
             ir_test_expect(tally, needed ? refused == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0 : refused == IR_SIMD_TYPED_OK, description);
         }
     }
-    Tier0Operation narrow = rows[0];
-    narrow.operand_bytes[1] = 8;
+    // An SSE carrier (#1280), an operand of 8 or 4 bytes or a result of 4, is a row call's (an f64 or f32): its moves
+    // are a vector's below 64 bytes, VL's. A vector of 2 or 12 bytes is no width a row call takes.
     IrSimdTypedOperation decoded;
-    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of an 8-byte vector is no row call's");
+    static const uint8_t carriers[3][2] = { { 1, 8 }, { 1, 4 }, { 2, 4 } };
+    for (uint32_t c = 0; c < 3; c += 1)
+    {
+        Tier0Operation narrow = rows[0];
+        if (carriers[c][0] == 2)
+        {
+            narrow.result_bytes = carriers[c][1];
+        }
+        else
+        {
+            narrow.operand_bytes[carriers[c][0]] = carriers[c][1];
+        }
+        memset(&decoded, 0x5a, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&narrow, avx512, &decoded);
+        snprintf(description, sizeof(description), "a machine row of a %u-byte vector %s decodes, needing VL for its move", carriers[c][1], carriers[c][0] == 2 ? "result" : "operand");
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.machine && decoded.required_features == (expected[0] | BUSTER_X86_FEATURE(AVX512VL)) &&
+                              ir_simd_typed_row(&narrow, avx512 & ~BUSTER_X86_FEATURE(AVX512VL), &decoded) == IR_SIMD_TYPED_TARGET,
+                       description);
+    }
+    Tier0Operation narrow = rows[0];
+    narrow.operand_bytes[1] = 2;
+    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 2-byte vector is no row call's");
+    narrow.operand_bytes[1] = 12;
+    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 12-byte vector is no row call's");
     Tier0Operation wide = rows[2];
     wide.operand_classes[1] = BUSTER_TYPED_CLASS_I128;
     ir_test_expect(tally, ir_simd_typed_row(&wide, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 128-bit integer is no row call's");
@@ -480,16 +520,138 @@ static void ir_simd_typed_test(IrTestTally* tally)
                 ir_test_expect(tally, ir_simd_typed_operation(&altered, target, &decoded) == IR_SIMD_TYPED_UNSUPPORTED,
                                "operand widths cannot be silently truncated to the result shape");
             }
-            Tier0Operation unsupported = { 0 };
-            const TypeId floating = type_vector(&table.table, BUSTER_TYPE_FLOAT, 4u << width, false);
-            const char* reason = check_vector_lower_row(&table.table, &producer, false, CHECK_OP_ADD, floating, BUSTER_TYPED_CLASS_VOID, &unsupported);
-            IrSimdTypedOperation decoded = { 0 };
-            ir_test_expect(tally, reason == NULL && ir_simd_typed_operation(&unsupported, target, &decoded) == IR_SIMD_TYPED_UNSUPPORTED,
-                           "an otherwise valid floating producer operation remains explicitly outside the integer lane subset");
+            // Floats' and doubles' arithmetic and comparisons (#141's element types) decode into the IR's floating
+            // operations of their lanes, and their comparisons into a comparison of floating lanes expanded at their
+            // width (C's predicates: no unsigned ones).
+            static const CheckOp floating_operations[] = { CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE, CHECK_OP_LESS, CHECK_OP_LESS_EQUAL,
+                                                           CHECK_OP_GREATER, CHECK_OP_GREATER_EQUAL, CHECK_OP_EQUAL, CHECK_OP_NOT_EQUAL };
+            static const IrSimdOperation floating_semantics[] = { IR_SIMD_FADD, IR_SIMD_FSUB, IR_SIMD_FMUL, IR_SIMD_FDIV };
+            for (uint32_t element = 0; unsigned_lanes == 0 && element < 2; element += 1)
+            {
+                const TypeId floating = type_vector(&table.table, element == 0 ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_DOUBLE, (4u << width) >> element, false);
+                for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(floating_operations); operation += 1)
+                {
+                    Tier0Operation row = { 0 };
+                    const char* reason = check_vector_lower_row(&table.table, &producer, false, floating_operations[operation], floating, BUSTER_TYPED_CLASS_VOID, &row);
+                    IrSimdTypedOperation decoded = { 0 };
+                    const IrSimdTypedStatus status = ir_simd_typed_operation(&row, target, &decoded);
+                    const bool compare = operation >= 4;
+                    ir_test_expect(tally, reason == NULL && status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.shape == (IrSimdShape)(IR_SIMD_V4I32 + width) &&
+                                          decoded.lane == (element == 0 ? IR_SIMD_LANE_F32 : IR_SIMD_LANE_F64) && decoded.expand_mask == compare &&
+                                          (compare ? decoded.operation == IR_SIMD_COMPARE && decoded.predicate == predicates[0][operation - 4] : decoded.operation == floating_semantics[operation]),
+                                   "a floating producer operation decodes into the IR's operation of its lanes");
+                }
+            }
         }
     }
+    // At x86-64-v3, a target without AVX-512 (#1281), the producer's rows are VEX's (c_check_program_vectors_baseline.c):
+    // the 32-bit integers' addition, subtraction, multiplication and bitwise operations decode into the IR's own
+    // operations at 16 and 32 bytes, their features the form's (AVX, or AVX2 for a ymm register's integers) and AVX's
+    // moves', and nothing of AVX-512; the complement and the comparisons, which VEX makes of several records, stay
+    // machine rows; and a 64-byte vector has no VEX producer.
+    X86Target v3 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
+    ir_test_expect(tally, parsed && (v3.features & (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL))) == 0, "x86-64-v3 is a target without AVX-512");
+    for (uint32_t width = 0; ready && parsed && width < 2; width += 1)
+    {
+        const TypeId type = type_vector(&table.table, BUSTER_TYPE_INT, 4u << width, false);
+        for (uint32_t operation = 0; operation < sizeof(operations) / sizeof(*operations); operation += 1)
+        {
+            Tier0Operation row = { 0 };
+            const char* reason = check_vector_lower_row(&table.table, &v3, false, operations[operation], type, BUSTER_TYPED_CLASS_VOID, &row);
+            IrSimdTypedOperation decoded = { 0 };
+            const IrSimdTypedStatus admitted = ir_simd_typed_row(&row, v3.features, &decoded);
+            const bool own = operation < 6;
+            const uint64_t expected = BUSTER_X86_FEATURE(AVX) | (width == 1 && operation < 3 ? BUSTER_X86_FEATURE(AVX2) : 0);
+            ir_test_expect(tally, reason == NULL && admitted == IR_SIMD_TYPED_OK && decoded.machine == !own && (!own || (decoded.operation == semantics[operation] && decoded.shape == (IrSimdShape)(IR_SIMD_V4I32 + width) &&
+                                                                                                                       !decoded.expand_mask && decoded.required_features == expected)),
+                           "x86-64-v3's VEX rows decode into the IR's own operations, or stay machine rows, at 16 and 32 bytes");
+            const uint64_t features[] = { BUSTER_X86_FEATURE(AVX), BUSTER_X86_FEATURE(AVX2) };
+            for (uint32_t feature = 0; own && feature < BUSTER_ARRAY_LENGTH(features); feature += 1)
+            {
+                IrSimdTypedOperation without;
+                memset(&without, 0xa5, sizeof(without));
+                const IrSimdTypedOperation before = without;
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, v3.features & ~features[feature], &without);
+                const bool needed = (expected & features[feature]) != 0;
+                ir_test_expect(tally, needed ? status == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0 : status == IR_SIMD_TYPED_OK,
+                               "each VEX operation's features are needed, the result untouched without one");
+            }
+        }
+    }
+    // At the SSE targets (#141), the x86-64 baseline and x86-64-v2, the producer's 16-byte rows are legacy SSE's
+    // (c_check_program_vectors_baseline.c), two operands, the destination's the first: every element type's addition and
+    // subtraction, the 16-bit (and at x86-64-v2 the 32-bit) product, the bitwise operations and the floating arithmetic
+    // decode into the IR's operations of their lanes with no feature past the target's (SSE4.1's pmulld at x86-64-v2);
+    // the comparisons, the complement and the shifts (which need AVX's rows) stay machine rows or are the producer's
+    // refusals; and a 32-byte vector, which such a target computes in halves, is no IR value there.
+    static const TypeId sse_elements[] = { BUSTER_TYPE_SCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT, BUSTER_TYPE_ULLONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE };
+    static const IrSimdLane sse_lanes[] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64, IR_SIMD_LANE_F32, IR_SIMD_LANE_F64 };
+    static const CheckOp sse_operations[] = { CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE, CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR };
+    for (uint32_t level = 0; ready && level < 2; level += 1)
+    {
+        X86Target sse = { .architecture = X86_ARCH_BASELINE };
+        const bool sse_parsed = level == 0 || x86_target_parse("x86-64-v2", 9, &sse);
+        ir_test_expect(tally, sse_parsed && (sse.features & BUSTER_X86_FEATURE(AVX)) == 0, "the SSE targets have no AVX");
+        for (uint32_t element = 0; sse_parsed && element < BUSTER_ARRAY_LENGTH(sse_elements); element += 1)
+        {
+            const bool floating = element >= 4;
+            const uint64_t element_bytes = type_size(&table.table, sse_elements[element]);
+            const TypeId vector = type_vector(&table.table, sse_elements[element], (uint32_t)(16 / element_bytes), false);
+            for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(sse_operations); operation += 1)
+            {
+                const CheckOp op = sse_operations[operation];
+                const bool bitwise = op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR;
+                // The rows the producer makes: x86 has no byte's or quadword's product, and pmulld is SSE4.1's.
+                const bool made = floating ? !bitwise : op == CHECK_OP_DIVIDE ? false : op != CHECK_OP_MULTIPLY || element == 1 || (element == 2 && level == 1);
+                Tier0Operation row = { 0 };
+                const char* reason = check_vector_lower_row(&table.table, &sse, false, op, vector, BUSTER_TYPED_CLASS_VOID, &row);
+                if (made && reason == NULL)
+                {
+                    IrSimdTypedOperation decoded = { 0 };
+                    const IrSimdTypedStatus status = ir_simd_typed_row(&row, sse.features, &decoded);
+                    const IrSimdOperation expected = bitwise ? (op == CHECK_OP_BIT_AND ? IR_SIMD_AND : op == CHECK_OP_BIT_OR ? IR_SIMD_OR : IR_SIMD_XOR) :
+                                                     op == CHECK_OP_ADD ? (floating ? IR_SIMD_FADD : IR_SIMD_ADD) : op == CHECK_OP_SUBTRACT ? (floating ? IR_SIMD_FSUB : IR_SIMD_SUB) :
+                                                     op == CHECK_OP_MULTIPLY ? (floating ? IR_SIMD_FMUL : IR_SIMD_MUL) : IR_SIMD_FDIV;
+                    const IrSimdLane lane = bitwise ? IR_SIMD_LANE_I32 : sse_lanes[element];
+                    ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.operation == expected && decoded.lane == lane && decoded.shape == IR_SIMD_V4I32 &&
+                                          (decoded.required_features & ~sse.features) == 0,
+                                   "an SSE target's legacy rows decode into the IR's operations of their lanes, of the target's features");
+                }
+                else
+                {
+                    ir_test_expect(tally, !made || reason != NULL, "an SSE target's producer makes the rows x86 has forms for");
+                }
+            }
+        }
+        Tier0Operation wide = { 0 };
+        const TypeId wide_vector = type_vector(&table.table, BUSTER_TYPE_INT, 8, false);
+        const char* wide_reason = check_vector_lower_row(&table.table, &sse, false, CHECK_OP_ADD, wide_vector, BUSTER_TYPED_CLASS_VOID, &wide);
+        IrSimdTypedOperation decoded = { 0 };
+        ir_test_expect(tally, wide_reason != NULL || ir_simd_typed_row(&wide, sse.features, &decoded) != IR_SIMD_TYPED_OK,
+                       "an SSE target's 32-byte vector is no IR value");
+    }
+    // At Sandy Bridge, a target with AVX but not AVX2 (#1281's review), a 32-byte vector's bitwise operations are the
+    // packed singles' VEX forms, which decode into the IR's own operations with AVX alone; Tier 1 computes them by those
+    // forms there (Tier1SelectHoles.avx2).
+    X86Target v2 = { 0 };
+    const bool avx_parsed = x86_target_parse("x86-64-v2", 9, &v2);
+    const X86Target sandybridge = { .features = v2.features | BUSTER_X86_FEATURE(AVX), .architecture = X86_ARCH_OTHER };
+    ir_test_expect(tally, avx_parsed && (sandybridge.features & BUSTER_X86_FEATURE(AVX2)) == 0, "x86-64-v2 with AVX, as Sandy Bridge is, has no AVX2");
+    for (uint32_t operation = 3; ready && avx_parsed && operation < 6; operation += 1)
+    {
+        const TypeId type = type_vector(&table.table, BUSTER_TYPE_INT, 8, false);
+        Tier0Operation row = { 0 };
+        const char* reason = check_vector_lower_row(&table.table, &sandybridge, false, operations[operation], type, BUSTER_TYPED_CLASS_VOID, &row);
+        IrSimdTypedOperation decoded = { 0 };
+        const IrSimdTypedStatus admitted = ir_simd_typed_row(&row, sandybridge.features, &decoded);
+        ir_test_expect(tally, reason == NULL && admitted == IR_SIMD_TYPED_OK && !decoded.machine && decoded.operation == semantics[operation] && decoded.shape == IR_SIMD_V8I32 &&
+                              decoded.required_features == BUSTER_X86_FEATURE(AVX),
+                       "an AVX target's 32-byte bitwise rows decode into the IR's own operations, of AVX alone");
+    }
     // The typed row has no element type. Logical bit operations are identical for all integer element widths;
-    // normalize those records as raw bits, while refusing arithmetic/comparison opcodes with different lanes.
+    // normalize those records as raw bits; the arithmetic and comparisons decode at their lanes (#141's element types),
+    // 8-, 16- or 64-bit, signed and unsigned comparisons by their forms.
     static const TypeId integer_elements[] = { BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT, BUSTER_TYPE_LLONG, BUSTER_TYPE_ULLONG };
     static const CheckOp integer_operations[] = { CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR, CHECK_OP_BIT_NOT, CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_LESS };
     for (uint32_t width = 0; ready && width < 3; width += 1)
@@ -508,10 +670,14 @@ static void ir_simd_typed_test(IrTestTally* tally)
                 IrSimdTypedOperation result = { 0 };
                 const IrSimdTypedStatus status = ir_simd_typed_operation(&row, target, &result);
                 const bool bitwise = operation < 4;
-                ir_test_expect(tally, reason == NULL && normalized_reason == NULL && (bitwise ?
-                               status == IR_SIMD_TYPED_OK && result.shape == (IrSimdShape)(IR_SIMD_V4I32 + width) && !result.expand_mask &&
-                               memcmp(&row, &canonical, sizeof(row)) == 0 : status == IR_SIMD_TYPED_UNSUPPORTED),
-                               "representation-independent integer bitwise rows normalize exactly; other integer lane arithmetic/comparisons refuse");
+                static const IrSimdLane lanes[] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I16, IR_SIMD_LANE_I64, IR_SIMD_LANE_I64 };
+                const bool signed_element = (element & 1) == 0;
+                const IrSimdOperation arithmetic = operation == 4 ? IR_SIMD_ADD : operation == 5 ? IR_SIMD_SUB : IR_SIMD_COMPARE;
+                ir_test_expect(tally, reason == NULL && normalized_reason == NULL && status == IR_SIMD_TYPED_OK && !result.machine && result.shape == (IrSimdShape)(IR_SIMD_V4I32 + width) &&
+                                      (bitwise ? !result.expand_mask && result.lane == IR_SIMD_LANE_I32 && memcmp(&row, &canonical, sizeof(row)) == 0 :
+                                                 result.operation == arithmetic && result.lane == lanes[element] && result.expand_mask == (arithmetic == IR_SIMD_COMPARE) &&
+                                                     (arithmetic != IR_SIMD_COMPARE || result.predicate == (signed_element ? IR_SIMD_LT : IR_SIMD_ULT))),
+                               "integer bitwise rows normalize exactly; other integer lanes' arithmetic and comparisons decode at their lanes");
             }
         }
     }

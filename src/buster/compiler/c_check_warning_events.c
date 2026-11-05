@@ -110,8 +110,8 @@ typedef enum CheckWarningEventKind
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
-    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_function_types):
-    // payload.name the attribute's name, payload.first_type the declarator's type, payload.data its typedef spelling.
+    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_type_warnings):
+    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling.
     CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_NONSTRING_TYPE,
     CHECK_WARNING_EVENT_TRANSPARENT_UNION,
@@ -229,6 +229,11 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
     CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
     CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
+    // An initializer's use of a member an unavailable attribute marks (#147, check_init_member_use): clang's error, which
+    // no warning option maps, staged with the walk's warnings (check_driver_initializer_warning_events gives it). The
+    // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
+    // CHECK_WARNING_NOTE_UNAVAILABLE_HERE, at the member's name.
+    CHECK_WARNING_EVENT_UNAVAILABLE_USE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -251,6 +256,7 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DEPRECATED_HERE,
     // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
     CHECK_WARNING_NOTE_SPAN_REASON,
+    CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

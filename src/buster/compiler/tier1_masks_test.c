@@ -39,6 +39,11 @@
 #include <unistd.h>
 
 #define BUSTER_TIER1_MASKS_TEST_BUFFER 256
+// The native entry's xmm0 and xmm1 (#1280, tier1_masks_test_call): a double's and a float's bits, signaling NaNs past
+// them.
+#define BUSTER_TIER1_MASKS_TEST_DOUBLE UINT64_C(0x400921fb54442d18)
+#define BUSTER_TIER1_MASKS_TEST_FLOAT UINT32_C(0x3fc00000)
+#define BUSTER_TIER1_MASKS_TEST_DIRTY UINT64_C(0x7f8000017f800001)
 #define BUSTER_TIER1_MASKS_TEST_INPUTS 16
 #define BUSTER_TIER1_MASKS_TEST_HELPER 9u
 #define BUSTER_TIER1_MASKS_TEST_ENTRY 1u
@@ -51,9 +56,26 @@ struct Tier1MasksTest
     uint64_t failures;
     uint64_t random;
     uint8_t* v4;
+    // x86-64-v3's forms (#1281): AVX2's and F16C's, no AVX-512, which the fixtures marked `v3` are emitted for.
+    uint8_t* v3;
+    // x86-64-v2's and the x86-64 baseline's forms (#141's SSE targets).
+    uint8_t* v2;
+    uint8_t* baseline;
+    // x86-64-v2's with AVX, Sandy Bridge's (#1281's review): AVX's without AVX2, which the fixtures marked `avx` are emitted for.
+    uint8_t* avx;
+    // x86-64-v3's with AVX512F but not VL (#1281's review), which the fixtures marked `foundation` are emitted for.
+    const uint8_t* foundation;
+    // x86-64-v4's forms with AVX512-FP16's complex multiplication, which no target of Tier 1's allows yet, for the
+    // fixtures of rows of it (Tier1MasksFixture.fp16); and the forms of the fixture that runs.
+    uint8_t* fp16;
+    const uint8_t* forms;
     // x86-64-v4's features, which the typed programs' lowering takes as its output target (ir_lower_typed_target).
     uint64_t v4_features;
     bool native;
+    // Whether the host has AVX512-FP16 too, which a fixture of its rows needs to run natively.
+    bool native_fp16;
+    // The fixtures that ran natively, by both paths, with and without rematerialization.
+    uint32_t native_fixtures;
     // --print: each fixture's records, by the vector path, as GNU as reads them.
     bool print;
     Arena output;
@@ -81,6 +103,29 @@ struct Tier1MasksTest
     uint32_t builtin_attempts;
     uint32_t builtin_rows;
     uint32_t builtin_native;
+    // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
+    // copies renamed into a live value's register; and of each, those the code's certificate refused.
+    uint32_t row_reloads;
+    uint32_t row_reloads_refused;
+    uint32_t row_stagings;
+    uint32_t row_stagings_refused;
+    // Claimed placements whose roles share a register Tier 0's placement keeps apart, and whose opmask register named by
+    // number is k0 (tier1_masks_test_claim_mutants), each with the row's records placed by it; and those refused.
+    uint32_t row_roles;
+    uint32_t row_roles_refused;
+    uint32_t row_k0;
+    uint32_t row_k0_refused;
+    // The rows whose first operand is read in its own register up to the result's first write (#1283's split), and their
+    // claims of it corrupted (the split cleared, its early register made the result's), and those refused.
+    uint32_t row_splits;
+    uint32_t row_split_mutants;
+    uint32_t row_split_refused;
+    // Among the roles sharing a register, the temporaries claimed in a live operand's register.
+    uint32_t row_overlaps;
+    uint32_t row_overlaps_refused;
+    // The vectors' moves of ymm and zmm registers narrowed to xmm ones (#1284), and those refused.
+    uint32_t vector_moves;
+    uint32_t vector_moves_refused;
 };
 
 typedef struct Tier1MasksFixture Tier1MasksFixture;
@@ -101,6 +146,32 @@ struct Tier1MasksFixture
     bool vector_cycle;
     // A machine row short of free opmask registers (#141), which borrows live masks' and reloads them after it.
     bool borrows;
+    // Emitted for x86-64-v3 (#1281), a target without AVX-512: its vectors by VEX forms in xmm0 to xmm15 alone, its rows'
+    // roles below 16, and every record one that target has.
+    bool v3;
+    // Emitted for Sandy Bridge, a target with AVX but not AVX2 (#1281's review): its 32-byte vectors by AVX's forms alone.
+    bool avx;
+    // Emitted for x86-64-v2 and for the x86-64 baseline, targets without AVX (#141's SSE targets): its 16-byte vectors by
+    // legacy SSE's forms in xmm0 to xmm15, and every record one that target has.
+    bool v2;
+    bool baseline;
+    // Emitted for x86-64-v3 with AVX512F but not AVX512VL, as Knights Landing has AVX-512 (#1281's review): zmm16 and on
+    // and EVEX's 512-bit forms, but no EVEX form of an xmm or a ymm register.
+    bool foundation;
+    // Its machine rows and the moves around them into their roles' registers and out of them (#1283,
+    // Tier1EmitResult.row_moves), by the vector path and by the scalar one (whose allocators assign registers
+    // differently; a host without the vector path runs the scalar one for both), with and without rematerialization:
+    // checked where `rows` isn't 0.
+    uint32_t rows;
+    uint32_t row_moves[2];
+    // A row of AVX512-FP16's (#1283's review): its forms are test->fp16's, and it runs natively only where the host has
+    // AVX512-FP16 (not the 9700X's Zen 5).
+    bool fp16;
+    // Rows whose destination can't be a source's register (#1283's review): a gather's or a complex multiplication's,
+    // whose records the test checks for distinct registers.
+    bool exclusive;
+    // Makes the random input one the fixture can run on (a gather's indices in its buffer), before its model reads it.
+    void (*prepare)(uint8_t* input);
     // The buffer after a run, from the input and the count, where the interpreter can't run the fixture: a machine row's
     // (#141), which it has no model of. Null for the interpreter's.
     void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
@@ -156,6 +227,102 @@ static void tier1_masks_test_rows_model(const uint8_t* input, uint64_t count, ui
     memcpy(output + 172, &y, 4);
 }
 
+// The machine rows' buffer at x86-64-v3 (#1281): of the 32-byte vectors x and y at 0 and 32, the bytes of x + y (a VEX
+// row) added to x as doublewords at 128 and x again at 160; of the floats a and b at 96 and 100, their bits added as
+// integers at 192 (the result read as its first operand), (a + b) ^ a at 196 (a row that writes its second floating
+// operand first), and a and b again at 200 and 204; and the doublewords of the 16-byte vector at 64 reversed (vpshufd's)
+// at 224.
+static void tier1_masks_test_vex_rows_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint8_t sum[32];
+    for (uint32_t i = 0; i < 32; i += 1)
+    {
+        sum[i] = (uint8_t)(input[i] + input[32 + i]);
+    }
+    for (uint32_t lane = 0; lane < 8; lane += 1)
+    {
+        uint32_t x = 0;
+        uint32_t z = 0;
+        memcpy(&x, input + 4 * lane, 4);
+        memcpy(&z, sum + 4 * lane, 4);
+        const uint32_t w = x + z;
+        memcpy(output + 128 + 4 * lane, &w, 4);
+    }
+    memcpy(output + 160, input, 32);
+    uint32_t a = 0;
+    uint32_t b = 0;
+    memcpy(&a, input + 96, 4);
+    memcpy(&b, input + 100, 4);
+    const uint32_t first = a + b;
+    const uint32_t second = (a + b) ^ a;
+    memcpy(output + 192, &first, 4);
+    memcpy(output + 196, &second, 4);
+    memcpy(output + 200, &a, 4);
+    memcpy(output + 204, &b, 4);
+    for (uint32_t lane = 0; lane < 4; lane += 1)
+    {
+        memcpy(output + 224 + 4 * lane, input + 64 + 4 * (3 - lane), 4);
+    }
+}
+
+// The pressure fixtures' buffer (#1281's review): of the 15 vectors of `bytes` bytes at 0, 4, ..., 56, the exclusive or
+// of the last 13 at 128, and the row's a ^ (a + b) of the first two at 128 + `bytes`, as doublewords.
+static void tier1_masks_test_pressure(const uint8_t* input, uint8_t* output, uint32_t bytes)
+{
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    for (uint32_t lane = 0; lane < bytes / 4; lane += 1)
+    {
+        uint32_t folded = 0;
+        for (uint32_t v = 2; v < 15; v += 1)
+        {
+            uint32_t x = 0;
+            memcpy(&x, input + 4 * v + 4 * lane, 4);
+            folded ^= x;
+        }
+        uint32_t a = 0;
+        uint32_t b = 0;
+        memcpy(&a, input + 4 * lane, 4);
+        memcpy(&b, input + 4 + 4 * lane, 4);
+        const uint32_t row = a ^ (a + b);
+        memcpy(output + 128 + 4 * lane, &folded, 4);
+        memcpy(output + 128 + bytes + 4 * lane, &row, 4);
+    }
+}
+
+static void tier1_masks_test_pressure_model64(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    tier1_masks_test_pressure(input, output, 64);
+}
+
+static void tier1_masks_test_pressure_model32(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    tier1_masks_test_pressure(input, output, 32);
+}
+
+// The read-only row's buffer (#1293's review): of the 15 32-byte vectors at 0, 4, ..., 56, the exclusive or of the last 14
+// at 128, and the first, the row's result, at 160.
+static void tier1_masks_test_read_only_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    for (uint32_t lane = 0; lane < 8; lane += 1)
+    {
+        uint32_t folded = 0;
+        for (uint32_t v = 1; v < 15; v += 1)
+        {
+            uint32_t x = 0;
+            memcpy(&x, input + 4 * v + 4 * lane, 4);
+            folded ^= x;
+        }
+        memcpy(output + 128 + 4 * lane, &folded, 4);
+    }
+    memcpy(output + 160, input, 32);
+}
+
 // The floating row's buffer (#141): the low lanes of a float's and another's bits added as integers at 128, the result
 // read as its first operand, of the floats at 0 and 4.
 static void tier1_masks_test_floating_model(const uint8_t* input, uint64_t count, uint8_t* output)
@@ -169,6 +336,132 @@ static void tier1_masks_test_floating_model(const uint8_t* input, uint64_t count
     const uint32_t sum = a + b;
     memcpy(output + 128, &sum, 4);
 }
+
+// The SSE carriers' buffer (#1280): rows of no records, each its 4- or 8-byte vector operand's register whole as a
+// 16-byte result, at 128 the double parameter's (its bits, then zeros), at 144 the float parameter's (its bits, then
+// zeros) and at 160 the helper's double result's (count + 1, then zeros): each operand zero-extended into its role,
+// though its register's bytes past it aren't zero.
+static void tier1_masks_test_carriers_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    const uint64_t parameter = BUSTER_TIER1_MASKS_TEST_DOUBLE;
+    const uint32_t single = BUSTER_TIER1_MASKS_TEST_FLOAT;
+    const uint64_t result = count + 1;
+    memset(output + 128, 0, 48);
+    memcpy(output + 128, &parameter, 8);
+    memcpy(output + 144, &single, 4);
+    memcpy(output + 160, &result, 8);
+}
+
+// The vector rows' buffer (#1283), of a and b, 16 doublewords at 0 and 64, and k, the word at 0: at 128, w ^ z ^ m, where
+// s = a + b, t = s ^ a ^ b, m = a + t where k has a bit and a elsewhere, n = (b + b)'s low 4 doublewords, w = n + n in its
+// low 4 and 0 past them, z = n's 16 bytes zero-extended; at 192, the bytes of lo (at 0) where c's (at 64) top bit is
+// clear and of hi (at 32) where it is set; n at 224 and m's first doubleword doubled at 240.
+static void tier1_masks_test_vector_rows_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint32_t a[16];
+    uint32_t b[16];
+    uint16_t k = 0;
+    memcpy(a, input, sizeof(a));
+    memcpy(b, input + 64, sizeof(b));
+    memcpy(&k, input, sizeof(k));
+    uint32_t m[16];
+    uint32_t n[4];
+    uint32_t f[16];
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t sum = a[i] + b[i];
+        const uint32_t t = sum ^ a[i] ^ b[i];
+        m[i] = ((k >> i) & 1) != 0 ? a[i] + t : a[i];
+    }
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        n[i] = b[i] + b[i];
+    }
+    uint8_t bytes[16];
+    memcpy(bytes, n, sizeof(bytes));
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t w = i < 4 ? n[i] + n[i] : 0;
+        f[i] = w ^ (uint32_t)bytes[i] ^ m[i];
+    }
+    memcpy(output + 128, f, sizeof(f));
+    for (uint32_t i = 0; i < 32; i += 1)
+    {
+        output[192 + i] = (input[64 + i] & 0x80) != 0 ? input[32 + i] : input[i];
+    }
+    memcpy(output + 224, n, sizeof(n));
+    const uint32_t doubled = m[0] + m[0];
+    memcpy(output + 240, &doubled, sizeof(doubled));
+}
+
+// The gathers' fixture's input (#1283's review): its 16 doubleword indices at 64 each below 16, so that they gather from the
+// buffer's first 64 bytes.
+static void tier1_masks_test_gather_prepare(uint8_t* input)
+{
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t index = input[64 + 4 * i] & 15u;
+        memcpy(input + 64 + 4 * i, &index, 4);
+    }
+}
+
+// The gathers' buffer: of the doublewords d at 0, the indices x at 64 and the word mask k at 0, each lane i where k has a
+// bit is d[x[i]], at 128 elsewhere x[i] (the source is the index) and at 192 d[i] (the source is d).
+static void tier1_masks_test_gather_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint32_t d[16];
+    uint32_t x[16];
+    uint16_t k = 0;
+    memcpy(d, input, sizeof(d));
+    memcpy(x, input + 64, sizeof(x));
+    memcpy(&k, input, sizeof(k));
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t first = ((k >> i) & 1) != 0 ? d[x[i]] : x[i];
+        const uint32_t second = ((k >> i) & 1) != 0 ? d[x[i]] : d[i];
+        memcpy(output + 128 + 4 * i, &first, 4);
+        memcpy(output + 192 + 4 * i, &second, 4);
+    }
+}
+
+// The complex multiplications' buffer: of the half-precision complex numbers a at 0 and b at 64, a times b at 128 and at
+// 192, as the host's vfmulcph computes them (its own rounding, NaNs and denormals), where the host has AVX512-FP16: the
+// encoder's records of a load of each, the product and its store, run from a page of their own, so that the test's own
+// code needs no AVX512-FP16 (this compiler's build of it, the self-host's, takes no intrinsics of it at x86-64).
+// JIT instructions have no Clang function-type prefix, so UBSan's indirect-call check must not read before the page.
+static __attribute__((no_sanitize("function"))) void tier1_masks_test_complex_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    const X86Instruction records[] = {
+        { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 0, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE },
+        { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 },
+        { .form = X86_FORM_VFMULCPH_Z_Z_ZM512, .reg = 2, .vvvv = 0, .rm = 1, .mode = BUSTER_X86_REGISTER_DIRECT },
+        { .form = X86_FORM_VMOVDQU64_ZM512_Z, .reg = 2, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE },
+        { .form = X86_FORM_RET },
+    };
+    const uint32_t count_records = sizeof(records) / sizeof(records[0]);
+    uint8_t* code = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const int64_t size = code != MAP_FAILED ? x86_encode(records, count_records, code, 4096, 0, 0) : -1;
+    if (size > 0 && mprotect(code, 4096, PROT_READ | PROT_EXEC) == 0)
+    {
+        void (*product)(const uint8_t*, uint8_t*) = (void (*)(const uint8_t*, uint8_t*))(void*)code;
+        product(input, output + 128);
+        memcpy(output + 192, output + 128, 64);
+    }
+    if (code != MAP_FAILED)
+    {
+        munmap(code, 4096);
+    }
+}
+
+// The fixtures of AVX512-FP16's rows, the array's last, which run natively only where the host has it.
+#define BUSTER_TIER1_MASKS_TEST_FP16_FIXTURES 1
 
 static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
     {
@@ -709,6 +1002,789 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "  %139 = ret.void\n"
                 "}\n",
     },
+    // The IR's lanes (#141's element types), at each width: 8-, 16- and 64-bit integers' arithmetic, products and shifts
+    // by each lane's count (masked to twice the lane's bits, so that half shift past it), floats' and doubles'
+    // arithmetic, and comparisons of each lanes by each predicate, into masks of a bit per lane and selections at those
+    // lanes; the interpreter's model of them against Tier 1's code, NaNs, infinities and denormals among the random
+    // floats. Generated by a script (the PR's description), kept as text so that a reader sees the IR.
+    {
+        .name = "16-byte vectors' lanes: 8-, 16- and 64-bit integers, floats and doubles (#141's element types)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v4i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=112\n"
+                "  %4 = load.v4i32 %3 align=1\n"
+                "  %5 = xor.v4i32 %2, %4\n"
+                "  %6 = add.v16i8 %2, %4\n"
+                "  %7 = sub.v16i8 %2, %4\n"
+                "  %8 = vcmp.m16 %2, %7 eq lanes=i8\n"
+                "  %9 = vselect.v16i8 %8, %6, %7\n"
+                "  %10 = xor.v4i32 %5, %9\n"
+                "  %11 = vcmp.m16 %7, %4 ne lanes=i8\n"
+                "  %12 = vselect.v16i8 %11, %7, %6\n"
+                "  %13 = xor.v4i32 %10, %12\n"
+                "  %14 = vcmp.m16 %2, %4 lt lanes=i8\n"
+                "  %15 = vselect.v16i8 %14, %6, %7\n"
+                "  %16 = xor.v4i32 %13, %15\n"
+                "  %17 = vcmp.m16 %7, %6 le lanes=i8\n"
+                "  %18 = vselect.v16i8 %17, %7, %6\n"
+                "  %19 = xor.v4i32 %16, %18\n"
+                "  %20 = vcmp.m16 %2, %4 gt lanes=i8\n"
+                "  %21 = vselect.v16i8 %20, %6, %7\n"
+                "  %22 = xor.v4i32 %19, %21\n"
+                "  %23 = vcmp.m16 %7, %4 ge lanes=i8\n"
+                "  %24 = vselect.v16i8 %23, %7, %6\n"
+                "  %25 = xor.v4i32 %22, %24\n"
+                "  %26 = vcmp.m16 %2, %7 ult lanes=i8\n"
+                "  %27 = vselect.v16i8 %26, %6, %7\n"
+                "  %28 = xor.v4i32 %25, %27\n"
+                "  %29 = vcmp.m16 %7, %4 ule lanes=i8\n"
+                "  %30 = vselect.v16i8 %29, %7, %6\n"
+                "  %31 = xor.v4i32 %28, %30\n"
+                "  %32 = vcmp.m16 %2, %4 ugt lanes=i8\n"
+                "  %33 = vselect.v16i8 %32, %6, %7\n"
+                "  %34 = xor.v4i32 %31, %33\n"
+                "  %35 = vcmp.m16 %7, %6 uge lanes=i8\n"
+                "  %36 = vselect.v16i8 %35, %7, %6\n"
+                "  %37 = xor.v4i32 %34, %36\n"
+                "  %38 = xor.v4i32 %37, %6\n"
+                "  %39 = xor.v4i32 %38, %7\n"
+                "  %40 = add.v8i16 %2, %4\n"
+                "  %41 = sub.v8i16 %2, %4\n"
+                "  %42 = mul.v8i16 %2, %4\n"
+                "  %43 = vconst.v4i32 0x001f001f001f001f001f001f001f001f\n"
+                "  %44 = and.v4i32 %4, %43\n"
+                "  %45 = shl.v8i16 %2, %44\n"
+                "  %46 = lshr.v8i16 %2, %44\n"
+                "  %47 = ashr.v8i16 %2, %44\n"
+                "  %48 = vcmp.m8 %2, %41 eq lanes=i16\n"
+                "  %49 = vselect.v8i16 %48, %40, %41\n"
+                "  %50 = xor.v4i32 %39, %49\n"
+                "  %51 = vcmp.m8 %41, %4 ne lanes=i16\n"
+                "  %52 = vselect.v8i16 %51, %41, %42\n"
+                "  %53 = xor.v4i32 %50, %52\n"
+                "  %54 = vcmp.m8 %2, %4 lt lanes=i16\n"
+                "  %55 = vselect.v8i16 %54, %42, %45\n"
+                "  %56 = xor.v4i32 %53, %55\n"
+                "  %57 = vcmp.m8 %45, %46 le lanes=i16\n"
+                "  %58 = vselect.v8i16 %57, %45, %46\n"
+                "  %59 = xor.v4i32 %56, %58\n"
+                "  %60 = vcmp.m8 %2, %4 gt lanes=i16\n"
+                "  %61 = vselect.v8i16 %60, %46, %47\n"
+                "  %62 = xor.v4i32 %59, %61\n"
+                "  %63 = vcmp.m8 %47, %4 ge lanes=i16\n"
+                "  %64 = vselect.v8i16 %63, %47, %40\n"
+                "  %65 = xor.v4i32 %62, %64\n"
+                "  %66 = vcmp.m8 %2, %41 ult lanes=i16\n"
+                "  %67 = vselect.v8i16 %66, %40, %41\n"
+                "  %68 = xor.v4i32 %65, %67\n"
+                "  %69 = vcmp.m8 %41, %4 ule lanes=i16\n"
+                "  %70 = vselect.v8i16 %69, %41, %42\n"
+                "  %71 = xor.v4i32 %68, %70\n"
+                "  %72 = vcmp.m8 %2, %4 ugt lanes=i16\n"
+                "  %73 = vselect.v8i16 %72, %42, %45\n"
+                "  %74 = xor.v4i32 %71, %73\n"
+                "  %75 = vcmp.m8 %45, %46 uge lanes=i16\n"
+                "  %76 = vselect.v8i16 %75, %45, %46\n"
+                "  %77 = xor.v4i32 %74, %76\n"
+                "  %78 = xor.v4i32 %77, %40\n"
+                "  %79 = xor.v4i32 %78, %41\n"
+                "  %80 = xor.v4i32 %79, %42\n"
+                "  %81 = xor.v4i32 %80, %45\n"
+                "  %82 = xor.v4i32 %81, %46\n"
+                "  %83 = xor.v4i32 %82, %47\n"
+                "  %84 = add.v2i64 %2, %4\n"
+                "  %85 = sub.v2i64 %2, %4\n"
+                "  %86 = mul.v2i64 %2, %4\n"
+                "  %87 = vconst.v4i32 0x000000000000007f000000000000007f\n"
+                "  %88 = and.v4i32 %4, %87\n"
+                "  %89 = shl.v2i64 %2, %88\n"
+                "  %90 = lshr.v2i64 %2, %88\n"
+                "  %91 = ashr.v2i64 %2, %88\n"
+                "  %92 = vcmp.m8 %2, %85 eq lanes=i64\n"
+                "  %93 = vselect.v2i64 %92, %84, %85\n"
+                "  %94 = xor.v4i32 %83, %93\n"
+                "  %95 = vcmp.m8 %85, %4 ne lanes=i64\n"
+                "  %96 = vselect.v2i64 %95, %85, %86\n"
+                "  %97 = xor.v4i32 %94, %96\n"
+                "  %98 = vcmp.m8 %2, %4 lt lanes=i64\n"
+                "  %99 = vselect.v2i64 %98, %86, %89\n"
+                "  %100 = xor.v4i32 %97, %99\n"
+                "  %101 = vcmp.m8 %89, %90 le lanes=i64\n"
+                "  %102 = vselect.v2i64 %101, %89, %90\n"
+                "  %103 = xor.v4i32 %100, %102\n"
+                "  %104 = vcmp.m8 %2, %4 gt lanes=i64\n"
+                "  %105 = vselect.v2i64 %104, %90, %91\n"
+                "  %106 = xor.v4i32 %103, %105\n"
+                "  %107 = vcmp.m8 %91, %4 ge lanes=i64\n"
+                "  %108 = vselect.v2i64 %107, %91, %84\n"
+                "  %109 = xor.v4i32 %106, %108\n"
+                "  %110 = vcmp.m8 %2, %85 ult lanes=i64\n"
+                "  %111 = vselect.v2i64 %110, %84, %85\n"
+                "  %112 = xor.v4i32 %109, %111\n"
+                "  %113 = vcmp.m8 %85, %4 ule lanes=i64\n"
+                "  %114 = vselect.v2i64 %113, %85, %86\n"
+                "  %115 = xor.v4i32 %112, %114\n"
+                "  %116 = vcmp.m8 %2, %4 ugt lanes=i64\n"
+                "  %117 = vselect.v2i64 %116, %86, %89\n"
+                "  %118 = xor.v4i32 %115, %117\n"
+                "  %119 = vcmp.m8 %89, %90 uge lanes=i64\n"
+                "  %120 = vselect.v2i64 %119, %89, %90\n"
+                "  %121 = xor.v4i32 %118, %120\n"
+                "  %122 = xor.v4i32 %121, %84\n"
+                "  %123 = xor.v4i32 %122, %85\n"
+                "  %124 = xor.v4i32 %123, %86\n"
+                "  %125 = xor.v4i32 %124, %89\n"
+                "  %126 = xor.v4i32 %125, %90\n"
+                "  %127 = xor.v4i32 %126, %91\n"
+                "  %128 = fadd.v4f32 %2, %4\n"
+                "  %129 = fsub.v4f32 %2, %4\n"
+                "  %130 = fmul.v4f32 %2, %4\n"
+                "  %131 = fdiv.v4f32 %2, %4\n"
+                "  %132 = vcmp.m8 %2, %129 eq lanes=f32\n"
+                "  %133 = vselect.v4f32 %132, %128, %129\n"
+                "  %134 = xor.v4i32 %127, %133\n"
+                "  %135 = vcmp.m8 %129, %4 ne lanes=f32\n"
+                "  %136 = vselect.v4f32 %135, %129, %130\n"
+                "  %137 = xor.v4i32 %134, %136\n"
+                "  %138 = vcmp.m8 %2, %4 lt lanes=f32\n"
+                "  %139 = vselect.v4f32 %138, %130, %131\n"
+                "  %140 = xor.v4i32 %137, %139\n"
+                "  %141 = vcmp.m8 %131, %128 le lanes=f32\n"
+                "  %142 = vselect.v4f32 %141, %131, %128\n"
+                "  %143 = xor.v4i32 %140, %142\n"
+                "  %144 = vcmp.m8 %2, %4 gt lanes=f32\n"
+                "  %145 = vselect.v4f32 %144, %128, %129\n"
+                "  %146 = xor.v4i32 %143, %145\n"
+                "  %147 = vcmp.m8 %129, %4 ge lanes=f32\n"
+                "  %148 = vselect.v4f32 %147, %129, %130\n"
+                "  %149 = xor.v4i32 %146, %148\n"
+                "  %150 = xor.v4i32 %149, %128\n"
+                "  %151 = xor.v4i32 %150, %129\n"
+                "  %152 = xor.v4i32 %151, %130\n"
+                "  %153 = xor.v4i32 %152, %131\n"
+                "  %154 = fadd.v2f64 %2, %4\n"
+                "  %155 = fsub.v2f64 %2, %4\n"
+                "  %156 = fmul.v2f64 %2, %4\n"
+                "  %157 = fdiv.v2f64 %2, %4\n"
+                "  %158 = vcmp.m8 %2, %155 eq lanes=f64\n"
+                "  %159 = vselect.v2f64 %158, %154, %155\n"
+                "  %160 = xor.v4i32 %153, %159\n"
+                "  %161 = vcmp.m8 %155, %4 ne lanes=f64\n"
+                "  %162 = vselect.v2f64 %161, %155, %156\n"
+                "  %163 = xor.v4i32 %160, %162\n"
+                "  %164 = vcmp.m8 %2, %4 lt lanes=f64\n"
+                "  %165 = vselect.v2f64 %164, %156, %157\n"
+                "  %166 = xor.v4i32 %163, %165\n"
+                "  %167 = vcmp.m8 %157, %154 le lanes=f64\n"
+                "  %168 = vselect.v2f64 %167, %157, %154\n"
+                "  %169 = xor.v4i32 %166, %168\n"
+                "  %170 = vcmp.m8 %2, %4 gt lanes=f64\n"
+                "  %171 = vselect.v2f64 %170, %154, %155\n"
+                "  %172 = xor.v4i32 %169, %171\n"
+                "  %173 = vcmp.m8 %155, %4 ge lanes=f64\n"
+                "  %174 = vselect.v2f64 %173, %155, %156\n"
+                "  %175 = xor.v4i32 %172, %174\n"
+                "  %176 = xor.v4i32 %175, %154\n"
+                "  %177 = xor.v4i32 %176, %155\n"
+                "  %178 = xor.v4i32 %177, %156\n"
+                "  %179 = xor.v4i32 %178, %157\n"
+                "  %180 = address.ptr %0 offset=240\n"
+                "  %181 = store.void %180, %179 align=1\n"
+                "  %182 = address.ptr %0 offset=128\n"
+                "  %183 = store.void %182, %158 align=1\n"
+                "  %184 = address.ptr %0 offset=129\n"
+                "  %185 = store.void %184, %161 align=1\n"
+                "  %186 = address.ptr %0 offset=130\n"
+                "  %187 = store.void %186, %164 align=1\n"
+                "  %188 = address.ptr %0 offset=131\n"
+                "  %189 = store.void %188, %167 align=1\n"
+                "  %190 = address.ptr %0 offset=132\n"
+                "  %191 = store.void %190, %170 align=1\n"
+                "  %192 = address.ptr %0 offset=133\n"
+                "  %193 = store.void %192, %173 align=1\n"
+                "  %194 = ret.void\n"
+                "}\n",
+    },
+    {
+        .name = "32-byte vectors' lanes: 8-, 16- and 64-bit integers, floats and doubles (#141's element types)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v8i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=96\n"
+                "  %4 = load.v8i32 %3 align=1\n"
+                "  %5 = xor.v8i32 %2, %4\n"
+                "  %6 = add.v32i8 %2, %4\n"
+                "  %7 = sub.v32i8 %2, %4\n"
+                "  %8 = vcmp.m32 %2, %7 eq lanes=i8\n"
+                "  %9 = vselect.v32i8 %8, %6, %7\n"
+                "  %10 = xor.v8i32 %5, %9\n"
+                "  %11 = vcmp.m32 %7, %4 ne lanes=i8\n"
+                "  %12 = vselect.v32i8 %11, %7, %6\n"
+                "  %13 = xor.v8i32 %10, %12\n"
+                "  %14 = vcmp.m32 %2, %4 lt lanes=i8\n"
+                "  %15 = vselect.v32i8 %14, %6, %7\n"
+                "  %16 = xor.v8i32 %13, %15\n"
+                "  %17 = vcmp.m32 %7, %6 le lanes=i8\n"
+                "  %18 = vselect.v32i8 %17, %7, %6\n"
+                "  %19 = xor.v8i32 %16, %18\n"
+                "  %20 = vcmp.m32 %2, %4 gt lanes=i8\n"
+                "  %21 = vselect.v32i8 %20, %6, %7\n"
+                "  %22 = xor.v8i32 %19, %21\n"
+                "  %23 = vcmp.m32 %7, %4 ge lanes=i8\n"
+                "  %24 = vselect.v32i8 %23, %7, %6\n"
+                "  %25 = xor.v8i32 %22, %24\n"
+                "  %26 = vcmp.m32 %2, %7 ult lanes=i8\n"
+                "  %27 = vselect.v32i8 %26, %6, %7\n"
+                "  %28 = xor.v8i32 %25, %27\n"
+                "  %29 = vcmp.m32 %7, %4 ule lanes=i8\n"
+                "  %30 = vselect.v32i8 %29, %7, %6\n"
+                "  %31 = xor.v8i32 %28, %30\n"
+                "  %32 = vcmp.m32 %2, %4 ugt lanes=i8\n"
+                "  %33 = vselect.v32i8 %32, %6, %7\n"
+                "  %34 = xor.v8i32 %31, %33\n"
+                "  %35 = vcmp.m32 %7, %6 uge lanes=i8\n"
+                "  %36 = vselect.v32i8 %35, %7, %6\n"
+                "  %37 = xor.v8i32 %34, %36\n"
+                "  %38 = xor.v8i32 %37, %6\n"
+                "  %39 = xor.v8i32 %38, %7\n"
+                "  %40 = add.v16i16 %2, %4\n"
+                "  %41 = sub.v16i16 %2, %4\n"
+                "  %42 = mul.v16i16 %2, %4\n"
+                "  %43 = vconst.v8i32 0x001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f\n"
+                "  %44 = and.v8i32 %4, %43\n"
+                "  %45 = shl.v16i16 %2, %44\n"
+                "  %46 = lshr.v16i16 %2, %44\n"
+                "  %47 = ashr.v16i16 %2, %44\n"
+                "  %48 = vcmp.m16 %2, %41 eq lanes=i16\n"
+                "  %49 = vselect.v16i16 %48, %40, %41\n"
+                "  %50 = xor.v8i32 %39, %49\n"
+                "  %51 = vcmp.m16 %41, %4 ne lanes=i16\n"
+                "  %52 = vselect.v16i16 %51, %41, %42\n"
+                "  %53 = xor.v8i32 %50, %52\n"
+                "  %54 = vcmp.m16 %2, %4 lt lanes=i16\n"
+                "  %55 = vselect.v16i16 %54, %42, %45\n"
+                "  %56 = xor.v8i32 %53, %55\n"
+                "  %57 = vcmp.m16 %45, %46 le lanes=i16\n"
+                "  %58 = vselect.v16i16 %57, %45, %46\n"
+                "  %59 = xor.v8i32 %56, %58\n"
+                "  %60 = vcmp.m16 %2, %4 gt lanes=i16\n"
+                "  %61 = vselect.v16i16 %60, %46, %47\n"
+                "  %62 = xor.v8i32 %59, %61\n"
+                "  %63 = vcmp.m16 %47, %4 ge lanes=i16\n"
+                "  %64 = vselect.v16i16 %63, %47, %40\n"
+                "  %65 = xor.v8i32 %62, %64\n"
+                "  %66 = vcmp.m16 %2, %41 ult lanes=i16\n"
+                "  %67 = vselect.v16i16 %66, %40, %41\n"
+                "  %68 = xor.v8i32 %65, %67\n"
+                "  %69 = vcmp.m16 %41, %4 ule lanes=i16\n"
+                "  %70 = vselect.v16i16 %69, %41, %42\n"
+                "  %71 = xor.v8i32 %68, %70\n"
+                "  %72 = vcmp.m16 %2, %4 ugt lanes=i16\n"
+                "  %73 = vselect.v16i16 %72, %42, %45\n"
+                "  %74 = xor.v8i32 %71, %73\n"
+                "  %75 = vcmp.m16 %45, %46 uge lanes=i16\n"
+                "  %76 = vselect.v16i16 %75, %45, %46\n"
+                "  %77 = xor.v8i32 %74, %76\n"
+                "  %78 = xor.v8i32 %77, %40\n"
+                "  %79 = xor.v8i32 %78, %41\n"
+                "  %80 = xor.v8i32 %79, %42\n"
+                "  %81 = xor.v8i32 %80, %45\n"
+                "  %82 = xor.v8i32 %81, %46\n"
+                "  %83 = xor.v8i32 %82, %47\n"
+                "  %84 = add.v4i64 %2, %4\n"
+                "  %85 = sub.v4i64 %2, %4\n"
+                "  %86 = mul.v4i64 %2, %4\n"
+                "  %87 = vconst.v8i32 0x000000000000007f000000000000007f000000000000007f000000000000007f\n"
+                "  %88 = and.v8i32 %4, %87\n"
+                "  %89 = shl.v4i64 %2, %88\n"
+                "  %90 = lshr.v4i64 %2, %88\n"
+                "  %91 = ashr.v4i64 %2, %88\n"
+                "  %92 = vcmp.m8 %2, %85 eq lanes=i64\n"
+                "  %93 = vselect.v4i64 %92, %84, %85\n"
+                "  %94 = xor.v8i32 %83, %93\n"
+                "  %95 = vcmp.m8 %85, %4 ne lanes=i64\n"
+                "  %96 = vselect.v4i64 %95, %85, %86\n"
+                "  %97 = xor.v8i32 %94, %96\n"
+                "  %98 = vcmp.m8 %2, %4 lt lanes=i64\n"
+                "  %99 = vselect.v4i64 %98, %86, %89\n"
+                "  %100 = xor.v8i32 %97, %99\n"
+                "  %101 = vcmp.m8 %89, %90 le lanes=i64\n"
+                "  %102 = vselect.v4i64 %101, %89, %90\n"
+                "  %103 = xor.v8i32 %100, %102\n"
+                "  %104 = vcmp.m8 %2, %4 gt lanes=i64\n"
+                "  %105 = vselect.v4i64 %104, %90, %91\n"
+                "  %106 = xor.v8i32 %103, %105\n"
+                "  %107 = vcmp.m8 %91, %4 ge lanes=i64\n"
+                "  %108 = vselect.v4i64 %107, %91, %84\n"
+                "  %109 = xor.v8i32 %106, %108\n"
+                "  %110 = vcmp.m8 %2, %85 ult lanes=i64\n"
+                "  %111 = vselect.v4i64 %110, %84, %85\n"
+                "  %112 = xor.v8i32 %109, %111\n"
+                "  %113 = vcmp.m8 %85, %4 ule lanes=i64\n"
+                "  %114 = vselect.v4i64 %113, %85, %86\n"
+                "  %115 = xor.v8i32 %112, %114\n"
+                "  %116 = vcmp.m8 %2, %4 ugt lanes=i64\n"
+                "  %117 = vselect.v4i64 %116, %86, %89\n"
+                "  %118 = xor.v8i32 %115, %117\n"
+                "  %119 = vcmp.m8 %89, %90 uge lanes=i64\n"
+                "  %120 = vselect.v4i64 %119, %89, %90\n"
+                "  %121 = xor.v8i32 %118, %120\n"
+                "  %122 = xor.v8i32 %121, %84\n"
+                "  %123 = xor.v8i32 %122, %85\n"
+                "  %124 = xor.v8i32 %123, %86\n"
+                "  %125 = xor.v8i32 %124, %89\n"
+                "  %126 = xor.v8i32 %125, %90\n"
+                "  %127 = xor.v8i32 %126, %91\n"
+                "  %128 = fadd.v8f32 %2, %4\n"
+                "  %129 = fsub.v8f32 %2, %4\n"
+                "  %130 = fmul.v8f32 %2, %4\n"
+                "  %131 = fdiv.v8f32 %2, %4\n"
+                "  %132 = vcmp.m8 %2, %129 eq lanes=f32\n"
+                "  %133 = vselect.v8f32 %132, %128, %129\n"
+                "  %134 = xor.v8i32 %127, %133\n"
+                "  %135 = vcmp.m8 %129, %4 ne lanes=f32\n"
+                "  %136 = vselect.v8f32 %135, %129, %130\n"
+                "  %137 = xor.v8i32 %134, %136\n"
+                "  %138 = vcmp.m8 %2, %4 lt lanes=f32\n"
+                "  %139 = vselect.v8f32 %138, %130, %131\n"
+                "  %140 = xor.v8i32 %137, %139\n"
+                "  %141 = vcmp.m8 %131, %128 le lanes=f32\n"
+                "  %142 = vselect.v8f32 %141, %131, %128\n"
+                "  %143 = xor.v8i32 %140, %142\n"
+                "  %144 = vcmp.m8 %2, %4 gt lanes=f32\n"
+                "  %145 = vselect.v8f32 %144, %128, %129\n"
+                "  %146 = xor.v8i32 %143, %145\n"
+                "  %147 = vcmp.m8 %129, %4 ge lanes=f32\n"
+                "  %148 = vselect.v8f32 %147, %129, %130\n"
+                "  %149 = xor.v8i32 %146, %148\n"
+                "  %150 = xor.v8i32 %149, %128\n"
+                "  %151 = xor.v8i32 %150, %129\n"
+                "  %152 = xor.v8i32 %151, %130\n"
+                "  %153 = xor.v8i32 %152, %131\n"
+                "  %154 = fadd.v4f64 %2, %4\n"
+                "  %155 = fsub.v4f64 %2, %4\n"
+                "  %156 = fmul.v4f64 %2, %4\n"
+                "  %157 = fdiv.v4f64 %2, %4\n"
+                "  %158 = vcmp.m8 %2, %155 eq lanes=f64\n"
+                "  %159 = vselect.v4f64 %158, %154, %155\n"
+                "  %160 = xor.v8i32 %153, %159\n"
+                "  %161 = vcmp.m8 %155, %4 ne lanes=f64\n"
+                "  %162 = vselect.v4f64 %161, %155, %156\n"
+                "  %163 = xor.v8i32 %160, %162\n"
+                "  %164 = vcmp.m8 %2, %4 lt lanes=f64\n"
+                "  %165 = vselect.v4f64 %164, %156, %157\n"
+                "  %166 = xor.v8i32 %163, %165\n"
+                "  %167 = vcmp.m8 %157, %154 le lanes=f64\n"
+                "  %168 = vselect.v4f64 %167, %157, %154\n"
+                "  %169 = xor.v8i32 %166, %168\n"
+                "  %170 = vcmp.m8 %2, %4 gt lanes=f64\n"
+                "  %171 = vselect.v4f64 %170, %154, %155\n"
+                "  %172 = xor.v8i32 %169, %171\n"
+                "  %173 = vcmp.m8 %155, %4 ge lanes=f64\n"
+                "  %174 = vselect.v4f64 %173, %155, %156\n"
+                "  %175 = xor.v8i32 %172, %174\n"
+                "  %176 = xor.v8i32 %175, %154\n"
+                "  %177 = xor.v8i32 %176, %155\n"
+                "  %178 = xor.v8i32 %177, %156\n"
+                "  %179 = xor.v8i32 %178, %157\n"
+                "  %180 = address.ptr %0 offset=224\n"
+                "  %181 = store.void %180, %179 align=1\n"
+                "  %182 = address.ptr %0 offset=128\n"
+                "  %183 = store.void %182, %158 align=1\n"
+                "  %184 = address.ptr %0 offset=129\n"
+                "  %185 = store.void %184, %161 align=1\n"
+                "  %186 = address.ptr %0 offset=130\n"
+                "  %187 = store.void %186, %164 align=1\n"
+                "  %188 = address.ptr %0 offset=131\n"
+                "  %189 = store.void %188, %167 align=1\n"
+                "  %190 = address.ptr %0 offset=132\n"
+                "  %191 = store.void %190, %170 align=1\n"
+                "  %192 = address.ptr %0 offset=133\n"
+                "  %193 = store.void %192, %173 align=1\n"
+                "  %194 = ret.void\n"
+                "}\n",
+    },
+    {
+        .name = "64-byte vectors' lanes: 8-, 16- and 64-bit integers, floats and doubles (#141's element types)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v16i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=64\n"
+                "  %4 = load.v16i32 %3 align=1\n"
+                "  %5 = xor.v16i32 %2, %4\n"
+                "  %6 = add.v64i8 %2, %4\n"
+                "  %7 = sub.v64i8 %2, %4\n"
+                "  %8 = vcmp.m64 %2, %7 eq lanes=i8\n"
+                "  %9 = vselect.v64i8 %8, %6, %7\n"
+                "  %10 = xor.v16i32 %5, %9\n"
+                "  %11 = vcmp.m64 %7, %4 ne lanes=i8\n"
+                "  %12 = vselect.v64i8 %11, %7, %6\n"
+                "  %13 = xor.v16i32 %10, %12\n"
+                "  %14 = vcmp.m64 %2, %4 lt lanes=i8\n"
+                "  %15 = vselect.v64i8 %14, %6, %7\n"
+                "  %16 = xor.v16i32 %13, %15\n"
+                "  %17 = vcmp.m64 %7, %6 le lanes=i8\n"
+                "  %18 = vselect.v64i8 %17, %7, %6\n"
+                "  %19 = xor.v16i32 %16, %18\n"
+                "  %20 = vcmp.m64 %2, %4 gt lanes=i8\n"
+                "  %21 = vselect.v64i8 %20, %6, %7\n"
+                "  %22 = xor.v16i32 %19, %21\n"
+                "  %23 = vcmp.m64 %7, %4 ge lanes=i8\n"
+                "  %24 = vselect.v64i8 %23, %7, %6\n"
+                "  %25 = xor.v16i32 %22, %24\n"
+                "  %26 = vcmp.m64 %2, %7 ult lanes=i8\n"
+                "  %27 = vselect.v64i8 %26, %6, %7\n"
+                "  %28 = xor.v16i32 %25, %27\n"
+                "  %29 = vcmp.m64 %7, %4 ule lanes=i8\n"
+                "  %30 = vselect.v64i8 %29, %7, %6\n"
+                "  %31 = xor.v16i32 %28, %30\n"
+                "  %32 = vcmp.m64 %2, %4 ugt lanes=i8\n"
+                "  %33 = vselect.v64i8 %32, %6, %7\n"
+                "  %34 = xor.v16i32 %31, %33\n"
+                "  %35 = vcmp.m64 %7, %6 uge lanes=i8\n"
+                "  %36 = vselect.v64i8 %35, %7, %6\n"
+                "  %37 = xor.v16i32 %34, %36\n"
+                "  %38 = xor.v16i32 %37, %6\n"
+                "  %39 = xor.v16i32 %38, %7\n"
+                "  %40 = add.v32i16 %2, %4\n"
+                "  %41 = sub.v32i16 %2, %4\n"
+                "  %42 = mul.v32i16 %2, %4\n"
+                "  %43 = vconst.v16i32 0x001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f\n"
+                "  %44 = and.v16i32 %4, %43\n"
+                "  %45 = shl.v32i16 %2, %44\n"
+                "  %46 = lshr.v32i16 %2, %44\n"
+                "  %47 = ashr.v32i16 %2, %44\n"
+                "  %48 = vcmp.m32 %2, %41 eq lanes=i16\n"
+                "  %49 = vselect.v32i16 %48, %40, %41\n"
+                "  %50 = xor.v16i32 %39, %49\n"
+                "  %51 = vcmp.m32 %41, %4 ne lanes=i16\n"
+                "  %52 = vselect.v32i16 %51, %41, %42\n"
+                "  %53 = xor.v16i32 %50, %52\n"
+                "  %54 = vcmp.m32 %2, %4 lt lanes=i16\n"
+                "  %55 = vselect.v32i16 %54, %42, %45\n"
+                "  %56 = xor.v16i32 %53, %55\n"
+                "  %57 = vcmp.m32 %45, %46 le lanes=i16\n"
+                "  %58 = vselect.v32i16 %57, %45, %46\n"
+                "  %59 = xor.v16i32 %56, %58\n"
+                "  %60 = vcmp.m32 %2, %4 gt lanes=i16\n"
+                "  %61 = vselect.v32i16 %60, %46, %47\n"
+                "  %62 = xor.v16i32 %59, %61\n"
+                "  %63 = vcmp.m32 %47, %4 ge lanes=i16\n"
+                "  %64 = vselect.v32i16 %63, %47, %40\n"
+                "  %65 = xor.v16i32 %62, %64\n"
+                "  %66 = vcmp.m32 %2, %41 ult lanes=i16\n"
+                "  %67 = vselect.v32i16 %66, %40, %41\n"
+                "  %68 = xor.v16i32 %65, %67\n"
+                "  %69 = vcmp.m32 %41, %4 ule lanes=i16\n"
+                "  %70 = vselect.v32i16 %69, %41, %42\n"
+                "  %71 = xor.v16i32 %68, %70\n"
+                "  %72 = vcmp.m32 %2, %4 ugt lanes=i16\n"
+                "  %73 = vselect.v32i16 %72, %42, %45\n"
+                "  %74 = xor.v16i32 %71, %73\n"
+                "  %75 = vcmp.m32 %45, %46 uge lanes=i16\n"
+                "  %76 = vselect.v32i16 %75, %45, %46\n"
+                "  %77 = xor.v16i32 %74, %76\n"
+                "  %78 = xor.v16i32 %77, %40\n"
+                "  %79 = xor.v16i32 %78, %41\n"
+                "  %80 = xor.v16i32 %79, %42\n"
+                "  %81 = xor.v16i32 %80, %45\n"
+                "  %82 = xor.v16i32 %81, %46\n"
+                "  %83 = xor.v16i32 %82, %47\n"
+                "  %84 = add.v8i64 %2, %4\n"
+                "  %85 = sub.v8i64 %2, %4\n"
+                "  %86 = mul.v8i64 %2, %4\n"
+                "  %87 = vconst.v16i32 0x000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f\n"
+                "  %88 = and.v16i32 %4, %87\n"
+                "  %89 = shl.v8i64 %2, %88\n"
+                "  %90 = lshr.v8i64 %2, %88\n"
+                "  %91 = ashr.v8i64 %2, %88\n"
+                "  %92 = vcmp.m8 %2, %85 eq lanes=i64\n"
+                "  %93 = vselect.v8i64 %92, %84, %85\n"
+                "  %94 = xor.v16i32 %83, %93\n"
+                "  %95 = vcmp.m8 %85, %4 ne lanes=i64\n"
+                "  %96 = vselect.v8i64 %95, %85, %86\n"
+                "  %97 = xor.v16i32 %94, %96\n"
+                "  %98 = vcmp.m8 %2, %4 lt lanes=i64\n"
+                "  %99 = vselect.v8i64 %98, %86, %89\n"
+                "  %100 = xor.v16i32 %97, %99\n"
+                "  %101 = vcmp.m8 %89, %90 le lanes=i64\n"
+                "  %102 = vselect.v8i64 %101, %89, %90\n"
+                "  %103 = xor.v16i32 %100, %102\n"
+                "  %104 = vcmp.m8 %2, %4 gt lanes=i64\n"
+                "  %105 = vselect.v8i64 %104, %90, %91\n"
+                "  %106 = xor.v16i32 %103, %105\n"
+                "  %107 = vcmp.m8 %91, %4 ge lanes=i64\n"
+                "  %108 = vselect.v8i64 %107, %91, %84\n"
+                "  %109 = xor.v16i32 %106, %108\n"
+                "  %110 = vcmp.m8 %2, %85 ult lanes=i64\n"
+                "  %111 = vselect.v8i64 %110, %84, %85\n"
+                "  %112 = xor.v16i32 %109, %111\n"
+                "  %113 = vcmp.m8 %85, %4 ule lanes=i64\n"
+                "  %114 = vselect.v8i64 %113, %85, %86\n"
+                "  %115 = xor.v16i32 %112, %114\n"
+                "  %116 = vcmp.m8 %2, %4 ugt lanes=i64\n"
+                "  %117 = vselect.v8i64 %116, %86, %89\n"
+                "  %118 = xor.v16i32 %115, %117\n"
+                "  %119 = vcmp.m8 %89, %90 uge lanes=i64\n"
+                "  %120 = vselect.v8i64 %119, %89, %90\n"
+                "  %121 = xor.v16i32 %118, %120\n"
+                "  %122 = xor.v16i32 %121, %84\n"
+                "  %123 = xor.v16i32 %122, %85\n"
+                "  %124 = xor.v16i32 %123, %86\n"
+                "  %125 = xor.v16i32 %124, %89\n"
+                "  %126 = xor.v16i32 %125, %90\n"
+                "  %127 = xor.v16i32 %126, %91\n"
+                "  %128 = fadd.v16f32 %2, %4\n"
+                "  %129 = fsub.v16f32 %2, %4\n"
+                "  %130 = fmul.v16f32 %2, %4\n"
+                "  %131 = fdiv.v16f32 %2, %4\n"
+                "  %132 = vcmp.m16 %2, %129 eq lanes=f32\n"
+                "  %133 = vselect.v16f32 %132, %128, %129\n"
+                "  %134 = xor.v16i32 %127, %133\n"
+                "  %135 = vcmp.m16 %129, %4 ne lanes=f32\n"
+                "  %136 = vselect.v16f32 %135, %129, %130\n"
+                "  %137 = xor.v16i32 %134, %136\n"
+                "  %138 = vcmp.m16 %2, %4 lt lanes=f32\n"
+                "  %139 = vselect.v16f32 %138, %130, %131\n"
+                "  %140 = xor.v16i32 %137, %139\n"
+                "  %141 = vcmp.m16 %131, %128 le lanes=f32\n"
+                "  %142 = vselect.v16f32 %141, %131, %128\n"
+                "  %143 = xor.v16i32 %140, %142\n"
+                "  %144 = vcmp.m16 %2, %4 gt lanes=f32\n"
+                "  %145 = vselect.v16f32 %144, %128, %129\n"
+                "  %146 = xor.v16i32 %143, %145\n"
+                "  %147 = vcmp.m16 %129, %4 ge lanes=f32\n"
+                "  %148 = vselect.v16f32 %147, %129, %130\n"
+                "  %149 = xor.v16i32 %146, %148\n"
+                "  %150 = xor.v16i32 %149, %128\n"
+                "  %151 = xor.v16i32 %150, %129\n"
+                "  %152 = xor.v16i32 %151, %130\n"
+                "  %153 = xor.v16i32 %152, %131\n"
+                "  %154 = fadd.v8f64 %2, %4\n"
+                "  %155 = fsub.v8f64 %2, %4\n"
+                "  %156 = fmul.v8f64 %2, %4\n"
+                "  %157 = fdiv.v8f64 %2, %4\n"
+                "  %158 = vcmp.m8 %2, %155 eq lanes=f64\n"
+                "  %159 = vselect.v8f64 %158, %154, %155\n"
+                "  %160 = xor.v16i32 %153, %159\n"
+                "  %161 = vcmp.m8 %155, %4 ne lanes=f64\n"
+                "  %162 = vselect.v8f64 %161, %155, %156\n"
+                "  %163 = xor.v16i32 %160, %162\n"
+                "  %164 = vcmp.m8 %2, %4 lt lanes=f64\n"
+                "  %165 = vselect.v8f64 %164, %156, %157\n"
+                "  %166 = xor.v16i32 %163, %165\n"
+                "  %167 = vcmp.m8 %157, %154 le lanes=f64\n"
+                "  %168 = vselect.v8f64 %167, %157, %154\n"
+                "  %169 = xor.v16i32 %166, %168\n"
+                "  %170 = vcmp.m8 %2, %4 gt lanes=f64\n"
+                "  %171 = vselect.v8f64 %170, %154, %155\n"
+                "  %172 = xor.v16i32 %169, %171\n"
+                "  %173 = vcmp.m8 %155, %4 ge lanes=f64\n"
+                "  %174 = vselect.v8f64 %173, %155, %156\n"
+                "  %175 = xor.v16i32 %172, %174\n"
+                "  %176 = xor.v16i32 %175, %154\n"
+                "  %177 = xor.v16i32 %176, %155\n"
+                "  %178 = xor.v16i32 %177, %156\n"
+                "  %179 = xor.v16i32 %178, %157\n"
+                "  %180 = address.ptr %0 offset=192\n"
+                "  %181 = store.void %180, %179 align=1\n"
+                "  %182 = address.ptr %0 offset=128\n"
+                "  %183 = store.void %182, %158 align=1\n"
+                "  %184 = address.ptr %0 offset=129\n"
+                "  %185 = store.void %184, %161 align=1\n"
+                "  %186 = address.ptr %0 offset=130\n"
+                "  %187 = store.void %186, %164 align=1\n"
+                "  %188 = address.ptr %0 offset=131\n"
+                "  %189 = store.void %188, %167 align=1\n"
+                "  %190 = address.ptr %0 offset=132\n"
+                "  %191 = store.void %190, %170 align=1\n"
+                "  %192 = address.ptr %0 offset=133\n"
+                "  %193 = store.void %192, %173 align=1\n"
+                "  %194 = ret.void\n"
+                "}\n",
+    },
+    // The SSE targets' vectors (#141): 16-byte vectors' integer arithmetic of each lane width and the bitwise operations
+    // in every operand order (the destination the left operand, the right one or neither: the two-operand expansion's
+    // copies, and xmm15's for a subtraction into its right operand), floats' and doubles' arithmetic, a floating
+    // subtraction and division into their right operand's register, and constants, by legacy SSE's forms; at x86-64-v2
+    // with SSE4.1's pmulld, at the baseline without it. Generated by a script, kept as text.
+    {
+        .name = "16-byte vectors' lanes by legacy SSE's forms at x86-64-v2 (#141's SSE targets)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v4i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=16\n"
+                "  %4 = load.v4i32 %3 align=1\n"
+                "  %5 = address.ptr %0 offset=32\n"
+                "  %6 = load.v4i32 %5 align=1\n"
+                "  %7 = address.ptr %0 offset=48\n"
+                "  %8 = load.v4i32 %7 align=1\n"
+                "  %9 = vconst.v4i32 0x00000000000000000000000000000000\n"
+                "  %10 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
+                "  %11 = vconst.v4i32 0x12345679123456791234567912345679\n"
+                "  %12 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
+                "  %13 = xor.v4i32 %2, %12\n"
+                "  %14 = add.v4i32 %13, %11\n"
+                "  %15 = add.v16i8 %14, %4\n"
+                "  %16 = xor.v4i32 %14, %15\n"
+                "  %17 = sub.v16i8 %15, %16\n"
+                "  %18 = xor.v4i32 %16, %17\n"
+                "  %19 = add.v8i16 %2, %6\n"
+                "  %20 = xor.v4i32 %18, %19\n"
+                "  %21 = sub.v8i16 %20, %19\n"
+                "  %22 = xor.v4i32 %20, %21\n"
+                "  %23 = mul.v8i16 %21, %22\n"
+                "  %24 = xor.v4i32 %22, %23\n"
+                "  %25 = add.v4i32 %2, %6\n"
+                "  %26 = xor.v4i32 %24, %25\n"
+                "  %27 = sub.v4i32 %26, %25\n"
+                "  %28 = xor.v4i32 %26, %27\n"
+                "  %29 = add.v2i64 %27, %28\n"
+                "  %30 = xor.v4i32 %28, %29\n"
+                "  %31 = sub.v2i64 %2, %6\n"
+                "  %32 = xor.v4i32 %30, %31\n"
+                "  %33 = and.v4i32 %32, %31\n"
+                "  %34 = xor.v4i32 %32, %33\n"
+                "  %35 = or.v4i32 %33, %34\n"
+                "  %36 = xor.v4i32 %34, %35\n"
+                "  %37 = xor.v4i32 %2, %6\n"
+                "  %38 = xor.v4i32 %36, %37\n"
+                "  %39 = mul.v4i32 %38, %37\n"
+                "  %40 = xor.v4i32 %38, %39\n"
+                "  %41 = fadd.v4f32 %6, %8\n"
+                "  %42 = fadd.v2f64 %6, %8\n"
+                "  %43 = fsub.v4f32 %8, %6\n"
+                "  %44 = fsub.v2f64 %8, %6\n"
+                "  %45 = fmul.v4f32 %6, %8\n"
+                "  %46 = fmul.v2f64 %6, %8\n"
+                "  %47 = fdiv.v4f32 %6, %8\n"
+                "  %48 = fdiv.v2f64 %6, %8\n"
+                "  %49 = fsub.v4f32 %41, %42\n"
+                "  %50 = fdiv.v2f64 %49, %41\n"
+                "  %51 = xor.v4i32 %40, %41\n"
+                "  %52 = xor.v4i32 %51, %42\n"
+                "  %53 = xor.v4i32 %52, %43\n"
+                "  %54 = xor.v4i32 %53, %44\n"
+                "  %55 = xor.v4i32 %54, %45\n"
+                "  %56 = xor.v4i32 %55, %46\n"
+                "  %57 = xor.v4i32 %56, %47\n"
+                "  %58 = xor.v4i32 %57, %48\n"
+                "  %59 = xor.v4i32 %58, %49\n"
+                "  %60 = xor.v4i32 %59, %50\n"
+                "  %61 = or.v4i32 %60, %9\n"
+                "  %62 = and.v4i32 %61, %10\n"
+                "  %63 = address.ptr %0 offset=128\n"
+                "  %64 = store.void %63, %62 align=1\n"
+                "  %65 = address.ptr %0 offset=144\n"
+                "  %66 = store.void %65, %39 align=1\n"
+                "  %67 = ret.void\n"
+                "}\n",
+        .v2 = true,
+    },
+    {
+        .name = "16-byte vectors' lanes by legacy SSE's forms at the x86-64 baseline (#141's SSE targets)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v4i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=16\n"
+                "  %4 = load.v4i32 %3 align=1\n"
+                "  %5 = address.ptr %0 offset=32\n"
+                "  %6 = load.v4i32 %5 align=1\n"
+                "  %7 = address.ptr %0 offset=48\n"
+                "  %8 = load.v4i32 %7 align=1\n"
+                "  %9 = vconst.v4i32 0x00000000000000000000000000000000\n"
+                "  %10 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
+                "  %11 = vconst.v4i32 0x12345679123456791234567912345679\n"
+                "  %12 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
+                "  %13 = xor.v4i32 %2, %12\n"
+                "  %14 = add.v4i32 %13, %11\n"
+                "  %15 = add.v16i8 %14, %4\n"
+                "  %16 = xor.v4i32 %14, %15\n"
+                "  %17 = sub.v16i8 %15, %16\n"
+                "  %18 = xor.v4i32 %16, %17\n"
+                "  %19 = add.v8i16 %2, %6\n"
+                "  %20 = xor.v4i32 %18, %19\n"
+                "  %21 = sub.v8i16 %20, %19\n"
+                "  %22 = xor.v4i32 %20, %21\n"
+                "  %23 = mul.v8i16 %21, %22\n"
+                "  %24 = xor.v4i32 %22, %23\n"
+                "  %25 = add.v4i32 %2, %6\n"
+                "  %26 = xor.v4i32 %24, %25\n"
+                "  %27 = sub.v4i32 %26, %25\n"
+                "  %28 = xor.v4i32 %26, %27\n"
+                "  %29 = add.v2i64 %27, %28\n"
+                "  %30 = xor.v4i32 %28, %29\n"
+                "  %31 = sub.v2i64 %2, %6\n"
+                "  %32 = xor.v4i32 %30, %31\n"
+                "  %33 = and.v4i32 %32, %31\n"
+                "  %34 = xor.v4i32 %32, %33\n"
+                "  %35 = or.v4i32 %33, %34\n"
+                "  %36 = xor.v4i32 %34, %35\n"
+                "  %37 = xor.v4i32 %2, %6\n"
+                "  %38 = xor.v4i32 %36, %37\n"
+                "  %39 = fadd.v4f32 %6, %8\n"
+                "  %40 = fadd.v2f64 %6, %8\n"
+                "  %41 = fsub.v4f32 %8, %6\n"
+                "  %42 = fsub.v2f64 %8, %6\n"
+                "  %43 = fmul.v4f32 %6, %8\n"
+                "  %44 = fmul.v2f64 %6, %8\n"
+                "  %45 = fdiv.v4f32 %6, %8\n"
+                "  %46 = fdiv.v2f64 %6, %8\n"
+                "  %47 = fsub.v4f32 %39, %40\n"
+                "  %48 = fdiv.v2f64 %47, %39\n"
+                "  %49 = xor.v4i32 %38, %39\n"
+                "  %50 = xor.v4i32 %49, %40\n"
+                "  %51 = xor.v4i32 %50, %41\n"
+                "  %52 = xor.v4i32 %51, %42\n"
+                "  %53 = xor.v4i32 %52, %43\n"
+                "  %54 = xor.v4i32 %53, %44\n"
+                "  %55 = xor.v4i32 %54, %45\n"
+                "  %56 = xor.v4i32 %55, %46\n"
+                "  %57 = xor.v4i32 %56, %47\n"
+                "  %58 = xor.v4i32 %57, %48\n"
+                "  %59 = or.v4i32 %58, %9\n"
+                "  %60 = and.v4i32 %59, %10\n"
+                "  %61 = address.ptr %0 offset=128\n"
+                "  %62 = store.void %61, %60 align=1\n"
+                "  %63 = address.ptr %0 offset=144\n"
+                "  %64 = store.void %63, %37 align=1\n"
+                "  %65 = ret.void\n"
+                "}\n",
+        .baseline = true,
+    },
+    {
+        // A complement into another register (%2 stays live) and in place (%6 dies), #1425's review.
+        .name = "a 16-byte vector's complement at the x86-64 baseline, apart and in place (#1425's review)",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v4i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=16\n"
+                "  %4 = load.v4i32 %3 align=1\n"
+                "  %5 = not.v4i32 %2\n"
+                "  %6 = add.v4i32 %5, %4\n"
+                "  %7 = not.v4i32 %6\n"
+                "  %8 = xor.v4i32 %7, %2\n"
+                "  %9 = address.ptr %0 offset=128\n"
+                "  %10 = store.void %9, %8 align=1\n"
+                "  %11 = address.ptr %0 offset=144\n"
+                "  %12 = store.void %11, %5 align=1\n"
+                "  %13 = ret.void\n"
+                "}\n",
+        .baseline = true,
+    },
     {
         .name = "vector constants: zeros, every bit, a splat and others",
         .text = "function (ptr) -> void {\n"
@@ -992,6 +2068,707 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "}\n",
         .model = tier1_masks_test_floating_model,
     },
+    {
+        // #1281: its VEX twin, whose floating roles only registers below 16 can be: its result in its destination, read
+        // as its first operand.
+        .name = "a floating machine row of a VEX form",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.f32 %0 align=4\n"
+                "  %2 = address.ptr %0 offset=4\n"
+                "  %3 = load.f32 %2 align=4\n"
+                "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
+                "  %5 = address.ptr %0 offset=128\n"
+                "  %6 = store.void %5, %4 align=4\n"
+                "  %7 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_floating_model,
+    },
+    {
+        // #1281: the same at a target without AVX-512, its copies movaps.
+        .name = "a floating machine row of a VEX form at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.f32 %0 align=4\n"
+                "  %2 = address.ptr %0 offset=4\n"
+                "  %3 = load.f32 %2 align=4\n"
+                "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
+                "  %5 = address.ptr %0 offset=128\n"
+                "  %6 = store.void %5, %4 align=4\n"
+                "  %7 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_floating_model,
+        .v3 = true,
+    },
+    {
+        // #1281: machine rows at a target without AVX-512, their vector roles in free registers below 16 and
+        // their floating ones below 16 too: a VEX row of 32-byte vectors, x live past it; a floating row whose result is
+        // read as its first operand, and one that writes its second floating operand, a and b live past both; and a
+        // 16-byte vector's row. Its vectors move, spill and compute by VEX forms.
+        .name = "machine rows at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector32, vector32) -> vector32 [VPADDB_Y_Y_YM256 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
+                "  row #2 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xa1 0xa1 0xa0 0x00 0x00 0x00 0 0] [VPXOR_X_X_XM128 0xb0 0xa1 0xb0 0x00 0x00 0x00 0 0]\n"
+                "  row #3 (vector16) -> vector16 [VPSHUFD_X_XM128_IMM8 0x80 0x00 0x80 0x00 0x00 0x00 27 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v8i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=32\n"
+                "  %3 = load.v8i32 %2 align=1\n"
+                "  %4 = call.v8i32 row #0(%1, %3) fixed=(v8i32, v8i32) variadic=0\n"
+                "  %5 = add.v8i32 %4, %1\n"
+                "  %6 = address.ptr %0 offset=96\n"
+                "  %7 = load.f32 %6 align=4\n"
+                "  %8 = address.ptr %0 offset=100\n"
+                "  %9 = load.f32 %8 align=4\n"
+                "  %10 = call.f32 row #1(%7, %9) fixed=(f32, f32) variadic=0\n"
+                "  %11 = call.f32 row #2(%7, %9) fixed=(f32, f32) variadic=0\n"
+                "  %12 = address.ptr %0 offset=64\n"
+                "  %13 = load.v4i32 %12 align=1\n"
+                "  %14 = call.v4i32 row #3(%13) fixed=(v4i32) variadic=0\n"
+                "  %15 = address.ptr %0 offset=128\n"
+                "  %16 = store.void %15, %5 align=1\n"
+                "  %17 = address.ptr %0 offset=160\n"
+                "  %18 = store.void %17, %1 align=1\n"
+                "  %19 = address.ptr %0 offset=192\n"
+                "  %20 = store.void %19, %10 align=4\n"
+                "  %21 = address.ptr %0 offset=196\n"
+                "  %22 = store.void %21, %11 align=4\n"
+                "  %23 = address.ptr %0 offset=200\n"
+                "  %24 = store.void %23, %7 align=4\n"
+                "  %25 = address.ptr %0 offset=204\n"
+                "  %26 = store.void %25, %9 align=4\n"
+                "  %27 = address.ptr %0 offset=224\n"
+                "  %28 = store.void %27, %14 align=1\n"
+                "  %29 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_vex_rows_model,
+        .v3 = true,
+    },
+    // #1281: the IR's vectors at x86-64-v3, a target without AVX-512, by VEX forms: v4i32's and v8i32's operations,
+    // constants (zeros by vpxor, every bit by vpcmpeqd, a splat by vmovd and vpshufd or vpbroadcastd, others loaded) and
+    // copies; their phis' swap through xmm15; their spills past xmm14; and their saves around calls.
+    {
+        .name = "vector operations and constants at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v4i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=16\n"
+                "  %3 = load.v4i32 %2 align=1\n"
+                "  %4 = add.v4i32 %1, %3\n"
+                "  %5 = sub.v4i32 %4, %3\n"
+                "  %6 = mul.v4i32 %5, %3\n"
+                "  %7 = and.v4i32 %6, %1\n"
+                "  %8 = or.v4i32 %7, %3\n"
+                "  %9 = xor.v4i32 %8, %4\n"
+                "  %10 = copy.v4i32 %9\n"
+                "  %11 = vconst.v4i32 0x00000000000000000000000000000000\n"
+                "  %12 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
+                "  %13 = vconst.v4i32 0x12345679123456791234567912345679\n"
+                "  %14 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
+                "  %15 = add.v4i32 %10, %13\n"
+                "  %16 = xor.v4i32 %15, %14\n"
+                "  %17 = sub.v4i32 %16, %12\n"
+                "  %18 = or.v4i32 %17, %11\n"
+                "  %19 = undef.v4i32\n"
+                "  %20 = address.ptr %0 offset=128\n"
+                "  %21 = store.void %20, %18 align=1\n"
+                "  %22 = address.ptr %0 offset=32\n"
+                "  %23 = load.v8i32 %22 align=1\n"
+                "  %24 = address.ptr %0 offset=64\n"
+                "  %25 = load.v8i32 %24 align=1\n"
+                "  %26 = add.v8i32 %23, %25\n"
+                "  %27 = sub.v8i32 %26, %25\n"
+                "  %28 = mul.v8i32 %27, %25\n"
+                "  %29 = and.v8i32 %28, %23\n"
+                "  %30 = or.v8i32 %29, %25\n"
+                "  %31 = xor.v8i32 %30, %26\n"
+                "  %32 = copy.v8i32 %31\n"
+                "  %33 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
+                "  %34 = vconst.v8i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
+                "  %35 = vconst.v8i32 0x1234567a1234567a1234567a1234567a1234567a1234567a1234567a1234567a\n"
+                "  %36 = vconst.v8i32 0x53845410b54cda571715609e78dde6e5daa66d2c3c6ef3739e3779ba00000001\n"
+                "  %37 = add.v8i32 %32, %35\n"
+                "  %38 = xor.v8i32 %37, %36\n"
+                "  %39 = sub.v8i32 %38, %34\n"
+                "  %40 = or.v8i32 %39, %33\n"
+                "  %41 = undef.v8i32\n"
+                "  %42 = address.ptr %0 offset=144\n"
+                "  %43 = store.void %42, %40 align=1\n"
+                "  %44 = address.ptr %0 offset=176\n"
+                "  %45 = store.void %44, %34 align=1\n"
+                "  %46 = address.ptr %0 offset=208\n"
+                "  %47 = store.void %46, %35 align=1\n"
+                "  %48 = address.ptr %0 offset=240\n"
+                "  %49 = store.void %48, %13 align=1\n"
+                "  %50 = ret.void\n"
+                "}\n",
+        .v3 = true,
+    },
+    {
+        .name = "a loop whose vector phis swap at x86-64-v3",
+        .text = "function (ptr, i64) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = param.i64 1\n"
+                "  %2 = load.v8i32 %0 align=1\n"
+                "  %3 = address.ptr %0 offset=32\n"
+                "  %4 = load.v8i32 %3 align=1\n"
+                "  %5 = address.ptr %0 offset=64\n"
+                "  %6 = load.v4i32 %5 align=1\n"
+                "  %7 = const.i64 0x00000000000000000000000000000000\n"
+                "  %8 = br.void b1\n"
+                "b1:\n"
+                "  %9 = phi.v8i32 [%2, b0], [%10, b1]\n"
+                "  %10 = phi.v8i32 [%4, b0], [%9, b1]\n"
+                "  %11 = phi.v4i32 [%6, b0], [%15, b1]\n"
+                "  %12 = phi.i64 [%7, b0], [%17, b1]\n"
+                "  %13 = address.ptr %0 + %12 * 4 offset=0\n"
+                "  %14 = load.v4i32 %13 align=4\n"
+                "  %15 = add.v4i32 %11, %14\n"
+                "  %16 = const.i64 0x00000000000000000000000000000001\n"
+                "  %17 = add.i64 %12, %16\n"
+                "  %18 = icmp.i1 %17, %1 ult\n"
+                "  %19 = cbr.void %18, b1, b2\n"
+                "b2:\n"
+                "  %20 = address.ptr %0 offset=128\n"
+                "  %21 = store.void %20, %9 align=1\n"
+                "  %22 = address.ptr %0 offset=160\n"
+                "  %23 = store.void %22, %10 align=1\n"
+                "  %24 = address.ptr %0 offset=192\n"
+                "  %25 = store.void %24, %15 align=1\n"
+                "  %26 = ret.void\n"
+                "}\n",
+        .count = 16,
+        .vector_cycle = true,
+        .v3 = true,
+    },
+    {
+        .name = "more vectors than xmm0 to xmm14 at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v8i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v8i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v8i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v8i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v8i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v8i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v8i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v8i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v8i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v8i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v8i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v8i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v8i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v8i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v8i32 %29 align=4\n"
+                "  %31 = address.ptr %0 offset=60\n"
+                "  %32 = load.v8i32 %31 align=4\n"
+                "  %33 = address.ptr %0 offset=64\n"
+                "  %34 = load.v8i32 %33 align=4\n"
+                "  %35 = xor.v8i32 %2, %34\n"
+                "  %36 = sub.v8i32 %35, %32\n"
+                "  %37 = mul.v8i32 %36, %30\n"
+                "  %38 = add.v8i32 %37, %28\n"
+                "  %39 = xor.v8i32 %38, %26\n"
+                "  %40 = sub.v8i32 %39, %24\n"
+                "  %41 = mul.v8i32 %40, %22\n"
+                "  %42 = add.v8i32 %41, %20\n"
+                "  %43 = xor.v8i32 %42, %18\n"
+                "  %44 = sub.v8i32 %43, %16\n"
+                "  %45 = mul.v8i32 %44, %14\n"
+                "  %46 = add.v8i32 %45, %12\n"
+                "  %47 = xor.v8i32 %46, %10\n"
+                "  %48 = sub.v8i32 %47, %8\n"
+                "  %49 = mul.v8i32 %48, %6\n"
+                "  %50 = add.v8i32 %49, %4\n"
+                "  %51 = xor.v8i32 %34, %32\n"
+                "  %52 = add.v8i32 %51, %30\n"
+                "  %53 = xor.v8i32 %52, %28\n"
+                "  %54 = add.v8i32 %53, %26\n"
+                "  %55 = xor.v8i32 %54, %24\n"
+                "  %56 = add.v8i32 %55, %22\n"
+                "  %57 = xor.v8i32 %56, %20\n"
+                "  %58 = add.v8i32 %57, %18\n"
+                "  %59 = xor.v8i32 %58, %16\n"
+                "  %60 = add.v8i32 %59, %14\n"
+                "  %61 = xor.v8i32 %60, %12\n"
+                "  %62 = add.v8i32 %61, %10\n"
+                "  %63 = xor.v8i32 %62, %8\n"
+                "  %64 = add.v8i32 %63, %6\n"
+                "  %65 = xor.v8i32 %64, %4\n"
+                "  %66 = add.v8i32 %65, %2\n"
+                "  %67 = address.ptr %0 offset=128\n"
+                "  %68 = store.void %67, %50 align=1\n"
+                "  %69 = address.ptr %0 offset=192\n"
+                "  %70 = store.void %69, %66 align=1\n"
+                "  %71 = ret.void\n"
+                "}\n",
+        .spills = true,
+        .v3 = true,
+    },
+    {
+        // #1281's review: 32-byte vectors at a target with AVX but not AVX2, whose ymm integer forms are AVX2's: their
+        // bitwise operations by vandps, vorps and vxorps, every bit by vpcmpeqd of the xmm register and vinsertf128, a
+        // splat by vmovd, vpshufd and vinsertf128, zeros by vpxor of the xmm register, others loaded, and copies, loads
+        // and stores by vmovdqa and vmovdqu; and 16-byte vectors' AVX operations beside them. Its native runs start with
+        // a signaling NaN in every ymm register and MXCSR's flags clear, which must stay clear: no record reads a
+        // register's old bits as floats (#1293's review).
+        .name = "vectors at a target with AVX but not AVX2",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v8i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=32\n"
+                "  %3 = load.v8i32 %2 align=1\n"
+                "  %4 = and.v8i32 %1, %3\n"
+                "  %5 = or.v8i32 %4, %1\n"
+                "  %6 = xor.v8i32 %5, %3\n"
+                "  %7 = copy.v8i32 %6\n"
+                "  %8 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
+                "  %9 = vconst.v8i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
+                "  %10 = vconst.v8i32 0x1234567a1234567a1234567a1234567a1234567a1234567a1234567a1234567a\n"
+                "  %11 = vconst.v8i32 0x53845410b54cda571715609e78dde6e5daa66d2c3c6ef3739e3779ba00000001\n"
+                "  %12 = xor.v8i32 %7, %10\n"
+                "  %13 = and.v8i32 %12, %11\n"
+                "  %14 = or.v8i32 %13, %8\n"
+                "  %15 = xor.v8i32 %14, %9\n"
+                "  %16 = address.ptr %0 offset=128\n"
+                "  %17 = store.void %16, %15 align=1\n"
+                "  %18 = address.ptr %0 offset=160\n"
+                "  %19 = store.void %18, %9 align=1\n"
+                "  %20 = address.ptr %0 offset=192\n"
+                "  %21 = store.void %20, %10 align=1\n"
+                "  %22 = address.ptr %0 offset=64\n"
+                "  %23 = load.v4i32 %22 align=1\n"
+                "  %24 = address.ptr %0 offset=80\n"
+                "  %25 = load.v4i32 %24 align=1\n"
+                "  %26 = mul.v4i32 %23, %25\n"
+                "  %27 = add.v4i32 %26, %23\n"
+                "  %28 = sub.v4i32 %27, %25\n"
+                "  %29 = vconst.v4i32 0x12345679123456791234567912345679\n"
+                "  %30 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
+                "  %31 = xor.v4i32 %28, %29\n"
+                "  %32 = and.v4i32 %31, %30\n"
+                "  %33 = address.ptr %0 offset=224\n"
+                "  %34 = store.void %33, %32 align=1\n"
+                "  %35 = ret.void\n"
+                "}\n",
+        .avx = true,
+    },
+    {
+        // #1281's review: a 64-byte EVEX row at x86-64-v3 with AVX512F but not VL (Knights Landing's AVX-512), its two
+        // operands dying at it and 13 vectors live across it, so that xmm0 to xmm14 are taken and only xmm15 is free
+        // below 16: its roles stay in place or take zmm16, rather than a run of two free registers below 16, which isn't
+        // there.
+        .name = "a 64-byte row under register pressure at AVX512F without VL",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXORD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v16i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v16i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v16i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v16i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v16i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v16i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v16i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v16i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v16i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v16i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v16i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v16i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v16i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v16i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v16i32 %29 align=4\n"
+                "  %31 = call.v16i32 row #0(%2, %4) fixed=(v16i32, v16i32) variadic=0\n"
+                "  %32 = xor.v16i32 %6, %8\n"
+                "  %33 = xor.v16i32 %32, %10\n"
+                "  %34 = xor.v16i32 %33, %12\n"
+                "  %35 = xor.v16i32 %34, %14\n"
+                "  %36 = xor.v16i32 %35, %16\n"
+                "  %37 = xor.v16i32 %36, %18\n"
+                "  %38 = xor.v16i32 %37, %20\n"
+                "  %39 = xor.v16i32 %38, %22\n"
+                "  %40 = xor.v16i32 %39, %24\n"
+                "  %41 = xor.v16i32 %40, %26\n"
+                "  %42 = xor.v16i32 %41, %28\n"
+                "  %43 = xor.v16i32 %42, %30\n"
+                "  %44 = address.ptr %0 offset=128\n"
+                "  %45 = store.void %44, %43 align=1\n"
+                "  %46 = address.ptr %0 offset=192\n"
+                "  %47 = store.void %46, %31 align=1\n"
+                "  %48 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_pressure_model64,
+        .foundation = true,
+    },
+    {
+        // #1281's review: its VEX twin at x86-64-v3, 13 32-byte vectors live across it beside its two dying operands: its
+        // roles stay in place (the result in a dying operand's register), or take xmm15, the one free register below 16,
+        // one at a time, not a run of two.
+        .name = "a VEX row under register pressure at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector32, vector32) -> vector32 [VPADDD_Y_Y_YM256 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXOR_Y_Y_YM256 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v8i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v8i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v8i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v8i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v8i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v8i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v8i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v8i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v8i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v8i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v8i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v8i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v8i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v8i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v8i32 %29 align=4\n"
+                "  %31 = call.v8i32 row #0(%2, %4) fixed=(v8i32, v8i32) variadic=0\n"
+                "  %32 = xor.v8i32 %6, %8\n"
+                "  %33 = xor.v8i32 %32, %10\n"
+                "  %34 = xor.v8i32 %33, %12\n"
+                "  %35 = xor.v8i32 %34, %14\n"
+                "  %36 = xor.v8i32 %35, %16\n"
+                "  %37 = xor.v8i32 %36, %18\n"
+                "  %38 = xor.v8i32 %37, %20\n"
+                "  %39 = xor.v8i32 %38, %22\n"
+                "  %40 = xor.v8i32 %39, %24\n"
+                "  %41 = xor.v8i32 %40, %26\n"
+                "  %42 = xor.v8i32 %41, %28\n"
+                "  %43 = xor.v8i32 %42, %30\n"
+                "  %44 = address.ptr %0 offset=128\n"
+                "  %45 = store.void %44, %43 align=1\n"
+                "  %46 = address.ptr %0 offset=160\n"
+                "  %47 = store.void %46, %31 align=1\n"
+                "  %48 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_pressure_model32,
+        .v3 = true,
+    },
+    {
+        // #1293's review: a VEX row whose result is its first operand, which no record writes, and which writes its second
+        // operand, live past it, at x86-64-v3 under the same pressure: 14 vectors live across it beside its dying first
+        // operand, so that only xmm15 is free below 16. VECTOR(0) stays in the first operand's register, taking none, and
+        // the second operand is staged in xmm15.
+        .name = "a VEX row of a read-only result under register pressure at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector32, vector32) -> vector32 [VPADDD_Y_Y_YM256 0x81 0x81 0x80 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v8i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v8i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v8i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v8i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v8i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v8i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v8i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v8i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v8i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v8i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v8i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v8i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v8i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v8i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v8i32 %29 align=4\n"
+                "  %31 = call.v8i32 row #0(%2, %4) fixed=(v8i32, v8i32) variadic=0\n"
+                "  %32 = xor.v8i32 %4, %6\n"
+                "  %33 = xor.v8i32 %32, %8\n"
+                "  %34 = xor.v8i32 %33, %10\n"
+                "  %35 = xor.v8i32 %34, %12\n"
+                "  %36 = xor.v8i32 %35, %14\n"
+                "  %37 = xor.v8i32 %36, %16\n"
+                "  %38 = xor.v8i32 %37, %18\n"
+                "  %39 = xor.v8i32 %38, %20\n"
+                "  %40 = xor.v8i32 %39, %22\n"
+                "  %41 = xor.v8i32 %40, %24\n"
+                "  %42 = xor.v8i32 %41, %26\n"
+                "  %43 = xor.v8i32 %42, %28\n"
+                "  %44 = xor.v8i32 %43, %30\n"
+                "  %45 = address.ptr %0 offset=128\n"
+                "  %46 = store.void %45, %44 align=1\n"
+                "  %47 = address.ptr %0 offset=160\n"
+                "  %48 = store.void %47, %31 align=1\n"
+                "  %49 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_read_only_model,
+        .v3 = true,
+    },
+    {
+        .name = "vectors across calls at x86-64-v3",
+        .text = "function (ptr, i64) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = param.i64 1\n"
+                "  %2 = load.v8i32 %0 align=1\n"
+                "  %3 = address.ptr %0 offset=16\n"
+                "  %4 = load.v4i32 %3 align=1\n"
+                "  %5 = address.ptr %0 offset=32\n"
+                "  %6 = load.v8i32 %5 align=1\n"
+                "  %7 = call.i64 @9(%1) fixed=(i64) variadic=0\n"
+                "  %8 = add.v8i32 %2, %2\n"
+                "  %9 = call.i64 @9(%7) fixed=(i64) variadic=0\n"
+                "  %10 = mul.v4i32 %4, %4\n"
+                "  %11 = xor.v8i32 %6, %6\n"
+                "  %12 = sub.v8i32 %11, %6\n"
+                "  %13 = address.ptr %0 offset=128\n"
+                "  %14 = store.void %13, %8 align=1\n"
+                "  %15 = address.ptr %0 offset=160\n"
+                "  %16 = store.void %15, %10 align=1\n"
+                "  %17 = address.ptr %0 offset=176\n"
+                "  %18 = store.void %17, %12 align=1\n"
+                "  %19 = address.ptr %0 offset=240\n"
+                "  %20 = store.void %19, %9 align=8\n"
+                "  %21 = ret.void\n"
+                "}\n",
+        .count = 1000,
+        .calls = true,
+        .v3 = true,
+    },
+    {
+        // #1280: SSE carriers from a double and a float parameter and a call's double result, whose registers' bytes
+        // past them aren't zero, read whole by rows of no records: each zero-extended into its role.
+        .name = "SSE carriers with dirty upper lanes",
+        .text = "function (ptr, i64, f64, f32) -> void {\n"
+                "  row #0 (vector8) -> vector16\n"
+                "  row #1 (vector4) -> vector16\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = param.i64 1\n"
+                "  %2 = param.f64 2\n"
+                "  %3 = param.f32 3\n"
+                "  %4 = call.v4i32 row #0(%2) fixed=(f64) variadic=0\n"
+                "  %5 = call.v4i32 row #1(%3) fixed=(f32) variadic=0\n"
+                "  %6 = call.f64 @9(%1) fixed=(i64) variadic=0\n"
+                "  %7 = call.v4i32 row #0(%6) fixed=(f64) variadic=0\n"
+                "  %8 = address.ptr %0 offset=128\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %0 offset=144\n"
+                "  %11 = store.void %10, %5 align=1\n"
+                "  %12 = address.ptr %0 offset=160\n"
+                "  %13 = store.void %12, %7 align=1\n"
+                "  %14 = ret.void\n"
+                "}\n",
+        .count = 1000,
+        .model = tier1_masks_test_carriers_model,
+    },
+    {
+        // #1281: the same at a target without AVX-512, each zero-extended by VEX vmovq or vinsertps.
+        .name = "SSE carriers with dirty upper lanes at x86-64-v3",
+        .text = "function (ptr, i64, f64, f32) -> void {\n"
+                "  row #0 (vector8) -> vector16\n"
+                "  row #1 (vector4) -> vector16\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = param.i64 1\n"
+                "  %2 = param.f64 2\n"
+                "  %3 = param.f32 3\n"
+                "  %4 = call.v4i32 row #0(%2) fixed=(f64) variadic=0\n"
+                "  %5 = call.v4i32 row #1(%3) fixed=(f32) variadic=0\n"
+                "  %6 = call.f64 @9(%1) fixed=(i64) variadic=0\n"
+                "  %7 = call.v4i32 row #0(%6) fixed=(f64) variadic=0\n"
+                "  %8 = address.ptr %0 offset=128\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %0 offset=144\n"
+                "  %11 = store.void %10, %5 align=1\n"
+                "  %12 = address.ptr %0 offset=160\n"
+                "  %13 = store.void %12, %7 align=1\n"
+                "  %14 = ret.void\n"
+                "}\n",
+        .count = 1000,
+        .model = tier1_masks_test_carriers_model,
+        .v3 = true,
+    },
+    {
+        // #1283: vector rows placed one role at a time: a two-operand form's (its first operand read in its own register
+        // up to the result's first write, which the destination takes), a tied operand's (copied into the destination),
+        // a merging opmask's, an operand written and dying at the node (kept in its own register) under an integer
+        // result, a VEX form's /is4 blend in the run below xmm16, a narrow result written at a wider width (moved at its
+        // width), a narrow operand read at a wider one (copied at its width) and a widening conversion's pure write.
+        .name = "vector machine rows",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (vector64, vector64, vector64) -> vector64 [VPTERNLOGD_Z_Z_ZM512_IMM8 0x80 0x81 0x82 0x00 0x00 0x00 150 0]\n"
+                "  row #2 (vector64) -> u32 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0] [VMOVD_RM32_X_EVEX 0x80 0x00 0x90 0x00 0x00 0x00 0 0]\n"
+                "  row #3 (vector32, vector32, vector32) -> vector32 [VPBLENDVB_Y_Y_YM256_Y 0x80 0x80 0x81 0x00 0x00 0x00 32 0]\n"
+                "  row #4 (vector64, vector64, mask2) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]\n"
+                "  row #5 (vector64) -> vector16 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
+                "  row #6 (vector16) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
+                "  row #7 (vector16) -> vector64 [VPMOVZXBD_Z_XM128 0x80 0x00 0x80 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v16i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = load.m16 %0 align=2\n"
+                "  %5 = call.v16i32 row #0(%1, %3) fixed=(v16i32, v16i32) variadic=0\n"
+                "  %6 = call.v16i32 row #1(%5, %1, %3) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
+                "  %7 = call.v16i32 row #4(%1, %6, %4) fixed=(v16i32, v16i32, m16) variadic=0\n"
+                "  %8 = call.v4i32 row #5(%3) fixed=(v16i32) variadic=0\n"
+                "  %9 = call.v16i32 row #6(%8) fixed=(v4i32) variadic=0\n"
+                "  %10 = call.v16i32 row #7(%8) fixed=(v4i32) variadic=0\n"
+                "  %11 = call.v16i32 row #1(%9, %10, %7) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
+                "  %12 = call.i32 row #2(%7) fixed=(v16i32) variadic=0\n"
+                "  %13 = address.ptr %0 offset=128\n"
+                "  %14 = store.void %13, %11 align=1\n"
+                "  %15 = load.v8i32 %0 align=1\n"
+                "  %16 = address.ptr %0 offset=32\n"
+                "  %17 = load.v8i32 %16 align=1\n"
+                "  %18 = load.v8i32 %2 align=1\n"
+                "  %19 = call.v8i32 row #3(%15, %17, %18) fixed=(v8i32, v8i32, v8i32) variadic=0\n"
+                "  %20 = address.ptr %0 offset=192\n"
+                "  %21 = store.void %20, %19 align=1\n"
+                "  %22 = address.ptr %0 offset=224\n"
+                "  %23 = store.void %22, %8 align=1\n"
+                "  %24 = address.ptr %0 offset=240\n"
+                "  %25 = store.void %24, %12 align=4\n"
+                "  %26 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_vector_rows_model,
+        // Tier 0's placement moved 25: each vector operand in (17) and each vector result out (8). What is left, by
+        // the vector path's allocation: the merging opmask's first operand in and the result out (its destination is
+        // the second operand's register), the narrow result's move into itself at its width, the narrow operand's
+        // copy at its width, and the tied operand's in and out (its destination is the second's); by the scalar
+        // path's, the narrow result's and the narrow operand's alone.
+        .rows = 9,
+        .row_moves = { 6, 2 },
+    },
+    {
+        // #1283's review: a gather (the front end's row of _mm512_mask_i32gather_epi32) whose destination can be none of
+        // its index's and mask's registers, #UD otherwise: its source and index one value dying at it, whose register
+        // the allocation gives the result, so the gather writes another and the result moves there; and one of a source
+        // and an index apart, the index dying at it.
+        .name = "gathers whose index dies at them",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, u64, vector64, mask2) -> vector64 [VPGATHERDD_Z_VM32Z 0x80 0x00 0x81 0x82 0x1e 0x0b 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = ptrtoint.i64 %0\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = load.m16 %0 align=2\n"
+                "  %5 = call.v16i32 row #0(%3, %1, %3, %4) fixed=(v16i32, i64, v16i32, m16) variadic=0\n"
+                "  %6 = load.v16i32 %0 align=1\n"
+                "  %7 = load.v16i32 %2 align=1\n"
+                "  %8 = load.m16 %0 align=2\n"
+                "  %9 = call.v16i32 row #0(%6, %1, %7, %8) fixed=(v16i32, i64, v16i32, m16) variadic=0\n"
+                "  %10 = address.ptr %0 offset=128\n"
+                "  %11 = store.void %10, %5 align=1\n"
+                "  %12 = address.ptr %0 offset=192\n"
+                "  %13 = store.void %12, %9 align=1\n"
+                "  %14 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_gather_model,
+        .prepare = tier1_masks_test_gather_prepare,
+        .exclusive = true,
+        // Each gather's source copied into zmm16, its mask (which it clears) into a free opmask register and its result
+        // moved out; by the scalar path's allocation, the second's source and index apart, the first's alone.
+        .rows = 2,
+        .row_moves = { 6, 4 },
+    },
+    {
+        // #1283's review: AVX512-FP16's complex multiplication, whose destination can be neither factor's register, #UD
+        // otherwise: a row whose result is the product alone, its factors dying at it, one of whose registers the
+        // allocation gives the result, so it writes another and the result moves there; and the front end's row of
+        // _mm512_fmul_pch, its result the copy of the product its third operand (the first factor again) holds.
+        .name = "complex multiplications whose factors die at them",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (u32, vector64, vector64) -> vector64 [VFMULCPH_Z_Z_ZM512 0x80 0x81 0x82 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (vector64, vector64, vector64, u32) -> vector64 [VFMULCPH_Z_Z_ZM512 0x82 0x80 0x81 0x00 0x00 0x00 0 0] [VMOVDQU64_Z_ZM512 0x80 0x00 0x82 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v16i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = const.i32 0x00000000000000000000000000000000\n"
+                "  %5 = call.v16i32 row #0(%4, %1, %3) fixed=(i32, v16i32, v16i32) variadic=0\n"
+                "  %6 = load.v16i32 %0 align=1\n"
+                "  %7 = load.v16i32 %2 align=1\n"
+                "  %8 = call.v16i32 row #1(%6, %7, %6, %4) fixed=(v16i32, v16i32, v16i32, i32) variadic=0\n"
+                "  %9 = address.ptr %0 offset=128\n"
+                "  %10 = store.void %9, %5 align=1\n"
+                "  %11 = address.ptr %0 offset=192\n"
+                "  %12 = store.void %11, %8 align=1\n"
+                "  %13 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_complex_model,
+        .fp16 = true,
+        .exclusive = true,
+        // The first's product moved out of zmm16; the second's third operand copied out of the first factor's register
+        // it shares, and its result written in the destination, the dying second factor's register, after it is read.
+        .rows = 2,
+        .row_moves = { 2, 2 },
+    },
 };
 
 // Refusals: a vector, a mask's select.
@@ -1003,6 +2780,22 @@ static const char tier1_masks_test_vector[] = "function (ptr) -> v4i32 {\n"
                                               "  %1 = load.v4i32 %0 align=16\n"
                                               "  %2 = ret.void %1\n"
                                               "}\n";
+
+// A 16-byte vector's comparison and selection, whose mask is an opmask: no SSE target has one, so the baseline refuses
+// them at emission (#1425's review).
+static const char tier1_masks_test_sse_compare[] = "function (ptr) -> void {\n"
+                                                   "b0:\n"
+                                                   "  %0 = param.ptr 0\n"
+                                                   "  %1 = address.ptr %0 offset=0\n"
+                                                   "  %2 = load.v4i32 %1 align=1\n"
+                                                   "  %3 = address.ptr %0 offset=16\n"
+                                                   "  %4 = load.v4i32 %3 align=1\n"
+                                                   "  %5 = vcmp.m8 %2, %4 lt\n"
+                                                   "  %6 = vselect.v4i32 %5, %2, %4\n"
+                                                   "  %7 = address.ptr %0 offset=128\n"
+                                                   "  %8 = store.void %7, %6 align=1\n"
+                                                   "  %9 = ret.void\n"
+                                                   "}\n";
 
 static const char tier1_masks_test_select[] = "function (ptr, i64) -> void {\n"
                                               "b0:\n"
@@ -1017,22 +2810,6 @@ static const char tier1_masks_test_select[] = "function (ptr, i64) -> void {\n"
                                               "  %8 = store.void %7, %6 align=2\n"
                                               "  %9 = ret.void\n"
                                               "}\n";
-
-// A machine row with a floating role in a VEX form (#141), which only a register below 16 can hold:
-// tier1_select_row_supported refuses it (its EVEX twin is "a floating machine row"'s), so that its function is Tier 0's
-// rather than staged through an EVEX copy a target without AVX-512 has none of.
-static const char tier1_masks_test_vex_floating[] = "function (ptr) -> void {\n"
-                                                    "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
-                                                    "b0:\n"
-                                                    "  %0 = param.ptr 0\n"
-                                                    "  %1 = load.f32 %0 align=4\n"
-                                                    "  %2 = address.ptr %0 offset=4\n"
-                                                    "  %3 = load.f32 %2 align=4\n"
-                                                    "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
-                                                    "  %5 = address.ptr %0 offset=128\n"
-                                                    "  %6 = store.void %5, %4 align=4\n"
-                                                    "  %7 = ret.void\n"
-                                                    "}\n";
 
 // A word mask alone: kmovw and kandw, AVX512F's.
 static const char tier1_masks_test_words[] = "function (ptr) -> void {\n"
@@ -1095,7 +2872,9 @@ static bool tier1_masks_test_dominance(Tier1MasksTest* test, const IrFunction* f
     return ok;
 }
 
-// The helper's records: kxnorq into every opmask register, then rdi + 1 into rax, and ret.
+// The helper's records: kxnorq into every opmask register, then rdi + 1 into rax, and ret. Its result is also xmm0's,
+// in both of its quadwords (vpbroadcastq), so that a call of it as a double's (#1280) returns one whose upper lanes,
+// which the convention leaves undefined, aren't zero.
 static uint32_t tier1_masks_test_helper(X86Instruction* records)
 {
     uint32_t count = 0;
@@ -1104,17 +2883,69 @@ static uint32_t tier1_masks_test_helper(X86Instruction* records)
         records[count++] = (X86Instruction){ .form = X86_FORM_KXNORQ_K_K_K, .reg = k, .vvvv = k, .rm = k };
     }
     records[count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 1 };
+    records[count++] = (X86Instruction){ .form = X86_FORM_VPBROADCASTQ_X_R64, .reg = 0, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_REGISTER_DIRECT };
     records[count++] = (X86Instruction){ .form = X86_FORM_RET };
     return count;
 }
 
-typedef void (*Tier1MasksTestEntry)(uint8_t*, uint64_t);
+// The entry takes xmm0 and xmm1 too (#1280), which a fixture of a double and a float parameter reads as them: their low
+// bytes the parameters, and past them signaling NaNs, the bytes the convention leaves undefined.
+typedef long long Tier1MasksTestXmm __attribute__((vector_size(16)));
+typedef void (*Tier1MasksTestEntry)(uint8_t*, uint64_t, Tier1MasksTestXmm, Tier1MasksTestXmm);
 
 static __attribute__((no_sanitize("function"))) void tier1_masks_test_call(const uint8_t* code, uint8_t* buffer, uint64_t count)
 {
     Tier1MasksTestEntry entry;
     memcpy(&entry, &code, sizeof(entry));
-    entry(buffer, count);
+    const Tier1MasksTestXmm xmm0 = { (long long)BUSTER_TIER1_MASKS_TEST_DOUBLE, (long long)BUSTER_TIER1_MASKS_TEST_DIRTY };
+    const Tier1MasksTestXmm xmm1 = { (long long)((BUSTER_TIER1_MASKS_TEST_DIRTY & ~UINT64_C(0xffffffff)) | BUSTER_TIER1_MASKS_TEST_FLOAT), (long long)BUSTER_TIER1_MASKS_TEST_DIRTY };
+    entry(buffer, count, xmm0, xmm1);
+}
+
+// A native run of an `avx` fixture (#1293's review), with every ymm register a signaling NaN and MXCSR's status flags
+// clear, its invalid and denormal exceptions unmasked, so that a record reading a register's old bits as floats traps
+// (SIGFPE): whether MXCSR's status flags are still clear after it. MXCSR is restored after the call; the stack pointer is
+// kept in rbx, below the red zone and aligned to 32 bytes for the call, and the state in r12, so that no operand is
+// addressed from rsp once it moves.
+static __attribute__((no_sanitize("function"))) bool tier1_masks_test_call_seeded(const uint8_t* code, uint8_t* buffer, uint64_t count)
+{
+    // The signaling NaN's bits, MXCSR's control for the run (every exception masked but invalid and denormal), its value
+    // after the run, and its value before, restored.
+    static uint32_t state[4] = { 0x7fa00000u, 0x1f80u & ~0x0180u, 0, 0 };
+    uint8_t* first = buffer;
+    uint64_t second = count;
+    __asm__ volatile("mov %[state], %%r12\n\t"
+                     "stmxcsr 12(%%r12)\n\t"
+                     "vbroadcastss (%%r12), %%ymm0\n\t"
+                     "vmovaps %%ymm0, %%ymm1\n\t"
+                     "vmovaps %%ymm0, %%ymm2\n\t"
+                     "vmovaps %%ymm0, %%ymm3\n\t"
+                     "vmovaps %%ymm0, %%ymm4\n\t"
+                     "vmovaps %%ymm0, %%ymm5\n\t"
+                     "vmovaps %%ymm0, %%ymm6\n\t"
+                     "vmovaps %%ymm0, %%ymm7\n\t"
+                     "vmovaps %%ymm0, %%ymm8\n\t"
+                     "vmovaps %%ymm0, %%ymm9\n\t"
+                     "vmovaps %%ymm0, %%ymm10\n\t"
+                     "vmovaps %%ymm0, %%ymm11\n\t"
+                     "vmovaps %%ymm0, %%ymm12\n\t"
+                     "vmovaps %%ymm0, %%ymm13\n\t"
+                     "vmovaps %%ymm0, %%ymm14\n\t"
+                     "vmovaps %%ymm0, %%ymm15\n\t"
+                     "ldmxcsr 4(%%r12)\n\t"
+                     "mov %%rsp, %%rbx\n\t"
+                     "sub $128, %%rsp\n\t"
+                     "and $-32, %%rsp\n\t"
+                     "call *%[entry]\n\t"
+                     "mov %%rbx, %%rsp\n\t"
+                     "stmxcsr 8(%%r12)\n\t"
+                     "ldmxcsr 12(%%r12)\n\t"
+                     "vzeroupper"
+                     : "+D"(first), "+S"(second)
+                     : [state] "r"(state), [entry] "r"(code)
+                     : "rax", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11", "r12", "memory", "cc", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9",
+                       "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+    return (state[2] & 0x3fu) == 0;
 }
 
 // The emitted function's records, sized, encoded by both encoders (which must agree) with the helper after them, its
@@ -1141,7 +2972,7 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
     if (ok)
     {
         const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets);
-        ok = tier1_masks_test_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(test->v4, code->records, code->count) == code->count, "the sized records obey x86-64-v4");
+        ok = tier1_masks_test_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(test->forms, code->records, code->count) == code->count, "the sized records obey their target's forms");
         bool covered = true;
         for (uint32_t r = 0; ok && r < code->count; r += 1)
         {
@@ -1213,6 +3044,388 @@ static bool tier1_masks_test_interpret(Tier1MasksTest* test, const IrFunction* f
 }
 
 // One fixture by one path: planned, emitted, its allocation checked, and where the host can, run on every input.
+// Whether the code's certificate refuses the code as it is now.
+static bool tier1_masks_test_refused(Tier1MasksTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+{
+    Tier1CertEmittedStats stats = { 0 };
+    return tier1_certificate_emitted_check(plan, emitted, &test->output, &test->scratch, 0, &stats) >= TIER1_CERT_EMITTED_REFUSED;
+}
+
+// The general registers record `record`'s fields name (Tier 0's fields of a placed record: its register fields, a memory
+// operand's base and index), each renamed `from` to `to` where `rename`.
+static uint32_t tier1_masks_test_general(X86Instruction* record, bool rename, uint8_t from, uint8_t to)
+{
+    const Tier0Fields fields = tier0_operation_fields(record);
+    uint32_t named = 0;
+    for (uint32_t k = 0; k < fields.count; k += 1)
+    {
+        const uint8_t class = fields.classes[k];
+        const bool general = class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+        named |= general ? 1u << (*fields.bytes[k] & 15) : 0;
+        *fields.bytes[k] = general && rename && *fields.bytes[k] == from ? to : *fields.bytes[k];
+    }
+    return named;
+}
+
+// The roles a row's template names (#1284): VECTOR(j)'s bit j, SCRATCH(k)'s 16 + k, MASK_SCRATCH(k)'s 20 + k and the
+// opmask register k's by number 24 + k.
+static uint32_t tier1_masks_test_roles(const Tier0Operation* row)
+{
+    uint32_t roles = 0;
+    for (uint32_t r = 0; r < row->record_count; r += 1)
+    {
+        X86Instruction record = row->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        for (uint32_t k = 0; k < fields.count; k += 1)
+        {
+            const uint8_t role = *fields.bytes[k];
+            const uint8_t class = fields.classes[k];
+            const bool vector = class == BUSTER_X86_CLASS_XMM || class == BUSTER_X86_CLASS_YMM || class == BUSTER_X86_CLASS_ZMM;
+            const bool general = class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+            const bool mask = class == BUSTER_X86_CLASS_OPMASK;
+            roles |= vector && role >= BUSTER_TIER0_ROLE && role < BUSTER_TIER0_ROLE_VECTOR(BUSTER_TIER0_OPERATION_VECTORS) ? 1u << (role & 15) : 0;
+            roles |= general && role >= BUSTER_TIER0_ROLE_SCRATCH(0) && role < BUSTER_TIER0_ROLE_SCRATCH(BUSTER_TIER0_SCRATCH) ? 1u << (16 + (role & 3)) : 0;
+            roles |= mask && role >= BUSTER_TIER0_ROLE_MASK_SCRATCH(0) && role < BUSTER_TIER0_ROLE_MASK_SCRATCH(BUSTER_TIER0_SCRATCH) ? 1u << (20 + (role & 3)) : 0;
+            roles |= mask && role < 8 ? 1u << (24 + role) : 0;
+        }
+        roles |= fields.is4 ? 1u << (((uint32_t)record.immediate >> 4) & 15) : 0;
+        const uint32_t decoration = record.decorations & BUSTER_TIER0_DECORATION_ROLE;
+        const uint32_t index = record.decorations & BUSTER_X86_DECORATION_MASK;
+        roles |= decoration == BUSTER_TIER0_DECORATION_MASK_SCRATCH(0) ? 1u << (20 + (index & 3)) : 0;
+        roles |= decoration == 0 && index != 0 ? 1u << (24 + index) : 0;
+    }
+    return roles;
+}
+
+// Machine row node `node`'s claimed placement corrupted (#1284), its records [first, first + the row's) placed again by the
+// corrupted claim as the certificate places them (tier1_cert_emitted_row_place), so that only the claim's own checks can
+// refuse it: each non-operand role (SCRATCH(k), MASK_SCRATCH(k), a VECTOR(j) no vector operand has) made the result's
+// register; the result made the register of an operand of its class that Tier 0's own placement doesn't give it
+// (tier0_operation_placement, tier0_operation_mask_place: its oracle); and each opmask register the row names by number,
+// k1 to k7, made k0, which in a decoration is no mask. Each must be refused; everything is put back after.
+static void tier1_masks_test_claim_mutants(Tier1MasksTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t node, uint32_t first)
+{
+    const IrFunction* function = plan->function;
+    const Tier0Operation* row = &function->rows[(uint32_t)plan->patterns[node].immediate];
+    X86Instruction* records = emitted->code.records;
+    Tier1RowPlacement* claimed = &emitted->row_placements[node];
+    const Tier1RowPlacement original = *claimed;
+    const bool fits = row->record_count <= BUSTER_TIER0_OPERATION_RECORDS && first + row->record_count <= emitted->code.count;
+    X86Instruction saved[BUSTER_TIER0_OPERATION_RECORDS];
+    for (uint32_t r = 0; fits && r < row->record_count; r += 1)
+    {
+        saved[r] = records[first + r];
+    }
+    // Tier 0's placement of the row with its operands at the bottom of each stack, its registers apart.
+    uint32_t integers = 0;
+    uint32_t floatings = 0;
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        integers += tier0_stack(row->operand_classes[j]) == 1 ? 1 : 0;
+        floatings += tier0_stack(row->operand_classes[j]) == 2 ? 1 : 0;
+    }
+    Tier0Placement tier0 = tier0_operation_placement(row, (int32_t)integers, (int32_t)floatings);
+    const Tier0MaskPlan mask_plan = tier0_operation_mask_plan(row, tier0_operation_masks(row).operands);
+    tier0_operation_mask_place(row, &mask_plan, &tier0);
+    const uint32_t roles = tier1_masks_test_roles(row);
+    const uint32_t result = row->result_class;
+    uint32_t vector_operands = 0;
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        vector_operands |= tier0_class_vector(row->operand_classes[j]) ? 1u << j : 0;
+    }
+    // VECTOR(j)'s uses (#1283): the result's VECTOR(0) holds its register from the row's entry where it is the first
+    // operand's role there, else from its first write; a temporary VECTOR(j) from its first write to its last naming.
+    const Tier1SelectRowVectors facts = tier1_select_row_vectors(row);
+    const bool split = original.split != 0;
+    const uint32_t result_start = (vector_operands & 1) != 0 && !split ? 0 : facts.first_write[0];
+    test->row_splits += split;
+    // Mutant m: 0 to 15 VECTOR(j) onto the result, 16 to 19 SCRATCH(k) or MASK_SCRATCH(k), 20 to 27 the result onto operand
+    // j, 28 to 34 opmask k (1 to 7) by number made k0; 35 and 36 a split's claim corrupted, its split cleared or its early
+    // register made the result's; 37 to 52 a temporary VECTOR(j), written before a vector operand's last naming, onto that
+    // operand's register (only the certificate's rule on the roles' uses refuses it: the operand is where the row reads it
+    // first, and the temporary's write overwrites it before its last read).
+    for (uint32_t m = 0; fits && m < 53; m += 1)
+    {
+        Tier1RowPlacement claim = original;
+        bool k0 = false;
+        bool split_mutant = false;
+        bool overlap = false;
+        bool mutated = false;
+        // A temporary onto the result: where its uses reach past the result's first write (one that ends before it is done
+        // with the register, which the result may take).
+        const bool overlapping = m < 16 && (result_start == 0 || facts.last_named[m] > result_start);
+        if (m < 16 && overlapping && ((roles >> m) & 1) != 0 && ((vector_operands >> m) & 1) == 0 && (tier0_class_floating(result) || (tier0_class_vector(result) && m != 0)))
+        {
+            claim.vectors[m] = tier0_class_floating(result) ? claim.floating_result : claim.vectors[0];
+            mutated = claim.vectors[m] != original.vectors[m];
+        }
+        else if (m >= 16 && m < 20 && tier0_class_integer(result) && ((roles >> m) & 1) != 0)
+        {
+            claim.scratch[m - 16] = claim.integer_result;
+            mutated = claim.scratch[m - 16] != original.scratch[m - 16];
+        }
+        else if (m >= 16 && m < 20 && tier0_class_mask(result) && ((roles >> (m + 4)) & 1) != 0)
+        {
+            claim.mask_scratch[m - 16] = claim.mask_result;
+            mutated = claim.mask_scratch[m - 16] != original.mask_scratch[m - 16];
+        }
+        else if (m >= 20 && m < 28 && m - 20 < row->operand_count)
+        {
+            const uint32_t j = m - 20;
+            const uint32_t class = row->operand_classes[j];
+            if (tier0_class_integer(result) && tier0_class_integer(class) && tier0.operands[j] != tier0.integer_result)
+            {
+                claim.integer_result = claim.operands[j];
+                mutated = claim.integer_result != original.integer_result;
+            }
+            else if (tier0_class_floating(result) && tier0_class_floating(class) && tier0.operands[j] != tier0.floating_result)
+            {
+                claim.floating_result = claim.operands[j];
+                mutated = claim.floating_result != original.floating_result;
+            }
+            else if (tier0_class_mask(result) && tier0_class_mask(class) && tier0.masks[j] != tier0.mask_result)
+            {
+                claim.mask_result = claim.masks[j];
+                mutated = claim.mask_result != original.mask_result;
+            }
+        }
+        else if (m >= 28 && m < 35 && ((roles >> (24 + m - 27)) & 1) != 0)
+        {
+            claim.renamed[m - 27] = 0;
+            k0 = true;
+            mutated = true;
+        }
+        else if ((m == 35 || m == 36) && split && claim.early != claim.vectors[0])
+        {
+            // The first operand read where VECTOR(0)'s later value is, before it is written: the split cleared, or its
+            // early register claimed the result's.
+            claim.split = m == 35 ? 0 : claim.split;
+            claim.position = m == 35 ? 0 : claim.position;
+            claim.early = m == 35 ? 0 : claim.vectors[0];
+            split_mutant = true;
+            mutated = true;
+        }
+        else if (m >= 37 && m - 37 < 16 && m - 37 != 0 && ((roles >> (m - 37)) & 1) != 0 && ((vector_operands >> (m - 37)) & 1) == 0 && facts.first_write[m - 37] != 0)
+        {
+            const uint32_t t = m - 37;
+            // The first vector operand (but a split's first, read elsewhere) whose last naming comes after t's first write.
+            uint32_t live = UINT32_MAX;
+            for (uint32_t j = 0; live == UINT32_MAX && j < row->operand_count && j < 16; j += 1)
+            {
+                live = ((vector_operands >> j) & 1) != 0 && !(j == 0 && split) && facts.last_named[j] > facts.first_write[t] ? j : live;
+            }
+            claim.vectors[t] = live != UINT32_MAX ? claim.vectors[live] : claim.vectors[t];
+            mutated = live != UINT32_MAX && claim.vectors[t] != original.vectors[t];
+            overlap = mutated;
+        }
+        bool placed = mutated;
+        for (uint32_t r = 0; placed && r < row->record_count; r += 1)
+        {
+            uint64_t named = 0;
+            uint64_t registers = 0;
+            uint32_t masks = 0;
+            placed = tier1_cert_emitted_row_place(row->records[r], r, &claim, &records[first + r], &named, &registers, &masks);
+        }
+        if (placed)
+        {
+            *claimed = claim;
+            const bool refused = tier1_masks_test_refused(test, plan, emitted);
+            test->row_roles += k0 || split_mutant ? 0 : 1;
+            test->row_roles_refused += !k0 && !split_mutant && refused;
+            test->row_k0 += k0 ? 1 : 0;
+            test->row_k0_refused += k0 && refused;
+            test->row_split_mutants += split_mutant ? 1 : 0;
+            test->row_split_refused += split_mutant && refused;
+            test->row_overlaps += overlap ? 1 : 0;
+            test->row_overlaps_refused += overlap && refused;
+            tier1_masks_test_expect(test, refused, k0             ? "a machine row's opmask register named by number, claimed k0, is refused (#1284)"
+                                                   : split_mutant ? "a machine row's first operand claimed where VECTOR(0)'s later value is, before its first write, is refused (#1284)"
+                                                                  : "a machine row's roles claimed in one register while both hold their values are refused (#1284)");
+        }
+        *claimed = original;
+        for (uint32_t r = 0; mutated && r < row->record_count; r += 1)
+        {
+            records[first + r] = saved[r];
+        }
+    }
+}
+
+// The certificate's rule on VECTOR roles sharing a register (#1283, tier1_cert_emitted_row_before), on the template
+// `vpaddd V2, V0, V1; vpaddd V0, V2, V1` by its own facts (tier1_select_row_vectors): the operand V1 and the temporary V2
+// may share the result V0's register, each last read in the record whose pure write makes V0; V1 and V2 may not, V2
+// written before V1's last read; nor V1 and V0 where V0's first write merges, or where that record's destination can't
+// be one of its sources. Whether each answer is the expected one.
+static bool tier1_masks_test_row_occupancy(void)
+{
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    row.record_count = 2;
+    row.records[0] = (X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(2), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
+    row.records[1] = (X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(2), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
+    const Tier1SelectRowVectors facts = tier1_select_row_vectors(&row);
+    const Tier1CertEmittedRole operand = { .operand = 1, .file = 1, .vector = 1, .start = 0, .end = facts.last_named[1] };
+    const Tier1CertEmittedRole temporary = { .operand = UINT32_MAX, .file = 1, .vector = 2, .start = facts.first_write[2], .end = facts.last_named[2] };
+    const Tier1CertEmittedRole result = { .operand = UINT32_MAX, .file = 1, .vector = 0, .result = true, .start = facts.first_write[0], .end = 3 };
+    Tier1SelectRowVectors merging = facts;
+    merging.pure &= ~1u;
+    Tier1SelectRowVectors exclusive = facts;
+    exclusive.exclusive |= 1u << 1;
+    const bool shapes = facts.first_write[2] == 1 && facts.first_write[0] == 2 && facts.last_named[1] == 2 && facts.last_named[2] == 2 && (facts.pure & 5) == 5 && facts.exclusive == 0;
+    const bool operand_then_result = tier1_cert_emitted_row_before(&row, &facts, operand, result);
+    const bool temporary_then_result = tier1_cert_emitted_row_before(&row, &facts, temporary, result);
+    const bool operand_temporary = tier1_cert_emitted_row_before(&row, &facts, operand, temporary) || tier1_cert_emitted_row_before(&row, &facts, temporary, operand);
+    const bool merged = tier1_cert_emitted_row_before(&row, &merging, operand, result);
+    const bool excluded = tier1_cert_emitted_row_before(&row, &exclusive, operand, result);
+    return shapes && operand_then_result && temporary_then_result && !operand_temporary && !merged && !excluded;
+}
+
+// The code's certificate refuses a corrupted machine row (#1284). For each row of the function: each borrowed opmask
+// register's reload after it (its node's kmov from the frame) made its register's move into itself, the mask the row
+// borrowed the register from lost; and each of its staging copies into a general register renamed to a register that
+// holds a value live across the row, through the row's records, its result's move and its claimed placement
+// (Tier1RowPlacement), so that the row computes as it did but overwrites the live value. Each must be refused; everything
+// is put back after.
+static void tier1_masks_test_row_mutants(Tier1MasksTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t base = 2 * (emitted->cfg_input.block_count - function->block_count);
+    X86Instruction* records = emitted->code.records;
+    for (uint32_t node = 0; emitted->row_placements != 0 && node < function->instruction_count; node += 1)
+    {
+        const uint32_t index = (uint32_t)plan->patterns[node].immediate;
+        const bool row = !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ROW && index < function->row_count;
+        const uint32_t own = tier1_origin(TIER1_ORIGIN_NODE, node);
+        const uint32_t staging = tier1_origin(TIER1_ORIGIN_MOVE, base + 2 * node + 1);
+        uint32_t first = 0;
+        while (row && first < emitted->code.count && emitted->origins[first] != own)
+        {
+            first += 1;
+        }
+        uint32_t end = first;
+        while (row && end < emitted->code.count && emitted->origins[end] == own)
+        {
+            end += 1;
+        }
+        const uint32_t rows_end = row && first < emitted->code.count ? first + function->rows[index].record_count : end;
+        for (uint32_t r = rows_end; row && r < end; r += 1)
+        {
+            const X86Instruction record = records[r];
+            for (uint32_t width = 1; width <= 8; width *= 2)
+            {
+                const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+                if (record.form == forms->load && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register)
+                {
+                    records[r] = (X86Instruction){ .form = forms->move, .reg = record.reg, .rm = record.reg };
+                    const bool refused = tier1_masks_test_refused(test, plan, emitted);
+                    records[r] = record;
+                    test->row_reloads += 1;
+                    test->row_reloads_refused += refused;
+                    tier1_masks_test_expect(test, refused, "a machine row's borrowed opmask register left without its reload is refused (#1284)");
+                }
+            }
+        }
+        if (row && first < emitted->code.count)
+        {
+            tier1_masks_test_claim_mutants(test, plan, emitted, node, first);
+        }
+        // The row's staging copies, the moves at its definition phase right before its records.
+        uint32_t staging_first = first;
+        while (row && staging_first > 0 && staging_first <= emitted->code.count && emitted->origins[staging_first - 1] == staging)
+        {
+            staging_first -= 1;
+        }
+        uint32_t named = 0;
+        for (uint32_t r = staging_first; row && r < end; r += 1)
+        {
+            X86Instruction record = records[r];
+            named |= tier1_masks_test_general(&record, false, 0, 0);
+        }
+        for (uint32_t s = staging_first; row && s < first; s += 1)
+        {
+            const X86Instruction copy = records[s];
+            if (copy.form == X86_FORM_MOV_R64_RM64 && copy.mode == BUSTER_X86_REGISTER_DIRECT && copy.reg < 16 && copy.rm < 16 && copy.reg != copy.rm)
+            {
+                // A general register holding a value across the row, at its definition phase and at the next node's use,
+                // that the row's records and moves don't name.
+                uint8_t to = UINT8_MAX;
+                for (uint32_t v = 0; to == UINT8_MAX && v < emitted->cfg_input.value_count; v += 1)
+                {
+                    uint32_t where = 0;
+                    uint8_t kind = 0;
+                    uint32_t after = 0;
+                    uint8_t after_kind = 0;
+                    const bool general = emitted->cfg_input.classes[v] == BUSTER_TIER1_ALLOCATE_GPR && emitted->value_nodes[v] != node;
+                    const bool held = general && tier1_cfg_location(&emitted->cfg, v, base + 2 * node + 1, &where, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER && where < 16 &&
+                                      tier1_cfg_location(&emitted->cfg, v, base + 2 * node + 2, &after, &after_kind) && after_kind == BUSTER_TIER1_ALLOCATE_REGISTER && after == where;
+                    to = held && where != X86_REGISTER_RSP && ((named >> where) & 1) == 0 ? (uint8_t)where : UINT8_MAX;
+                }
+                if (to != UINT8_MAX)
+                {
+                    X86Instruction saved[BUSTER_TIER1_EMIT_ROW_RECORDS + 64];
+                    const uint32_t count = end - s < BUSTER_ARRAY_LENGTH(saved) ? end - s : 0;
+                    const Tier1RowPlacement placement = emitted->row_placements[node];
+                    Tier1RowPlacement* claimed = &emitted->row_placements[node];
+                    for (uint32_t r = 0; r < count; r += 1)
+                    {
+                        saved[r] = records[s + r];
+                        tier1_masks_test_general(&records[s + r], true, copy.reg, to);
+                    }
+                    for (uint32_t j = 0; j < BUSTER_TIER0_OPERATION_OPERANDS; j += 1)
+                    {
+                        claimed->operands[j] = claimed->operands[j] == copy.reg ? to : claimed->operands[j];
+                    }
+                    for (uint32_t k = 0; k < BUSTER_TIER0_SCRATCH; k += 1)
+                    {
+                        claimed->scratch[k] = claimed->scratch[k] == copy.reg ? to : claimed->scratch[k];
+                    }
+                    claimed->integer_result = claimed->integer_result == copy.reg ? to : claimed->integer_result;
+                    const bool refused = count != 0 && tier1_masks_test_refused(test, plan, emitted);
+                    for (uint32_t r = 0; r < count; r += 1)
+                    {
+                        records[s + r] = saved[r];
+                    }
+                    *claimed = placement;
+                    test->row_stagings += count != 0;
+                    test->row_stagings_refused += refused;
+                    tier1_masks_test_expect(test, count == 0 || refused, "a machine row's staged operand overwriting a live register is refused (#1284)");
+                }
+            }
+        }
+    }
+    // The vectors' moves (#1284): each reload of a ymm or zmm register's value, and each of its moves between registers (an
+    // edge's or a fragment's), narrowed to its xmm register's, which leaves the register's upper bytes as they were. Its
+    // stores are left as they are: a narrowed one may store again into a slot that holds the value already. A call's saves
+    // of the widest vector's bytes, of whatever value the register holds, are no value's moves.
+    static const uint16_t wide_forms[][2] = {
+        { X86_FORM_VMOVDQA64_Y_YM256, X86_FORM_VMOVDQA64_X_XM128 },
+        { X86_FORM_VMOVDQA64_Z_ZM512, X86_FORM_VMOVDQA64_X_XM128 },
+        { X86_FORM_VMOVDQU32_Y_YM256, X86_FORM_VMOVDQU32_X_XM128 },
+        { X86_FORM_VMOVDQU32_Z_ZM512, X86_FORM_VMOVDQU32_X_XM128 },
+    };
+    for (uint32_t r = 0; r < emitted->code.count; r += 1)
+    {
+        const X86Instruction record = records[r];
+        const Tier1Origin kind = (Tier1Origin)(emitted->origins[r] >> BUSTER_TIER1_ORIGIN_SHIFT);
+        const uint32_t value = emitted->origin_values[r];
+        const bool wide = value < function->instruction_count && emitted->prepared.sizes[value] > 16;
+        for (uint32_t k = 0; wide && (kind == TIER1_ORIGIN_MOVE || kind == TIER1_ORIGIN_EDGE) && k < BUSTER_ARRAY_LENGTH(wide_forms); k += 1)
+        {
+            if (record.form == wide_forms[k][0] && record.reg < 16 && (record.mode != BUSTER_X86_REGISTER_DIRECT || record.rm < 16))
+            {
+                records[r].form = wide_forms[k][1];
+                const bool refused = tier1_masks_test_refused(test, plan, emitted);
+                records[r] = record;
+                test->vector_moves += 1;
+                test->vector_moves_refused += refused;
+                tier1_masks_test_expect(test, refused, "a vector's move narrowed to its xmm register's is refused (#1284)");
+            }
+        }
+    }
+    // The emitted code, as it was, still certified.
+    tier1_masks_test_expect(test, emitted->row_placements == 0 || !tier1_masks_test_refused(test, plan, emitted), "the machine rows' code, put back, is certified");
+}
+
 static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool vector, bool rematerialize, const uint8_t* inputs,
                                   const uint64_t* counts, const uint8_t* expected)
 {
@@ -1237,7 +3450,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     Tier1EmitResult emitted = { 0 };
     if (ok)
     {
-        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->v4, &test->output, &test->scratch, &emitted, &node);
+        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->forms, &test->output, &test->scratch, &emitted, &node);
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK && emitted.general, fixture->name);
         if (!ok)
         {
@@ -1248,8 +3461,13 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     }
     if (ok)
     {
+        tier1_masks_test_row_mutants(test, &plan, &emitted);
+    }
+    if (ok)
+    {
         // Every value a call stores, a mask's opmask row among them, is loaded back (#1116).
         ok = tier1_masks_test_expect(test, tier1_emit_test_saves_loaded(&emitted) && tier1_emit_test_saves_seen(&emitted), "every value a call stores is loaded back");
+        ok = tier1_masks_test_expect(test, tier1_emit_test_general_rows_used(&emitted), "a general call-save row is a register some call stores (#177)") && ok;
         // The opmask class's allocation, by the independent checker; its moves through k0 and of masks.
         Tier1CfgCheck check;
         ok = tier1_masks_test_expect(test, tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check), "the CFG checker accepts the masks' allocation");
@@ -1289,6 +3507,29 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_expect(test, !fixture->spills || (emitted.spill_stores != 0 && emitted.spill_loads != 0), "masks past k1 to k7 are spilled and reloaded");
         tier1_masks_test_expect(test, !fixture->calls || (emitted.call_stores != 0 && emitted.call_loads != 0), "masks live across a call are saved and reloaded");
         tier1_masks_test_expect(test, !fixture->borrows || (emitted.call_stores != 0 && emitted.call_loads != 0), "a machine row short of opmask registers borrows live masks' and reloads them");
+        // A host without the vector path runs the scalar one for both (BUSTER_HOST_VECTOR), and allocates as it does.
+        // A gather's and a complex multiplication's destination is none of their sources' registers (#1283's review),
+        // which would be #UD: tier1_emit_cfg_row stages its result where the allocation gave the result such a register
+        // (a dying index's or factor's), and the encoder's validation, which refuses the function otherwise, passes.
+        uint32_t exclusive = 0;
+        uint32_t distinct = 0;
+        for (uint32_t r = 0; fixture->exclusive && r < emitted.code.count; r += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[r];
+            const X86FormDescription* description = x86_form_description(record->form);
+            const bool memory = record->mode != BUSTER_X86_REGISTER_DIRECT;
+            const bool vsib = memory && (description->rm & BUSTER_X86_OPERAND_VSIB) != 0;
+            const bool complex = x86_form_has_distinct_destination(description);
+            exclusive += vsib || complex ? 1 : 0;
+            distinct += (vsib && record->reg != record->index) || (complex && record->reg != record->vvvv && (memory || record->reg != record->rm)) ? 1 : 0;
+        }
+        tier1_masks_test_expect(test, !fixture->exclusive || (exclusive != 0 && distinct == exclusive), "a gather's and a complex multiplication's destination is none of their sources' registers");
+        tier1_masks_test_expect(test, x86_validate(emitted.code.records, emitted.code.count) == emitted.code.count, "every record the function emits is valid");
+        const uint32_t row_moves = fixture->row_moves[vector && BUSTER_HOST_VECTOR ? 0 : 1];
+        if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
+        {
+            printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
+        }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
         uint32_t frame_accesses = 0;
@@ -1356,13 +3597,24 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         if (child == 0)
         {
             alarm(10);
+            // An `avx` fixture's runs start from signaling NaNs in every ymm register, and must leave MXCSR's status flags
+            // clear (#1293's review).
+            bool clear = true;
             for (uint32_t input = 0; input < BUSTER_TIER1_MASKS_TEST_INPUTS; input += 1)
             {
-                tier1_masks_test_call(machine, buffers + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER, counts[input]);
+                uint8_t* bytes = buffers + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER;
+                if (fixture->avx)
+                {
+                    clear &= tier1_masks_test_call_seeded(machine, bytes, counts[input]);
+                }
+                else
+                {
+                    tier1_masks_test_call(machine, bytes, counts[input]);
+                }
             }
-            _exit(0);
+            _exit(clear ? 0 : 1);
         }
-        ok = tier1_masks_test_expect(test, child > 0 && tier1_pipeline_wait(child), "the native code exits normally within its budget");
+        ok = tier1_masks_test_expect(test, child > 0 && tier1_pipeline_wait(child), "the native code exits normally within its budget, raising no floating exception where it starts from signaling NaNs");
         for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_INPUTS; input += 1)
         {
             const uint8_t* actual = buffers + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER;
@@ -1395,6 +3647,12 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
 static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixture* fixture)
 {
     const uint64_t output_mark = test->output.length;
+    // A fixture of AVX512-FP16's rows runs natively only where the host has it, and its model only then.
+    const bool native = test->native;
+    test->native = native && (!fixture->fp16 || test->native_fp16);
+    test->native_fixtures += test->native ? 1 : 0;
+    test->forms = fixture->fp16 ? test->fp16 : fixture->foundation ? test->foundation : fixture->avx ? test->avx : fixture->v3 ? test->v3 : fixture->v2 ? test->v2 :
+                  fixture->baseline ? test->baseline : test->v4;
     IrFunction function;
     IrDominance dominance;
     if (tier1_masks_test_parse(test, fixture->text, &function, &dominance))
@@ -1413,11 +3671,15 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
                 bytes[byte] = input % 4 == 1 ? 0 : input % 4 == 2 ? 0xff : (uint8_t)random;
             }
             counts[input] = fixture->count != 0 ? 1 + tier1_masks_test_next(test) % fixture->count : 0;
-            if (fixture->model != NULL)
+            if (fixture->prepare != NULL)
+            {
+                fixture->prepare(bytes);
+            }
+            if (fixture->model != NULL && test->native)
             {
                 fixture->model(bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
             }
-            else
+            else if (fixture->model == NULL)
             {
                 ok = tier1_masks_test_interpret(test, &function, bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
             }
@@ -1430,6 +3692,8 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
     }
     tier1_masks_test_expect(test, test->scratch.length == 0, "parsing returns the scratch arena");
     arena_pop_to(&test->output, output_mark);
+    test->native = native;
+    test->forms = test->v4;
 }
 
 // ir_function_has_vectors_path's vector path against its scalar twin and the expected answer: operation and type columns
@@ -1521,35 +3785,35 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
     const char* const texts[] = {
         tier1_masks_test_vector,
         tier1_masks_test_select,
-        tier1_masks_test_vex_floating,
         tier1_masks_test_fixtures[0].text,
         tier1_masks_test_fixtures[0].text,
         tier1_masks_test_words,
+        tier1_masks_test_sse_compare,
     };
     // The target each is emitted for (selection refusals stop first), and whether it is refused.
     const uint8_t* const targets[] = {
         test->v4,
         test->v4,
-        test->v4,
         baseline,
         foundation,
         foundation,
+        baseline,
     };
     const bool refused[] = {
         true,
         true,
         true,
         true,
-        true,
         false,
+        true,
     };
     const char* const names[] = {
         "a vector result is refused at selection",
         "a mask's select is refused at selection",
-        "a machine row with a floating role in a VEX form is refused at selection",
         "the baseline target has no opmask form",
         "AVX512F alone has no kandb, kmovd or kmovq",
         "AVX512F alone has kmovw and kandw",
+        "the baseline refuses a vector comparison and selection, which have no SSE form",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(texts); c += 1)
     {
@@ -1570,7 +3834,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
                 };
                 Tier1EmitResult emitted = { 0 };
                 const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, targets[c], &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_UNSUPPORTED;
-                const bool selection = c < 3;
+                const bool selection = c < 2;
                 const bool expected = selection ? selected == TIER1_SELECT_ERROR_UNSUPPORTED : refused[c] ? selected == TIER1_SELECT_OK && error == TIER1_EMIT_TARGET : selected == TIER1_SELECT_OK && error == TIER1_EMIT_OK;
                 tier1_masks_test_expect(test, expected, names[c]);
                 if (!expected)
@@ -1841,6 +4105,10 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             }
             Tier1CfgCheck check;
             ok = ok && tier1_masks_test_expect(test, tier1_cfg_verify(&emitted[f].cfg_input, &emitted[f].cfg, &test->scratch, &check), "the CFG checker accepts the typed program's allocation");
+            if (ok)
+            {
+                tier1_masks_test_row_mutants(test, &plan, &emitted[f]);
+            }
         }
         if (ok)
         {
@@ -2125,30 +4393,48 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             .random = seed * 2 + 1,
             .print = print,
             .v4 = malloc(X86_FORM_COUNT),
+            .v3 = malloc(X86_FORM_COUNT),
+            .v2 = malloc(X86_FORM_COUNT),
+            .avx = malloc(X86_FORM_COUNT),
+            .fp16 = malloc(X86_FORM_COUNT),
             .output = arena_reserve(64u << 20),
             .scratch = arena_reserve(64u << 20),
             .execution = arena_reserve(64u << 20),
         };
         uint8_t* baseline = malloc(X86_FORM_COUNT);
         uint8_t* foundation = malloc(X86_FORM_COUNT);
-        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
+        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.fp16 != 0 && test.v3 != 0 && test.v2 != 0 && test.avx != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
         if (tier1_masks_test_expect(&test, ready, "initialize the tables and arenas"))
         {
             X86Target v4 = { 0 };
             const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
             tier1_masks_test_expect(&test, parsed, "the x86-64-v4 target");
             x86_target_forms(&v4, test.v4);
+            memcpy(test.fp16, test.v4, X86_FORM_COUNT);
+            test.fp16[X86_FORM_VFMULCPH_Z_Z_ZM512] = 1;
+            test.forms = test.v4;
             const X86Target base = { .architecture = X86_ARCH_BASELINE };
             x86_target_forms(&base, baseline);
+            test.baseline = baseline;
             X86Target v3 = { 0 };
             x86_target_parse("x86-64-v3", 9, &v3);
+            x86_target_forms(&v3, test.v3);
+            // x86-64-v2 with AVX, as Sandy Bridge is: AVX without AVX2.
+            X86Target v2 = { 0 };
+            x86_target_parse("x86-64-v2", 9, &v2);
+            x86_target_forms(&v2, test.v2);
+            const X86Target sandybridge = { .features = v2.features | BUSTER_X86_FEATURE(AVX), .architecture = X86_ARCH_OTHER };
+            tier1_masks_test_expect(&test, (sandybridge.features & BUSTER_X86_FEATURE(AVX2)) == 0, "x86-64-v2 with AVX has no AVX2");
+            x86_target_forms(&sandybridge, test.avx);
             const X86Target f = { .features = v3.features | BUSTER_X86_FEATURE(AVX512F), .architecture = X86_ARCH_OTHER };
             x86_target_forms(&f, foundation);
+            test.foundation = foundation;
             // The native runs execute code checked against x86-64-v4's forms (the fixtures', the typed programs' and Tier
             // 0's rows), so they need every feature of it: AVX512F's words, DQ's bytes, BW's doublewords and quadwords,
             // and VL's EVEX forms at 128 and 256 bits, which the vectors' fixtures take (#1204's review).
             const X86Target host = x86_target_native();
             test.native = parsed && (host.features & v4.features) == v4.features;
+            test.native_fp16 = (host.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0;
             for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
             {
                 tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);
@@ -2159,8 +4445,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
-            const uint64_t expected_runs = test.native ? 4u * BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
-            tier1_masks_test_expect(&test, test.native_runs == expected_runs, "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
+            const uint32_t runnable = test.native_fp16 ? BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) : BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) - BUSTER_TIER1_MASKS_TEST_FP16_FIXTURES;
+            const uint64_t expected_runs = test.native ? 4u * runnable * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
+            tier1_masks_test_expect(&test, test.native_fixtures == (test.native ? runnable : 0) && test.native_runs == expected_runs,
+                                    "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
             tier1_masks_test_expect(&test, test.recomputed != 0, "with rematerialization, general values beside the masks are recomputed");
             tier1_masks_test_expect(&test, test.refused == 10, "every refusal on both paths");
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
@@ -2175,6 +4463,17 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
                test.typed_programs, test.typed_runs, test.typed_machine);
         printf("test-tier1-masks: the front end's opmask rows: %u through Tier 0 natively (%u runs), the IR's interpreter, SSA, the optimizer and Tier 1\n", test.builtin_rows, test.builtin_native);
+        tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
+                                "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
+        tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,
+                                "the machine rows' and vectors' mutants include reloads left out, staged operands overwriting live registers, roles sharing a register, opmask registers made k0, splits and narrowed "
+                                "moves (#1284)");
+        printf("test-tier1-masks: machine rows' code certified, %u of their claims with a split; mutants refused: borrowed opmask registers' reloads left out %u of %u, staged operands overwriting a live register %u of %u, "
+               "claimed roles sharing a register while both hold their values %u of %u (temporaries over a live operand %u of %u), opmask registers named by number claimed k0 %u of %u, splits corrupted %u of %u, "
+               "vectors' moves narrowed to xmm %u of %u\n",
+               test.row_splits, test.row_reloads_refused, test.row_reloads, test.row_stagings_refused, test.row_stagings, test.row_roles_refused, test.row_roles, test.row_overlaps_refused, test.row_overlaps,
+               test.row_k0_refused, test.row_k0,
+               test.row_split_refused, test.row_split_mutants, test.vector_moves_refused, test.vector_moves);
         printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls, %" PRIu64 " through frame objects, %" PRIu64 " general values recomputed beside them; %u refusals (seed=%" PRIu64 ")\n",
                test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.frame_accesses,
                test.recomputed, test.refused, seed);
@@ -2185,6 +4484,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         free(foundation);
         free(baseline);
         free(test.v4);
+        free(test.v3);
+        free(test.v2);
+        free(test.avx);
+        free(test.fp16);
     }
     return result;
 }

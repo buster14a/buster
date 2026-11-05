@@ -299,6 +299,33 @@ static int fixture_execute(const char* sidecar)
     return result;
 }
 
+static int fixture_interpret(const char* source, bool multifile, bool second_source)
+{
+    FILE* file = source != 0 ? fopen(source, "r") : 0;
+    bool valid = file != 0 && (!multifile || (second_source && access("init.h", R_OK) == 0));
+    char line[128] = {0};
+    char scenario[64] = "probe";
+    if (file != 0)
+    {
+        valid = fgets(line, sizeof(line), file) != 0 && valid;
+        if (sscanf(line, "// fixture-scenario=%63s", scenario) != 1)
+        {
+            snprintf(scenario, sizeof(scenario), "probe");
+        }
+        valid = fclose(file) == 0 && valid;
+    }
+    int result = valid ? 0 : 31;
+    if (valid && strcmp(scenario, "interpreter-error") == 0)
+    {
+        result = 125;
+    }
+    else if (valid)
+    {
+        puts(strcmp(scenario, "interpreter-mismatch") == 0 ? "43" : "42");
+    }
+    return result;
+}
+
 int main(int argc, char** argv)
 {
     bool csmith = false;
@@ -306,6 +333,7 @@ int main(int argc, char** argv)
     bool buster = false;
     bool clang = false;
     bool tier1 = false;
+    bool interpreter = false;
     bool seeded = false;
     bool c_mode = false;
     bool out_dir = false;
@@ -322,6 +350,7 @@ int main(int argc, char** argv)
         buster |= strcmp(argv[i], "--fixture-buster") == 0;
         clang |= strcmp(argv[i], "--fixture-clang") == 0;
         tier1 |= strcmp(argv[i], "--fixture-tier1") == 0;
+        interpreter |= strcmp(argv[i], "interpret-c") == 0;
         seeded |= strcmp(argv[i], "--seed") == 0 && i + 1 < argc;
         seeded |= strncmp(argv[i], "--seed=", 7) == 0;
         c_mode |= strcmp(argv[i], "--std=c") == 0;
@@ -393,6 +422,10 @@ int main(int argc, char** argv)
     else if (csmith || yarpgen)
     {
         result = fixture_generate(yarpgen, scenario, seeded, c_mode, out_dir);
+    }
+    else if (buster && interpreter)
+    {
+        result = fixture_interpret(source, multifile, second_source);
     }
     else if (buster || clang)
     {

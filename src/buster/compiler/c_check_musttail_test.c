@@ -111,6 +111,13 @@ static __attribute__((noinline)) void check_test_musttail_sources(CheckTest* tes
                                                                            "__attribute__((musttail)) return f(x);\n}\nreturn 0;\n}\n", .rejected = true },
         { .name = "musttail: a later return's error", .source = "int f(int);\nint g(int x)\n{\nif (x)\n__attribute__((musttail)) return f(x);\n"
                                                          "__attribute__((musttail)) return x;\n}\n", .rejected = true },
+        // __builtin_call_with_static_chain's (#148), of clang's signature R(R, C).
+        { .name = "musttail: a static chain's call", .source = "int f(int);\nint g(int x, void *p)\n{\n"
+                                                             "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), p);\n}\n" },
+        { .name = "musttail: a static chain's function chain", .source = "int f(int);\nint g(int x, int (*p)(int))\n{\n"
+                                                                       "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x), f);\n}\n" },
+        { .name = "musttail: a static chain's other signature", .source = "int f(int, int);\nint g(int x, int y, void *p)\n{\n"
+                                                                        "__attribute__((musttail)) return __builtin_call_with_static_chain(f(x, y), p);\n}\n", .rejected = true },
         // Refused by name, where clang takes it (its call of the builtin's own signature) and computes the builtin inline.
         { .name = "musttail: a builtin's call", .source = "long g(long a, long b)\n{\n__attribute__((musttail)) return __builtin_expect(a, b);\n}\n", .rejected = true,
           .unsupported = true },

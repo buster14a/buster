@@ -1966,7 +1966,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
                               "initializer native code stays bounded independently of payload size");
-            if (code.lowered.initializers.count != 0)
+            // (A unit's __builtin_dump_struct strings are pools too, which no memcpy reads.)
+            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0)
             {
                 const uint64_t access_mark = scratch.length;
                 uint8_t* defined = NULL;

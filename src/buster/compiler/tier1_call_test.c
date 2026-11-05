@@ -1200,6 +1200,15 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             const bool verified = emitted.general ? tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check) : tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation);
             tier1_emit_test_expect(test, verified, "direct-call allocation passes independent interference verification");
             tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted), "every value a call stores is loaded back before the code leaves its straight-line run");
+            tier1_emit_test_expect(test, tier1_emit_test_general_rows_used(&emitted), "a call-save row is a register some call stores, and no other register has one (#177)");
+            // A call past which no value lives (the pointer's, the empty one's) takes no call-save row, where every
+            // caller-saved register took one (#177); and a run of calls past which three values live, some in their
+            // incoming caller-saved registers, takes rows for those alone.
+            const uint32_t rows = emitted.prepared.call_save_mask;
+            const uint32_t columns = emitted.prepared.call_save_columns;
+            tier1_emit_test_expect(test, !(fixture->pointer || fixture->empty) || rows == 0, "a call past which no value lives takes no call-save row (#177)");
+            tier1_emit_test_expect(test, !fixture->run || (rows != 0 && (rows & ~columns) == 0 && __builtin_popcount(rows) < __builtin_popcount(columns)),
+                                   "only the registers some call saves take call-save rows, not every caller-saved one (#177)");
             if (fixture->narrow_return)
             {
                 // A narrow result's zero extension into its canonical storage, the call's own, before the ZEXT. An I32

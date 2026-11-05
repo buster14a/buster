@@ -53,6 +53,19 @@ one program per generator. `--tiers 0` explicitly selects an early Tier 0-only
 campaign; its records contain zero Tier 1 passes. Seed 0 is rejected because
 YARPGen treats it as a request for a random seed. Seed-range overflow, unknown
 options, missing values and excessive argument counts are rejected.
+
+Add `--interpreter` to execute each source through Buster's `interpret-c`
+command as well as the selected compiled tiers and Clang modes. Both YARPGen
+translation units are passed separately. This mode creates no executable for
+the interpreter: its source preparation and execution are one supervised
+`buster-interpreter-run` process, with the same timeout and output limits as
+the other processes. A refusal, timeout, empty output or mismatch fails the
+case. Preflight exercises the interpreter too. Its selection is retained in
+the manifest and exact replay arguments; summaries report
+`interpreter_campaign_passed` separately, with zero credit for fixtures or
+campaigns that did not select it. Existing `tiers` fields continue to describe
+the selected compiled tiers. Compiler common arguments must also be accepted
+by `interpret-c`; compiled-tier-specific arguments stay in their tier options.
 The saved per-case configuration must occupy less than 128 KiB, including its
 format header, arguments and NUL terminators. The same serializer checks this
 limit before tools run and before a case is saved, so every saved configuration
