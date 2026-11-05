@@ -116,6 +116,8 @@ static void check_test_driver_attribute_effects(CheckTest* test, const char* cla
         { "gnu17", "int x[] __attribute__((loader_uninitialized));\n" },
         { "gnu17", "int x __attribute__((loader_uninitialized)); int x = 1;\n" },
         { "gnu17", "int x __attribute__((loader_uninitialized)); int x __attribute__((loader_uninitialized));\n" },
+        { "gnu17", "int x __attribute__((loader_uninitialized)); int x; int x __attribute__((loader_uninitialized));\n" },
+        { "gnu17", "static int x __attribute__((loader_uninitialized)); static int x __attribute__((loader_uninitialized));\n" },
         { "gnu17", "__attribute__((internal_linkage)) int il(void) { return 1; }\n" },
         { "gnu17", "int il2(void);\n__attribute__((internal_linkage)) int il2(void) { return 1; }\n" },
         { "gnu17", "__attribute__((internal_linkage)) int il3(void);\nint il3(void) { return 1; }\n" },

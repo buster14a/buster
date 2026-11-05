@@ -7521,9 +7521,15 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 parameter_conflict = check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) && previous_count != 0 &&
                                      (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
             }
+            // Repeated loader declarations describe the same uninitialized definition. They remain definitions for
+            // a later initializer's conflict, but two such declarations do not define the variable twice.
+            const uint32_t definition = reader->definition_origins[previous];
+            const bool repeated_loader = kind == C_BINDING_OBJECT && definition != 0 &&
+                check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL &&
+                check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
             if (reader->declaration_kinds[previous] != kind || check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token) ||
                 (compatible != TYPE_ANSWER_YES && !library_redeclaration) ||
-                (reader->definition_origins[token] && reader->definition_origins[previous]) ||
+                (reader->definition_origins[token] && definition && !repeated_loader) ||
                 check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
             {
                 const uint32_t before = reader->output->report_count;
