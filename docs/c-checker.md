@@ -6127,13 +6127,21 @@ arguments against the function. The checker now gives these as clang does.
     check mutual exclusions across redeclarations: both need the earlier
     declarations' attributes, which a lane doesn't publish
     (`check_input_lane_refuse`'s linked state).
-  - An argument count of a supported attribute that takes arguments is
-    checked as its arguments are read, before its subject. So
-    `int x __attribute__((format(printf)));` is the count's error, where
-    clang warns of the subject and ignores it. One that takes none
-    (`int x __attribute__((cold(1)));`) is checked after its subject, as
-    clang's, but for a type's (`noreturn`, `packed`, `may_alias`,
-    `transparent_union`, nullability), whose count clang checks first.
+  - A supported attribute's argument count is checked after its subject, as
+    clang's (`int x __attribute__((format(printf)));` is the subject's
+    warning alone), and after the errors clang's parser gives of its
+    arguments: a string literal's position that holds none, and a name that
+    names nothing (`check_input_attribute_parsed`). An argument whose
+    parser errors clang gives otherwise (a tag's or `typeof`'s type, a call,
+    a builtin, an empty one) keeps the count's error first, where clang gives
+    those (`aligned(sizeof(struct q), 2)` is the count's error, where clang
+    gives the incomplete type's). A type's (`noreturn`, `packed`,
+    `may_alias`, `transparent_union`, nullability) and `sentinel`'s count
+    is checked first, as clang's. Those whose arguments clang parses its own
+    way (`cpu_specific()`, `no_sanitize()`, `target_clones()`) aren't
+    counted against clang's and are refused; `format`'s first argument that
+    is no identifier is its error before the subject's, where clang's
+    handler checks it after.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6155,8 +6163,9 @@ arguments against the function. The checker now gives these as clang does.
     members' in initializers and where the evaluator alone reads them,
     overloads' calls, members' own marks, anonymous tags', and typedefs that
     name marked tags;
-  - a no-argument attribute's count after its subject, and a declarator's
-    type's convention warnings before the declaration's attributes'.
+  - an attribute's count after its subject and its arguments' parser
+    errors, with or without arguments, and a declarator's type's convention
+    warnings before the declaration's attributes'.
 
   `test-checker` checks the exclusions table's order and pairs, and that the
   facts tell C's attributes from another language's.

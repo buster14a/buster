@@ -1512,6 +1512,84 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
     return valid;
 }
 
+// What clang's parser makes of an attribute's arguments before its handler counts them (#147,
+// ParseAttributeArgsCommon): CLEAN, no error, so the count's error waits for the subject's check; ERROR, its first
+// argument's error, reported (a string literal's position that holds none, clang's "expected string literal", or an
+// expression's name that names nothing, "use of undeclared identifier"), which drops the attribute; or UNSURE, an
+// argument whose errors clang's parser gives otherwise (a type's, a call's, a builtin's or an empty one), for which the
+// count's error stays where its arguments are read. Linear over the arguments' tokens: only an attribute whose count is
+// wrong (or cleanup's) gets here.
+#define BUSTER_CHECK_PARSED_CLEAN 0
+#define BUSTER_CHECK_PARSED_ERROR 1
+#define BUSTER_CHECK_PARSED_UNSURE 2
+
+static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t stop = attribute->argument_end;
+    const uint8_t schema = attribute->schema;
+    uint8_t result = stop > attribute->argument_first && parser->tokens.kinds[stop - 1] == PARSE_KIND_COMMA ? BUSTER_CHECK_PARSED_UNSURE : BUSTER_CHECK_PARSED_CLEAN;
+    uint32_t first = attribute->argument_first;
+    for (uint32_t argument = 0; result == BUSTER_CHECK_PARSED_CLEAN && first < stop; argument += 1)
+    {
+        uint32_t end = first;
+        while (end < stop && parser->tokens.kinds[end] != PARSE_KIND_COMMA)
+        {
+            end = check_input_attribute_after_group(parser, end, stop);
+        }
+        // An identifier argument (an IdentifierArgument's or an EnumArgument's, visibility's; not cleanup's nor malloc's,
+        // whose arguments clang parses as expressions) is taken as one; a string literal's position must hold one.
+        const bool lone = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+        const bool identifier = lone && (schema == CHECK_ATTRIBUTE_IDENTIFIER_LIST ||
+                                         (argument == 0 && attribute->kind != CHECK_ATTRIBUTE_MALLOC && attribute->kind != CHECK_ATTRIBUTE_CLEANUP &&
+                                          (schema == CHECK_ATTRIBUTE_IDENTIFIER || schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS ||
+                                           attribute->kind == CHECK_ATTRIBUTE_VISIBILITY)));
+        const bool string = schema == CHECK_ATTRIBUTE_STRING_LIST || (argument == 0 && schema == CHECK_ATTRIBUTE_STRING);
+        uint32_t undeclared = BUSTER_CHECK_NONE;
+        bool unsure = first >= end;
+        bool literal = !unsure;
+        for (uint32_t token = first; !identifier && token < end; token += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            literal &= kind == PARSE_KIND_STRING;
+            const String8 spelled = kind == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
+            const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
+            const uint8_t next = token + 1 < stop ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
+            unsure |= kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_TYPEOF ||
+                      kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || (kind == PARSE_KIND_IDENTIFIER && next == PARSE_KIND_L_PAREN) ||
+                      (spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0);
+            const bool named = previous == PARSE_KIND_PERIOD || previous == PARSE_KIND_ARROW ||
+                               c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) != 0;
+            undeclared = undeclared == BUSTER_CHECK_NONE && kind == PARSE_KIND_IDENTIFIER && !named ? token : undeclared;
+        }
+        if (identifier)
+        {
+        }
+        else if (string && first < end && parser->tokens.kinds[first] != PARSE_KIND_STRING)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            result = BUSTER_CHECK_PARSED_ERROR;
+        }
+        else if (unsure || (string && !literal))
+        {
+            result = BUSTER_CHECK_PARSED_UNSURE;
+        }
+        else if (!string && undeclared != BUSTER_CHECK_NONE)
+        {
+            if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+            {
+                attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                attributes->error_first = first;
+                attributes->error_end = end;
+                check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+            }
+            result = BUSTER_CHECK_PARSED_ERROR;
+        }
+        first = end + 1;
+    }
+    return result;
+}
+
 // Declaration attributes clang drops when first added after a definition. Unscoped [[noreturn]] and [[_Noreturn]]
 // are declaration attributes; GNU noreturn (including [[gnu::noreturn]]) changes the function type instead, and C's
 // _Noreturn keyword is explicitly allowed after a definition. A scoped list item keeps first at its namespace and
@@ -2860,22 +2938,33 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
-            // An argument count other than clang's is its error, worded as clang's (#147): before the arguments are read,
-            // where clang checks it after the subject. cleanup's is checked after its subject's already
-            // (check_input_cleanup_declaration).
+            // An argument count other than clang's is its error, worded as clang's (#147). cleanup's is checked after its
+            // subject's already (check_input_cleanup_declaration).
             uint32_t bound = 0;
             const CheckInputFactRow* counted = standard ? fact : check_input_fact_row((String8){ "", 0 }, name, false, false);
             const uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
                                         rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
                                         check_input_attribute_count_check(counted, check_input_attribute_count(parser, &attribute), &bound);
-            // One that takes no arguments, which aren't read, keeps its count's error for after its subject's check
-            // (check_input_attribute_subjects), as clang's handleCommonAttributeFeatures has it: `cold(1)` on a variable
-            // is the subject's warning alone. Not a type's, whose count clang's type processing checks first.
+            // The count's error comes after its subject's check (check_input_attribute_subjects), as clang's
+            // handleCommonAttributeFeatures has it: `cold(1)` or `format(printf)` on a variable is the subject's warning
+            // alone. Its arguments aren't read then, but clang's parser's errors of them come first
+            // (check_input_attribute_parsed). Not a type's, whose count clang's type processing checks first, nor
+            // sentinel's, whose subject its handler checks after the count. Kept as clang's generated handler's (the
+            // generic kind), its own handler's checks and effects aren't made.
             const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
-                                        rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY;
-            const bool count_deferred = count_check == BUSTER_CHECK_COUNT_EXACT && bound == 0 && !type_attribute;
-            if (count_deferred)
+                                        rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
+                                        rule->kind == CHECK_ATTRIBUTE_SENTINEL;
+            const uint8_t parsed = count_check != BUSTER_CHECK_COUNT_NONE && !type_attribute ? check_input_attribute_parsed(reader, attributes, &attribute) :
+                                   BUSTER_CHECK_PARSED_UNSURE;
+            if (parsed == BUSTER_CHECK_PARSED_ERROR)
             {
+                valid = false;
+            }
+            else if (parsed == BUSTER_CHECK_PARSED_CLEAN)
+            {
+                attribute.kind = CHECK_ATTRIBUTE_UNKNOWN;
+                attribute.schema = CHECK_ATTRIBUTE_NO_ARGUMENTS;
+                attribute.argument_count = check_input_attribute_count(parser, &attribute);
                 attribute.count_check = count_check;
                 attribute.count_bound = bound;
             }
@@ -2904,6 +2993,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             else if (rule->kind == CHECK_ATTRIBUTE_COUNTED_BY)
             {
                 valid = check_input_attribute_counted_shape(reader, attributes, &attribute);
+            }
+            else if (rule->kind == CHECK_ATTRIBUTE_CLEANUP && check_input_attribute_count(parser, &attribute) != 1 &&
+                     check_input_attribute_parsed(reader, attributes, &attribute) == BUSTER_CHECK_PARSED_ERROR)
+            {
+                // cleanup's arguments of another count than one: clang's parser's errors of them first (an undeclared
+                // name), then its subject's and its count's (check_input_cleanup_declaration).
+                valid = false;
             }
             else
             {

@@ -1174,6 +1174,39 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         // (check_input_attribute_function_types).
         "void f(void) __attribute__((cold(1)));\n",
         "int e __attribute__((const(1)));\nint i __attribute__((always_inline(1)));\nint m __attribute__((returns_twice(1)));\n",
+        // So is one that takes arguments, which are parsed first: a string literal's position that holds none, or a name
+        // that names nothing, is clang's parser's error, which drops it (check_input_attribute_parsed). A type's count and
+        // sentinel's still come first.
+        "int x __attribute__((format(printf)));\nint y __attribute__((format(printf, 1)));\nint v __attribute__((nonnull(1)));\n"
+        "int u __attribute__((alloc_size()));\nint t __attribute__((cleanup()));\nint s __attribute__((constructor(1, 2)));\n"
+        "int r __attribute__((assume_aligned(1, 2, 3)));\nint q __attribute__((format(printf, 1, 2, 3))), p;\n"
+        "struct S { int m __attribute__((format(printf))); };\ntypedef int T __attribute__((format(printf)));\n"
+        "int o [[gnu::format(printf)]];\nint n __attribute__((enum_extensibility(open, 1)));\n"
+        "void f(int p __attribute__((format(printf))));\nint (*fp)(void) __attribute__((format(printf)));\n",
+        "int z __attribute__((section()));\n",
+        "int w __attribute__((aligned(1, 2)));\n",
+        "void f(void) __attribute__((format(printf)));\n",
+        "void f(void) __attribute__((alloc_size(1, 2, 3)));\n",
+        "int g __attribute__((visibility(\"default\", \"x\")));\n",
+        "int j __attribute__((mode(SI, 2)));\n",
+        "int k __attribute__((sentinel(1, 2, 3)));\n",
+        "int s __attribute__((noreturn(1)));\n",
+        "void f(int) __attribute__((format_arg(1, 2)));\n",
+        "void f(void) __attribute__((constructor(1, 2)));\n",
+        "int o __attribute__((tls_model()));\n",
+        "[[gnu::section()]] int x;\n",
+        "void f(void) __attribute__((cold, hot(1)));\n",
+        "void f(void) { int x __attribute__((section())); }\n",
+        "int a __attribute__((aligned(q, 2)));\n",
+        "int b __attribute__((format(printf, q)));\n",
+        "int c __attribute__((visibility(hidden, r)));\n",
+        "int d __attribute__((malloc(q, 1, 2)));\n",
+        "int e __attribute__((cold(q)));\n",
+        "int a __attribute__((aligned(sizeof(q), 2)));\n",
+        "int i __attribute__((cleanup(f, g)));\n",
+        "int b __attribute__((section(1, \"a\")));\n",
+        "int c __attribute__((deprecated(\"a\", 1, 2)));\n",
+        "int e __attribute__((visibility(1, 2)));\n",
         "int __attribute__((cold)) __stdcall x;\n__attribute__((cold)) int __stdcall y;\nint __stdcall __attribute__((cold)) z;\n"
         "int __attribute__((unused, cold)) __fastcall w;\n",
     };
