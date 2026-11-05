@@ -2674,12 +2674,15 @@ static bool check_input_attribute_only(const Parser* parser, uint32_t first, uin
     uint32_t token = first;
     while (token < end)
     {
-        if (check_input_attribute_starts(parser, token, end))
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, token, end)))
         {
             attribute = true;
-            token = check_input_skip_attributes(parser, token, end);
+            const uint32_t open = kind == PARSE_KIND_L_SQUARE ? token : token + 1;
+            const uint32_t close = open < end ? parser->tree.parents[open] : end;
+            token = close > open && close < end ? close + 1 : end;
         }
-        else if (parser->tokens.kinds[token] == PARSE_KIND_EXTENSION)
+        else if (kind == PARSE_KIND_EXTENSION)
         {
             token += 1;
         }
