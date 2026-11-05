@@ -216,6 +216,8 @@ static void check_input_overload_uses(CheckInputReader* reader, const CheckStrea
     }
 }
 
+#include "c_check_noderef_graph.c"
+
 static bool check_input_warning_graph(CheckInput* input, const Parser* parser, TypeTable* types, const CheckStream* stream, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -319,6 +321,11 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
             }
             valid = !staged.resource;
         }
+    }
+    if (valid && check_sparse_wide_present(input->noderef_types))
+    {
+        check_input_noderef_graph(&reader, stream);
+        valid = !staged.resource;
     }
     if (valid && input->marked_member_count != 0)
     {

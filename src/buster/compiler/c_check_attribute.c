@@ -117,6 +117,7 @@ typedef enum CheckInputAttributeKind
     // its handler's checks.
     CHECK_ATTRIBUTE_THREAD_SAFETY,
     CHECK_ATTRIBUTE_SELECTANY,
+    CHECK_ATTRIBUTE_NODEREF,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -296,6 +297,7 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "ext_vector_type", CHECK_ATTRIBUTE_EXT_VECTOR_TYPE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "transparent_union", CHECK_ATTRIBUTE_TRANSPARENT_UNION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "may_alias", CHECK_ATTRIBUTE_MAY_ALIAS, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "noderef", CHECK_ATTRIBUTE_NODEREF, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "visibility", CHECK_ATTRIBUTE_VISIBILITY, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "alias", CHECK_ATTRIBUTE_ALIAS, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "ifunc", CHECK_ATTRIBUTE_IFUNC, CHECK_ATTRIBUTE_STRING, 1, 1 },
@@ -2711,7 +2713,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
         // A bit-field's preferred type, whose type check_input_attribute_annotations checks; MSVC's forceinline and
         // forceinline_calls, which it ignores off MSVC's ABI.
-        "preferred_type", "forceinline", "forceinline_calls", "noderef",
+        "preferred_type", "forceinline", "forceinline_calls",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -3030,7 +3032,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // generic kind), its own handler's checks and effects aren't made.
             const bool type_attribute = rule->kind == CHECK_ATTRIBUTE_NORETURN || rule->kind == CHECK_ATTRIBUTE_PACKED || rule->kind == CHECK_ATTRIBUTE_MAY_ALIAS ||
                                         rule->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || rule->kind == CHECK_ATTRIBUTE_NULLABILITY ||
-                                        rule->kind == CHECK_ATTRIBUTE_SENTINEL;
+                                        rule->kind == CHECK_ATTRIBUTE_SENTINEL || rule->kind == CHECK_ATTRIBUTE_NODEREF;
             const uint8_t parsed = count_check != BUSTER_CHECK_COUNT_NONE && !type_attribute ? check_input_attribute_parsed(reader, attributes, &attribute) :
                                    BUSTER_CHECK_PARSED_UNSURE;
             if (parsed == BUSTER_CHECK_PARSED_ERROR)
@@ -3852,6 +3854,7 @@ static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKin
         case CHECK_ATTRIBUTE_NORETURN:
         case CHECK_ATTRIBUTE_CALLING_CONVENTION:
         case CHECK_ATTRIBUTE_REGPARM:
+        case CHECK_ATTRIBUTE_NODEREF:
         // Attributes clang ignores on a function (with a warning this checker doesn't model).
         case CHECK_ATTRIBUTE_ACCESS:
         case CHECK_ATTRIBUTE_EXTERNALLY_VISIBLE:

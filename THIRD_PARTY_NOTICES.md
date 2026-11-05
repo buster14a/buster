@@ -27,6 +27,14 @@ against LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`,
 `clang/include/clang/Basic/DiagnosticSemaKinds.td`; no upstream implementation
 or test fixture is imported.
 
+The GNU `noderef` source-type shadows, expression diagnostics and
+`c_check_noderef_driver_test.c` fixtures (#1447) are original project material
+under the default terms. Clang 23.1.4 is the behavioral oracle. Its
+[attribute reference](https://clang.llvm.org/docs/AttributeReference.html#noderef)
+and published `clang/lib/Sema/SemaType.cpp` documentation were consulted for
+the placement and type-sugar contract on November 5, 2026; no implementation
+or upstream test fixture is imported.
+
 The VECTOR/X86 typed adapter integration, sparse shared-interpreter SIMD storage,
 `ir_simd_lower_test.c`, `ir_interpreter_simd_test.c` and the real-C
 `tests/ir/vector-i32.c` fixture (#732) are original project material under the

@@ -1044,6 +1044,9 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->specifier_abi_origin = 0;
     reader->declarator_abi_origin = 0;
     reader->constant_abi_origin = 0;
+    reader->specifier_noderef = NULL;
+    reader->declarator_noderef = NULL;
+    reader->constant_noderef = NULL;
     reader->specifier_thread_local = false;
     reader->declarator_overloadable = false;
     reader->lane_unsupported = false;

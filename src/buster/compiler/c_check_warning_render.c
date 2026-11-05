@@ -670,6 +670,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                           check_warning_text(scratch, "'%.*s' is unavailable", (int)name.length, name.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_NODEREF_PLACEMENT:
+            result = "'noderef' can only be used on an array or pointer type";
+            break;
+        case CHECK_WARNING_EVENT_NODEREF_DEREFERENCE:
+            result = name.length == 0 ? "dereferencing expression marked as 'noderef'" :
+                     check_warning_text(scratch, "dereferencing %.*s; was declared with a 'noderef' type", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NODEREF_CONVERSION:
+            result = "casting to dereferenceable pointer removes 'noderef' attribute";
+            break;
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
@@ -960,6 +970,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         }
         case CHECK_WARNING_NOTE_UNAVAILABLE_HERE:
             result = check_warning_text(scratch, "'%.*s' has been explicitly marked unavailable here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_NODEREF_DECLARATION:
+            result = check_warning_text(scratch, "%.*s declared here", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {
