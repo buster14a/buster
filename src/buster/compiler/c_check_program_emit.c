@@ -863,8 +863,8 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 // room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
 // their control flow too (emitted_verify_frames: but an assembly template's code, the user's, and a rule a form
 // x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
-// (unwind_tier0, which reads them alone), its frame must be the same CFI. A frame past the events' 32-bit offsets
-// (EMITTED_FRAME_LIMIT, #1149) or code past 2 GB is unsupported, not an internal error; no room is a resource failure,
+// (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
+// internal error; no room is a resource failure,
 // which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason.
 static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
                                                    Arena* scratch, UnwindFunction* frame, const char** reason)
@@ -872,10 +872,9 @@ static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint
     const char* const mismatch = "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
     const uint32_t frame_status = code->frame_status;
     CheckProgramStatus status = frame_status == EMITTED_FRAME_MEMORY ? CHECK_PROGRAM_RESOURCE :
-                                frame_status == EMITTED_FRAME_LIMIT || length > INT32_MAX ? CHECK_PROGRAM_UNSUPPORTED :
+                                length > INT32_MAX ? CHECK_PROGRAM_UNSUPPORTED :
                                 frame_status == EMITTED_FRAME_UNDESCRIBED ? CHECK_PROGRAM_BACKEND : CHECK_PROGRAM_OK;
     *reason = status == CHECK_PROGRAM_RESOURCE ? "no room for a function's frame events" :
-              frame_status == EMITTED_FRAME_LIMIT ? "a frame within 56 bytes of 2 GB, past the 32-bit offsets of its unwind events (#1149)" :
               status == CHECK_PROGRAM_UNSUPPORTED ? "a function of 2 GB of code or more, past its unwind table's offsets" :
               status != CHECK_PROGRAM_OK ? mismatch : 0;
     if (status == CHECK_PROGRAM_OK)

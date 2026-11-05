@@ -16,6 +16,7 @@ struct CheckProgramDiagnostic
     CheckProgramStatus status;
     uint32_t token;
     uint32_t position;
+    CheckProgramFailure failure;
 };
 
 static void check_program_constraint_at(CheckProgram* program, uint32_t token, uint32_t position)
@@ -25,6 +26,7 @@ static void check_program_constraint_at(CheckProgram* program, uint32_t token, u
         program->status = CHECK_PROGRAM_INVALID;
         program->token = token;
         program->diagnostic_position = position;
+        program->failure = (CheckProgramFailure){ 0 };
     }
 }
 
@@ -171,11 +173,13 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
         // Defaults are diagnosed during a reverse source walk, before numeric collisions. Singleton checks
         // then run in converted value order; GNU ranges follow, with their own source expression location.
         uint32_t selected = values - first >= 2 ? order[values - 2] : BUSTER_CHECK_NONE;
+        unsigned __int128 duplicate = 0;
         for (uint32_t i = values + 1; i < ranges && selected == BUSTER_CHECK_NONE; i += 1)
         {
             if (program->cases[order[i - 1]].lower == program->cases[order[i]].lower)
             {
                 selected = order[i];
+                duplicate = program->cases[selected].lower;
             }
         }
         uint32_t previous = BUSTER_CHECK_NONE;
@@ -204,6 +208,8 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
                     (previous != BUSTER_CHECK_NONE && check_program_case_order(program, program->cases + previous, true) >= lower))
                 {
                     selected = order[i];
+                    duplicate = begin < ranges && check_program_case_order(program, program->cases + order[begin], false) <= upper ?
+                                program->cases[order[begin]].lower : item->lower;
                 }
                 previous = order[i];
             }
@@ -217,7 +223,17 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
             }
             if (valid)
             {
-                check_program_constraint_at(program, program->cases[selected].token, ends[owner]);
+                const CheckProgramCase* item = program->cases + selected;
+                check_program_constraint_at(program, item->token, ends[owner]);
+                if (program->status == CHECK_PROGRAM_INVALID && program->token == item->token && program->diagnostic_position == ends[owner])
+                {
+                    program->failure = (CheckProgramFailure)
+                    {
+                        .message = item->fallback ? CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT : CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE,
+                        .type = item->type,
+                        .value = duplicate,
+                    };
+                }
             }
         }
         first = end;
@@ -356,6 +372,7 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
         result->status = program.status;
         result->token = check_program_diagnostic_location(parser, program.token);
         result->position = program.diagnostic_position;
+        result->failure = program.failure;
         valid = program.status != CHECK_PROGRAM_RESOURCE;
     }
     if (scratch != 0)

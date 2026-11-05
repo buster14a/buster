@@ -367,6 +367,9 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_static_p
 BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
 // runtime_import, runtime_import_static, runtime_import_static_pie or runtime_import_shared, by `kind`.
 static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
+// Discovers startup objects and runtime library paths for the C driver's mixed-input foreign link, without importing
+// their symbols. The paths and probes remain owned by runtime until runtime_release.
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_discover_inputs(Runtime* runtime, RuntimeKind kind);
 // Finds the default interpreter through libc.so's script without importing CRT objects, archives or library symbols.
 // The path and probe records belong to runtime->files until runtime_release. This is path discovery, not ELF validation.
 static __attribute__((unused)) RuntimeError runtime_discover_interpreter(Runtime* runtime);
@@ -993,6 +996,15 @@ static RuntimeError runtime_search(Runtime* runtime)
     {
         result = runtime_search_archives(runtime);
     }
+    return result;
+}
+
+BUSTER_LINKER_ENTRY RuntimeError runtime_discover_inputs(Runtime* runtime, RuntimeKind kind)
+{
+    const bool reserved = runtime_begin(runtime);
+    runtime->kind = kind;
+    RuntimeError result = reserved ? runtime_search(runtime) : RUNTIME_ERROR_MEMORY;
+    result = result == RUNTIME_ERROR_NONE && runtime->probes_full ? RUNTIME_ERROR_MEMORY : result;
     return result;
 }
 

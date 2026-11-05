@@ -2260,7 +2260,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                     const CheckWarningEvent annotation = {
                         .id = CHECK_WARNING_ID_NODEREF,
                         .kind = CHECK_WARNING_EVENT_NODEREF_CONVERSION,
-                        .token = check_input_expression_location(walker->parser, token, end),
+                        .token = check_warning_expression_location(walker->parser, walker->types, walker->stream, node, token, end),
                         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                         .completion = walker->warning_completion,

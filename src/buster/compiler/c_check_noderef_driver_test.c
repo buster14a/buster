@@ -130,6 +130,20 @@ static void check_test_driver_noderef(CheckTest* test, const char* clang, const 
         "struct S { NP p[1][1]; }; void f(struct S s) { int *q = s.p[0][0]; (void)q; }\n",
         "void f(NP **p) { int *q = p++[0][0]; (void)q; }\n",
         "void f(NP **p) { int *q = (p + 1)[0][0]; (void)q; }\n",
+        "struct S { NP *p; }; void f(struct S s) { int *q = s.p[0]; (void)q; }\n",
+        "struct S { NP p[1]; }; void f(struct S s) { int *q = s.p[0]; (void)q; }\n",
+        "void f(NP *p) { int *q = p++[0]; (void)q; }\n",
+        "NP *g(void); void f(void) { int *q = g()[0]; (void)q; }\n",
+        "struct S { NP *p; }; struct S g(void); void f(void) { int *q = g().p[0]; (void)q; }\n",
+        "void f(NP *p) { int *q = (p++)[0]; (void)q; }\n",
+        "void f(NP *p) { int *q = 0[p++]; (void)q; }\n",
+        "struct S { NP *p; }; void f(struct S s) { int *q = 0[s.p]; (void)q; }\n",
+        "void f(NP **p) { int *q = (p++[0][0]); (void)q; }\n",
+        "struct S { NP *p; }; struct S g(void); void f(void) { int *q = (g()).p[0]; (void)q; }\n",
+        "struct S { NP p[1]; }; struct S g(void); void f(void) { int *q = g().p[0]; (void)q; }\n",
+        "struct S { NP *p; }; void f(struct S s) { int *q[1] = {s.p[0]}; (void)q; }\n",
+        "int *f(NP **p) { return p++[0][0]; }\n",
+        "void g(int *); void f(NP **p) { g(p++[0][0]); }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

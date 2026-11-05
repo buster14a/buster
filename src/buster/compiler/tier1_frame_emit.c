@@ -187,7 +187,7 @@ static void tier1_frame_emit_event(EmissionFrameEvent* events, uint32_t* count, 
 {
     events[*count] = (EmissionFrameEvent){
         .at = { .boundary = record + 1, .side = EMISSION_LEFT },
-        .value = (int32_t)value,
+        .value = value,
         .reg = (uint16_t)reg,
         .kind = (uint8_t)kind,
     };
@@ -196,8 +196,7 @@ static void tier1_frame_emit_event(EmissionFrameEvent* events, uint32_t* count, 
 
 // A step's effect on the CFA (Tier1FrameCfa) and, with `events`, its events at the records it wrote: the step's first
 // `first`, its last `last` (the record before temporary.count), and a probe's (`probe`). Returns false for a step whose
-// CFA no rule describes (a realignment while the CFA is rsp's, rbp pointed or rsp reset from an unknown depth, a CFA
-// past int32's offsets).
+// CFA no rule describes (a realignment while the CFA is rsp's, or rbp pointed or rsp reset from an unknown depth).
 static bool tier1_frame_emit_cfa(const Tier1FrameStep* step, Tier1FrameCfa* cfa, uint32_t last, Tier1FrameProbeRecords probe, EmissionFrameEvent* events,
                                  uint32_t* event_count)
 {
@@ -287,7 +286,8 @@ static bool tier1_frame_emit_cfa(const Tier1FrameStep* step, Tier1FrameCfa* cfa,
     case TIER1_FRAME_SET_REALIGN_BASE:
         break;
     }
-    valid = valid && cfa->offset >= 0 && cfa->offset <= INT32_MAX && (!cfa->depth_known || (cfa->depth >= 8 && cfa->depth <= INT32_MAX));
+    // The bounded plan has at most BUSTER_TIER1_FRAME_STEP_CAPACITY imm32 adjustments, so these sums fit int64_t.
+    valid = valid && cfa->offset >= 0 && (!cfa->depth_known || cfa->depth >= 8);
     if (events == 0)
     {
         ignored_count = 0;
