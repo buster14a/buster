@@ -1896,11 +1896,18 @@ record dump, as `BuiltinDumpStruct` checks it.
   - unnamed bit-fields are skipped, anonymous members' fields flattened, and
     the record's last line is `"}\n"`.
 - **Type names.** A field's type prints as its declaration spells it: the
-  type table has no typedef sugar, so the input records each member's
-  declarator (`CheckInput.member_tokens`), whose typedef specifier
-  (`check_input_typedef_spelling`) gives the alias `type_print` prints. A
-  record a deferred body's lane completes has no such row, and prints its
-  canonical types.
+  type table has no typedef sugar, so the plan finds each member's declarator
+  in its record's body (`check_lower_dump_member`), from the token past the
+  body's `}` (`CheckGraph.tag_completions`, which the deferred reader's merge
+  maps for records its lanes complete), and its typedef specifier
+  (`check_input_typedef_spelling`) gives the alias `type_print` prints. An
+  unnamed record's canonical name has its scope, as clang's
+  `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
+  it, up to a named one (C's named tags belong to no record), then the
+  function whose body holds the outermost, with its parameters' types where
+  it has a written prototype (`struct main()::L::(unnamed)`,
+  `struct old_style()::O::(unnamed)`); an unnamed record whose own scope is a
+  function has none.
 - **Formats.** `PrintfSpecifier::fixType`'s, after clang's own cases: bool
   `%d`, plain char `%hhd` (`%hhu` with `-funsigned-char`), signed char
   `%hhd`, unsigned char `%hhu`; a pointer to a character type
