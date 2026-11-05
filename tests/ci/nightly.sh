@@ -26,10 +26,16 @@ cat > "$work/bin/gh" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURES/calls.log"
 printf '%s %s\n' "${GH_TOKEN:-none}" "$*" >> "$FIXTURES/tokens.log"
-# An expired branch token: GitHub rejects every call made with it.
+# An expired branch token: GitHub rejects every call made with it. One without access to the repository: every call,
+# the repository's own included, is a 404.
 if [ "${GH_TOKEN:-}" = expired-token ]; then
     printf '{"message":"Bad credentials","status":"401"}\n'
     printf 'gh: Bad credentials (HTTP 401)\n' >&2
+    exit 1
+fi
+if [ "${GH_TOKEN:-}" = outsider-token ]; then
+    printf '{"message":"Not Found","status":"404"}\n'
+    printf 'gh: Not Found (HTTP 404)\n' >&2
     exit 1
 fi
 if [ "$1" = workflow ]; then
@@ -93,7 +99,18 @@ case "$method $endpoint" in
             exit 1
         fi
         printf '{}\n'; exit 0 ;;
-    "POST repos/buster14a/buster/actions/runs/"*/cancel|"DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+    "GET repos/buster14a/buster")
+        printf '{"id":1421805693}\n' > "$FIXTURES/repository.json"
+        answer "$FIXTURES/repository.json"; exit 0 ;;
+    "DELETE repos/buster14a/buster/git/refs/heads/nightly/"*)
+        # $FIXTURES/gone-SHA: someone else deleted that branch first.
+        if [ -f "$FIXTURES/gone-${endpoint##*/}" ]; then
+            printf '{"message":"Not Found","status":"404"}\n'
+            printf 'gh: Not Found (HTTP 404)\n' >&2
+            exit 1
+        fi
+        printf '{}\n'; exit 0 ;;
+    "POST repos/buster14a/buster/actions/runs/"*/cancel)
         printf '{}\n'; exit 0 ;;
     *)
         printf 'fake gh: unexpected %s %s\n' "$method" "$endpoint" >&2; exit 1 ;;
@@ -695,6 +712,26 @@ expect_match "$fixtures/tokens.log" "^workflow-token api -X POST repos/buster14a
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'a branch it may have is dispatched'
 expect_match "$work/coordinate.log" "::warning title=Nightly branch::GitHub refused the workflow token nightly/$merge" 'one it is refused is skipped, as without a branch token'
 rm -f "$fixtures/refuse-$merge" "$fixtures"/count-*
+# A branch someone else deleted before the prune: a 404 to a valid branch token, which keeps it, so the next branch
+# the workflow token would be refused is still made with it and dispatched. A token without access to the repository
+# (a 404 there too) is rejected, as an expired one is.
+gone=1111111111111111111111111111111111111111
+printf '[{"ref":"refs/heads/nightly/%s"}]\n' "$gone" > "$fixtures/refs.json"
+: > "$fixtures/gone-$gone"
+: > "$fixtures/refuse-$epoch"
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=branch-token GITHUB_RUN_ID=9671 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/pruned-404" prepare run
+expect_match "$fixtures/tokens.log" "^branch-token api -X DELETE repos/buster14a/buster/git/refs/heads/nightly/$gone$" 'the prune of a branch already gone is a 404'
+expect_no_match "$work/coordinate.log" 'Nightly branch token::' 'which doesn'"'"'t reject a valid branch token'
+expect_match "$fixtures/tokens.log" "^branch-token api -X POST repos/buster14a/buster/git/refs -f ref=refs/heads/nightly/$epoch " 'so a later branch is still made with it'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'and its state dispatched'
+: > "$fixtures/calls.log"
+: > "$fixtures/tokens.log"
+NIGHTLY_BRANCH_TOKEN=outsider-token GITHUB_RUN_ID=9672 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/outsider-token" prepare run
+test "$(grep -c '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (gh: Not Found (HTTP 404))' "$work/coordinate.log")" -eq 1 || fail 'a branch token without access to the repository is rejected once'
+expect_match "$fixtures/tokens.log" "^workflow-token api -X DELETE repos/buster14a/buster/git/refs/heads/nightly/$gone$" 'and the workflow token takes over'
+rm -f "$fixtures/refs.json" "$fixtures/gone-$gone" "$fixtures/refuse-$epoch" "$fixtures"/count-*
 # A branch another step made meanwhile (the POST fails, the branch is then there at the commit) is used as it is.
 printf '{"object":{"sha":"%s"}}\n' "$epoch" > "$fixtures/ref-$epoch.json.2"
 : > "$fixtures/refuse-$epoch"

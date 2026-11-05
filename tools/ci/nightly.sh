@@ -376,7 +376,8 @@ harvest()
 # (contents and workflows write on this repository alone, docs/ci.md), GitHub doesn't refuse the merges the workflow
 # token may not have; without it, the workflow token, and those states are skipped. Nothing else uses that token:
 # dispatches, cancellations and reads stay the workflow's. A branch token GitHub rejects as a credential (expired or
-# revoked: HTTP 401; without access to this repository: a 404 or "not accessible by personal access token") is
+# revoked: HTTP 401; without access to this repository: "not accessible by personal access token", or a 404 when the
+# token can't read the repository itself, since a branch another actor deleted is a 404 to a valid token too) is
 # dropped for the rest of the job, which then writes with the workflow token as if there were none, and says so once
 # (branch_token_warning). Its output is gh's, standard output and error together.
 branch_api()
@@ -385,7 +386,13 @@ branch_api()
     if [ -n "${NIGHTLY_BRANCH_TOKEN:-}" ] && [ ! -e "$work/branch-token-rejected" ]; then
         answer=$(GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "$@" 2>&1) || status=$?
         fallback=false
-        if [ "$status" -ne 0 ] && grep -E -q 'HTTP 401|HTTP 404|Bad credentials|not accessible by personal access token' <<< "$answer"; then
+        local rejected=false
+        if [ "$status" -ne 0 ] && grep -E -q 'HTTP 401|Bad credentials|not accessible by personal access token' <<< "$answer"; then
+            rejected=true
+        elif [ "$status" -ne 0 ] && grep -F -q 'HTTP 404' <<< "$answer" && ! GH_TOKEN=$NIGHTLY_BRANCH_TOKEN "$gh" api "repos/$repository" --jq .id > /dev/null 2>&1; then
+            rejected=true
+        fi
+        if [ "$rejected" = true ]; then
             printf '::warning title=Nightly branch token::GitHub rejected BUSTER_NIGHTLY_BRANCH_TOKEN (%s), so this job makes the nightly branches with the workflow token (docs/ci.md, "Refused branches")\n' "$(tail -n 1 <<< "$answer")" > "$work/branch-token-rejected"
             fallback=true
             status=0
