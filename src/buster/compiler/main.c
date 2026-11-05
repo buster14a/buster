@@ -1708,6 +1708,15 @@ static int main_driver(int argc, char** argv)
     // dispatch, including -E and parse commands that need no worker lease themselves.
     bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
     int result = guardian >= 0 ? guardian : 0;
+    // An option first (-E, -fsyntax-only, -c, ...) is a source command's (#652): no unit's command starts with '-' (the
+    // two that do, --fuzz and the guardian's, are main's and the guardian's above), so it skips the units' chains of
+    // strcmp against every command's name, which were most of an empty file's 930 strcmp calls and touched pages of
+    // .rodata.str1.1 and .text that a compile needs nothing else of.
+    if (!found && argc >= 2 && argv[1][0] == '-')
+    {
+        result = main_source_command(argc, argv);
+        found = true;
+    }
     if (!found)
     {
         result = main_unit_x86(argc, argv, &found);
