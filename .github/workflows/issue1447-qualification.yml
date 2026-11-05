@@ -95,19 +95,21 @@ jobs:
       - name: Record Clang x86 builtin semantics
         if: always()
         run: |
+          clang -std=gnu17 -O0 -march=znver5 -funsigned-char -S tools/issue1447-builtin-probes/rounding.c -o build/issue1447-oracle/builtin-rounding.s
+          cat build/issue1447-oracle/builtin-rounding.s
           clang -std=gnu17 -O0 -march=znver5 -funsigned-char -S -emit-llvm tools/issue1447-builtin-probes/lowering.c -o build/issue1447-oracle/builtin-lowering.ll
           cat build/issue1447-oracle/builtin-lowering.ll
           clang -std=gnu17 -O0 -march=znver5 -funsigned-char -S tools/issue1447-builtin-probes/lowering.c -o build/issue1447-oracle/builtin-lowering.s
           cat build/issue1447-oracle/builtin-lowering.s
           clang -std=gnu17 -fsyntax-only -march=znver5 -funsigned-char -fno-caret-diagnostics tools/issue1447-builtin-probes/diagnostics.c || true
       - name: Build compiler for baseline attribute comparison
-        if: always()
+        if: false
         env:
           BUSTER_HOST_ARCH: x86-64
           BUSTER_DEBUG_INFO: '0'
         run: ./build.sh --config Release
       - name: Record baseline Buster attribute diagnostics
-        if: always()
+        if: false
         run: |
           test -x build/compiler
           for mode in default scalar; do
@@ -119,7 +121,7 @@ jobs:
                 read -r -a args <<< "$flags"
                 printf '\nBUSTER ATTRIBUTE %s %s %s\n' "$mode" "$suite" "$source"
                 set +e
-                build/compiler "${mode_args[@]}" -std=gnu23 -fsyntax-only -fno-color-diagnostics -fno-caret-diagnostics -fdiagnostics-show-option "${args[@]}" "tools/$suite/$source" > "build/issue1447-oracle/buster-$mode-$suite-$source.log" 2>&1
+                build/compiler "${mode_args[@]}" -std=gnu23 -fsyntax-only -fno-caret-diagnostics "${args[@]}" "tools/$suite/$source" > "build/issue1447-oracle/buster-$mode-$suite-$source.log" 2>&1
                 status=$?
                 set -e
                 cat "build/issue1447-oracle/buster-$mode-$suite-$source.log"
