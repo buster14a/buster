@@ -17,7 +17,7 @@
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
 //     isn't set, the purpose, the time limit, the tool's path and its file's times) making a new one, and HOME not; a
-//     tool not on PATH; a file the run didn't write removed when it is taken;
+//     tool not on PATH; an entry that removes a present file runs the tool;
 //   - dependencies (traced clang -fsyntax-only): taken in the same and the other directory, again after a header
 //     changes, and taken after a file it doesn't look for is added beside it; again after #embed's resource or what
 //     __has_include found changes; __has_include's header created where it looked, in a directory other files go
@@ -55,20 +55,10 @@
 //   - the kernel's numbers (#550's sixth review): a file's inode, which no entry has, by the test's program's stat of a
 //     file of the same bytes in each directory, taken in use mode by the other directory's run, as the contract has it,
 //     and stale in check mode, which fails the run;
-//   - outputs: a run that reads its output before it writes it (traced sh), run again when those bytes differ and
-//     taken when they are an entry's; clang's object where the last compile left one, run again once, then taken, and
-//     in the other directory, without one, taken;
-//   - replays (#1317, the test's program's replay): a run that adds one to a counter it reads and writes (its set-user
-//     and set-group bits set), makes a file and removes one, taken with the counter rewritten in place; each of a
-//     take's steps that can fail made to fail (oracle_replay_faults), its files left or put back, then its tool run on
-//     them as they were: wholly (status-change times, link counts and the directory's times too) where the take
-//     changed nothing, else their bytes, sizes, modes, modification times and inodes; of two steps failing, exactly
-//     those whose second is a restoration's failing the run without its tool; and another process's file made, put
-//     over one of the take's, written in place or removed, between its preparation and its replay
-//     (oracle_replay_between) and as it puts back what it changed (oracle_replay_restoring), which the take neither
-//     writes over nor removes, nor moves back as the file it moved aside; a file the take made write-only (umask 0444),
-//     removed as its replay fails; and large ones (16 MiB), taken with peak memory under 2.7 times one read of the file
-//     for one rewritten (no copy of it made for the check) and under half for one removed (its bytes not kept);
+//   - outputs: read-before-write outputs are taken when their recorded inputs match; missing outputs run the tool;
+//   - replays (#1317): every preparation and replay fault and every pair of faults check in-place rollback or refusal;
+//     concurrent writes, replacements and an appearing removal are left to the tool or fail restoration. A present
+//     removal and an absent creation each miss before mutation; a large existing output is compared in bounded chunks;
 //   - listings (the test's program's getdents64, as ls -i lists): a file made anew with the same name and bytes, its
 //     inode another, run again;
 //   - changes (the test's program's mkdir and traced sh's rmdir): mkdir's path, which the run made, there the next
@@ -490,6 +480,8 @@ static void oracle_test_runs(OracleTest* test)
         char written[BUSTER_ORACLE_PATH_BYTES + 16];
         snprintf(written, sizeof(written), "%s/written", directory);
         unlink(written);
+        // The first run creates the artifact; subsequent takes rewrite an existing file.
+        right &= i == 0 || oracle_test_write(written, "placeholder", 11);
         char* arguments[] = { "sh", "-c", script, "sh", directory, 0 };
         const char* files[] = { written };
         OracleRun run = {
@@ -563,22 +555,22 @@ static void oracle_test_runs(OracleTest* test)
     const bool started = oracle_test_go(&run, &cache, "oracle test: parts", missing, 0, 0);
     oracle_run_release(&run);
     oracle_test_expect(test, !started && cache.counts->unkept == unkept + 1, "runs: a tool that isn't on PATH");
-    // A file the run didn't write is removed when its entry is taken.
+    // A cached removal of a now-present file must run the tool, not unlink it during replay.
     char absent[BUSTER_ORACLE_PATH_BYTES + 16];
     snprintf(absent, sizeof(absent), "%s/absent", test->runs[0]);
     unlink(absent);
-    char* nothing[] = { "sh", "-c", "true", 0 };
+    char* nothing[] = { "sh", "-c", "rm -f \"$1\"", "sh", absent, 0 };
     const char* files[] = { absent };
     bool removed = true;
     for (uint32_t i = 0; i < 2; i += 1)
     {
         run = (OracleRun){ .cache = &cache, .purpose = "oracle test: sh", .arguments = nothing, .files = files, .file_count = 1 };
-        removed &= oracle_run(&run) && run.taken == (i == 1);
+        removed &= oracle_run(&run) && !run.taken;
         oracle_run_release(&run);
         removed &= i == 1 || oracle_test_write(absent, "junk", 4);
     }
     struct stat status;
-    oracle_test_expect(test, removed && lstat(absent, &status) != 0 && errno == ENOENT, "runs: a file the run didn't write, removed when it is taken");
+    oracle_test_expect(test, removed && lstat(absent, &status) != 0 && errno == ENOENT, "runs: a present file the entry removes is left to the tool");
     uint32_t count = 0;
     uint32_t others = 0;
     oracle_test_count(&cache, &count, &others);
@@ -1654,11 +1646,11 @@ static void oracle_test_kernel(OracleTest* test)
         uint64_t lengths[3] = { 0 };
         for (uint32_t i = 0; compiled && i < 3; i += 1)
         {
-            // Compiled, taken, and compiled again once the source gives another object, each without the object there
+            // Compiled each time, including after the source changes: each run starts without the object there
             // (which, there, would be among what the run looked at: oracle_test_outputs).
             oracle_test_unlink(root, "main.o");
             compiled &= i == 1 || oracle_test_write_text(root, "main.c", i == 0 ? "int f(void) { return 1; }\n" : "int f(void) { return 2; }\n");
-            compiled &= oracle_test_compile(&cache, compile, root, "main.o", i == 1, &objects[i], &lengths[i]);
+            compiled &= oracle_test_compile(&cache, compile, root, "main.o", false, &objects[i], &lengths[i]);
         }
         compiled &= lengths[0] == lengths[1] && memcmp(objects[0], objects[1], lengths[0]) == 0 && (lengths[2] != lengths[0] || memcmp(objects[0], objects[2], lengths[0]) != 0);
         for (uint32_t i = 0; i < 3; i += 1)
@@ -1987,7 +1979,7 @@ static void oracle_test_outputs(OracleTest* test)
     uint64_t lengths[4] = { 0 };
     for (uint32_t i = 0; compiled && i < 4; i += 1)
     {
-        // Into an empty place, over that object (run), over the second's (taken), and in the other directory (taken).
+        // Into an empty place (run), over that object (run), over the second's (taken), and into another empty place (run).
         const char* place = test->runs[i == 3 ? 1 : 0];
         if (i == 0 || i == 3)
         {
@@ -1996,7 +1988,7 @@ static void oracle_test_outputs(OracleTest* test)
         // The shell's inputs include modification times, so give repeated source and existing object a stable time.
         compiled = oracle_test_write_epoch(place, "output.c", "int output(void) { return 7; }\n") &&
                    (i == 0 || i == 3 || oracle_epoch_file(object)) &&
-                   oracle_test_compile(&cache, compile, place, "output.o", i >= 2, &objects[i], &lengths[i]);
+                   oracle_test_compile(&cache, compile, place, "output.o", i == 2, &objects[i], &lengths[i]);
     }
     for (uint32_t i = 1; compiled && i < 4; i += 1)
     {
@@ -2265,17 +2257,15 @@ static void oracle_test_replay_restoring(uint32_t file, bool acting)
     }
 }
 
-// A take whose steps fail (#1317), with the test's program's `replay` as the tool: a run that reads a file it writes
-// (the counter), makes one and removes one; taken, it rewrites the counter in place (the same file). Each step that can
-// fail, failing, leaves the files as they were or puts them back, and the tool runs on them: wholly as they were
-// (their status-change times, link counts and directory's times too) where the take changed nothing, and as the cache
-// has a tool's result depend on (bytes, sizes, modes with their set-user and set-group bits, modification times and
-// inodes) where it changed them and put them back, adding one to 1. Of two steps failing, exactly those whose second is
-// a restoration's fail the run without its tool. And another process's file made, put over one of the take's, written in
-// place or removed, between its preparation and its replay or as it puts back what it changed (at the check of a file
-// it made and its removal among them), is never written over or removed by the take; nor is the file it moved aside
-// moved back once another process has changed what is under the name it is kept under, even between the check of it
-// and the move.
+// Existing outputs can still be replayed and rolled back. Leave the removed output absent and the written output
+// present so the replay never needs an unsafe unlink; the counter and the other output each exercise an in-place write.
+static bool oracle_test_replay_reset_writable(const char* directory, bool gone)
+{
+    char made[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(made, sizeof(made), "%s/replay-made", directory);
+    return oracle_test_replay_reset(directory, gone) && oracle_test_write(made, "before\n", 7);
+}
+
 static void oracle_test_replays(OracleTest* test)
 {
     OracleCache cache;
@@ -2286,123 +2276,90 @@ static void oracle_test_replays(OracleTest* test)
     snprintf(counter, sizeof(counter), "%s/replay-counter", directory);
     snprintf(made, sizeof(made), "%s/replay-made", directory);
     OracleTestReplay replay;
-    const bool first = oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.seen && replay.ran &&
+    const bool first = oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.seen && replay.ran &&
                        oracle_test_replay_after(directory);
     struct stat before;
     struct stat after;
-    const bool reset = oracle_test_replay_reset(directory, true) && lstat(counter, &before) == 0;
+    const bool reset = oracle_test_replay_reset_writable(directory, false) && lstat(counter, &before) == 0;
     const bool second = reset && oracle_test_replay_run(test, &cache, directory, 0, &replay) && replay.taken && !replay.ran && oracle_test_replay_after(directory) &&
                         lstat(counter, &after) == 0 && after.st_ino == before.st_ino && (after.st_mode & 0777) == 0750;
-    // A take's last steps are its replay's, one for each of its three files (oracle_replay_write), each counted after it
-    // changed its file.
+    // The first of the three replay steps checks an absent removal and changes nothing; the other two rewrite files.
     const uint32_t steps = oracle_replay_steps;
     const uint32_t replayed = steps >= 3 ? steps - 3 : 0;
-    oracle_test_expect(test, first && second && steps >= 3 && steps + 3 < 64 && oracle_test_replay_kept(directory, false) == 0, "replays: a run kept, then taken in place");
+    oracle_test_expect(test, first && second && steps >= 3 && steps + 2 < 64 && oracle_test_replay_kept(directory, false) == 0, "replays: existing outputs taken in place");
     bool restored = first && second;
     for (uint32_t s = 0; restored && s < steps; s += 1)
     {
-        restored = oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 1ull << s, &replay) && !replay.taken && replay.ran &&
-                   (s < replayed ? replay.seen : replay.contract) && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
+        restored = oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 1ull << s, &replay) && !replay.taken && replay.ran &&
+                   (s <= replayed ? replay.seen : replay.contract) && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
     }
-    oracle_test_expect(test, restored, "replays: a take failing at each step, its files left or put back, then its tool run on them as they were");
-    // Two steps failing: a restoration's, of the replay's file that failed or one before it (each changed), fails the run
-    // without its tool, 1 + 2 + 3 of them; any other leaves the tool to run as one step failing does.
+    oracle_test_expect(test, restored, "replays: each failing step leaves or restores the tool's inputs");
+    // A second fault refuses exactly when it hits restoration of one of the two changed files.
     printf("oracle cache: takes made to fail on purpose, each file that couldn't be put back named on the next lines:\n");
     fflush(stdout);
     bool exact = restored;
     uint32_t refusals = 0;
     for (uint32_t a = 0; exact && a < steps; a += 1)
     {
-        for (uint32_t b = a + 1; exact && b < steps + 3; b += 1)
+        for (uint32_t b = a + 1; exact && b < steps + 2; b += 1)
         {
-            const bool restoration = a >= replayed && b <= a + (a - replayed) + 1;
-            const bool ready = oracle_test_replay_reset(directory, true);
+            const bool restoration = a > replayed && b <= a + (a - replayed);
+            const bool ready = oracle_test_replay_reset_writable(directory, false);
             oracle_test_replay_run(test, &cache, directory, (1ull << a) | (1ull << b), &replay);
-            const bool fell_back = replay.went && !replay.taken && replay.ran && (a < replayed ? replay.seen : replay.contract) && oracle_test_replay_after(directory);
+            const bool fell_back = replay.went && !replay.taken && replay.ran && (a <= replayed ? replay.seen : replay.contract) && oracle_test_replay_after(directory);
             const bool refused = !replay.went && !replay.taken && !replay.ran;
             exact = ready && (restoration ? refused : fell_back);
             refusals += refused;
         }
     }
-    oracle_test_expect(test, exact && refusals == 6, "replays: exactly the takes whose restorations fail refuse, their tool not run");
-    // Another process's changes between the take's preparation and its replay, and as it puts back what it changed.
+    oracle_test_expect(test, exact && refusals == 3, "replays: exactly the takes whose restorations fail refuse, their tool not run");
     oracle_test_replay_place = directory;
     oracle_replay_between = oracle_test_replay_other;
     oracle_replay_restoring = oracle_test_replay_restoring;
     bool other = true;
     struct stat status;
     uint64_t length = 0;
-    // Its file where the take would make one (the last, after the take has changed the others), which the take mustn't
-    // truncate, nor remove as it puts back what it changed: the tool sees it, and writes into it.
+    // A replacement of the second output is left for the tool after the first rewrite is restored.
     oracle_test_replay_change = 1;
-    other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
+    other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
              strstr(replay.output, "replay-made 7 ") != 0 && oracle_test_replay_after(directory) && lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode;
-    // Its counter over the take's, not rewritten: the tool counts from it.
     oracle_test_replay_change = 2;
-    other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran;
+    other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran;
     char* count = oracle_test_read(counter, &length);
     other &= count != 0 && strcmp(count, "10\n") == 0 && lstat(counter, &status) == 0 && status.st_ino == oracle_test_replay_inode;
     free(count);
-    // Its file over the one the take would remove, moved back: the tool sees it, and removes it.
-    oracle_test_replay_change = 3;
-    other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
-             strncmp(replay.output, "1\nnew\n", 6) == 0 && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
-    // That file removed, as the entry has it: taken.
-    oracle_test_replay_change = 4;
-    other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && replay.taken && !replay.ran &&
-             oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
-    // That file made where it wasn't: the tool sees it, and removes it.
+    // A file appearing where the entry removes an absent one is left to the tool.
     oracle_test_replay_change = 5;
-    other &= oracle_test_replay_reset(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
+    other &= oracle_test_replay_reset_writable(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran &&
              strncmp(replay.output, "1\nnew\n", 6) == 0 && oracle_test_replay_after(directory);
-    // The counter written in place (the same inode and size): not rewritten, the tool counts from it.
     oracle_test_replay_change = 6;
-    other &= oracle_test_replay_reset(directory, true) && lstat(counter, &before) == 0 && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken &&
-             replay.ran;
+    other &= oracle_test_replay_reset_writable(directory, false) && lstat(counter, &before) == 0 && oracle_test_replay_run(test, &cache, directory, 0, &replay) && !replay.taken && replay.ran;
     count = oracle_test_read(counter, &length);
     other &= count != 0 && strcmp(count, "10\n") == 0 && lstat(counter, &status) == 0 && status.st_ino == before.st_ino;
     free(count);
-    // The counter written in place after the replay rewrote it, before its restoration (the replay's last step failing):
-    // not written over, so that the run fails without its tool.
     oracle_test_replay_change = 7;
-    other &= oracle_test_replay_reset(directory, true) && !oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && !replay.ran;
+    other &= oracle_test_replay_reset_writable(directory, false) && !oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && !replay.ran;
     count = oracle_test_read(counter, &length);
     other &= count != 0 && strcmp(count, "9\n") == 0;
     free(count);
-    // A file of another process's over the one the replay made, before its restoration: moved aside, found not to be
-    // it, and moved back; and one made where that was, between the check of the file moved aside and its removal, left.
-    // The tool writes into each.
-    for (uint32_t change = 8; change <= 9; change += 1)
-    {
-        oracle_test_replay_change = change;
-        other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && replay.ran &&
-                 oracle_test_replay_after(directory) && lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode && oracle_test_replay_kept(directory, false) == 0;
-    }
-    // The file the take moved aside for the entry to remove (the first), changed under the name it is kept under before
-    // its restoration (another file put there, or that one written in place), and another file put there between the
-    // check of it and the move back: none moved back, so that the run fails without its tool.
-    char gone[BUSTER_ORACLE_PATH_BYTES + 32];
-    snprintf(gone, sizeof(gone), "%s/replay-gone", directory);
-    for (uint32_t change = 10; change <= 12; change += 1)
-    {
-        oracle_test_replay_change = change;
-        other &= oracle_test_replay_reset(directory, true) && !oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && !replay.ran &&
-                 lstat(gone, &status) != 0 && errno == ENOENT;
-    }
     oracle_replay_between = 0;
     oracle_replay_restoring = 0;
     oracle_test_replay_change = 0;
-    oracle_test_expect(test, other, "replays: another process's file made, put over the take's, written in place or removed, neither written over nor removed by the take");
-    // The file the take makes made write-only (umask 0444, mode 0222), the replay failing as it writes it: the
-    // restoration tells it by lstat and checks it through the descriptor it was made with, then removes it, so that the
-    // tool doesn't find it (a process that isn't root can't open it to read; as root this passes either way). Last, as
-    // the cache's own files made under that mask can't be read.
-    const bool masked_ready = oracle_test_replay_reset(directory, true);
+    oracle_test_expect(test, other, "replays: concurrent replacement or writes are left to the tool, or refuse restoration");
+    // Both problematic namespace transitions miss before the first replay mutation. The helper prints
+    // the whole pre-run state, including ctimes and directory times, so an earlier rewrite is detected.
+    const bool existing_removal = oracle_test_replay_reset_writable(directory, true) && oracle_test_replay_run(test, &cache, directory, 0, &replay) &&
+                                  oracle_replay_steps >= 2 && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
+    const bool absent_creation = oracle_test_replay_reset(directory, false) && oracle_test_replay_run(test, &cache, directory, 0, &replay) &&
+                                 oracle_replay_steps >= 3 && !replay.taken && replay.ran && replay.seen && oracle_test_replay_after(directory) && oracle_test_replay_kept(directory, false) == 0;
+    oracle_test_expect(test, existing_removal, "replays: a present removal misses before any mutation");
+    oracle_test_expect(test, absent_creation, "replays: an absent creation misses before any mutation");
+    const bool masked_ready = oracle_test_replay_reset(directory, false);
     const mode_t mask = umask(0444);
-    const bool masked = masked_ready && oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && replay.ran && replay.contract &&
-                        strstr(replay.output, "replay-made ") == 0;
+    const bool masked = masked_ready && oracle_test_replay_run(test, &cache, directory, 0, &replay) &&
+                        !replay.taken && replay.ran && replay.seen;
     umask(mask);
-    oracle_test_expect(test, masked, "replays: a file the take made write-only, removed as its replay fails, the tool not finding it");
+    oracle_test_expect(test, masked, "replays: a write-only creation misses before any mutation");
     oracle_test_replay_kept(directory, true);
     oracle_test_unlink(directory, "replay-counter");
     oracle_test_unlink(directory, "replay-made");
@@ -2488,13 +2445,9 @@ static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory
     return read_whole && waited ? report[0] : -1;
 }
 
-// Large replays (#1342's third and fourth reviews), 16 MiB, each taken in a child process whose peak memory is measured
-// against one read of the file, in a build without a sanitizer (whose shadow memory and quarantine count too). A run
-// that writes it, taken where its output already is, its bytes compared through a buffer of the check's own
-// (oracle_replay_unchanged) rather than a copy: under 2.7 times one read (the entry's bytes and the take's own of the file
-// it rewrites are two, 2.2 times on the owner's machine; a copy for the check was a third, 3.2 times). And a run that
-// removes it, taken where it is again: under half of one read, as the take keeps only SHA-256 of a file it removes,
-// hashed a chunk at a time (its bytes kept were one read).
+// A large replay, 16 MiB, compared against one read of the file in a child without a sanitizer: an existing
+// rewritten output takes less than 2.7 times one read, since the check uses a bounded buffer. A present
+// output to remove instead misses and the tool removes it.
 static void oracle_test_replay_large(OracleTest* test)
 {
     OracleCache cache;
@@ -2526,19 +2479,17 @@ static void oracle_test_replay_large(OracleTest* test)
     bool removed = false;
     const int64_t removing = removal && oracle_test_write(gone, bytes, size) ? oracle_test_replay_peak(&cache, directory, 2, &removed) : -1;
     struct stat status;
-    const bool gone_right = removed && lstat(gone, &status) != 0 && errno == ENOENT && oracle_test_replay_kept(directory, false) == 0;
+    const bool gone_right = !removed && lstat(gone, &status) != 0 && errno == ENOENT && oracle_test_replay_kept(directory, false) == 0;
     free(bytes);
 #if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer)
     const bool bounded = true;
-    const bool removal_bounded = true;
 #else
     const bool bounded = took >= 0 && took * 10 < once * 27;
-    const bool removal_bounded = removing >= 0 && removing * 2 < once;
 #endif
     printf("oracle cache: a large take's peak grew by %lld KiB, a large removal's by %lld KiB, one read of its file by %lld KiB\n", (long long)took,
            (long long)removing, (long long)once);
     oracle_test_expect(test, first && taken && right && bounded, "replays: a large output taken without a copy of it for its check");
-    oracle_test_expect(test, removal && removed && gone_right && removal_bounded, "replays: a large output the entry removes taken without its bytes kept");
+    oracle_test_expect(test, removal && removing >= 0 && gone_right, "replays: a large output to remove is left to the tool");
     unlink(source);
     unlink(big);
     unlink(gone);
@@ -3033,11 +2984,11 @@ static void oracle_test_adapter(OracleTest* test)
     ready = ready && oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
     uint64_t original_length = 0;
     char* original = ready ? oracle_test_read(object, &original_length) : 0;
-    ready = ready && original != 0 && unlink(object) == 0 && oracle_test_run(&run, output, errors, 0, 0) == 0 && run.taken;
+    ready = ready && original != 0 && unlink(object) == 0 && oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
     uint64_t restored_length = 0;
     char* restored = ready ? oracle_test_read(object, &restored_length) : 0;
     oracle_test_expect(test, ready && restored != 0 && original_length == restored_length && memcmp(original, restored, original_length) == 0,
-                       "adapter: warm compile restores exact object bytes");
+                       "adapter: a missing object is compiled again with exact bytes");
     free(original);
     free(restored);
     char* execute[] = { program, 0 };
@@ -3074,10 +3025,10 @@ static void oracle_test_adapter(OracleTest* test)
                        diagnostic.bytes[sizeof(diagnostic.bytes) - 1] == 0 && memcmp(full, diagnostic.bytes, sizeof(diagnostic.bytes) - 1) == 0,
                        "adapter: rejection preserves full capture and bounded diagnostic prefix");
     free(full);
-    // The shell made an empty output even on rejection; restore the cold run's absent output pre-state first.
+    // The shell made an empty output even on rejection; absent-output replay misses safely.
     oracle_test_expect(test, rejected == 1 && unlink(object) == 0 &&
-                       oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) == 1 && run.taken,
-                       "adapter: cached rejection retains its nonzero status");
+                       oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) == 1 && !run.taken,
+                       "adapter: a repeated rejection retains its nonzero status");
     oracle_test_expect(test, oracle_test_run(&run, directory, errors, 0, 0) == -1, "adapter: capture write failure is not compiler rejection");
     // Uncacheable dependencies are a safe fallback, not a compiler rejection or launcher failure. Force one even
     // on hosts whose Clang uses getrandom instead of the random device for direct output's temporary name.

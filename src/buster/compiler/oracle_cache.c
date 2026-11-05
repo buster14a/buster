@@ -3510,9 +3510,8 @@ static bool oracle_replay_unchanged(int fd, const struct stat* before, const uin
 
 // Before a take changes anything, and changing nothing (no file's inode, status-change time or directory): each of the
 // run's files as it is, into `replays`, so that the replay can tell another process's change since and a replay that
-// fails can put it back (oracle_replay_restore): the bytes of one the entry rewrites, which a restoration writes back,
-// and only SHA-256 of one it removes, which a restoration moves back whole. False if a file can't be read, or is there
-// but isn't a regular file (a directory, a symbolic link the replay would write through).
+// fails can put it back (oracle_replay_restore). False if the take would create or remove a file, if a file can't be
+// read, or if it is there but isn't a regular file (a directory or symbolic link the replay would write through).
 static bool oracle_replay_prepare(const OracleRun* run, const OracleEntry* entry, OracleReplay* replays)
 {
     bool result = true;
@@ -3526,6 +3525,10 @@ static bool oracle_replay_prepare(const OracleRun* run, const OracleEntry* entry
         result = oracle_run_path(run, run->files[f], path, sizeof(path));
         replays[f].present = result && lstat(path, &status) == 0;
         result = result && (replays[f].present ? S_ISREG(status.st_mode) : errno == ENOENT);
+        // There is no atomic unlink-if-inode operation: a pathname can be replaced after its check,
+        // even under the temporary name. Refuse a take that might need to remove a file, before any
+        // replay has changed one. The tool handles creation and removal on a miss.
+        result = result && (replays[f].present == (length != UINT64_MAX));
         if (result && replays[f].present)
         {
             const int fd = oracle_replay_fault() ? -1 : open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
