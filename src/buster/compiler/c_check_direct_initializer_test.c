@@ -59,6 +59,9 @@ static void check_test_direct_initializers(CheckTest* test, const char* clang)
     check_test_program_source(test,
         "int absent(void);int tested(int n){int a=0;int x __attribute__((unused)) ((a++,n+3),a++,absent());"
         "int y __attribute__((unused)) (n? a++,n+4 : n-2,absent());int z=n? a++,n+4 : n-2;return a*100+x+y+z;}", "direct-nested-comma-and-conditional", clang);
+    // A discarded later argument's VLA type must not evaluate its bound: Clang checks it but does not run it.
+    check_test_program_source(test,
+        "int tested(int n){int x __attribute__((unused)) (3,sizeof(int[n++]));return x+100*n;}", "direct-unused-vla-bound", clang);
     check_test_program_source(test,
         "int tested(int n){struct P{int a,b;};struct P a={n,n+7};"
         "struct P b __attribute__((unused)) (a,n++);int *p __attribute__((unused)) (&b.a);"
