@@ -475,6 +475,7 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     unit.identifiers = pp->table;
     unit.target = pp->options.target;
     unit.predefines = &pp->options.predefines;
+    unit.frame_pointer = predefines_frame_pointer(&pp->options.predefines);
     return unit;
 }
 

@@ -389,9 +389,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         Tier1EmitDiagnostic diagnostic = { 0 };
+        // The frame pointer the options ask for (#177, Tier0Function.frame_pointer), as Tier 0's frame keeps it.
         const Tier1EmitOptions options = {
             .diagnostic = &diagnostic,
             .register_mask = tier1_liveness_register_mask(),
+            .frame_flags = function->frame_pointer != BUSTER_TIER0_FRAME_POINTER_NONE ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+            .omit_leaf_frame_pointer = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF,
             .vector = !scalar,
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
