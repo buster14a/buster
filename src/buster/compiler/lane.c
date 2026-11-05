@@ -1091,6 +1091,19 @@ struct LaneProcess
 extern LaneProcess lane_process;
 #elif defined(BUSTER_UNIT)
 LaneProcess lane_process = { .fail_at = UINT32_MAX };
+// The threads the process's lanes started (LaneProcess.threads_created), written at its exit to the file
+// BUSTER_TEST_THREADS names, for the tests that count a command's threads (#652): a library preloaded into a dynamic
+// executable counts its calls of pthread_create too, which a static one doesn't load.
+static __attribute__((destructor, unused)) void lane_threads_report(void)
+{
+    const char* path = getenv("BUSTER_TEST_THREADS");
+    FILE* file = path != 0 ? fopen(path, "w") : 0;
+    if (file != 0)
+    {
+        fprintf(file, "%llu\n", (unsigned long long)__atomic_load_n(&lane_process.threads_created, __ATOMIC_RELAXED));
+        fclose(file);
+    }
+}
 #else
 static LaneProcess lane_process = { .fail_at = UINT32_MAX };
 #endif

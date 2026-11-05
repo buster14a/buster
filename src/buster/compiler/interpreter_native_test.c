@@ -598,6 +598,66 @@ static void interpreter_native_test_copy_definedness(InterpreterNativeTestTally*
     interpreter_native_test_expect(tally, ok && memcmp(destination_defined, before_defined, sizeof(destination_defined)) == 0, "copy into memory without a byte map preserves unrelated metadata");
 }
 
+// The host functions that the interpreter's programs bind (test_libm, #652) keep the process's own state: setenv
+// through its binding changes the environment the process's getenv reads, and the binding of __errno_location is the
+// process's errno. A static executable's lookup takes them from its table, rather than from the second C library its
+// fallback loads, whose environment and errno are its own.
+static void interpreter_native_test_host_state(InterpreterNativeTestTally* tally)
+{
+    int (*const bound_setenv)(const char*, const char*, int) = (int (*)(const char*, const char*, int))test_libm("setenv");
+    char* (*const bound_getenv)(const char*) = (char* (*)(const char*))test_libm("getenv");
+    int* (*const bound_errno)(void) = (int* (*)(void))test_libm("__errno_location");
+    const bool found = bound_setenv != NULL && bound_getenv != NULL && bound_errno != NULL;
+    interpreter_native_test_expect(tally, found, "find setenv, getenv and __errno_location for the interpreter's natives");
+    const bool set = found && bound_setenv("BUSTER_TEST_HOST_STATE", "PRESENT", 1) == 0;
+    const char* const own = getenv("BUSTER_TEST_HOST_STATE");
+    const char* const bound = found ? bound_getenv("BUSTER_TEST_HOST_STATE") : NULL;
+    interpreter_native_test_expect(tally, set && own != NULL && strcmp(own, "PRESENT") == 0 && bound != NULL && strcmp(bound, "PRESENT") == 0,
+                                   "a bound setenv changes the environment the process's own getenv reads");
+    unsetenv("BUSTER_TEST_HOST_STATE");
+    interpreter_native_test_expect(tally, found && bound_errno() == &errno, "a bound __errno_location is the process's errno");
+}
+
+// A file stdio makes, through the interpreter's calls of the bound tmpfile, fwrite, ftell and fclose (#652): the FILE the
+// bound tmpfile returns belongs to the C library whose bound fwrite and fclose take it. A static executable's lookup
+// once took tmpfile from the second C library a dlopen'd libm brings, whose FILE this one's fclose freed into the wrong
+// heap and aborted. There, a name its table doesn't give, such as gethostname, binds to nothing rather than to that
+// second C library's.
+static void interpreter_native_test_host_files(InterpreterNativeTestTally* tally)
+{
+    void* const bound_tmpfile = test_libm("tmpfile");
+    void* const bound_fwrite = test_libm("fwrite");
+    void* const bound_ftell = test_libm("ftell");
+    void* const bound_fclose = test_libm("fclose");
+    const bool found = bound_tmpfile != NULL && bound_fwrite != NULL && bound_ftell != NULL && bound_fclose != NULL;
+    interpreter_native_test_expect(tally, found, "find tmpfile, fwrite, ftell and fclose for the interpreter's natives");
+    static const char bytes[] = "bytes";
+    InterpreterValue file = { 0 };
+    bool ok = found && interpreter_native_test_call(bound_tmpfile, 0, 0, 0, 0, 0, IR_PTR, 0, &file) && file.low != 0;
+    const uint16_t write_types[4] = {
+        IR_PTR,
+        IR_I64,
+        IR_I64,
+        IR_PTR,
+    };
+    const InterpreterValue write_arguments[4] = {
+        { .low = (uintptr_t)bytes },
+        { .low = 1 },
+        { .low = sizeof(bytes) - 1 },
+        file,
+    };
+    InterpreterValue written = { 0 };
+    ok = ok && interpreter_native_test_call(bound_fwrite, 0, write_types, write_arguments, 4, 4, IR_I64, 0, &written) && written.low == sizeof(bytes) - 1;
+    const uint16_t file_type = IR_PTR;
+    InterpreterValue position = { 0 };
+    ok = ok && interpreter_native_test_call(bound_ftell, 0, &file_type, &file, 1, 1, IR_I64, 0, &position) && position.low == sizeof(bytes) - 1;
+    InterpreterValue closed = { .low = UINT64_MAX };
+    const bool called = file.low != 0 && interpreter_native_test_call(bound_fclose, 0, &file_type, &file, 1, 1, IR_I32, 0, &closed);
+    interpreter_native_test_expect(tally, ok && called && (uint32_t)closed.low == 0, "the bound tmpfile's FILE is written, told and closed by the bound fwrite, ftell and fclose");
+    interpreter_native_test_expect(tally, !BUSTER_HOST_STATIC_EXECUTABLE || test_libm("gethostname") == NULL,
+                                   "a static executable binds no C library name its table doesn't give");
+}
+
 static void interpreter_native_test_rejections(InterpreterNativeTestTally* tally)
 {
     const InterpreterNativeBinding binding = {
@@ -671,6 +731,8 @@ static __attribute__((unused)) int run_interpreter_native_tests(int argc, char**
     interpreter_native_test_allocations(&tally);
     interpreter_native_test_copy_definedness(&tally);
     interpreter_native_test_rejections(&tally);
+    interpreter_native_test_host_state(&tally);
+    interpreter_native_test_host_files(&tally);
     printf("interpreter-native: %" PRIu64 " checks, %" PRIu64 " failures\n", tally.checks, tally.failures);
     return tally.failures != 0;
 }
