@@ -199,6 +199,8 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_builtin_catalog.c"
 #include "buster/compiler/test_process.c"
+// libm's functions for the tests' oracles, which the compiler's link doesn't take (#652).
+#include "buster/compiler/test_libm.c"
 // The clang and gcc runs the tests compare with, kept between runs (#542), and its tests, for the test-oracle-cache
 // command.
 #include "buster/compiler/oracle_cache.c"

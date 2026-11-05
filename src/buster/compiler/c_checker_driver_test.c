@@ -402,9 +402,21 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     char needed[256] = { 0 };
     check_test_expect(test, written && check_test_driver_needed(outputs[0], needed, sizeof(needed)) && strcmp(needed, "libm.so.6 libc.so.6") == 0,
                       "libm.so.6 needed before libc.so.6");
-    char expected[256];
-    const double logarithm = lgamma(-0.5);
-    snprintf(expected, sizeof(expected), "%f %f %f %f %f %d\n", sin(2), sqrt(2.0), pow(2.0, 10.0), cos(0.5), logarithm, signgam);
+    // The host libm's results, from test_libm (#652): lgamma sets that libm's signgam.
+    double (*const libm_sin)(double) = (double (*)(double))test_libm("sin");
+    double (*const libm_sqrt)(double) = (double (*)(double))test_libm("sqrt");
+    double (*const libm_pow)(double, double) = (double (*)(double, double))test_libm("pow");
+    double (*const libm_cos)(double) = (double (*)(double))test_libm("cos");
+    double (*const libm_lgamma)(double) = (double (*)(double))test_libm("lgamma");
+    const int* const libm_signgam = (const int*)test_libm("signgam");
+    const bool oracle = libm_sin != NULL && libm_sqrt != NULL && libm_pow != NULL && libm_cos != NULL && libm_lgamma != NULL && libm_signgam != NULL;
+    check_test_expect(test, oracle, "find libm's functions for the program's expected output");
+    char expected[256] = { 0 };
+    if (oracle)
+    {
+        const double logarithm = libm_lgamma(-0.5);
+        snprintf(expected, sizeof(expected), "%f %f %f %f %f %d\n", libm_sin(2), libm_sqrt(2.0), libm_pow(2.0, 10.0), libm_cos(0.5), logarithm, *libm_signgam);
+    }
     char captured[256] = { 0 };
     FILE* output = written ? popen(outputs[0], "r") : NULL;
     const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
