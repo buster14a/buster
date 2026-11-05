@@ -270,7 +270,12 @@ compares every lane kind and width with C's scalar operators lane by lane, and
 against the interpreter, random NaNs, infinities and denormals among the floats.
 The passes see a pure operation where they saw a call: SSA promotion, SCCP, dead
 code and CFG cleanup take them (SCCP folds no vector); GVN and LICM still refuse
-SIMD functions.
+SIMD functions. Dead code keeps the floating operations as the scalar ones'
+effects on the floating environment: the arithmetic, and a comparison of
+floating lanes (`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises
+MXCSR's invalid flag, or traps where it is unmasked), whose mask may go unused;
+an integer comparison goes with its mask. `test-ir-optimize` checks both paths,
+and `test-checker-driver` an unused comparison of a NaN natively, by both tiers.
 
 ## Machine rows (#141)
 

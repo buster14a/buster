@@ -3092,6 +3092,75 @@ static void check_test_driver_tier1_lanes(CheckTest* test, const char* clang, co
     unlink(header);
 }
 
+// An unused comparison of floating lanes keeps its effect on the floating environment (#1413's review): a NaN operand
+// raises MXCSR's invalid flag, as fcmp's does, so dead code elimination keeps it where its mask goes unused. clang -O0
+// drops such a comparison itself (C allows it without FENV_ACCESS, which the checker refuses: #1135), so the oracle is
+// Tier 0's build of the same unit, which keeps every expression. A float's and a double's comparison, each the flag it
+// leaves: 3 where both operands' NaN raise it, 0 where none has one.
+static const char check_test_tier1_invalid_source[] =
+    "#include <stdio.h>\n"
+    "typedef float f4 __attribute__((vector_size(16)));\n"
+    "typedef double d4 __attribute__((vector_size(32)));\n"
+    "static unsigned csr(void) { return __builtin_ia32_stmxcsr(); }\n"
+    "__attribute__((noinline)) int invalid(f4 a, f4 b, d4 c, d4 d)\n"
+    "{\n"
+    "    __builtin_ia32_ldmxcsr(csr() & ~0x3fu);\n"
+    "    (void)(a < b);\n"
+    "    const unsigned first = csr() & 1u;\n"
+    "    __builtin_ia32_ldmxcsr(csr() & ~0x3fu);\n"
+    "    (void)(c >= d);\n"
+    "    return (int)(first * 2 + (csr() & 1u));\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    const f4 n = { 1.0f, __builtin_nanf(\"\"), 2.0f, 3.0f };\n"
+    "    const f4 o = { 0.5f, 1.0f, 4.0f, 3.0f };\n"
+    "    const d4 m = { 1.0, 2.0, __builtin_nan(\"\"), 3.0 };\n"
+    "    const d4 p = { 1.0, 2.0, 3.0, 4.0 };\n"
+    "    printf(\"%d %d %d\\n\", invalid(n, o, m, p), invalid(o, o, p, p), invalid(o, n, p, m));\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64-v4: Tier 0's, and by --tier1 by each path with and without rematerialization, `invalid` Tier 1's,
+// each printing "3 0 3", run where the host has x86-64-v4.
+static void check_test_driver_tier1_invalid(CheckTest* test, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    char source[512];
+    char program[512];
+    snprintf(source, sizeof(source), "%s/tier1-invalid.c", directory);
+    snprintf(program, sizeof(program), "%s/tier1-invalid", directory);
+    const bool written = parse_test_write(source, check_test_tier1_invalid_source, strlen(check_test_tier1_invalid_source));
+    check_test_expect(test, written, "the unused comparisons' unit is written");
+    for (uint32_t run = 0; written && run < 5; run += 1)
+    {
+        bool built = false;
+        CheckTestTier1Build build;
+        if (run == 4)
+        {
+            char* arguments[] = { (char*)executable, "-march=x86-64-v4", "-o", program, source, NULL };
+            char* text = NULL;
+            built = check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+        }
+        else
+        {
+            built = check_test_tier1_build(executable, source, "invalid", program, (run & 2) == 0, (run & 1) != 0, false, false, "-march=x86-64-v4", &build);
+        }
+        char* output = NULL;
+        char* run_arguments[] = { program, NULL };
+        const bool ran = built && host && check_test_driver_spawn_stream(run_arguments, &output, true) == 0;
+        char message[256];
+        snprintf(message, sizeof(message), "an unused floating comparison raises invalid on a NaN, as Tier 0's does (%s)", run == 4 ? "Tier 0" : (run & 1) != 0 ? "Tier 1, scalar path" : "Tier 1, vector path");
+        check_test_expect(test, built && (!host || (ran && output != NULL && strcmp(output, "3 0 3\n") == 0)), message);
+        free(output);
+        unlink(program);
+    }
+    unlink(source);
+}
+
 // The VEX fixture (#1281): x86-64-v3's AVX2 and F16C builtins and the vector operators, at a target without AVX-512,
 // whose vectors Tier 1 moves, spills and computes by VEX forms in xmm0 to xmm15 alone and whose machine rows' roles it
 // places below 16: the 32-bit integers' operators (the IR's own operations by their VEX forms) and their comparisons,
