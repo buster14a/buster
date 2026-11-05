@@ -158,7 +158,12 @@ struct Tier1EmitPrepared
     // The straight-line consumer's nodes of fixed-register rules (tier1_select_fixed_registers), whose records take more
     // than a node's share.
     uint32_t fixed_count;
+    // The general registers with a call-save row, and those with a slot column, which the frame's reservations before
+    // allocation count: the straight-line consumer's are the same, every caller-saved register where the function calls
+    // and the fixed registers' sequences' (tier1_emit_prepare). The CFG consumer's rows are those of its columns that a
+    // call or a fixed register's sequence saves, by the allocation (tier1_emit_cfg_saves; #177).
     uint32_t call_save_mask;
+    uint32_t call_save_columns;
     // The CFG consumer's: each node's class (null for the straight-line consumer, whose values are all general), the
     // opmask registers whose masks a call saves in rows of their own after the general registers' (#179), and the
     // slots' columns for them, one per opmask register where the function has masks; and the same of the xmm registers
@@ -351,6 +356,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     }
     prepared.call_abi.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     prepared.call_save_mask = (prepared.call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
+    prepared.call_save_columns = prepared.call_save_mask;
     prepared.slot_columns = count + (uint32_t)__builtin_popcount(prepared.call_save_mask);
     uint32_t* allowed = 0;
     uint32_t* offsets = 0;
@@ -970,6 +976,131 @@ static uint32_t tier1_emit_call_saved(const Tier1EmitResult* result, const Tier1
         }
     }
     return saved;
+}
+
+// The first of `count` positions in ascending order at or past `start`, by halving: `count` where there is none.
+static uint32_t tier1_emit_first_at(const uint32_t* positions, uint32_t count, uint32_t start)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = positions[middle] < start ? middle + 1 : low;
+        high = positions[middle] < start ? high : middle;
+    }
+    return low;
+}
+
+// Whether a fragment from `start` to `end` covers one of the positions, other than `own` (its value's definition: a call's
+// result, or a fixed register's sequence's, which its node doesn't save).
+static bool tier1_emit_covers(const uint32_t* positions, uint32_t count, uint32_t start, uint32_t end, uint32_t own)
+{
+    uint32_t first = tier1_emit_first_at(positions, count, start);
+    first += first < count && positions[first] == own ? 1 : 0;
+    return first < count && positions[first] < end;
+}
+
+// The calls' definition phases, and each fixed register's sequences' (a division's rax and rdx, a shift's rcx, of the
+// registers in `columns`), `base` past the plan's node positions, in position order: the calls' in `positions` from 0, then
+// each register's run from `offsets[reg]` to `offsets[reg + 1]`, the registers in order. Their room on `scratch`. The
+// function's `calls` and `fixed` nodes (Tier1EmitPrepared.call_count, the fixed registers' sequences' count) say how many:
+// a function with neither, most leaves, has no positions and takes no pass over its nodes, and one without fixed
+// registers' sequences one; a node's registers are its mask's set bits alone (#177's measurement: a loop over all 16 for
+// every node cost 0.46% of `--tier1 -c sqlite3.c`'s instructions). A count past `calls` is refused.
+typedef struct Tier1EmitSavePositions Tier1EmitSavePositions;
+struct Tier1EmitSavePositions
+{
+    uint32_t* positions;
+    uint32_t call_count;
+    uint32_t offsets[BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 1];
+};
+
+static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t columns, uint32_t base, uint32_t calls, uint32_t fixed_nodes, Arena* scratch, Tier1EmitSavePositions* saves)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t count = calls != 0 || fixed_nodes != 0 ? function->instruction_count : 0;
+    memset(saves, 0, sizeof(*saves));
+    for (uint32_t node = 0; fixed_nodes != 0 && node < count; node += 1)
+    {
+        uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
+        while (fixed != 0)
+        {
+            saves->offsets[__builtin_ctz(fixed) + 1] += 1;
+            fixed &= fixed - 1;
+        }
+    }
+    saves->offsets[0] = calls;
+    for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    {
+        saves->offsets[reg + 1] += saves->offsets[reg];
+    }
+    bool ok = true;
+    const uint32_t total = saves->offsets[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
+    saves->positions = total != 0 ? ir_allocate(scratch, total, 4, &ok) : 0;
+    uint32_t cursors[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
+    memcpy(cursors, saves->offsets, sizeof(cursors));
+    for (uint32_t node = 0; ok && saves->positions != 0 && node < count; node += 1)
+    {
+        const uint32_t position = base + 2 * node + 1;
+        const bool call = tier1_select_function_call(function, node);
+        ok = !call || saves->call_count < calls;
+        if (ok && call)
+        {
+            saves->positions[saves->call_count++] = position;
+        }
+        uint32_t fixed = fixed_nodes == 0 || plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
+        while (fixed != 0)
+        {
+            const uint32_t reg = (uint32_t)__builtin_ctz(fixed);
+            saves->positions[cursors[reg]++] = position;
+            fixed &= fixed - 1;
+        }
+    }
+    return ok;
+}
+
+// Whether general register fragment `f`, in a register of `columns` but not of `callee` (whose values survive a call),
+// covers a call's definition phase or one of a fixed register's sequence that takes its register, but its own value's
+// definition `own`: the values tier1_emit_call_saved and the CFG consumer's calls save, and those a fixed register's
+// sequence saves around it (tier1_emit_fixed), each in its register's call-save row.
+static bool tier1_emit_fragment_saved(const Tier1Allocation* allocation, uint32_t f, uint32_t own, uint32_t columns, uint32_t callee, const Tier1EmitSavePositions* saves)
+{
+    const uint32_t reg = allocation->registers[f];
+    const bool caller = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((columns >> reg) & 1) != 0 && ((callee >> reg) & 1) == 0;
+    const uint32_t start = allocation->starts[f];
+    const uint32_t end = allocation->ends[f];
+    const bool across_call = caller && tier1_emit_covers(saves->positions, saves->call_count, start, end, own);
+    const uint32_t first = caller ? saves->offsets[reg] : 0;
+    const uint32_t last = caller ? saves->offsets[reg + 1] : 0;
+    const bool across_fixed = caller && first < last && tier1_emit_covers(saves->positions + first, last - first, start, end, own);
+    return across_call || across_fixed;
+}
+
+// The straight-line consumer's call-save rows (#177): those of its columns, every caller-saved register where the function
+// calls, that some call or fixed register's sequence saves, by the allocation (tier1_emit_fragment_saved). The rest take
+// no row: in a function whose calls no value lives past, none.
+static Tier1EmitError tier1_emit_saves(const Tier1SelectPlan* plan, Arena* scratch, Tier1EmitResult* emitted)
+{
+    const Tier1Allocation* allocation = &emitted->allocation;
+    const Tier1AllocationInput* input = &emitted->prepared.allocation;
+    const uint32_t columns = emitted->prepared.call_save_columns;
+    const uint64_t mark = scratch->length;
+    Tier1EmitSavePositions saves;
+    const bool ok = tier1_emit_save_positions(plan, columns, 0, emitted->prepared.call_count, emitted->prepared.fixed_count, scratch, &saves);
+    uint32_t saved = 0;
+    // A register found saved isn't searched again (its fragments' columns left out), and once every column's is, nothing is.
+    for (uint32_t i = 0; ok && saves.positions != 0 && saved != columns && i < allocation->interval_count; i += 1)
+    {
+        const uint32_t own = 2 * input->values[i] + 1;
+        for (uint32_t f = allocation->fragment_offsets[i]; f < allocation->fragment_offsets[i + 1]; f += 1)
+        {
+            saved |= tier1_emit_fragment_saved(allocation, f, own, columns & ~saved, 0, &saves) ? 1u << allocation->registers[f] : 0;
+        }
+    }
+    emitted->prepared.call_save_mask = saved & columns;
+    arena_pop_to(scratch, mark);
+    return ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
 
 // A call's aggregate result object (#789): the frame object its into operand is the address of, as a base register and a
@@ -1658,6 +1789,10 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK && chain)
     {
+        error = tier1_emit_saves(plan, scratch, &emitted);
+    }
+    if (error == TIER1_EMIT_OK && chain)
+    {
         const uint32_t spill_count = emitted.allocation.spill_count;
         const uint32_t call_slots = (uint32_t)__builtin_popcount(emitted.prepared.call_save_mask);
         const uint32_t* indices = emitted.allocation.spill_values;
@@ -1675,9 +1810,14 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
                 {
                     memcpy(combined, indices, (uint64_t)spill_count * sizeof(*combined));
                 }
-                for (uint32_t slot = 0; slot < call_slots; slot += 1)
+                // Each row's column, its register's of the columns (#177).
+                uint32_t slot = spill_count;
+                for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
                 {
-                    combined[spill_count + slot] = plan->function->instruction_count + slot;
+                    if (((emitted.prepared.call_save_mask >> reg) & 1) != 0)
+                    {
+                        combined[slot++] = plan->function->instruction_count + (uint32_t)__builtin_popcount(emitted.prepared.call_save_columns & ((1u << reg) - 1));
+                    }
                 }
                 indices = combined;
             }
