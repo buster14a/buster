@@ -931,6 +931,36 @@ static bool lane_test_arenas(void)
     const Arena empty_tables = arena_reserve_tables(tables, 0);
     lane_test_expect(&tally, refused.base == 0 && none[0].base == 0 && empty_tables.base == 0, "an arena of tables reserved a table of no bytes, or no tables");
 
+    // The limits a compile fixes for its process (arena_limits_fix, #652), in a child: before it fixes them, each
+    // reservation's share follows RLIMIT_AS as it is lowered; after, it stays the share of the limit it fixed while the
+    // limit goes back to what it was. Only the shares are read, so that a sanitizer build, whose address space is past
+    // any such limit already, checks them too.
+    fflush(stdout);
+    const pid_t fixing = fork();
+    if (fixing == 0)
+    {
+        arena_pool = 0;
+        arena_compact = false;
+        struct rlimit space;
+        bool limited = getrlimit(RLIMIT_AS, &space) == 0;
+        const struct rlimit before = space;
+        const uint64_t lowered = space.rlim_max != RLIM_INFINITY && space.rlim_max < (128ull << 30) ? (uint64_t)space.rlim_max : 128ull << 30;
+        const uint64_t share = (lowered / BUSTER_ARENA_LIMIT_SHARE) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        space.rlim_cur = lowered;
+        limited = limited && setrlimit(RLIMIT_AS, &space) == 0;
+        const bool followed = limited && arena_reservation_limit() == share;
+        arena_limits_fix();
+        const bool restored = setrlimit(RLIMIT_AS, &before) == 0;
+        const bool changed = (uint64_t)before.rlim_cur == lowered || arena_address_share() != arena_limits.address_share;
+        const bool kept = restored && changed && arena_limits.fixed && arena_reservation_limit() == share;
+        _exit(followed && kept ? 0 : 1);
+    }
+    int fixing_status = 0;
+    const bool fixing_waited = fixing > 0 && waitpid(fixing, &fixing_status, 0) == fixing;
+    lane_test_expect(&tally, fixing_waited && WIFEXITED(fixing_status) && WEXITSTATUS(fixing_status) == 0,
+                     "a reservation's share didn't follow RLIMIT_AS before the limits were fixed, or changed after");
+    lane_test_expect(&tally, !arena_limits.fixed, "the tests' process has its limits fixed");
+
     // The executable's .bss in base pages (arena_static_base_pages): a static of this file's there, and its last page. The
     // static is page-aligned so that its page is a whole page of .bss whatever the linker's layout; the advice leaves out
     // .bss's first page when that holds .data's last bytes.

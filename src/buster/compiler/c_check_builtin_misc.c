@@ -91,6 +91,9 @@ struct CheckBuiltinMiscAction
     // __builtin_infer_alloc_token's token, where the call's arguments give one (CheckBuiltinCall.alloc_token).
     bool alloc_token_known;
     uint64_t alloc_token;
+    // A constant CFString's object (#148): its call's own, its `)`'s token plus one, whose address its value is
+    // (check_data_cfstring_keys makes it, the first of each literal's for them all).
+    uint32_t cfstring_object;
     // Whether __builtin_call_with_static_chain's first argument is a call as written (CheckBuiltinCall.static_chain_call).
     bool static_chain_call;
     // The os_log builtins' format's layout (CheckBuiltinCall.os_log_items), whether its format is a literal, whether a
@@ -1079,6 +1082,44 @@ static uint64_t check_builtin_cpu_lookup(const CheckBuiltinCpuName* names, uint3
     return result;
 }
 
+// Whether __builtin_dump_struct of a record of `record` dumps a bit-field that no format prints (#148): a named one of
+// a _BitInt or a 128-bit integer type, among its fields, its anonymous members' and its fields' records'. A frame per
+// record being walked, its tag and its next member, so the stack's bound is the records' nesting; past 64 levels the
+// walk stops, and the lowering refuses such a dump by name (check_lower_dump_record).
+static bool check_builtin_misc_dump_bit_field(const TypeTable* table, TypeId record)
+{
+    uint32_t tags[64];
+    uint32_t next[64];
+    uint32_t depth = 0;
+    bool found = false;
+    tags[depth] = table->types.index[type_index(record)];
+    next[depth++] = 0;
+    while (!found && depth != 0)
+    {
+        const uint32_t tag = tags[depth - 1];
+        if (next[depth - 1] >= table->tags.member_count[tag])
+        {
+            depth -= 1;
+        }
+        else
+        {
+            const uint32_t member = table->tags.member_begin[tag] + next[depth - 1];
+            next[depth - 1] += 1;
+            const TypeId bare = type_unqualified(type_strip_aligned(table, table->members.type[member]));
+            const uint8_t kind = type_kind(table, bare);
+            const bool bits = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+            found = bits && table->members.name[member] != 0 &&
+                    (kind == BUSTER_TYPE_KIND_BIT_INT || bare == BUSTER_TYPE_INT128 || bare == BUSTER_TYPE_UINT128);
+            if (!bits && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && depth < 64)
+            {
+                tags[depth] = table->types.index[type_index(bare)];
+                next[depth++] = 0;
+            }
+        }
+    }
+    return found;
+}
+
 // The last of clang's generic builtins of #148 that its Sema checks itself:
 // - __arithmetic_fence(x): x, lvalue-converted, of a floating type, a complex one or a vector of either (its type before
 //   conversion: an _Atomic one is refused), a constant where x is; at -O0 a fence keeps nothing apart;
@@ -1185,7 +1226,7 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
         // operands: (rest..., format) for a brace's line and up to five operands more for a field's. A prototype must
         // take each of those calls: it is variadic, with no more parameters than the rest and the format, the rest
         // converting to its first parameters and the format, a char *, to the next ("too many" or "too few arguments"
-        // otherwise). The calls' code is the printing function's, which this compiler doesn't make (check_lower_unsupported).
+        // otherwise). The calls' code is check_lower_dump_struct's, of check_lower_dump_prepare's plan.
         CheckValue record = check_builtin_misc_argument(table, input, output, 0);
         const TypeId pointer = type_strip_aligned(table, record.type);
         const bool is_pointer = output->action.diagnostic == CHECK_DIAG_NONE && check_action_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER;
@@ -1237,6 +1278,12 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
             {
                 check_action_diagnose(&output->action, scratch.action.diagnostic, i < rest ? 2 + i : 1);
             }
+        }
+        if (output->action.diagnostic == CHECK_DIAG_NONE && check_builtin_misc_dump_bit_field(table, pointee))
+        {
+            // A bit-field no format prints (a _BitInt's or an __int128's) prints its address, which clang's Sema refuses:
+            // "address of bit-field requested".
+            check_action_diagnose(&output->action, CHECK_DIAG_BIT_FIELD, 0);
         }
         if (output->action.diagnostic == CHECK_DIAG_NONE)
         {
@@ -1375,18 +1422,32 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     {
         // A constant CFString (#148), a const __NSConstantString *: CFString's of an ordinary string literal (clang's
         // CheckObjCString: "CFString literal is not a string constant" otherwise), NSString's of any const char * in C,
-        // which clang checks in Objective-C alone. clang's evaluator takes either call as an address constant
-        // (IsOpaqueConstantCall), which this checker's doesn't; clang's code generation makes the object, which this
-        // compiler's doesn't (check_lower_unsupported).
+        // which clang checks in Objective-C alone. Of a literal, clang's evaluator takes either call as an address
+        // constant (IsOpaqueConstantCall), whose code is its object's address and which no operand's evaluation runs:
+        // here its call's object (CheckBuiltinMiscAction.cfstring_object), a static one. NSString's of what is no
+        // literal stays a value, whose code clang makes from the literal its argument isn't (check_lower_unsupported).
         // Its argument converts to const char * as a prototype's, and past its parentheses and casts is an ordinary
         // literal, never a UTF-8 one (u8"x", a char array before C23).
         check_builtin_misc_convert(table, input, output, values + 0, 0, type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)));
         const TypeId record = input->ns_constant_string != 0 ? type_qualify(table, input->ns_constant_string, BUSTER_TYPE_CONST) : 0;
         const TypeId result = record != 0 ? type_pointer(table, record) : 0;
         const bool ordinary = id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING || (input->string_known && !input->string_utf8);
+        const bool literal = input->string_known && input->cfstring_object != 0;
         if (output->action.diagnostic == CHECK_DIAG_NONE && (!ordinary || result == 0))
         {
             check_action_diagnose(&output->action, result == 0 && ordinary ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (output->action.diagnostic == CHECK_DIAG_NONE && literal)
+        {
+            output->action.value = (CheckValue){
+                .type = result,
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = input->cfstring_object,
+            };
+            output->constant_value = output->action.value;
+            output->constant_evaluated_operands = 0;
         }
         else if (output->action.diagnostic == CHECK_DIAG_NONE)
         {

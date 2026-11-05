@@ -135,7 +135,8 @@ static bool driver_information_files(const char* name, int count, char** argumen
 
 // Information actions may follow other options; an operand spelling an action is never interpreted again. A null
 // status tests for an action so implicit assembly dispatch leaves it to the driver. A bare -v prints to stderr only.
-static bool main_information(int count, char** arguments, int* status)
+// noinline: its search paths' buffers would take 23 KB of its caller's frame, which a compile runs below (#652).
+static __attribute__((noinline)) bool main_information(int count, char** arguments, int* status)
 {
     const char* target = NULL;
     const char* file = NULL;

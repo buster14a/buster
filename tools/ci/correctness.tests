@@ -376,6 +376,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-interpreter-native
 "$BUSTER_COMPILER" test-interpreter-link
 "$BUSTER_COMPILER" test-ir-interpreter
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
 == Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 # #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
 # function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
@@ -403,8 +405,8 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-checker-asm
 == Test c-testsuite's harness
 # The self-test checks the harness's timeouts, relative paths (as the programs' heading gives them) and
-# cross-check rules with a stand-in compiler, in a directory of its own: about 7 s, most of it waiting out
-# the timeouts, so it runs apart from the programs, on one CPU rather than their four.
+# cross-check rules with a stand-in compiler, in a directory of its own. Six scenarios run concurrently with
+# five-second watchdogs (the stand-in's deliberate hangs are 30 s); most of the time is waiting, not CPU use.
 "$BUSTER_COMPILER" test-c-testsuite --self-test
 == Test the C lexer without digraphs and // comments, as c89
 "$BUSTER_COMPILER" test-lexer --no-digraphs --no-line-comments

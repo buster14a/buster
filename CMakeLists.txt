@@ -197,10 +197,13 @@ endforeach()
 # With BUSTER_HOST_RUNTIME, CI's emulated old CPU's runtime, linked explicitly: the host's startup objects and loader
 # can require a newer ISA even with -march=x86-64.
 # The link's arguments before the objects and after them, without BUSTER_HOST_RUNTIME, which buster_link adds itself:
-# into `before` and `after`.
+# into `before` and `after`. libm is a needed library only where the link references it (#652): the compiler's own
+# floating operations are host_math.h's and its tests' libm calls go through dlopen (test_libm.c), so that a compile
+# doesn't load libm.so.6 at its start, 24 microseconds and 12 page faults on the 9700X; a build whose code still calls
+# libm (the baseline host's rounding functions, a fuzzing runtime) takes it.
 function(buster_link_arguments before after)
     set(${before} ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags} PARENT_SCOPE)
-    set(${after} ${buster_fuzz_libraries} -lm -ldl PARENT_SCOPE)
+    set(${after} ${buster_fuzz_libraries} -Wl,--push-state,--as-needed -lm -Wl,--pop-state -ldl PARENT_SCOPE)
 endfunction()
 
 function(buster_link target)
@@ -213,8 +216,8 @@ function(buster_link target)
         set(support "${BUSTER_HOST_RUNTIME}/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a")
         target_link_options(${target} PRIVATE ${buster_link_mode} -nostdlib ${buster_linker_flags}
             "${library}/crt1.o" "${library}/crti.o")
-        target_link_libraries(${target} PRIVATE "${library}/libm.so.6" "${library}/libc.so.6" "${support}"
-            "${library}/crtn.o")
+        target_link_libraries(${target} PRIVATE -Wl,--push-state,--as-needed "${library}/libm.so.6" -Wl,--pop-state
+            "${library}/libc.so.6" "${support}" "${library}/crtn.o")
     else()
         buster_link_arguments(before after)
         target_link_options(${target} PRIVATE ${before})

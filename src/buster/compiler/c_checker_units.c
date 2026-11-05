@@ -1801,7 +1801,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
+                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL);
         arena_small_floor = 0;
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
         if (command->helper_report != NULL)
