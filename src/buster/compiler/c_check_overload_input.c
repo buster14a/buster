@@ -173,8 +173,8 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             input->overload_heads[token] = current + 1;
             reader->objects[token] = candidate.object;
             reader->definition_origins[token] = definition_origin;
-            index->lexical_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, lexical_head, index->lexical_next) : lexical_head;
-            index->linked_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, linked_head, index->linked_next) : linked_head;
+            index->lexical_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, candidate.object_sizes != NULL, lexical_head, index->lexical_next) : lexical_head;
+            index->linked_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, candidate.object_sizes != NULL, linked_head, index->linked_next) : linked_head;
             index->checked[current] = active;
             index->unmarked[current] = unmarked != BUSTER_CHECK_NONE ? unmarked :
                                        (candidate.flags & BUSTER_CHECK_OVERLOADABLE) == 0 ? candidate.canonical : BUSTER_CHECK_NONE;

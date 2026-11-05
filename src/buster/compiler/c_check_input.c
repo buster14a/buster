@@ -7376,10 +7376,11 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
             const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
             for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); previous == 0 && linked != UINT32_MAX; linked = reader->overload_index.linked_next[linked])
             {
-                const TypeId candidate = reader->overload_candidates[linked].type;
-                const TypeAnswer signature = check_overload_signature(reader->types, candidate, type);
+                const CheckOverloadCandidate* candidate = reader->overload_candidates + linked;
+                const bool same_sizes = (candidate->object_sizes != NULL) == (attributes != NULL && attributes->object_sizes != NULL);
+                const TypeAnswer signature = same_sizes ? check_overload_signature(reader->types, candidate->type, type) : TYPE_ANSWER_NO;
                 reader->output->resource |= signature == TYPE_ANSWER_FULL;
-                previous = signature == TYPE_ANSWER_YES ? candidate : 0;
+                previous = signature == TYPE_ANSWER_YES ? candidate->type : 0;
             }
         }
         else if (old != 0 && reader->bindings.kind[old - 1] == C_BINDING_FUNCTION)
