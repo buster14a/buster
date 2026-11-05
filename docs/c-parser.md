@@ -198,7 +198,17 @@ memory, not by the native stack: 100,000 levels of every kind of group parse.
 
 It rejects what C's grammar rejects, at the token clang names, with clang's
 message (76 messages, `BUSTER_PARSE_MESSAGES`), and after an error skips to the
-end of the top-level declaration and goes on. It reports one syntax error per
+end of the top-level declaration and goes on. A declaration's missing `;`
+before what clang's `isDeclarationSpecifier` takes for a declaration specifier
+(a type's, a storage class, a function specifier, `typedef`, `_Alignas`, a
+calling convention; not `_Static_assert`, `__extension__` or `[[`), with no
+`#pragma pack` between, is `ParseDiagnostic.resumed` (#147): clang's
+`ParseDeclGroup` reads the specifier as the next declaration's, as if the `;`
+were there. At file scope the parse goes on at the specifier, so that the next
+declaration's errors are clang's too; in a body it skips the rest as any error,
+and the checker's view parses past it again (`check_prefix_resume`,
+`docs/c-checker.md`). `test-parser` checks every diagnostic's place and mark
+on both paths (`parse_test_check_resumed`). It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without
 changing how it parses (a missing type specifier, an unknown type name); clang
 may report more. Its places follow

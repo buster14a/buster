@@ -1159,6 +1159,76 @@ static uint32_t parse_test_check_fixtures(const char* directory)
     return failures;
 }
 
+// clang's recovery after a declaration's missing `;` before a declaration specifier (#147, ParseDiagnostic.resumed): it
+// reads the specifier as the next declaration's, so that a file-scope declaration's errors after it are its own; a
+// `#pragma pack` between, `_Static_assert` and a name that is no type leave the rest skipped. Every diagnostic, its place
+// and whether it resumed, by both paths, as clang 23 places them (test-parser --clang compares the first lines).
+static uint32_t parse_test_check_resumed(const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        const char* diagnostics;
+    } cases[] = {
+        { "int x _Alignas(3);\nint y;\n", "1:6 resumed expected ';' after top level declarator\n" },
+        { "int x const y z;\nint w;\n", "1:6 resumed expected ';' after top level declarator\n1:13 unknown type name 'y'\n" },
+        { "int x const int y z;\n", "1:6 resumed expected ';' after top level declarator\n1:18 expected ';' after top level declarator\n" },
+        { "int x const int y static;\n", "1:6 resumed expected ';' after top level declarator\n1:18 resumed expected ';' after top level declarator\n" },
+        { "int x\n#pragma pack(1)\nconst;\n", "1:6 expected ';' after top level declarator\n" },
+        { "void f(void) { int x const; int y static; }\n", "1:21 resumed expected ';' at end of declaration\n" },
+        { "int x y;\nint z const;\n", "1:6 expected ';' after top level declarator\n2:6 resumed expected ';' after top level declarator\n" },
+        { "int x _Static_assert(1, \"\");\n", "1:6 expected ';' after top level declarator\n" },
+        { "typedef int T;\nint x T;\n", "2:6 resumed expected ';' after top level declarator\n" },
+    };
+    uint32_t failures = 0;
+    char path[4096];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/resumed_%u.c", directory, i);
+        const bool written = parse_test_write(path, cases[i].source, strlen(cases[i].source));
+        const ParseTestSnippet snippet = { .source = cases[i].source, .error = "", .std = 0 };
+        const PPOptions options = parse_test_snippet_options(&snippet);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            const bool ran = written && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                             pp_run(&pp, path);
+            if (ran)
+            {
+                parse_translation_unit(&parser, &pp);
+            }
+            char text[1024] = "";
+            uint32_t length = 0;
+            for (uint32_t d = 0; ran && d < parser.diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = &parser.diagnostics[d];
+                const uint32_t location = parse_diagnostic_location(&parser, &pp, diagnostic);
+                const uint32_t range = pp_find_range(&pp, location);
+                uint32_t column = 0;
+                const uint32_t line = range != BUSTER_PP_NONE ? pp_line_of(&pp, range, location, &column) : 0;
+                char message[256];
+                parse_diagnostic_message(&parser, &pp, diagnostic, message, sizeof(message));
+                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s\n", line, column, diagnostic->resumed ? "resumed " : "", message);
+                length += printed > 0 && (uint32_t)printed < sizeof(text) - length ? (uint32_t)printed : 0;
+            }
+            if (!ran || strcmp(text, cases[i].diagnostics) != 0)
+            {
+                failures += 1;
+                printf("resumed %u (%s path): diagnostics\n%s  not\n%s    %s", i, scalar ? "scalar" : "vector", text, cases[i].diagnostics, cases[i].source);
+            }
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+        remove(path);
+    }
+    printf("resumed declarations: %u cases, %u failures\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), failures);
+    return failures;
+}
+
 // The oracle itself: clang that fails before it reads the file (an option it doesn't know) is no answer, and an error
 // in a header the file includes rejects the file.
 static uint32_t parse_test_check_oracle(const char* directory, const char* clang)
@@ -4206,6 +4276,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_check_snippets(directory, clang);
             failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
             failures += parse_test_check_fixtures(directory);
+            failures += parse_test_check_resumed(directory);
         }
         if (input_count == 0)
         {

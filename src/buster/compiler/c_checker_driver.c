@@ -185,6 +185,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL: result = "attribute requires parameter 1 to be int or bool"; break;
         case CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS: result = "attribute parameter is out of bounds"; break;
         case CHECK_INPUT_ATTRIBUTE_ARGUMENT: result = "invalid attribute argument"; break;
+        case CHECK_INPUT_RESTRICT_NOT_POINTER: result = "restrict requires a pointer or reference"; break;
+        case CHECK_INPUT_INLINE_NOT_FUNCTION: result = "'inline' can only appear on functions"; break;
+        case CHECK_INPUT_NORETURN_NOT_FUNCTION: result = "'_Noreturn' can only appear on functions"; break;
     }
     return result;
 }
@@ -3777,7 +3780,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     {
         CheckPrefix prefix = { 0 };
         CheckRepair repair = { 0 };
+        CheckResumed resumed = { 0 };
         const Parser* checking = parser;
+        // A failed parse as clang's recovery reads it (check_prefix_resume, #147), or the parse itself: what the views
+        // after a failed parse are made of, and the original whose places their diagnostics publish at. Its parse's
+        // diagnostics are the original's.
+        const Parser* recovered = parser;
         Preprocessor* checking_pp = pp;
         bool prefix_only = false;
         bool repairing = false;
@@ -3814,29 +3822,40 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 parse_print_diagnostics(parser, pp);
             }
-            else if (check_repair_make(&repair, parser, pp, arena, scratch) == CHECK_REPAIR_READY)
+            else
             {
-                // Only completed original expressions can contribute diagnostics. The synthetic closure
-                // belongs to a private checking view and can never produce a successful source result.
-                checking = &repair.parser;
-                checking_pp = repair.preprocessor;
-                prefix_only = true;
-                repairing = true;
-                ready = true;
-            }
-            else if (check_prefix_make(&prefix, parser, arena, scratch) == CHECK_PREFIX_READY)
-            {
-                // Only complete earlier declarations survive this view. Its checking suppresses obligations
-                // that belong to the full translation-unit end; the original parser rejection stays final.
-                checking = &prefix.parser;
-                prefix_only = true;
-                ready = true;
+                recovered = check_prefix_resume(&resumed, parser, arena, scratch) == CHECK_PREFIX_READY ? &resumed.parser : parser;
+                if (recovered != parser && recovered->errors == 0)
+                {
+                    // Every missing `;` read past as clang's recovery reads it: the whole view, checked as a prefix is.
+                    checking = recovered;
+                    prefix_only = true;
+                    ready = true;
+                }
+                else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
+                {
+                    // Only completed original expressions can contribute diagnostics. The synthetic closure
+                    // belongs to a private checking view and can never produce a successful source result.
+                    checking = &repair.parser;
+                    checking_pp = repair.preprocessor;
+                    prefix_only = true;
+                    repairing = true;
+                    ready = true;
+                }
+                else if (check_prefix_make(&prefix, recovered, arena, scratch) == CHECK_PREFIX_READY)
+                {
+                    // Only complete earlier declarations survive this view. Its checking suppresses obligations
+                    // that belong to the full translation-unit end; the original parser rejection stays final.
+                    checking = &prefix.parser;
+                    prefix_only = true;
+                    ready = true;
+                }
             }
         }
         if (parse_failed)
         {
-            original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, parser, pp,
-                                                                       check_diagnostic_parse_end(parser), arena, scratch);
+            original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, recovered, pp,
+                                                                       check_diagnostic_parse_end(recovered), arena, scratch);
             if (!original_pragmas_ready)
             {
                 fprintf(errors, "fatal error: original pragma diagnostic capacity exhausted\n");
@@ -3848,7 +3867,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         const uint32_t tokens = checking->tokens.count;
         // A complete declaration prefix ends before the original parser's lookahead, not at the whole PP EOF.
         // Repairs retain their synthetic/end boundary; completed original bodies are handled independently.
-        const uint32_t publication_end = !repairing && tokens < parser->tokens.count ? parser->tokens.sources[tokens] : pp->output.count;
+        const uint32_t publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
         const TypeCapacity capacity = {
             .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
             .parameters = tokens,
@@ -4120,7 +4139,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                     }
                     if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
-                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
+                        !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
@@ -4181,7 +4200,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_driver_diagnose(checking, pp, program.token, message);
                         result = 1;
                     }
-                    check_driver_x86_reports(checking, parser, pp, &input, &stream, &types, quiet);
+                    check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
                                                 input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
                     if (final_warnings)
@@ -4203,7 +4222,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
-                        check_driver_return_reports(checking, parser, pp, &program, baseline, quiet);
+                        check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
                         if (!quiet)
                         {
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, scratch);
@@ -4221,7 +4240,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
-                            result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)
@@ -4245,7 +4264,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
-                            result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)
@@ -4272,7 +4291,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
-                if (!check_driver_reports(checking, parser, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
+                if (!check_driver_reports(checking, recovered, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
                                           original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, scratch) ||
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {
@@ -4288,8 +4307,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
-                check_driver_remaining_pragmas(parser, pp, &original_pragmas, &fp, &visibility, quiet);
-                if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
+                check_driver_remaining_pragmas(recovered, pp, &original_pragmas, &fp, &visibility, quiet);
+                if (!check_driver_warning_events_at(recovered, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
                     driver_fatal = true;
@@ -4299,8 +4318,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 // The checked view's reports covered its tokens: the original ones of a repair, a prefix's whole.
                 const uint32_t checked_end = !ready || !prefix_only ? 0 : repairing ? repair.original_end : checking->tokens.count;
-                check_driver_unparsed_literals(parser, pp, checked_end, scratch);
-                parse_print_diagnostics(parser, pp);
+                check_driver_unparsed_literals(recovered, pp, checked_end, scratch);
+                // The parse's errors as clang's recovery reads on past a missing `;` (check_prefix_resume): the original's
+                // places, with what its own recovery skipped.
+                Parser printed = *parser;
+                printed.diagnostics = recovered != parser ? resumed.diagnostics : parser->diagnostics;
+                printed.diagnostic_count = recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count;
+                parse_print_diagnostics(&printed, pp);
             }
             result = 1;
         }

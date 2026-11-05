@@ -919,7 +919,20 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     const bool keyword = after < count && (returns || next == PARSE_KIND_IF || next == PARSE_KIND_SWITCH || next == PARSE_KIND_WHILE || next == PARSE_KIND_DO ||
                                            next == PARSE_KIND_FOR || next == PARSE_KIND_GOTO || next == PARSE_KIND_CONTINUE || next == PARSE_KIND_BREAK ||
                                            next == PARSE_KIND_CASE || next == PARSE_KIND_DEFAULT || next == PARSE_KIND_L_BRACE);
-    const bool empty = after < count && next == PARSE_KIND_SEMI;
+    // A declaration specifier among them before the `;` makes it a declaration of no declarator, which clang's
+    // ParsedFreeStandingDeclSpec takes whatever the rest are (#147, check_input_declaration): `_Alignas(8);`, a calling
+    // convention's keyword, _Noreturn and the nullability keywords, at the list's own depth.
+    bool declaration_specifier = false;
+    for (uint32_t token = first; token < after; token += 1)
+    {
+        const uint8_t token_kind = parser->tokens.kinds[token];
+        const uint32_t name = parser->tokens.names[token];
+        declaration_specifier |= parser->tree.depths[token] == parser->tree.depths[first] &&
+                                 (token_kind == PARSE_KIND_ALIGNAS || token_kind == PARSE_KIND_CALLING_CONVENTION || name == C_NAME_NORETURN ||
+                                  name == C_NAME_NONNULL || name == C_NAME_NULLABLE || name == C_NAME_NULLABLE_RESULT || name == C_NAME_NULL_UNSPECIFIED);
+    }
+    const bool free_standing = after < count && next == PARSE_KIND_SEMI && declaration_specifier;
+    const bool empty = after < count && next == PARSE_KIND_SEMI && !free_standing;
     // GNU attributes among them make it a declaration unless each is one of clang's statement attributes; C23's alone
     // leave it to what follows (#147's `[[x]] y += 1;`), as the parser reads them (parse_scalar_attributed_statement).
     bool gnu = false;
@@ -927,7 +940,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     {
         gnu |= parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE;
     }
-    const bool expression = after < count && !empty && !keyword && !check_input_declaration_after(parser, after) &&
+    const bool expression = after < count && !empty && !free_standing && !keyword && !check_input_declaration_after(parser, after) &&
                             (!gnu || check_input_statement_attribute_names(reader, first, after));
     // Before a label's name, the statement's attributes are its label's.
     const bool named = expression && next == PARSE_KIND_IDENTIFIER && after + 1 < count && parser->tree.roles[after + 1] == PARSE_ROLE_LABEL;

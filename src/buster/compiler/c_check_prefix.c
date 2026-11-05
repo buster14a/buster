@@ -275,4 +275,279 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
     return prefix->status;
 }
 
+// A failed parse read as clang's recovery reads it (#147): where a declaration's `;` is missing before a declaration
+// specifier, clang's ParseDeclGroup goes on as if the `;` were there (ParseDiagnostic.resumed), so its later
+// declarations are checked as any others, the one before the specifier and those after it. This view puts a synthetic
+// `;` before each such specifier, the parse's every one before its first other error, and parses it again; a missing
+// `;` in a body, which the parser's recovery skips with the rest of its top-level declaration, shows up in the next
+// round's parse. A view without errors is checked whole, as a prefix is (no translation-unit end); one with errors
+// takes the prefix and repair views of its own first error in the original's place. The view's token indices are its
+// own: the original's past a synthetic `;` move up by one. The synthetic `;`s have no spelling of their own: each takes
+// the following token's source, as clang's diagnostics of the recovery point there.
+//
+// The parse's diagnostics as clang's parser gives them are the missing `;`s' errors, each round's, and the last view's,
+// at the original's tokens (`diagnostics`): those of a body after its first missing `;`, which the original's recovery
+// skipped, among them. READY means at least one `;` was put in. Its columns and diagnostics live in `output`; scratch is
+// restored on every outcome.
+typedef struct CheckResumed CheckResumed;
+struct CheckResumed
+{
+    Parser parser;
+    CheckPrefixStatus status;
+    // The synthetic `;`s put in, in all.
+    uint32_t inserted;
+    ParseDiagnostic* diagnostics;
+    uint32_t diagnostic_count;
+};
+
+// The rounds of insertions a view may take, each a parse of the whole unit: one for the file scope's missing `;`s, which
+// the original parse reports all of, and one more for each body's in turn.
+#define BUSTER_CHECK_RESUME_ROUNDS 8
+
+// Whether a pragma just before `token` comes between a missing `;` and the specifier after it as clang's parser's
+// annotation token (`#pragma weak`, `GCC visibility`, `pack`...), so that its recovery skips the declaration instead: any
+// but those its preprocessor takes alone (`message`, the diagnostic ones, `GCC warning` and the like).
+static bool check_prefix_pragma_between(const Parser* view, uint32_t token)
+{
+    const Preprocessor* pp = view->preprocessor;
+    uint32_t low = 0;
+    uint32_t high = view->tokens.pragma_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = view->tokens.pragma_positions[middle] < token;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    bool between = false;
+    for (uint32_t k = low; pp != 0 && !between && k < view->tokens.pragma_count && view->tokens.pragma_positions[k] == token; k += 1)
+    {
+        const uint32_t hash = view->tokens.pragma_sources[k];
+        uint32_t end = hash;
+        const bool pragma = parse_pragma_at(&pp->output, hash, &end);
+        const bool vendor = pragma && (pp_token_is_name(pp, &pp->output, hash + 2, end, "GCC") || pp_token_is_name(pp, &pp->output, hash + 2, end, "clang"));
+        const uint32_t name = vendor ? hash + 3 : hash + 2;
+        const bool preprocessor = pragma && (pp_token_is_name(pp, &pp->output, name, end, "message") || pp_token_is_name(pp, &pp->output, name, end, "diagnostic") ||
+                                             pp_token_is_name(pp, &pp->output, name, end, "warning") || pp_token_is_name(pp, &pp->output, name, end, "error") ||
+                                             pp_token_is_name(pp, &pp->output, name, end, "poison") || pp_token_is_name(pp, &pp->output, name, end, "system_header") ||
+                                             pp_token_is_name(pp, &pp->output, name, end, "dependency") || pp_token_is_name(pp, &pp->output, name, end, "push_macro") ||
+                                             pp_token_is_name(pp, &pp->output, name, end, "pop_macro"));
+        between = !preprocessor;
+    }
+    return between;
+}
+
+// Whether the view's parse puts a `;` before diagnostic `d`'s token: a resumed error before `limit`, its first other, with no
+// pragma between (check_prefix_pragma_between).
+static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diagnostic, uint32_t limit)
+{
+    return diagnostic->error && diagnostic->resumed && diagnostic->token < limit && diagnostic->token != 0 &&
+           (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, diagnostic->token));
+}
+
+// `diagnostic` at the original's tokens, from a view's whose tokens' originals `origin` has (a synthetic `;`'s, the
+// token after it).
+static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* diagnostic, const uint32_t* origin, uint32_t count, uint32_t original_count)
+{
+    ParseDiagnostic result = *diagnostic;
+    result.token = diagnostic->token < count ? origin[diagnostic->token] : original_count;
+    result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
+    result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
+    result.resumed = false;
+    return result;
+}
+
+static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser* original, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    *resumed = (CheckResumed){ .status = CHECK_PREFIX_UNAVAILABLE };
+    const Parser* current = original;
+    const uint32_t original_count = original->tokens.count;
+    bool more = output != scratch && original->errors != 0 && original->fatal == PARSE_MESSAGE_NONE && original->diagnostics != 0 &&
+                original->diagnostic_count <= original->diagnostic_capacity && original_count <= BUSTER_PARSE_MAX_TOKENS / 2 &&
+                original->tokens.kinds != 0 && original->tokens.names != 0 && original->tokens.sources != 0 && original->tokens.flags != 0 &&
+                original->meanings.capacity != 0 && (original->tokens.pragma_count == 0 || original->tokens.pragma_positions != 0);
+    for (uint32_t i = 0; more && i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
+    {
+        more = original->predeclared[i] < original->meanings.capacity;
+    }
+    uint8_t* meanings = 0;
+    Parser* views = more ? BUSTER_ARENA_PUSH_ARRAY(output, Parser, 2) : 0;
+    // Each view token's original (scratch), and the missing `;`s' errors found so far, at the original's tokens.
+    uint32_t* origin = 0;
+    ParseDiagnostic* pending = 0;
+    uint32_t pending_count = 0;
+    more = more && views != 0;
+    for (uint32_t round = 0; more && round < BUSTER_CHECK_RESUME_ROUNDS; round += 1)
+    {
+        const uint32_t count = current->tokens.count;
+        // The resumed errors before the parse's first other one, whose tokens get a `;` before them. The diagnostics are
+        // in token order, but for the notes of errors that don't stop the parse, which are taken as other errors.
+        uint32_t limit = count;
+        for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
+        {
+            const ParseDiagnostic* diagnostic = current->diagnostics + d;
+            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count);
+            limit = other && diagnostic->token < limit ? diagnostic->token : limit;
+        }
+        uint32_t insert = 0;
+        uint32_t last = 0;
+        bool ordered = true;
+        for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
+        {
+            const ParseDiagnostic* diagnostic = current->diagnostics + d;
+            const bool taken = check_prefix_resumes(current, diagnostic, limit);
+            ordered &= !taken || diagnostic->token > last;
+            last = taken ? diagnostic->token : last;
+            insert += taken;
+        }
+        more = ordered && insert != 0;
+        Parser* view = views + (round & 1);
+        const uint32_t total = count + insert;
+        uint32_t* next_origin = 0;
+        ParseDiagnostic* next_pending = 0;
+        if (more)
+        {
+            *view = (Parser){ .options = original->options, .language = original->language, .preprocessor = original->preprocessor };
+            view->options.tree_only = false;
+            memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
+            view->tokens.count = total;
+            view->tokens.capacity = total;
+            view->tokens.kinds = check_prefix_column(output, total, 1);
+            view->tokens.names = check_prefix_column(output, total, sizeof(uint32_t));
+            view->tokens.sources = check_prefix_column(output, total, sizeof(uint32_t));
+            view->tokens.flags = check_prefix_column(output, total, 1);
+            view->tree.roles = check_prefix_column(output, total, 1);
+            view->tree.parents = check_prefix_column(output, total, sizeof(uint32_t));
+            view->tree.depths = check_prefix_column(output, total, sizeof(uint32_t));
+            view->diagnostic_capacity = total + 16;
+            view->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, ParseDiagnostic, view->diagnostic_capacity);
+            view->tokens.pragma_count = current->tokens.pragma_count;
+            view->tokens.pragma_sources = current->tokens.pragma_sources;
+            view->tokens.pragma_positions = view->tokens.pragma_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, view->tokens.pragma_count) : 0;
+            meanings = meanings != 0 ? meanings : BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, original->meanings.capacity);
+            view->meanings = (ParseMeanings){ .meanings = meanings, .capacity = original->meanings.capacity, .table = original->meanings.table };
+            next_origin = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, total);
+            next_pending = BUSTER_ARENA_PUSH_ARRAY(scratch, ParseDiagnostic, (uint64_t)pending_count + insert);
+            more = view->tokens.kinds != 0 && view->tokens.names != 0 && view->tokens.sources != 0 && view->tokens.flags != 0 && view->tree.roles != 0 &&
+                   view->tree.parents != 0 && view->tree.depths != 0 && view->diagnostics != 0 && meanings != 0 &&
+                   (view->tokens.pragma_count == 0 || view->tokens.pragma_positions != 0) && next_origin != 0 && next_pending != 0;
+            resumed->status = more ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+        }
+        if (more)
+        {
+            // Each kept token moves up by the `;`s before it; a pragma just before a resumed token stays before it, after
+            // its `;`.
+            if (pending_count != 0)
+            {
+                memcpy(next_pending, pending, (uint64_t)pending_count * sizeof(ParseDiagnostic));
+            }
+            uint32_t written = 0;
+            uint32_t from = 0;
+            uint32_t pragma = 0;
+            for (uint32_t d = 0; d <= current->diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? current->diagnostics + d : 0;
+                const bool taken = diagnostic == 0 || check_prefix_resumes(current, diagnostic, limit);
+                const uint32_t to = diagnostic != 0 ? diagnostic->token : count;
+                if (taken)
+                {
+                    const uint32_t length = to - from;
+                    memcpy(view->tokens.kinds + written, current->tokens.kinds + from, length);
+                    memcpy(view->tokens.names + written, current->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
+                    memcpy(view->tokens.sources + written, current->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
+                    memcpy(view->tokens.flags + written, current->tokens.flags + from, length);
+                    for (uint32_t k = 0; k < length; k += 1)
+                    {
+                        next_origin[written + k] = origin != 0 ? origin[from + k] : from + k;
+                    }
+                    for (; pragma < view->tokens.pragma_count && current->tokens.pragma_positions[pragma] < to + (diagnostic == 0); pragma += 1)
+                    {
+                        view->tokens.pragma_positions[pragma] = current->tokens.pragma_positions[pragma] + written - from;
+                    }
+                    written += length;
+                    if (diagnostic != 0)
+                    {
+                        view->tokens.kinds[written] = PARSE_KIND_SEMI;
+                        view->tokens.names[written] = 0;
+                        view->tokens.sources[written] = current->tokens.sources[to];
+                        view->tokens.flags[written] = 0;
+                        next_origin[written] = origin != 0 ? origin[to] : to;
+                        written += 1;
+                        // (The first round's tokens are the original's.)
+                        next_pending[pending_count] = origin != 0 ? check_prefix_original_diagnostic(diagnostic, origin, count, original_count) : *diagnostic;
+                        next_pending[pending_count].resumed = false;
+                        pending_count += 1;
+                    }
+                    from = to;
+                }
+            }
+            for (; pragma < view->tokens.pragma_count; pragma += 1)
+            {
+                view->tokens.pragma_positions[pragma] = current->tokens.pragma_positions[pragma] + insert;
+            }
+            origin = next_origin;
+            pending = next_pending;
+            memset(meanings, PARSE_MEANING_ORDINARY, original->meanings.capacity);
+            for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
+            {
+                meanings[view->predeclared[i]] = PARSE_MEANING_TYPEDEF;
+            }
+            const ParseScalarResult parsed = parse_scalar(view->tokens.kinds, view->tokens.names, view->tokens.flags, total, view->language, &view->meanings,
+                                                          &view->tree, scratch, view->diagnostics, view->diagnostic_capacity, &view->diagnostic_count);
+            view->errors = parsed.errors;
+            view->fatal = PARSE_MESSAGE_NONE;
+            resumed->inserted += insert;
+            resumed->status = parsed.out_of_memory ? CHECK_PREFIX_RESOURCE : CHECK_PREFIX_READY;
+            more = !parsed.out_of_memory && parsed.errors != 0;
+            current = view;
+        }
+    }
+    if (resumed->status == CHECK_PREFIX_READY && current != original)
+    {
+        // The parse's diagnostics: the missing `;`s' and the last view's other ones, by their tokens (each list is in order
+        // already, but for the notes, which an insertion sort's stable steps put in place).
+        const uint32_t count = current->tokens.count;
+        const uint32_t total = pending_count + current->diagnostic_count;
+        resumed->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, ParseDiagnostic, total + 1);
+        resumed->status = resumed->diagnostics != 0 ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+        for (uint32_t d = 0; resumed->status == CHECK_PREFIX_READY && d < total; d += 1)
+        {
+            const ParseDiagnostic next = d < pending_count ? pending[d] :
+                                         check_prefix_original_diagnostic(current->diagnostics + d - pending_count, origin, count, original_count);
+            uint32_t at = d;
+            while (at > 0 && resumed->diagnostics[at - 1].token > next.token)
+            {
+                resumed->diagnostics[at] = resumed->diagnostics[at - 1];
+                at -= 1;
+            }
+            resumed->diagnostics[at] = next;
+        }
+        resumed->diagnostic_count = total;
+    }
+    if (resumed->status == CHECK_PREFIX_READY && current != original && current->errors == 0)
+    {
+        // A whole view brings its postorder, as a prefix does (check_prefix_order).
+        Parser* view = (Parser*)current;
+        view->postorder = check_prefix_column(output, view->tokens.count, sizeof(uint32_t));
+        view->sizes = check_prefix_column(output, view->tokens.count, sizeof(uint32_t));
+        resumed->status = view->postorder != 0 && view->sizes != 0 ? check_prefix_order(view, scratch) : CHECK_PREFIX_RESOURCE;
+    }
+    arena_pop_to(scratch, scratch_mark);
+    if (resumed->status == CHECK_PREFIX_READY && current != original)
+    {
+        resumed->parser = *current;
+    }
+    else
+    {
+        resumed->status = resumed->status == CHECK_PREFIX_READY ? CHECK_PREFIX_UNAVAILABLE : resumed->status;
+        resumed->parser = (Parser){ 0 };
+        resumed->diagnostics = 0;
+        resumed->diagnostic_count = 0;
+        arena_pop_to(output, output_mark);
+    }
+    return resumed->status;
+}
+
 #endif

@@ -220,6 +220,12 @@ typedef enum CheckInputMessage
     // An attribute's argument's error as clang's handler words it (#147, c_check_attribute.c's CheckAttributeArgumentError
     // in `detail`'s low byte, a number above it), the attribute named by its first token (the report's attribute).
     CHECK_INPUT_ATTRIBUTE_ARGUMENT,
+    // A declaration of no declarator (#147, clang's ParsedFreeStandingDeclSpec): restrict, at its first; and inline and
+    // _Noreturn, at theirs. Each is clang's error, after which it goes on to
+    // its warning that the declaration declares nothing.
+    CHECK_INPUT_RESTRICT_NOT_POINTER,
+    CHECK_INPUT_INLINE_NOT_FUNCTION,
+    CHECK_INPUT_NORETURN_NOT_FUNCTION,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -1367,6 +1373,9 @@ struct CheckInputReader
     // C23's inferred auto and constexpr (#793) from the specifiers check_input_specifiers read last.
     uint32_t specifier_c23_auto;
     uint32_t specifier_constexpr;
+    // A free-standing declaration's restrict, which clang reports at its first one whatever the type and goes on (#147),
+    // from the specifiers check_input_specifiers read last, or BUSTER_CHECK_NONE.
+    uint32_t specifier_restrict;
     uint32_t specifier_query_depth;
     bool specifier_pending;
     // The declaration whose specifiers are read declares no declarator (check_input_free_standing): its GNU attributes and
@@ -3691,12 +3700,15 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     // C90's declaration-specifiers may give no type (a storage class or qualifier alone), whose type is int (implicit
     // int), and clang also takes a declarator with no specifier at all in its C89 modes (`x;`, `main() {}`, and
     // `__extension__ x;`, whose marker is a specifier): `!typed` here. C99 and later make a missing type an error at
-    // its declarator's name instead (the parser's, before the checker sees it).
+    // its declarator's name instead (the parser's, before the checker sees it). A declaration of no declarator takes
+    // int too, whatever the language, without a word (#147, clang's ParsedFreeStandingDeclSpec: `const;`); its typedef
+    // may have a function specifier, which is its own error (check_input_declaration).
+    const bool free_standing = reader->specifier_free_standing && reader->specifier_owner == first;
     const bool typed = base != 0 || integer_seen || longs || shorts || signedness || complex;
-    const bool implicit_int = !typed && parser->language.standard < 1999;
+    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing);
     valid &= implicit_int || (saw && typed);
     valid &= longs <= 2 && shorts <= 1 && !(longs && shorts);
-    valid &= !*is_typedef || (storage == 0 && !*is_inline && !thread_local);
+    valid &= !*is_typedef || (storage == 0 && (!*is_inline || free_standing) && !thread_local);
     valid &= !thread_local || (storage == 0 || storage == C_NAME_STATIC || storage == C_NAME_EXTERN);
     const bool plain_complex = complex && base == 0 && !integer_seen && !longs && !shorts && !signedness;
     if (base == 0)
@@ -3735,14 +3747,23 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         valid = check_input_auto_type_specifiers(reader, first, i, complex, atomic, (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? restrict_token : BUSTER_CHECK_NONE);
     }
+    reader->specifier_restrict = BUSTER_CHECK_NONE;
     if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0 && valid && !inferred_auto)
     {
-        const bool pointer = type_kind(reader->types, base) == BUSTER_TYPE_KIND_POINTER;
-        valid = pointer && type_kind(reader->types, reader->types->types.base[type_index(base)]) != BUSTER_TYPE_KIND_FUNCTION;
-        if (!valid)
+        const bool pointer = type_kind(reader->types, base) == BUSTER_TYPE_KIND_POINTER &&
+                             type_kind(reader->types, reader->types->types.base[type_index(base)]) != BUSTER_TYPE_KIND_FUNCTION;
+        if (free_standing)
+        {
+            // A declaration of no declarator, whatever its type, a pointer's too: its error, then its warning
+            // (check_input_declaration), as clang's ParsedFreeStandingDeclSpec's.
+            reader->specifier_restrict = restrict_token;
+            qualifiers &= ~(uint32_t)BUSTER_TYPE_RESTRICT;
+        }
+        else if (!pointer)
         {
             // clang reports restrict on a type other than a pointer to an object at the qualifier.
             check_input_report(reader, restrict_token, CHECK_INPUT_DECLARATION);
+            valid = false;
         }
     }
     if (complex && valid)
@@ -6543,16 +6564,36 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     const bool is_static = storage == C_NAME_STATIC;
     bool valid = base != 0;
     // A declaration of no declarator declares its tag, or nothing, as clang takes it whatever its storage class, typedef,
-    // qualifiers and attributes (with a warning, -Wmissing-declarations, which this doesn't give); but a function
-    // specifier there, inline or _Noreturn, is an error at the specifier.
+    // qualifiers and attributes, with its warnings (-Wmissing-declarations). Its errors come first, as clang's
+    // ParsedFreeStandingDeclSpec's (#147): restrict, whatever the type, then the function specifiers inline and
+    // _Noreturn, each at its first keyword; it then warns as it would without them, and stops.
     const bool declares_nothing = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
+    const uint32_t restrict_token = !continuation && declares_nothing ? reader->specifier_restrict : BUSTER_CHECK_NONE;
+    reader->specifier_restrict = BUSTER_CHECK_NONE;
     if (declares_nothing)
     {
-        const uint32_t specifier = is_inline ? check_input_inline_token(parser, first, i) : check_input_noreturn_keyword(common_attributes);
-        if (is_inline || specifier != BUSTER_CHECK_NONE)
+        const uint32_t inline_token = is_inline ? check_input_inline_token(parser, first, i) : BUSTER_CHECK_NONE;
+        const uint32_t noreturn_token = check_input_noreturn_keyword(common_attributes);
+        const uint32_t reports_before = reader->output->report_count;
+        if (restrict_token != BUSTER_CHECK_NONE)
         {
-            check_input_report(reader, specifier != BUSTER_CHECK_NONE ? specifier : first, CHECK_INPUT_DECLARATION);
-            valid = false;
+            check_input_report(reader, restrict_token, CHECK_INPUT_RESTRICT_NOT_POINTER);
+        }
+        if (is_inline)
+        {
+            check_input_report(reader, inline_token != BUSTER_CHECK_NONE ? inline_token : first, CHECK_INPUT_INLINE_NOT_FUNCTION);
+        }
+        if (noreturn_token != BUSTER_CHECK_NONE)
+        {
+            check_input_report(reader, noreturn_token, CHECK_INPUT_NORETURN_NOT_FUNCTION);
+        }
+        const bool specifier_errors = restrict_token != BUSTER_CHECK_NONE || is_inline || noreturn_token != BUSTER_CHECK_NONE;
+        // (Ordered and published in this order at the `;`, as clang's are, each kept, before the warnings after it, wherever
+        // their tokens are.)
+        for (uint32_t r = reports_before; r < reader->output->report_count; r += 1)
+        {
+            reader->output->reports[r].sort = i;
+            reader->output->reports[r].repeated = true;
         }
         if (valid)
         {
@@ -6599,6 +6640,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t keyword = base_kind == BUSTER_TYPE_KIND_UNION ? 1u : base_kind == BUSTER_TYPE_KIND_ENUM ? 2u : 0u;
             valid = (!free_standing || check_input_attribute_ignored_lists(reader, first, i, tag && tag_type, keyword, i)) && !leading_list;
         }
+        valid = valid && !specifier_errors;
     }
     bool more = valid && !declares_nothing;
     while (more && i < count)
@@ -10268,6 +10310,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .specifier_auto_type = BUSTER_CHECK_NONE,
         .specifier_c23_auto = BUSTER_CHECK_NONE,
         .specifier_constexpr = BUSTER_CHECK_NONE,
+        .specifier_restrict = BUSTER_CHECK_NONE,
         .resolve_limit = count + 1,
         .resolve_pragma = BUSTER_CHECK_NONE,
         .resolve_diagnostic_token = BUSTER_CHECK_NONE,
