@@ -20,8 +20,9 @@ requirements. [Command index](README.md).
   first, so that its error is clang's first (`c_checker_driver.c`);
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
-  each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
-  "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
+  each one's class, numbers their nodes into a batch whose columns it writes 16
+  nodes at a time (`check_input_expression_flush`), with the walk (`--scalar`)
+  its twin (`docs/c-checker.md`'s "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
   an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
   "The sparse output columns", #628), and `attributes` as a wide one, of 64-bit
   values ("The attributes column", #1167); `c_check_binding.c` publishes each use's retained answer from those events

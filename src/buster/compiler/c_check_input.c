@@ -1013,6 +1013,9 @@ typedef enum CheckInputExpressionCode
     // A return statement's keyword: its value converted to the function's return type (CONVERT), or a report of a missing
     // one. goto, break and continue, of the same role, are the walk's.
     CHECK_INPUT_CODE_RETURN,
+    // An initializer's assignment (CheckInputReader.initializers, a BINARY's role): its one value initialized (INITIALIZE),
+    // or a braced initializer's values passed on as a list.
+    CHECK_INPUT_CODE_INITIALIZE,
     // In check_input_role_codes alone: an operand's role, whose class its kind gives.
     CHECK_INPUT_CODE_OPERAND,
 } CheckInputExpressionCode;
@@ -1038,6 +1041,7 @@ static const char* const check_input_expression_code_names[BUSTER_CHECK_EXPRESSI
     [CHECK_INPUT_CODE_CALL] = "call",
     [CHECK_INPUT_CODE_STRING] = "string",
     [CHECK_INPUT_CODE_RETURN] = "return",
+    [CHECK_INPUT_CODE_INITIALIZE] = "initialize",
 };
 
 _Static_assert(CHECK_INPUT_CODE_OPERAND << BUSTER_CHECK_EXPRESSION_CODE_SHIFT <= BUSTER_CHECK_EXPRESSION_CODE_MASK, "the classes fit their bits");
@@ -1174,6 +1178,7 @@ static const uint8_t check_input_builtin_codes[64] __attribute__((aligned(64))) 
     [CHECK_INPUT_CODE_POSTFIX] = 1,
     [CHECK_INPUT_CODE_CONDITION] = 1,
     [CHECK_INPUT_CODE_CALL] = 1,
+    [CHECK_INPUT_CODE_INITIALIZE] = 1,
 };
 
 // The expressions' walk's class of a token of the role that isn't ignored and that no sparse column has an entry for
@@ -8483,14 +8488,12 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
 // A node of `op` at `token` with operands a, b and c (check_graph_add's, its checks and columns), the end of its value
 // chain, and the columns the reader gives every node: where its expression ends, its warnings' suppression and its
 // floating-point environment. A full graph is a resource failure. It doesn't record the nodes before it, which
-// check_input_add does first; the coded walk leaves that to the next check_input_add or check_graph_record_finish, which
-// record them in node order from their final columns.
-// Always inlined (#880), as profile-guided builds do; hot callers: the coded walk's actions and check_input_add_node,
-// once per node.
-static inline __attribute__((always_inline)) uint32_t check_input_add_columns(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c,
-                                                                              bool clear)
+// check_input_add does first. The coded walk's class actions number their nodes into a batch instead, whose flush writes
+// the same columns (check_input_batch_add, check_input_expression_flush, #1038).
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_add, once per node.
+static inline __attribute__((always_inline)) uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
-    const uint32_t node = check_graph_add_node(&reader->output->graph, op, token, a, b, c, clear);
+    const uint32_t node = check_graph_add(&reader->output->graph, op, token, a, b, c);
     if (node == BUSTER_CHECK_NONE)
     {
         reader->output->resource = true;
@@ -8511,19 +8514,6 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_columns(Ch
         }
     }
     return node;
-}
-
-// Always inlined (#880), as profile-guided builds do; hot caller: check_input_run, once per node.
-static inline __attribute__((always_inline)) uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
-{
-    return check_input_add_columns(reader, op, token, a, b, c, true);
-}
-
-// A VALUE node at `token` whose leaf its maker writes whole (check_graph_add_node without `clear`): the coded walk's
-// identifiers', literals' and strings' (#1038), inlined as check_input_add_node is.
-static inline __attribute__((always_inline)) uint32_t check_input_add_leaf(CheckInputReader* reader, uint32_t token)
-{
-    return check_input_add_columns(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
 }
 
 static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
@@ -8756,16 +8746,16 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
 
 
 // The class `code` of `token`, by its role and kind, as the columns the reader wrote before the walk refine it (#1038): a
-// separator is a comma operator's BINARY where expression_commas says so; a BINARY that is an initializer's assignment,
-// a builtin's token of a class whose action leaves builtins to the walk (check_input_builtin_codes) and an intrinsic's
-// call are the walk's. Each class's action then tests none of these columns at the token as the walk reaches it, where
+// separator is a comma operator's BINARY where expression_commas says so, and a BINARY that is an initializer's assignment
+// an INITIALIZE; a builtin's token of a class whose action leaves builtins to the walk (check_input_builtin_codes) and an
+// intrinsic's call are the walk's. Each class's action then tests none of these columns at the token as the walk reaches it, where
 // each was a load the walk's serial order waited for (an intrinsic's id, at a call, a miss in a column no other pass
 // reads). The scalar twin of check_input_expression_classes' folds.
 static uint8_t check_input_expression_fold(const CheckInputReader* reader, uint32_t token, uint8_t code)
 {
     const uint32_t* intrinsics = reader->output->intrinsic_ids;
     uint8_t result = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[token] != 0 ? CHECK_INPUT_CODE_BINARY : code;
-    result = result == CHECK_INPUT_CODE_BINARY && reader->initializers[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
+    result = result == CHECK_INPUT_CODE_BINARY && reader->initializers[token] != 0 ? CHECK_INPUT_CODE_INITIALIZE : result;
     result = check_input_builtin_codes[result] != 0 && reader->builtins[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
     result = result == CHECK_INPUT_CODE_CALL && intrinsics != NULL && intrinsics[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
     return result;
@@ -8993,10 +8983,11 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t comma = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_SEPARATOR)) & _mm512_test_epi8_mask(commas, commas);
         codes = _mm512_mask_mov_epi8(codes, comma, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY));
         const uint64_t assigned = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY)) & _mm512_test_epi8_mask(initializers, initializers);
+        codes = _mm512_mask_mov_epi8(codes, assigned, _mm512_set1_epi8(CHECK_INPUT_CODE_INITIALIZE));
         const __m512i declines = _mm512_permutexvar_epi8(codes, builtin_codes);
         const uint64_t declined = _mm512_test_epi8_mask(declines, declines) & builtin;
         const uint64_t called = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_CALL)) & intrinsic;
-        codes = _mm512_mask_mov_epi8(codes, assigned | declined | called | sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+        codes = _mm512_mask_mov_epi8(codes, declined | called | sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
         // Every class is below 32, so each byte's shift stays in its byte.
         const __m512i classes = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
                                                                 _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE))),
