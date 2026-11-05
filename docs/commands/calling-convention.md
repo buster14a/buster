@@ -105,7 +105,10 @@ output. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Four compiled runs
 (#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
-this compiler on our side: a world of what its C passes (integers to 64 bits,
+this compiler on our side, and each links our side by Tier 1 too (#177's
+cross-linking at Tier 1: `--tier1 --verify`, without a frame pointer and with
+`-fno-omit-frame-pointer`), whose program must pass the same checks, its line
+saying how many of our side's functions Tier 1 compiled: a world of what its C passes (integers to 64 bits,
 `_BitInt`s of every width (past 128 bits in memory, a limb at a time), `__int128`
 and `unsigned __int128`, enums, pointers,
 `nullptr_t` in clang's, `_Float16`, `__bf16`, `float`, `double`, `long double`,
@@ -117,7 +120,8 @@ makes atomic, but `_BitInt`s (themselves, records holding them and aligned
 typedefs of them, as in the record runs), the vectors of 4, 8, 16, 32 and 64
 bytes the producer lowers (with SSE's registers at 16 bytes, AVX-512's at 64),
 and those of 1 and 2 bytes and of `bool`, which it passes by their bytes (#137:
-`check_lower_transport_type`, nothing that computes with them), and the
+`check_lower_transport_type`; what computes with them is
+`c_check_program_transport.c`'s, outside these runs), and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a

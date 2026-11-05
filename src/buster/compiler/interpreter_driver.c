@@ -62,7 +62,15 @@ static int run_ir_interpreter(int argc, char** argv)
             const char* specification = argv[++i];
             const unsigned long symbol = strtoul(specification, &end, 0);
             valid = end != specification && *end == '=' && end[1] != 0 && errno == 0 && symbol > 0 && symbol < UINT32_MAX;
+            // The process's own libraries, or libm, which the compiler's link doesn't take (#652, test_libm); in a static
+            // executable, test_libm's table alone.
             void* address = valid ? dlsym(RTLD_DEFAULT, end + 1) : 0;
+            address = valid && address == 0 ? test_libm(end + 1) : address;
+            if (valid && address == 0)
+            {
+                fprintf(stderr, "interpret-ir: --bind: no host symbol %s%s\n", end + 1,
+                        BUSTER_HOST_STATIC_EXECUTABLE ? " in this static executable (test_libm.c's table names those it binds)" : "");
+            }
             valid = valid && address != 0;
             uint32_t flags = 0;
             if (valid)

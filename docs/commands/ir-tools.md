@@ -18,6 +18,9 @@ requirements. [Command index](README.md).
   supplies the SysV host boundary and `interpreter_link.c` materializes data
   atoms. Their commands are
   `test-interpreter`, `test-interpreter-native`, `test-interpreter-link`,
-  `test-ir-interpreter`, and `interpret-ir`. [The tools guide](../../docs/ir-tools.md)
+  `test-ir-interpreter`, `interpret-ir`, and `interpret-c`. The latter runs retained
+  typed streams from separately prepared C units, resolving their functions and
+  data by name. `test-ssa-source --typed` adds that execution to the three IR
+  forms' output/status comparison. [The tools guide](../../docs/ir-tools.md)
   records the API, text grammar and frontend-dependent acceptance. Run builds
   and tests through the approved 9700X's shared per-run lock.

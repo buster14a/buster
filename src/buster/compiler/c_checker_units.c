@@ -57,8 +57,8 @@ struct CheckUnitsKept
 };
 
 // A unit of the command: its source file, and its size, and what compiling it gave: its exit status, its diagnostics'
-// text in the order it wrote them (from open_memstream, or null), whether it was compiled, and its kept link. `object`
-// is the object -c writes.
+// text in the order it wrote them (from open_memstream, or null), whether publication reached a fatal, whether it was
+// compiled, and its kept link. `object` is the object -c writes.
 struct CheckUnitsUnit
 {
     const char* path;
@@ -69,6 +69,7 @@ struct CheckUnitsUnit
     char* diagnostics;
     size_t diagnostic_bytes;
     bool unbuffered;
+    bool fatal;
     bool compiled;
     CheckUnitsKept kept;
     DependencyOutput dependency;
@@ -1793,6 +1794,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     else if (errors != NULL && !check_units_lane_ready(lane, command))
     {
         fprintf(errors, "fatal error: can't reserve the lane's memory\n");
+        unit->fatal = true;
     }
     else if (errors != NULL)
     {
@@ -1811,6 +1813,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
+            .tier1_no_inline = command->tier1_no_inline,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
             .helper_reporting = command->helper_report != NULL,
             .units_lane = lane,
@@ -1826,7 +1829,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         else
         {
             unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                             &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
+                                             &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL, &unit->fatal);
         }
         arena_small_floor = 0;
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
@@ -1884,6 +1887,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_certified, unit_report->code_certified, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->machine_rows, unit_report->machine_rows, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
@@ -2071,7 +2077,7 @@ static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* leas
 // `lanes->lanes` of them, a unit at a time each and past the units as many as their sources pay for, which a GNU make
 // jobserver's budget may reduce; the lanes without a unit left take the units' functions' parts), the units' diagnostics are
 // printed in the command line's order, and then with a link to make, the units' links are merged and linked
-// (check_driver_executable), with -g their DWARF units, one each. -o with -c, a dump and --id-order are refused: their
+// (check_driver_executable), with -g their DWARF units, one each. -o with -c and a dump are refused: their
 // outputs are one unit's.
 // With `stage_clock`, the setup, the lanes' run, the link and the release are its stages. Without `release` (a command
 // whose process exits after it) and without a link, the last lane to stop taking units leaves its memory to the exit.
@@ -2089,9 +2095,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
     {
         fprintf(stderr, "error: cannot specify -o when generating multiple output files\n");
     }
-    else if (command->dump || command->dump_static || command->id_ordered)
+    else if (command->dump || command->dump_static)
     {
-        fprintf(stderr, "error: --dump-typed, --dump-static and --id-order take one source file\n");
+        fprintf(stderr, "error: --dump-typed and --dump-static take one source file\n");
     }
     else if (order == NULL)
     {
@@ -2221,18 +2227,21 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             lane_restore(caller);
             lanes->active = active;
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
-            // The units' diagnostics, in the command line's order.
+            // All jobs have finished: publish input order's prefix through its first fatal, including that unit's notes
+            // and summary. A later job's fatal cannot cancel an earlier job. Release every buffer even past the cutoff.
             result = 0;
+            bool stopped = false;
             for (uint32_t u = 0; u < count; u += 1)
             {
-                if (units[u].diagnostic_bytes != 0)
+                if (!stopped && units[u].diagnostic_bytes != 0)
                 {
-                    fwrite(units[u].diagnostics, 1, units[u].diagnostic_bytes, stderr);
+                    result = fwrite(units[u].diagnostics, 1, units[u].diagnostic_bytes, stderr) == units[u].diagnostic_bytes ? result : 1;
                 }
-                if (units[u].unbuffered)
+                if (!stopped && units[u].unbuffered)
                 {
                     fprintf(stderr, "fatal error: %s: can't buffer its diagnostics\n", units[u].path);
                 }
+                stopped |= units[u].fatal || units[u].unbuffered;
                 free(units[u].diagnostics);
                 units[u].diagnostics = NULL;
                 result = units[u].status != 0 ? 1 : result;

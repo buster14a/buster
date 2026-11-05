@@ -431,6 +431,31 @@ static const ParseTestSnippet parse_test_snippets[] =
 {
     // Valid code.
     { "int x;\nint f(int a, int b) { return a + b * 2; }\n", "", 0 },
+    // Empty array bounds close with `]`; qualifiers and unspecified-size parameters keep that allowance (#1253).
+    { "extern int a[]; void f(int a[], int b[const], int c[*], int d[static 3]);\n", "", 0 },
+    { "void f(int [], int [const], int [*]);\n", "", 0 },
+    // Before any bound, a wrong closer or a semicolon is a missing expression, not a missing `]`.
+    { "int a[);\n", "1:7: expected expression", 0 },
+    { "int a[;\n", "1:7: expected expression", 0 },
+    { "int a[};\n", "1:7: expected expression", 0 },
+    { "void f(int a[);\n", "1:14: expected expression", 0 },
+    { "void f(const x [);\n", "1:17: expected expression", 0 },
+    { "void f(int a[const);\n", "1:19: expected expression", 0 },
+    { "void f(int a[const;\n", "1:19: expected expression", 0 },
+    { "void f(int a[const};\n", "1:19: expected expression", 0 },
+    { "void f(int a[static );\n", "1:21: expected expression", 0 },
+    { "void f(int a[static ;\n", "1:21: expected expression", 0 },
+    // Starting an expression still requires its operand, even at the matching bracket.
+    { "void f(int a[+]);\n", "1:15: expected expression", 0 },
+    { "void f(int a[*);\n", "1:15: expected expression", 0 },
+    // After a bound the missing bracket is still the error; a subscript never admits an empty expression.
+    { "int a[3;\n", "1:8: expected ']'", 0 },
+    { "int a[static 3);\n", "1:15: expected ']'", 0 },
+    { "void f(int a[3);\n", "1:15: expected ']'", 0 },
+    { "int g(int *p) { return p[); }\n", "1:26: expected expression", 0 },
+    { "int g(int *p) { return p[]; }\n", "1:26: expected expression", 0 },
+    // Other empty expression contexts are unchanged.
+    { "void f(void); void g(void) { f(); for (;;) { return; } }\n", "", 0 },
     { "struct S { int a : 3; char *p; } s = { 1, \"x\" };\n", "", 0 },
     { "int x; void g(void) { if (x) x = 1; else { for (int i = 0; i < 3; i++) x += i; } do x--; while (x); switch (x) { case 1: break; default: ; } }\n", "", 0 },
     { "typedef int T; T (x); int f(T (x)); int g(int (x));\n", "", 0 },
@@ -1131,6 +1156,76 @@ static uint32_t parse_test_check_fixtures(const char* directory)
         remove(path);
     }
     printf("fixtures: %u trees checked by hand, %u failures\n", count, failures);
+    return failures;
+}
+
+// clang's recovery after a declaration's missing `;` before a declaration specifier (#147, ParseDiagnostic.resumed): it
+// reads the specifier as the next declaration's, so that a file-scope declaration's errors after it are its own; a
+// `#pragma pack` between, `_Static_assert` and a name that is no type leave the rest skipped. Every diagnostic, its place
+// and whether it resumed, by both paths, as clang 23 places them (test-parser --clang compares the first lines).
+static uint32_t parse_test_check_resumed(const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        const char* diagnostics;
+    } cases[] = {
+        { "int x _Alignas(3);\nint y;\n", "1:6 resumed expected ';' after top level declarator\n" },
+        { "int x const y z;\nint w;\n", "1:6 resumed expected ';' after top level declarator\n1:13 unknown type name 'y'\n" },
+        { "int x const int y z;\n", "1:6 resumed expected ';' after top level declarator\n1:18 expected ';' after top level declarator\n" },
+        { "int x const int y static;\n", "1:6 resumed expected ';' after top level declarator\n1:18 resumed expected ';' after top level declarator\n" },
+        { "int x\n#pragma pack(1)\nconst;\n", "1:6 expected ';' after top level declarator\n" },
+        { "void f(void) { int x const; int y static; }\n", "1:21 resumed expected ';' at end of declaration\n" },
+        { "int x y;\nint z const;\n", "1:6 expected ';' after top level declarator\n2:6 resumed expected ';' after top level declarator\n" },
+        { "int x _Static_assert(1, \"\");\n", "1:6 expected ';' after top level declarator\n" },
+        { "typedef int T;\nint x T;\n", "2:6 resumed expected ';' after top level declarator\n" },
+    };
+    uint32_t failures = 0;
+    char path[4096];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/resumed_%u.c", directory, i);
+        const bool written = parse_test_write(path, cases[i].source, strlen(cases[i].source));
+        const ParseTestSnippet snippet = { .source = cases[i].source, .error = "", .std = 0 };
+        const PPOptions options = parse_test_snippet_options(&snippet);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            const bool ran = written && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                             pp_run(&pp, path);
+            if (ran)
+            {
+                parse_translation_unit(&parser, &pp);
+            }
+            char text[1024] = "";
+            uint32_t length = 0;
+            for (uint32_t d = 0; ran && d < parser.diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = &parser.diagnostics[d];
+                const uint32_t location = parse_diagnostic_location(&parser, &pp, diagnostic);
+                const uint32_t range = pp_find_range(&pp, location);
+                uint32_t column = 0;
+                const uint32_t line = range != BUSTER_PP_NONE ? pp_line_of(&pp, range, location, &column) : 0;
+                char message[256];
+                parse_diagnostic_message(&parser, &pp, diagnostic, message, sizeof(message));
+                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s\n", line, column, diagnostic->resumed ? "resumed " : "", message);
+                length += printed > 0 && (uint32_t)printed < sizeof(text) - length ? (uint32_t)printed : 0;
+            }
+            if (!ran || strcmp(text, cases[i].diagnostics) != 0)
+            {
+                failures += 1;
+                printf("resumed %u (%s path): diagnostics\n%s  not\n%s    %s", i, scalar ? "scalar" : "vector", text, cases[i].diagnostics, cases[i].source);
+            }
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+        remove(path);
+    }
+    printf("resumed declarations: %u cases, %u failures\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), failures);
     return failures;
 }
 
@@ -3718,6 +3813,120 @@ static __attribute__((unused)) uint32_t parse_test_check_probe(const ParseTestPr
 // a run stops at the first that fails, so in a child whose address space may grow a page less than a run reached, the
 // last fails, and the child's peak is what the run had before it; a page less than that, the one before fails; and so
 // on, a run each, down to the first.
+// Whether `pointer` is in the bytes `arena` has room for, compared as integers: the arena is another mapping, which C's
+// relational operators don't relate to the pointer's.
+static bool parse_test_in_arena(const void* pointer, const Arena* arena)
+{
+    const uintptr_t address = (uintptr_t)pointer;
+    const uintptr_t base = (uintptr_t)arena->base;
+    return pointer != 0 && base != 0 && address >= base && address - base < arena->capacity;
+}
+
+// The diagnostics' place: as the address space says, wrong, or not checked (the host's hard RLIMIT_AS leaves no room for
+// the limited run).
+typedef enum ParseTestPlace
+{
+    PARSE_TEST_PLACE_RIGHT,
+    PARSE_TEST_PLACE_WRONG,
+    PARSE_TEST_PLACE_SKIPPED,
+} ParseTestPlace;
+
+// The least address space past the process's own that the limited run takes: under a finite RLIMIT_AS each arena admits
+// a 128th of it (arena_address_share), here 512 MB, more than the large unit's columns take.
+#define BUSTER_PARSE_TEST_PLACE_BYTES (64ull << 30)
+
+// Whether a parse of `declarations` declarations puts its diagnostics where the address space says (#1279's review): in
+// the tokens' arena where it is unbounded, and under a finite RLIMIT_AS in an arena of their own sized by the tokens
+// converted, not by the tokens' bound, twice the output's, which would map 12 bytes more for each token of a large unit
+// than it can use. Its meanings are in the tokens' arena either way. Run in a child, which sets its soft limit: none, where
+// the hard limit allows that, for the unbounded run; for the limited one, 1 TiB past its address space, or the hard
+// limit where that is lower but leaves BUSTER_PARSE_TEST_PLACE_BYTES. Where the hard limit allows neither, the run isn't
+// checked.
+static __attribute__((unused)) ParseTestPlace parse_test_diagnostic_place(uint32_t declarations, bool limited)
+{
+    // Zero where /proc or getrlimit fails, so that what follows reads defined values and the run reports a wrong place.
+    struct rlimit space = {
+        .rlim_cur = 0,
+        .rlim_max = 0,
+    };
+    const uint64_t base = parse_test_status_bytes("VmSize:");
+    bool result = base != 0 && getrlimit(RLIMIT_AS, &space) == 0;
+    const uint64_t hard = space.rlim_max == RLIM_INFINITY ? UINT64_MAX : (uint64_t)space.rlim_max;
+    const uint64_t wanted = base + (1ull << 40);
+    // The run without a limit lifts the soft one, which a finite hard one forbids.
+    const bool skipped = result && (limited ? hard < base + BUSTER_PARSE_TEST_PLACE_BYTES : space.rlim_max != RLIM_INFINITY);
+    space.rlim_cur = !limited ? RLIM_INFINITY : wanted < hard ? wanted : hard;
+    result = result && !skipped && setrlimit(RLIMIT_AS, &space) == 0;
+    const uint64_t bytes = (uint64_t)declarations * 8 + 1;
+    char* source = result ? malloc(bytes) : 0;
+    for (uint32_t i = 0; source != 0 && i < declarations; i += 1)
+    {
+        memcpy(source + (uint64_t)i * 8, "int x;\n ", 8);
+    }
+    InternTable table = { 0 };
+    Preprocessor pp = { 0 };
+    Parser parser = { 0 };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parsing = { 0 };
+    result = source != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parsing, options.language) &&
+             pp_run_source(&pp, "diagnostic-place.c", (const uint8_t*)source, (uint32_t)(bytes - 1));
+    // Repeated `int x;` is valid C (tentative definitions), so the parse succeeds without a diagnostic.
+    result = result && parse_translation_unit(&parser, &pp) && parser.diagnostic_count == 0 && parser.tokens.count == 3 * declarations;
+    const Arena* own = &parser.columns[8];
+    const Arena* tokens = &parser.columns[0];
+    const bool in_tokens = parse_test_in_arena(parser.diagnostics, tokens);
+    const bool in_own = parse_test_in_arena(parser.diagnostics, own);
+    const uint64_t needed = ((uint64_t)parser.tokens.count + 16 + 2 * BUSTER_PARSE_TOKEN_PADDING) * sizeof(ParseDiagnostic) + 64;
+    result = result && parse_test_in_arena(parser.meanings.meanings, tokens) && parser.diagnostic_capacity == parser.tokens.count + 16 &&
+             (limited ? in_own && !in_tokens && own->requested_capacity == needed : in_tokens && !in_own);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&table);
+    free(source);
+    return skipped ? PARSE_TEST_PLACE_SKIPPED : result ? PARSE_TEST_PLACE_RIGHT : PARSE_TEST_PLACE_WRONG;
+}
+
+// parse_test_diagnostic_place in a child each, unbounded and limited: a small unit and a large one (786,432 tokens).
+static uint32_t parse_test_diagnostic_places(void)
+{
+    uint32_t failures = 0;
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+    printf("parser: the diagnostics' place under RLIMIT_AS isn't checked under a sanitizer, whose shadow takes the address space\n");
+#else
+    static const uint32_t sizes[] = { 1, 1u << 18 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        for (uint32_t limited = 0; limited < 2; limited += 1)
+        {
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                _exit((int)parse_test_diagnostic_place(sizes[i], limited != 0));
+            }
+            int status = 0;
+            pid_t waited = child;
+            while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
+            {
+            }
+            const int place = child > 0 && waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : PARSE_TEST_PLACE_WRONG;
+            const bool passed = place == PARSE_TEST_PLACE_RIGHT || place == PARSE_TEST_PLACE_SKIPPED;
+            if (place == PARSE_TEST_PLACE_SKIPPED)
+            {
+                printf("parser: %u declarations %s: not checked, the hard RLIMIT_AS %s\n", sizes[i], limited != 0 ? "under a finite RLIMIT_AS" : "without a limit",
+                       limited != 0 ? "leaves less than 64 GiB past the address space" : "is finite");
+            }
+            if (!passed)
+            {
+                parse_test_report("parser: %u declarations %s: the diagnostics aren't where the address space puts them\n", sizes[i],
+                                  limited != 0 ? "under a finite RLIMIT_AS" : "without a limit");
+            }
+            failures += !passed;
+        }
+    }
+#endif
+    return failures;
+}
+
 static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
@@ -4061,11 +4270,13 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             failures += parse_test_check_postorder_self(&arena);
             failures += parse_test_workspace_budget();
+            failures += parse_test_diagnostic_places();
             failures += parse_test_check_k6_tables();
             failures += parse_test_check_handoff(options.language, seed);
             failures += parse_test_check_snippets(directory, clang);
             failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
             failures += parse_test_check_fixtures(directory);
+            failures += parse_test_check_resumed(directory);
         }
         if (input_count == 0)
         {

@@ -480,6 +480,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 // The definition's object among the static objects, or past them (check_data_declared_index).
                 const uint32_t declared = check_data_declared_index(data, object);
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
+                // An object made only for what references it (CheckDataObject.optional: a constant CFString's record, #148).
+                flags |= !function && data->objects[raw - full->body_count].optional ? BUSTER_C_LOWERING_OPTIONAL : 0;
                 const uint32_t declaration = full->object_declarations[object];
                 if (declaration != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2)
                 {

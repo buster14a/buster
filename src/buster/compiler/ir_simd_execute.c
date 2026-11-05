@@ -49,6 +49,13 @@ static IrSimdOperation ir_simd_operation(uint8_t operation)
         case IR_OR: result = IR_SIMD_OR; break;
         case IR_XOR: result = IR_SIMD_XOR; break;
         case IR_NOT: result = IR_SIMD_NOT; break;
+        case IR_SHL: result = IR_SIMD_SHL; break;
+        case IR_LSHR: result = IR_SIMD_LSHR; break;
+        case IR_ASHR: result = IR_SIMD_ASHR; break;
+        case IR_FADD: result = IR_SIMD_FADD; break;
+        case IR_FSUB: result = IR_SIMD_FSUB; break;
+        case IR_FMUL: result = IR_SIMD_FMUL; break;
+        case IR_FDIV: result = IR_SIMD_FDIV; break;
         case IR_VCMP: result = IR_SIMD_COMPARE; break;
         case IR_VSELECT: result = IR_SIMD_SELECT; break;
         case IR_LOAD: result = IR_SIMD_LOAD; break;
@@ -185,7 +192,9 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
                 constant = function->vector_constants + a;
             }
             action.predicate = op == IR_VCMP ? (IrSimdPredicate)c : IR_SIMD_EQ;
-            action.volatile_memory = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0;
+            // A vector operation's lanes (#141's element types); a load's and a store's flags are their access's.
+            action.lane = ir_lane_operation(op) != IR_SIMD_OPERATION_COUNT ? (IrSimdLane)function->flags[node] : IR_SIMD_LANE_I32;
+            action.volatile_memory = (op == IR_LOAD || op == IR_STORE) && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0;
             if (op == IR_STORE)
             {
                 operands[0] = operands[1];

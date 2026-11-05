@@ -106,6 +106,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_DEDUCED_ARRAY: result = "cannot use 'auto' with array in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_BIT_FIELD: result = "cannot pass bit-field as auto initializer in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_MISMATCH: result = "'auto' deduced types differ within one declaration"; break;
+        case CHECK_INPUT_AUTO_TYPE_MISMATCH: result = "'__auto_type' deduced types differ within one declaration"; break;
         case CHECK_INPUT_CONSTEXPR_INITIALIZER: result = "constexpr variable must be initialized by a constant expression"; break;
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
@@ -185,6 +186,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL: result = "attribute requires parameter 1 to be int or bool"; break;
         case CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS: result = "attribute parameter is out of bounds"; break;
         case CHECK_INPUT_ATTRIBUTE_ARGUMENT: result = "invalid attribute argument"; break;
+        case CHECK_INPUT_RESTRICT_NOT_POINTER: result = "restrict requires a pointer or reference"; break;
+        case CHECK_INPUT_INLINE_NOT_FUNCTION: result = "'inline' can only appear on functions"; break;
+        case CHECK_INPUT_NORETURN_NOT_FUNCTION: result = "'_Noreturn' can only appear on functions"; break;
     }
     return result;
 }
@@ -684,14 +688,17 @@ static bool tier1_select_initialize(void);
 
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
+// The initializers' walk's warnings, and its unavailable members' errors (CHECK_WARNING_EVENT_UNAVAILABLE_USE, #147), which
+// `quiet` (-w) keeps alone: the walk stages them all, whatever the warning options.
 static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
-                                                      const CheckWarningEvents* view, const CheckRepair* repair, Arena* scratch)
+                                                      const CheckWarningEvents* view, const CheckRepair* repair, bool quiet, Arena* scratch)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && !pp->fatal && i < view->count; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
+        const bool shown = !quiet || event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE;
+        if (shown && event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
         {
             valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count &&
                     (event->payload.data & 0xffff) == CHECK_WARNING_EXCESS_INITIALIZERS;
@@ -719,7 +726,29 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 }
             }
         }
-        else
+        else if (shown && event->kind == CHECK_WARNING_EVENT_UNAVAILABLE_USE)
+        {
+            // An unavailable member's use (check_init_member_use, #147): clang's error, whatever the warning options.
+            const CheckWarningNote* note = event->note_count == 1 && event->note_first < view->note_count ? view->notes + event->note_first : NULL;
+            valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count && note != NULL && note->token < parser->tokens.count;
+            if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
+            {
+                const uint64_t mark = scratch->length;
+                CheckWarningSpelling spell = { 0 };
+                const char* message = check_driver_warning_message(parser, pp, input, types, &spell, event, scratch);
+                const char* text = check_driver_warning_note(parser, pp, input, types, &spell, note, scratch);
+                valid = message != NULL && text != NULL;
+                if (valid)
+                {
+                    const PPOutputDiagnosticNote noted = { .token = parser->tokens.sources[note->token], .message = text };
+                    const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
+                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[event->token], publication, &noted, 1, "%s", message);
+                    valid = !pp->diagnostic_collection_failed;
+                }
+                arena_pop_to(scratch, mark);
+            }
+        }
+        else if (shown)
         {
             const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
             valid = check_driver_warning_events(parser, pp, input, types, &one, repair, scratch);
@@ -1598,17 +1627,37 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
                             // attribute's message, and the note at it.
                             const CheckInputReport* report = input->reports + index;
-                            const uint32_t used = parser->tokens.names[token];
                             const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
-                            char noted[160];
-                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, used), intern_bytes(pp->table, used));
+                            // The names are the tokens' (the note's its declaration's: an enumerator's enum's where the enum
+                            // marks it), or at an anonymous tag's keyword its type's spelling, with its quotes.
+                            const bool typed = input->declared_types != NULL;
+                            const String8 used_type = parser->tokens.kinds[token] != PARSE_KIND_IDENTIFIER && typed ?
+                                                      check_driver_warning_type(parser, pp, input, types, &spell, scratch, input->declared_types[token], 0) : (String8){ 0 };
+                            const bool noted_token = report->note_token < count;
+                            const String8 note_type = noted_token && parser->tokens.kinds[report->note_token] != PARSE_KIND_IDENTIFIER && typed ?
+                                                      check_driver_warning_type(parser, pp, input, types, &spell, scratch, input->declared_types[report->note_token], 0) :
+                                                      (String8){ 0 };
+                            const uint32_t used = parser->tokens.names[token];
+                            const String8 used_name = { .pointer = (char*)intern_bytes(pp->table, used), .length = intern_length(pp->table, used) };
+                            const uint32_t declared = noted_token && parser->tokens.kinds[report->note_token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[report->note_token] : used;
+                            const String8 declared_name = { .pointer = (char*)intern_bytes(pp->table, declared), .length = intern_length(pp->table, declared) };
+                            const String8 used_text = used_type.length != 0 ? used_type : used_name;
+                            const String8 declared_text = note_type.length != 0 ? note_type : noted_token || used_type.length == 0 ? declared_name : used_type;
+                            const char* used_quote = used_type.length != 0 ? "" : "'";
+                            const char* note_quote = note_type.length != 0 || (!noted_token && used_type.length != 0) ? "" : "'";
+                            char noted[256];
+                            snprintf(noted, sizeof(noted), "%s%.*s%s has been explicitly marked unavailable here", note_quote, (int)declared_text.length, declared_text.pointer, note_quote);
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = noted,
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
-                                                        (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
-                                                        (int)message.length, message.pointer);
+                            // Once more for each of a tag's declarators after the first (report->value).
+                            for (uint64_t copy = 0; copy <= report->value; copy += 1)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
+                                                            message.length != 0 ? ": " : "", (int)message.length, message.pointer);
+                            }
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
                         {
@@ -2595,7 +2644,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
-                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign)
+                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
 {
     (void)scalar;
 
@@ -2660,6 +2709,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         else if (!valid)
         {
             fprintf(errors, "fatal error: can't keep the unit's link: no memory\n");
+            *fatal = true;
         }
     }
     else if (valid)
@@ -3569,6 +3619,10 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
     return result;
 }
 
+// Fault injection for test-check-units' reusable-driver child, set before any workers start and immutable until its
+// command returns. Normal commands leave it null. Fail the named unit's type-table reservation, not its preprocessing.
+static const char* check_driver_test_failed_types;
+
 // What every translation unit of a command reads, and none writes: run_check_command_mode's options.
 typedef struct CheckDriverCommand CheckDriverCommand;
 struct CheckDriverCommand
@@ -3585,6 +3639,9 @@ struct CheckDriverCommand
     bool quiet;
     bool lazy_system_headers;
     bool lower_all;
+    // --deferred-bodies: a unit's function bodies read apart, on the command's lanes (#151, check_input_deferred_compile);
+    // --no-deferred-bodies reads them in source order.
+    bool deferred_bodies;
     // -Wreturn-type's: whether to warn, whether -Werror promotes it, and -Werror=return-type's (1) or
     // -Wno-error=return-type's (-1) say.
     bool return_warning;
@@ -3622,12 +3679,13 @@ struct CheckDriverCommand
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
-    // --tier1-no-lifetimes.
+    // --tier1-no-lifetimes; and --tier1-no-inline (#1282).
     bool tier1;
     bool tier1_strict;
     bool tier1_no_rematerialize;
     bool tier1_gvn;
     bool tier1_no_lifetimes;
+    bool tier1_no_inline;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
     // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
@@ -3641,6 +3699,53 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
+// A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
+// worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
+typedef struct CheckDriverDeferred CheckDriverDeferred;
+struct CheckDriverDeferred
+{
+    CheckProgramLanes* lanes;
+    WorkerBudgetLease lease;
+    bool return_failed;
+};
+
+// The lanes a unit's reading may give its deferred bodies: the command's (its CPUs, --lanes N and --worker-budget N), no
+// more than the reader has. Of those, its grant (check_driver_deferred_grant) takes what the session and the worker budget
+// give, once the reader has counted the bodies' tokens: a small unit's never waits for the session's lanes.
+static uint32_t check_driver_deferred_lanes(const CheckProgramLanes* lanes)
+{
+    const uint32_t result = lanes->lanes < BUSTER_CHECK_DEFERRED_MAX_LANES ? lanes->lanes : BUSTER_CHECK_DEFERRED_MAX_LANES;
+    return result != 0 ? result : 1;
+}
+
+// CheckDeferredFlow.grant: of the `wanted` lanes, no more than the session asks for, by default one per core
+// (lane_session_asked), those it started (lane_flow_lanes), and those the worker budget gives, whose slots it takes without
+// waiting, as the emission takes its own (worker_budget_acquire).
+static uint32_t check_driver_deferred_grant(void* context, uint32_t wanted)
+{
+    CheckDriverDeferred* deferred = context;
+    CheckProgramLanes* lanes = deferred->lanes;
+    const uint32_t most = check_driver_deferred_lanes(lanes);
+    const uint32_t asked = lane_session_asked();
+    uint32_t result = wanted < most ? wanted : most;
+    result = asked < result ? asked : result;
+    const uint32_t started = result > 1 ? lane_flow_lanes(lanes->flow) : 1;
+    result = started < result ? started : result;
+    deferred->lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
+    if (result > 1 && lanes->budget != NULL)
+    {
+        result = worker_budget_acquire(lanes->budget, result, &deferred->lease);
+    }
+    return result;
+}
+
+// CheckDeferredFlow.give_back: the slots the grant took, once the final reader round's lanes have met.
+static void check_driver_deferred_give_back(void* context)
+{
+    CheckDriverDeferred* deferred = context;
+    deferred->return_failed |= !worker_budget_release(&deferred->lease);
+}
+
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
 // `errors`; then, as the command says, its object written, its executable linked or, with `kept` (#152: one of several
@@ -3648,12 +3753,18 @@ static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 // caller initialized (null if it couldn't), `pp` and `parser` its state, and `arena`, `scratch` and `output_arena` its
 // memory; its functions compile on `lanes`. The preprocessor's phases' ticks go to `pp_ticks`, and with `stage_clock`
 // (--time-stages), each stage's time. With `release`, it releases the parser's, the preprocessor's and the type table's
-// memory before it returns. Returns the command's exit status: 0 for a unit without errors whose outputs were written.
+// memory before it returns. With `deferred` (--deferred-bodies, one source file's), the unit's reading reads its bodies
+// apart on the command's lanes, with that state, which the caller keeps until the unit is done (check_deferred_release).
+// If `fatal` is nonnull, retain the publication's fatal state before releasing the preprocessor: a multi-unit caller
+// uses that state to publish the canonical prefix, independently of which lane finishes first.
+// Returns the command's exit status: 0 for a unit without errors whose outputs were written.
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
-                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena)
+                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+                             CheckDeferred* deferred, bool* fatal)
 {
     int result = 1;
+    bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
     const bool scalar = command->scalar;
@@ -3681,12 +3792,18 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
         arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        driver_fatal = true;
     }
     else
     {
         CheckPrefix prefix = { 0 };
         CheckRepair repair = { 0 };
+        CheckResumed resumed = { 0 };
         const Parser* checking = parser;
+        // A failed parse as clang's recovery reads it (check_prefix_resume, #147), or the parse itself: what the views
+        // after a failed parse are made of, and the original whose places their diagnostics publish at. Its parse's
+        // diagnostics are the original's.
+        const Parser* recovered = parser;
         Preprocessor* checking_pp = pp;
         bool prefix_only = false;
         bool repairing = false;
@@ -3723,32 +3840,44 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 parse_print_diagnostics(parser, pp);
             }
-            else if (check_repair_make(&repair, parser, pp, arena, scratch) == CHECK_REPAIR_READY)
+            else
             {
-                // Only completed original expressions can contribute diagnostics. The synthetic closure
-                // belongs to a private checking view and can never produce a successful source result.
-                checking = &repair.parser;
-                checking_pp = repair.preprocessor;
-                prefix_only = true;
-                repairing = true;
-                ready = true;
-            }
-            else if (check_prefix_make(&prefix, parser, arena, scratch) == CHECK_PREFIX_READY)
-            {
-                // Only complete earlier declarations survive this view. Its checking suppresses obligations
-                // that belong to the full translation-unit end; the original parser rejection stays final.
-                checking = &prefix.parser;
-                prefix_only = true;
-                ready = true;
+                recovered = check_prefix_resume(&resumed, parser, arena, scratch) == CHECK_PREFIX_READY ? &resumed.parser : parser;
+                if (recovered != parser && recovered->errors == 0)
+                {
+                    // Every missing `;` read past as clang's recovery reads it: the whole view, checked as a prefix is.
+                    checking = recovered;
+                    prefix_only = true;
+                    ready = true;
+                }
+                else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
+                {
+                    // Only completed original expressions can contribute diagnostics. The synthetic closure
+                    // belongs to a private checking view and can never produce a successful source result.
+                    checking = &repair.parser;
+                    checking_pp = repair.preprocessor;
+                    prefix_only = true;
+                    repairing = true;
+                    ready = true;
+                }
+                else if (check_prefix_make(&prefix, recovered, arena, scratch) == CHECK_PREFIX_READY)
+                {
+                    // Only complete earlier declarations survive this view. Its checking suppresses obligations
+                    // that belong to the full translation-unit end; the original parser rejection stays final.
+                    checking = &prefix.parser;
+                    prefix_only = true;
+                    ready = true;
+                }
             }
         }
         if (parse_failed)
         {
-            original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, parser, pp,
-                                                                       check_diagnostic_parse_end(parser), arena, scratch);
+            original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, recovered, pp,
+                                                                       check_diagnostic_parse_end(recovered), arena, scratch);
             if (!original_pragmas_ready)
             {
                 fprintf(errors, "fatal error: original pragma diagnostic capacity exhausted\n");
+                driver_fatal = true;
                 ready = false;
             }
         }
@@ -3756,7 +3885,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         const uint32_t tokens = checking->tokens.count;
         // A complete declaration prefix ends before the original parser's lookahead, not at the whole PP EOF.
         // Repairs retain their synthetic/end boundary; completed original bodies are handled independently.
-        const uint32_t publication_end = !repairing && tokens < parser->tokens.count ? parser->tokens.sources[tokens] : pp->output.count;
+        const uint32_t publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
         const TypeCapacity capacity = {
             .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
             .parameters = tokens,
@@ -3770,12 +3899,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
             // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
             const uint64_t type_bytes = type_capacity_bytes(capacity);
-            type_arena = arena_reserve_small(type_bytes, type_bytes);
-            index_arena = arena_reserve(type_index_capacity_bytes(capacity));
-            ready = capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
+            const bool fail_types = check_driver_test_failed_types != NULL && strcmp(path, check_driver_test_failed_types) == 0;
+            type_arena = !fail_types ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
+            index_arena = !fail_types ? arena_reserve(type_index_capacity_bytes(capacity)) : (Arena){ 0 };
+            ready = !fail_types && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
             if (!ready)
             {
                 fprintf(errors, "fatal error: can't reserve type table\n");
+                driver_fatal = true;
             }
         }
         check_clock_mark(stage_clock, CHECK_STAGE_TYPE_TABLE);
@@ -3786,17 +3917,56 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (!ready)
             {
                 fprintf(errors, "fatal error: system-header checking selection failed\n");
+                driver_fatal = true;
             }
         }
         if (ready)
         {
             CheckInput input;
             // A repaired fragment (check_input_fragment), a prefix (check_input_prefix), a unit with its system headers'
-            // bodies deferred (check_input_selected) or the whole unit (check_input).
-            const bool input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
-                                                         repairing ? repair.original_end : checking->tokens.count,
-                                                         lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0);
+            // bodies deferred (check_input_selected) or the whole unit (check_input). A whole unit's bodies are read apart
+            // on the command's lanes (#151) where it asks for that and has more than one lane.
+            const uint8_t* selected = lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0;
+            const bool deferring = deferred != NULL && lanes != NULL && lanes->flow != NULL && !prefix_only && selected == NULL;
+            const uint32_t deferred_lanes = deferring ? check_driver_deferred_lanes(lanes) : 1;
+            CheckDriverDeferred grants = { .lanes = lanes };
+            bool input_valid = false;
+            if (deferred_lanes > 1)
+            {
+                const CheckDeferredFlow flow = {
+                    .flow = lanes->flow,
+                    .grant = check_driver_deferred_grant,
+                    .give_back = check_driver_deferred_give_back,
+                    .context = &grants,
+                };
+                deferred->flow = &flow;
+                deferred->every_lane = lanes->every_lane;
+                input_valid = check_input_deferred_compile(deferred, &input, checking, checking_pp, &types, arena, scratch, deferred_lanes);
+                deferred->flow = NULL;
+            }
+            else
+            {
+                input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
+                                                  repairing ? repair.original_end : checking->tokens.count, selected);
+            }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
+            if (stage_clock != NULL && deferring)
+            {
+                stage_clock->deferred = true;
+                stage_clock->deferred_lanes = deferred_lanes > 1 && !deferred->unsupported ? deferred->active : 0;
+                stage_clock->deferred_reason = deferred_lanes <= 1 ? "one lane" : deferred->unsupported ? deferred->reason : NULL;
+                stage_clock->deferred_expression_parts = deferred->expression_parts;
+                stage_clock->deferred_expression_parallel_tokens = deferred->expression_parallel_tokens;
+                stage_clock->deferred_expression_serial_tokens = deferred->expression_serial_tokens;
+                stage_clock->deferred_expression_worker_mask = deferred->expression_worker_mask;
+                stage_clock->deferred_expression_retry = deferred->expression_retry;
+                memcpy(stage_clock->deferred_expression_ticks, deferred->expression_ticks, sizeof(stage_clock->deferred_expression_ticks));
+            }
+            if (grants.return_failed)
+            {
+                fprintf(errors, "fatal error: could not return GNU make worker slots\n");
+                driver_fatal = true;
+            }
             if (stage_clock != NULL)
             {
                 _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
@@ -3812,10 +3982,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (input.resource)
             {
                 fprintf(errors, "fatal error: checker input capacity exhausted\n");
+                driver_fatal = true;
             }
             // A rejected reader may retain complete earlier expressions solely for diagnostics. Their typed
             // reports share source order with declaration reports, but this fragment can never be emitted.
-            if (input_valid || input.diagnostic_graph)
+            if (grants.return_failed)
+            {
+                result = 1;
+            }
+            else if (input_valid || input.diagnostic_graph)
             {
                 const CheckOptions check_options = {
                     .scalar = scalar,
@@ -3842,7 +4017,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
                     CheckMusttails musttails = { 0 };
-                    const bool expression_valid = input_valid && stream.report_count == 0;
+                    // The reader's reports after checking are unavailable members' uses (check_input_member_uses, #147).
+                    const bool expression_valid = input_valid && stream.report_count == 0 && input.report_count == 0;
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
                     CheckDriverDiagnostic fallback[4] = { 0 };
                     CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);
@@ -3891,7 +4067,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 asms.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", asms.token };
                         }
                         if (check_initializers_run_events(&initializers, &input, &stream, checking, &types, output_arena, scratch,
-                                                          !quiet ? &initializer_warnings : NULL, !quiet ? &initializer_warning_keys : NULL))
+                                                          &initializer_warnings, &initializer_warning_keys))
                         {
                             excess_tokens = initializers.warning_tokens;
                             excess_count = initializers.warning_count;
@@ -3901,16 +4077,17 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckInitDiagnostic earlier = { 0 };
                         const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
+                        // Under -w too: its unavailable members' errors are its events' (#147), which publication keeps alone.
                         CheckInitWarningSink warnings = {
-                            .capacity = !quiet ? tokens : 0,
-                            .events = !quiet ? &initializer_warnings : NULL,
-                            .event_keys = !quiet ? &initializer_warning_keys : NULL,
+                            .capacity = tokens,
+                            .events = &initializer_warnings,
+                            .event_keys = &initializer_warning_keys,
                         };
                         warnings.tokens = warnings.capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, warnings.capacity) : NULL;
                         const bool storage = warnings.capacity == 0 || warnings.tokens != NULL;
                         const bool diagnosed = storage && initializers.status != CHECK_INIT_RESOURCE &&
                                                check_initializers_diagnose_warnings(&earlier, &input, &stream, checking, &types, before,
-                                                                                     output_arena, scratch, !quiet ? &warnings : NULL);
+                                                                                     output_arena, scratch, &warnings);
                         if (!storage || initializers.status == CHECK_INIT_RESOURCE)
                         {
                             earlier.status = CHECK_INIT_RESOURCE;
@@ -3948,6 +4125,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     if (!initializer_context)
                     {
                         fprintf(errors, "fatal error: initializer diagnostic capacity exhausted\n");
+                        driver_fatal = true;
                         ready = false;
                     }
                     const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
@@ -3984,14 +4162,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
-                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, scratch) ||
-                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
+                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
+                        !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                     {
                         fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
                         ready = false;
                     }
                     original_pragmas_printed = true;
@@ -3999,7 +4178,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
                     }
-                    result = ready && expression_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
+                    result = !driver_fatal && ready && expression_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
                              !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
                     CheckProgram program;
                     CheckDataPrepared data = { 0 };
@@ -4045,7 +4224,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_driver_diagnose(checking, pp, program.token, message);
                         result = 1;
                     }
-                    check_driver_x86_reports(checking, parser, pp, &input, &stream, &types, quiet);
+                    check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
                                                 input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
                     if (final_warnings)
@@ -4058,6 +4237,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
                         {
                             fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
+                            driver_fatal = true;
                             result = 1;
                         }
                         result = pp->errors != 0 ? 1 : result;
@@ -4066,7 +4246,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
-                        check_driver_return_reports(checking, parser, pp, &program, baseline, quiet);
+                        check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
                         if (!quiet)
                         {
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, scratch);
@@ -4084,7 +4264,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
-                            result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)
@@ -4092,7 +4272,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
                             result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
                                                                            object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
-                                                                           scratch, stage_clock, errors, kept, command->mixed_inputs) ? 0 : 1;
+                                                                           scratch, stage_clock, errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
                         }
                         else if (!selection)
                         {
@@ -4108,7 +4288,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
-                            result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)
@@ -4130,15 +4310,17 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 else
                 {
                     fprintf(errors, "fatal error: %s\n", stream.status == CHECK_STATUS_RESOURCE ? "checker output capacity exhausted" : "invalid checker input graph");
+                    driver_fatal = true;
                 }
             }
             else
             {
-                if (!check_driver_reports(checking, parser, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
+                if (!check_driver_reports(checking, recovered, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
                                           original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, scratch) ||
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                    driver_fatal = true;
                 }
                 original_pragmas_printed = true;
             }
@@ -4149,18 +4331,24 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
-                check_driver_remaining_pragmas(parser, pp, &original_pragmas, &fp, &visibility, quiet);
-                if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
+                check_driver_remaining_pragmas(recovered, pp, &original_pragmas, &fp, &visibility, quiet);
+                if (!check_driver_warning_events_at(recovered, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
+                    driver_fatal = true;
                 }
             }
             if (!pp->fatal)
             {
                 // The checked view's reports covered its tokens: the original ones of a repair, a prefix's whole.
                 const uint32_t checked_end = !ready || !prefix_only ? 0 : repairing ? repair.original_end : checking->tokens.count;
-                check_driver_unparsed_literals(parser, pp, checked_end, scratch);
-                parse_print_diagnostics(parser, pp);
+                check_driver_unparsed_literals(recovered, pp, checked_end, scratch);
+                // The parse's errors as clang's recovery reads on past a missing `;` (check_prefix_resume): the original's
+                // places, with what its own recovery skipped.
+                Parser printed = *parser;
+                printed.diagnostics = recovered != parser ? resumed.diagnostics : parser->diagnostics;
+                printed.diagnostic_count = recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count;
+                parse_print_diagnostics(&printed, pp);
             }
             result = 1;
         }
@@ -4169,7 +4357,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
-    result = pp->errors != 0 ? 1 : result;
+    result = pp->errors != 0 || driver_fatal ? 1 : result;
+    if (fatal != NULL)
+    {
+        *fatal = pp->fatal || driver_fatal;
+    }
     if (result == 0 && options->dependencies.enabled)
     {
         result = pp_dependencies(pp, path, output, dependency_arena, dependency, errors) ? 0 : 1;
@@ -4214,10 +4406,14 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
+    // The deferred bodies' state (#151), which the process's commands take in turn too: its lanes' memory stays in place
+    // from one command's unit to the next, and the unit's input points into it until the unit is done.
+    static CheckDeferred deferred;
     const bool interned = intern_initialize(&identifiers);
     DependencyOutput dependency = { 0 };
     int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena);
+                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
+                                  run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
@@ -4225,6 +4421,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     if (run->release)
     {
         intern_release(&identifiers);
+        check_deferred_release(&deferred);
     }
     return result;
 }
@@ -4335,6 +4532,14 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
+// The driver's lanes (check_driver_command): 98 KB, almost all of it the lanes' arenas (CheckProgramLanes.arenas), in .bss
+// as the unit's preprocessor and parser are (check_driver_one_unit), so that a compile touches only the pages it uses: a
+// zeroed local touched them all, 24 pages of stack, each a page fault, even for an empty file's -fsyntax-only (#652). A
+// command after the process's first zeroes them again; only the tests' reusable routes run more than one, and only lane
+// 0 runs the command (run_check_command_mode).
+static CheckProgramLanes check_driver_lanes;
+static bool check_driver_lanes_taken;
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
@@ -4396,6 +4601,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool warning_errors = false;
     int32_t return_error = 0;
     bool lazy_system_headers = false;
+    // --deferred-bodies reads a unit's function bodies apart, on the command's lanes (#151); --no-deferred-bodies, the
+    // default, reads them in source order.
+    bool deferred_bodies = false;
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
     bool lower_all = false;
@@ -4444,20 +4652,27 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
     // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
     // (check_driver_units).
-    CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
+    // The command's lanes, in .bss (check_driver_lanes): a command after the process's first zeroes them again.
+    CheckProgramLanes* const lanes = &check_driver_lanes;
+    if (check_driver_lanes_taken)
+    {
+        memset(lanes, 0, sizeof(*lanes));
+    }
+    check_driver_lanes_taken = true;
+    lanes->lanes = check_driver_cpus();
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
-    lanes.budget = &worker_budget;
+    lanes->budget = &worker_budget;
     // A test's hook, in every build (#673): the jobserver tokens a growing team's lane 0 supplies itself after its first
     // part (CheckProgramLanes.grow_supply), read only when it is set.
     const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
-    lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
+    lanes->grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
     // And another (#673): "LANE,MICROSECONDS", a lane (its index plus one) that sleeps that long at each part it takes,
     // before each part's lowering in a growing team (CheckProgramLanes.slow_lane), read only when it is set.
     const char* slow_lane = getenv("BUSTER_TEST_SLOW_LANE");
     char* slow_end = NULL;
-    lanes.slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
-    lanes.slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
+    lanes->slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
+    lanes->slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
     bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
@@ -4636,11 +4851,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (strcmp(arguments[i], "--tier1") == 0)
         {
-            lanes.tier1 = true;
+            lanes->tier1 = true;
         }
         else if (strcmp(arguments[i], "--tier1-strict") == 0)
         {
-            lanes.tier1_strict = true;
+            lanes->tier1_strict = true;
         }
         else if (strcmp(arguments[i], "--tier1-report") == 0)
         {
@@ -4648,12 +4863,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (strcmp(arguments[i], "--tier1-refusals") == 0)
         {
-            lanes.tier1_refusals = stderr;
+            lanes->tier1_refusals = stderr;
         }
         else if (strcmp(arguments[i], "--helper-report") == 0)
         {
             helper_report = true;
-            lanes.helper_reporting = true;
+            lanes->helper_reporting = true;
         }
         else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
         {
@@ -4665,20 +4880,24 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 fprintf(stderr, "error: --helper-forms= takes a comma-separated list of fence, atomic-access, atomic-rmw and asm, or all\n");
             }
             invalid_helper_forms |= forms == 0;
-            lanes.helper_forms = forms;
+            lanes->helper_forms = forms;
         }
         else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
         {
-            lanes.tier1_no_rematerialize = true;
+            lanes->tier1_no_rematerialize = true;
+        }
+        else if (strcmp(arguments[i], "--tier1-no-inline") == 0)
+        {
+            lanes->tier1_no_inline = true;
         }
         else if (strcmp(arguments[i], "--tier1-gvn") == 0)
         {
-            lanes.tier1_gvn = true;
+            lanes->tier1_gvn = true;
             tier1_gvn = true;
         }
         else if (strcmp(arguments[i], "--tier1-no-lifetimes") == 0)
         {
-            lanes.tier1_no_lifetimes = true;
+            lanes->tier1_no_lifetimes = true;
         }
         else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
         {
@@ -4686,8 +4905,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             char* end = 0;
             const unsigned long lane_count = value != 0 ? strtoul(value, &end, 10) : 0;
             invalid_lanes |= value == 0 || end == value || *end != 0 || lane_count == 0 || lane_count > BUSTER_CHECK_EMIT_MAX_LANES;
-            lanes.lanes = (uint32_t)lane_count;
-            lanes.every_lane = true;
+            lanes->lanes = (uint32_t)lane_count;
+            lanes->every_lane = true;
         }
         else if (strcmp(arguments[i], "--worker-budget") == 0 || strncmp(arguments[i], "--worker-budget=", 16) == 0)
         {
@@ -4700,6 +4919,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
             lazy_system_headers = true;
+        }
+        else if (strcmp(arguments[i], "--deferred-bodies") == 0 || strcmp(arguments[i], "--no-deferred-bodies") == 0)
+        {
+            deferred_bodies = arguments[i][2] == 'd';
         }
         else if (strcmp(arguments[i], "--lower-all") == 0)
         {
@@ -4902,6 +5125,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .quiet = quiet,
         .lazy_system_headers = lazy_system_headers,
         .lower_all = lower_all,
+        // The scalar path keeps source order's reader, the twin the deferred one is checked against.
+        .deferred_bodies = deferred_bodies && !scalar,
         .return_warning = return_warning,
         .warning_errors = warning_errors,
         .return_error = return_error,
@@ -4921,15 +5146,16 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .source_count = source_count,
         .mixed_inputs = mixed_inputs,
         .assembly_intel = assembly_intel,
-        .tier1 = lanes.tier1,
-        .tier1_strict = lanes.tier1_strict,
-        .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
-        .tier1_gvn = lanes.tier1_gvn,
-        .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
-        .tier1_report = &lanes.tier1_report,
-        .tier1_refusals = lanes.tier1_refusals,
-        .helper_report = helper_report ? &lanes.helper_report : NULL,
-        .helper_forms = lanes.helper_forms,
+        .tier1 = lanes->tier1,
+        .tier1_strict = lanes->tier1_strict,
+        .tier1_no_rematerialize = lanes->tier1_no_rematerialize,
+        .tier1_gvn = lanes->tier1_gvn,
+        .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
+        .tier1_no_inline = lanes->tier1_no_inline,
+        .tier1_report = &lanes->tier1_report,
+        .tier1_refusals = lanes->tier1_refusals,
+        .helper_report = helper_report ? &lanes->helper_report : NULL,
+        .helper_forms = lanes->helper_forms,
     };
     if (worker_budget.dry_run)
     {
@@ -4959,7 +5185,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
@@ -4973,10 +5199,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
-    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
+    else if ((lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize || tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline) &&
+             !lanes->tier1)
     {
-        fprintf(stderr, "error: %s needs --tier1\n", lanes.tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
-                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" : "--tier1-no-lifetimes");
+        fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
+                                                    lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
+                                                    lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : "--tier1-no-inline");
     }
     else
     {
@@ -4992,7 +5220,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
-        if (lanes.tier1 && !check_tier1_ready)
+        if (lanes->tier1 && !check_tier1_ready)
         {
             check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
         }
@@ -5003,7 +5231,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             .inputs = inputs,
             .input_count = input_count,
             .path = path,
-            .lanes = &lanes,
+            .lanes = lanes,
             .stage_clock = stage_clock,
             .pp_ticks = pp_ticks,
             .arena = &arena,
@@ -5015,11 +5243,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         result = check_driver_run(&run, announced);
         if (tier1_report)
         {
-            check_tier1_print_report(stderr, &lanes.tier1_report);
+            check_tier1_print_report(stderr, &lanes->tier1_report);
         }
         if (helper_report)
         {
-            check_helper_print_report(stderr, &lanes.helper_report);
+            check_helper_print_report(stderr, &lanes->helper_report);
         }
     }
     if (release)
@@ -5037,7 +5265,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
                                worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
             fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tgrown=%u\tworked=%u\tfallback=%u\n", mode,
-                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, lanes.grown, lanes.worked, (uint32_t)lanes.again);
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes->active, lanes->grown, lanes->worked, (uint32_t)lanes->again);
         }
     }
     worker_budget_close(&worker_budget);

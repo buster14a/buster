@@ -23,12 +23,19 @@ With one source file the driver runs as before, byte for byte. With several:
   (`check_driver_executable`). `-l` and `-L` work as for one unit.
 - **`-g`** gives the executable each unit's DWARF ("The DWARF" below), and
   `-c -g` each unit's object its own.
-- `--dump-typed`, `--dump-static` and `--id-order` take one source file.
+- `--dump-typed` and `--dump-static` take one source file.
+- `--id-order N` primes each unit's lane-owned intern table with unused and
+  reordered names before its real compile, as in the single-file driver.
+  Objects, executables and diagnostics must match an unprimed command.
 
 Every unit is compiled whatever the others do, as clang compiles them: a unit
 with errors writes no object, and the others write theirs; any unit's error
 makes the exit status 1 and leaves no executable. The diagnostics come in the
-command line's order, each unit's exactly as it alone would print them.
+command line's order, each unit's exactly as it alone would print them, through
+the first unit with a fatal diagnostic. Every unit finishes before publication,
+so a fatal on a fast lane cannot cancel an earlier unit's diagnostics. The
+fatal unit's notes and summary remain attached; later units' buffers are freed
+without printing them.
 
 `src/buster/compiler/c_checker_units.c` is the implementation, and
 `c_checker_driver.c`'s `check_driver_unit` the pipeline each unit runs, the one
@@ -805,13 +812,24 @@ driver as a process, in a directory of its own:
   and lines in their own files, the static functions of one name apart, and
   backtraces across the units; and a third unit's weak function that the
   second's replaces, at its own code (once the checker takes `weak`).
+  The poisoned commands and `-c -g` also pass `--id-order 153`, comparing
+  changed identifier assignments with the original standalone/reference bytes.
 - **Diagnostics:** a unit with a warning, one with an error and a clean one,
   with `-c`, `-fsyntax-only` and into an executable, at every lane count:
   standard error is each unit's alone, in the command line's order; `-c`
   writes the objects of the units without errors only, and the link writes
   nothing.
+- **Fatal prefix (#153):** a slow earlier warning, two fatal units and a later
+  warning, whose source sizes put the later fatal ahead of the earlier one in
+  work order. With a missing nested include and with `-Wfatal-errors`, both
+  paths at 1/2/3/8 lanes, changed IDs and poisoned arenas must reproduce only
+  the first two units' standalone diagnostic groups, notes and summary, for
+  syntax checking, objects and linking. Multi-input `-E` is sequential; its
+  text and diagnostics, with and without markers and through both kernels,
+  must equal the valid units' standalone bytes concatenated in input order,
+  with no macro state leaking between them.
 - **Refusals:** a name two units define, a name none defines, `-c -o`, a dump,
-  `--id-order`, two units of one object's name; and that last one in a child
+  two units of one object's name; and that last one in a child
   whose stack was filled with a mapping's address first, which must exit with
   its message as with a clean stack: a local the driver read before setting
   it would release an arena of that address and unmap the child's code.

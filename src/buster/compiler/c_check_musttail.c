@@ -9,7 +9,9 @@
 //   1. its value is a call: of its expression, parentheses, __extension__ and a selection's (_Generic's,
 //      __builtin_choose_expr's) chosen operand looked through, as Expr::IgnoreParenImplicitAsWritten does, but not a cast
 //      (`return (long)f(x)`) or any other operator; a call of a builtin's, which the checker computes with no call, is
-//      refused as unsupported (clang checks it against the builtin's signature and computes it inline);
+//      refused as unsupported (clang checks it against the builtin's signature and computes it inline), but
+//      __builtin_call_with_static_chain's, whose signature clang's Sema makes of its arguments
+//      (check_musttail_static_chain_rule);
 //   2. both its function and its callee have prototypes (a K&R definition with parameters has its parameters' promoted
 //      types as one, as the checker types it, and clang does it as a caller's; a call through a K&R designator has none);
 //   3. the same calling convention;
@@ -170,10 +172,69 @@ static bool check_musttail_noreturn(const CheckInput* input, const uint32_t* nor
     return object != 0 && object <= input->token_count && noreturns[object] < name;
 }
 
+// A builtin's call's name, which clang's messages give as its callee's: its first child in the tree, the token before its
+// `(`, whose parent is the call's `)` (`close`), searched for back from it to the return.
+static uint32_t check_musttail_builtin_name(const Parser* parser, uint32_t statement, uint32_t close)
+{
+    uint32_t name = BUSTER_CHECK_NONE;
+    for (uint32_t t = close; close < parser->tokens.count && t > statement + 1; t -= 1)
+    {
+        name = parser->tree.parents[t - 1] == close ? t - 1 : name;
+    }
+    return name;
+}
+
+// The rules for a musttail return of __builtin_call_with_static_chain(call, chain) (`builtin`, #148), whose callee is the
+// builtin: clang's BuiltinCallWithStaticChain gives it the type R(R, C), R the call's result and C the chain's after the
+// usual unary conversions (an array's or a function's address), prototyped, not variadic and of the default convention,
+// and no declaration of it is noreturn. So the caller must have a prototype, the default convention and no variadic
+// part, return R and take exactly R and C, as similar types. Its code is then the call's and an ordinary return, not a
+// tail call (check_control_static_chain): clang's code generation emits no musttail for a builtin's call.
+static uint32_t check_musttail_static_chain_rule(const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 const CheckInputMusttail* musttail, uint32_t builtin, bool* resource)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t first = graph->argument_offsets[builtin];
+    const TypeId result = check_stream_type(stream, graph->argument_nodes[first]);
+    const TypeId chain = type_strip_aligned(types, check_stream_type(stream, graph->argument_nodes[first + 1]));
+    const uint8_t chain_kind = type_kind(types, chain);
+    const uint32_t declaration = check_sparse_get(input->body_declarations, musttail->body);
+    const TypeId caller = declaration != BUSTER_CHECK_NONE ? check_musttail_function(types, input->declared_types[declaration]) : 0;
+    const uint8_t caller_flags = caller != 0 ? types->types.flags[type_index(caller)] : 0;
+    uint32_t caller_count = 0;
+    const TypeId* caller_parameters = caller != 0 ? type_parameters(types, caller, &caller_count) : NULL;
+    uint32_t rule = CHECK_MUSTTAIL_SIGNATURE;
+    if (caller == 0 || (caller_flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0)
+    {
+        rule = CHECK_MUSTTAIL_PROTOTYPE;
+    }
+    else if (type_function_abi_kind(types, caller) != TYPE_FUNCTION_ABI_SYSV)
+    {
+        rule = CHECK_MUSTTAIL_CONVENTION;
+    }
+    else if ((caller_flags & BUSTER_TYPE_FLAG_VARIADIC) != 0)
+    {
+        rule = CHECK_MUSTTAIL_VARIADIC;
+    }
+    else if (caller_count == 2 && check_musttail_similar(types, type_return(types, caller), result, resource) &&
+             check_musttail_similar(types, result, caller_parameters[0], resource))
+    {
+        // The chain's type after its conversion: an array's element's address, or a function's, which the caller's
+        // parameter must be a pointer to, as similar types; a pointer as it is.
+        const TypeId parameter = type_strip_aligned(types, caller_parameters[1]);
+        const bool decays = type_kind_is_array(chain_kind) || chain_kind == BUSTER_TYPE_KIND_FUNCTION;
+        const TypeId pointee = type_kind_is_array(chain_kind) ? type_element(types, chain) : chain;
+        const bool similar = decays ? type_kind(types, parameter) == BUSTER_TYPE_KIND_POINTER && check_musttail_similar(types, pointee, type_element(types, parameter), resource) :
+                                      check_musttail_similar(types, chain, parameter, resource);
+        rule = similar ? CHECK_MUSTTAIL_SCOPE : CHECK_MUSTTAIL_SIGNATURE;
+    }
+    return rule;
+}
+
 // The first of the six rules that the musttail return `musttail` breaks (the file's comment), or the count for none, with
 // the callee's name for the messages that name it.
-static uint32_t check_musttail_rule(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const uint32_t* noreturns,
-                                    const CheckInputMusttail* musttail, uint32_t* callee_name, bool* resource)
+static uint32_t check_musttail_rule(const CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types,
+                                    const uint32_t* noreturns, const CheckInputMusttail* musttail, uint32_t* callee_name, bool* resource)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t returned = input->token_nodes[musttail->statement];
@@ -185,7 +246,12 @@ static uint32_t check_musttail_rule(const CheckInput* input, const CheckStream* 
     const CheckOp op = value < graph->count ? graph->ops[value] : CHECK_OP_COUNT;
     uint32_t rule = CHECK_MUSTTAIL_SCOPE;
     *callee_name = BUSTER_CHECK_NONE;
-    if (op != CHECK_OP_CALL)
+    if (op == CHECK_OP_BUILTIN_MISC && graph->members[value] == CBUILTIN_CALL_WITH_STATIC_CHAIN && graph->argument_counts[value] == 2)
+    {
+        rule = check_musttail_static_chain_rule(input, stream, types, musttail, value, resource);
+        *callee_name = rule != CHECK_MUSTTAIL_SCOPE ? check_musttail_builtin_name(parser, musttail->statement, graph->tokens[value]) : BUSTER_CHECK_NONE;
+    }
+    else if (op != CHECK_OP_CALL)
     {
         const bool builtin = op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT ||
                              op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 ||
@@ -259,7 +325,7 @@ static uint64_t check_musttail_collect(const CheckInput* input, const Parser* pa
     {
         const CheckInputMusttail* musttail = input->musttails + m;
         uint32_t callee = BUSTER_CHECK_NONE;
-        const uint32_t rule = check_musttail_rule(input, stream, types, noreturns, musttail, &callee, resource);
+        const uint32_t rule = check_musttail_rule(input, parser, stream, types, noreturns, musttail, &callee, resource);
         const uint32_t end = check_musttail_terminator(parser, musttail->statement);
         if (rule != CHECK_MUSTTAIL_SCOPE)
         {

@@ -86,9 +86,11 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         const char* const compile_main[] = { "-c", "main.c", "-o", "main.o", NULL };
         const char* const compile_helper[] = { "-c", "helper.c", "-o", "helper.o", NULL };
         const char* const compile_unknown[] = { "-c", "helper.c", "-o", "helper.blob", NULL };
+        const char* const compile_dash_name[] = { "-c", "helper.c", "-o", "-E", NULL };
         cc_mixed_command(&test, "Buster main object", compile_main, NULL, false);
         cc_mixed_command(&test, "Buster helper object", compile_helper, NULL, false);
         cc_mixed_command(&test, "Buster object with an unknown suffix", compile_unknown, NULL, false);
+        cc_mixed_command(&test, "Buster object named like an option", compile_dash_name, NULL, false);
         const char* const cases[][20] = {
             { "main.c", "helper.o", "-o", "program" },
             { "main.o", "helper.o", "-o", "program" },
@@ -107,6 +109,7 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
             { "main.c", "-xassembler-with-cpp", "preprocessed.txt", "-DBASE=40", "-o", "program" },
             { "-x", "assembler", "raw.txt", "-xnone", "main.c", "-o", "program" },
             { "main.c", "helper.blob", "-o", "program" },
+            { "-o", "program", "--", "main.o", "-E" },
             { "main.c", "./libanswer.so", "-Wl,-rpath,$ORIGIN", "-o", "program" },
             { "main.o", "-L.", "-l:libanswer.a", "-o", "program" },
             { "-static", "main.c", "helper.o", "-o", "program" },
