@@ -56,9 +56,8 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
-// The text of the string literal at parser token `token` as written, between its quotes (past an encoding prefix), in
-// `scratch`; empty for none.
-static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+// A string token's complete spelling in scratch, including its quotes and encoding prefix.
+static String8 check_warning_string_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
     String8 result = { 0 };
     const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : UINT32_MAX;
@@ -69,15 +68,33 @@ static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp,
         uint8_t* buffer = capacity < (UINT64_C(1) << 20) ? arena_push(scratch, capacity, 1) : NULL;
         const uint8_t* bytes = NULL;
         const uint32_t length = buffer != NULL ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
-        uint32_t open = 0;
-        while (open < length && bytes[open] != '"')
-        {
-            open += 1;
-        }
-        const bool quoted = open + 1 < length && bytes[length - 1] == '"';
-        result = quoted ? (String8){ (char*)bytes + open + 1, length - open - 2 } : result;
+        result = (String8){ (char*)bytes, length };
     }
     return result;
+}
+
+// The text of the string literal as written, between its quotes (past an encoding prefix); empty for none.
+static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+    uint64_t open = 0;
+    while (open < spelling.length && spelling.pointer[open] != '"')
+    {
+        open += 1;
+    }
+    const bool quoted = open + 1 < spelling.length && spelling.pointer[spelling.length - 1] == '"';
+    return quoted ? (String8){ spelling.pointer + open + 1, spelling.length - open - 2 } : (String8){ 0 };
+}
+
+// Attribute handlers classify decoded bytes, so their diagnostic excerpts must use the same bytes. An escape's
+// source width is unrelated to the offsets retained in CHECK_WARNING_EVENT_TARGET_UNSUPPORTED's payload.
+static String8 check_warning_string_value(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+    const CheckStringPart part = { .bytes = (const uint8_t*)spelling.pointer, .length = spelling.length };
+    const CheckStringLiteral decoded = spelling.length != 0 ? check_literal_strings(&part, 1, pp->options.language.standard >= 2023, scratch) :
+                                                             (CheckStringLiteral){ 0 };
+    return decoded.valid && decoded.byte_count != 0 ? (String8){ (char*)decoded.bytes, decoded.byte_count - 1 } : (String8){ 0 };
 }
 
 // One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
@@ -602,6 +619,38 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         attribute.pointer, ending);
             break;
         }
+        case CHECK_WARNING_EVENT_THREAD_CAPABILITY:
+        case CHECK_WARNING_EVENT_THREAD_ARGUMENT:
+        case CHECK_WARNING_EVENT_THREAD_METHOD:
+        case CHECK_WARNING_EVENT_THREAD_POINTER:
+        case CHECK_WARNING_EVENT_THREAD_CONTEXT:
+        case CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER:
+        case CHECK_WARNING_EVENT_THREAD_PARAMETER:
+        {
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const bool typed = event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER;
+            const String8 type = typed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->token) : (String8){ "", 0 };
+            const char* suffix = event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY ?
+                                 "attribute requires arguments whose type is annotated with 'capability' attribute; type here is " :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ? "only applies to pointer types; type here is " :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_METHOD ?
+                                 "attribute without capability arguments can only be applied to non-static methods of a class" :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_PARAMETER ?
+                                 "attribute applies to function parameters only if their type is a reference to a 'scoped_lockable'-annotated type" :
+                                 event->kind == CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER ?
+                                 (payload->token != 0 ? "attribute on a field requires the field to be of function pointer type" :
+                                                       "attribute on a variable requires the variable to be of function pointer type") :
+                                 "attribute can only be applied in a context annotated with 'capability' attribute";
+            result = event->kind == CHECK_WARNING_EVENT_THREAD_ARGUMENT ?
+                     check_warning_text(scratch, "ignoring '%.*s%s%.*s' attribute because its argument is invalid", (int)scope.length, scope.pointer,
+                                        scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                     check_warning_text(scratch, "'%.*s%s%.*s' %s%.*s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                        (int)attribute.length, attribute.pointer, suffix, (int)type.length, type.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
         {
             static const char* const keywords[] = { "struct", "union", "enum" };
@@ -621,6 +670,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                           check_warning_text(scratch, "'%.*s' is unavailable", (int)name.length, name.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_NODEREF_PLACEMENT:
+            result = "'noderef' can only be used on an array or pointer type";
+            break;
+        case CHECK_WARNING_EVENT_NODEREF_DEREFERENCE:
+            result = name.length == 0 ? "dereferencing expression marked as 'noderef'" :
+                     check_warning_text(scratch, "dereferencing %.*s; was declared with a 'noderef' type", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_NODEREF_CONVERSION:
+            result = "casting to dereferenceable pointer removes 'noderef' attribute";
+            break;
         case CHECK_WARNING_EVENT_DEPRECATED_USE:
         {
             // The message is the attribute's string as written, without its quotes or prefix. An anonymous tag's name is its
@@ -729,7 +788,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                  token += 1)
             {
                 const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING;
-                const String8 text = string ? check_warning_string_text(parser, pp, token, scratch) :
+                const String8 text = string ? (target ? check_warning_string_value(parser, pp, token, scratch) : check_warning_string_text(parser, pp, token, scratch)) :
                                               check_warning_attribute_normalized(check_driver_warning_name(pp, parser->tokens.names[token]));
                 const uint32_t copied = text.length < sizeof(argument) - 1 - length ? (uint32_t)text.length : (uint32_t)(sizeof(argument) - 1 - length);
                 memcpy(argument + length, text.pointer, copied);
@@ -912,6 +971,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_UNAVAILABLE_HERE:
             result = check_warning_text(scratch, "'%.*s' has been explicitly marked unavailable here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_NODEREF_DECLARATION:
+            result = check_warning_text(scratch, "%.*s declared here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_SPAN_REASON:
         {
             static const char* const places[] = { "", "1st", "2nd" };
@@ -955,6 +1017,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                    event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
                    event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
                    event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT ||
+                   event->kind == CHECK_WARNING_EVENT_THREAD_CAPABILITY || event->kind == CHECK_WARNING_EVENT_THREAD_POINTER ||
                    (event->kind == CHECK_WARNING_EVENT_DEPRECATED_USE && event->note_count != 0 && event->note_first < view->note_count &&
                     view->notes[event->note_first].payload.data == BUSTER_CHECK_DEPRECATED_TYPE_NAME));
     }

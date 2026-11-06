@@ -92,6 +92,16 @@ requirements. [Command index](README.md).
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
+  compares original GNU `noderef` placement, propagation, conversion,
+  address-cancellation and unevaluated-expression fixtures with pinned Clang
+  in GNU C17 and C23. It checks complete diagnostic lines and notes through
+  scalar, ordinary and poisoned deferred-reader paths, plus `-Werror=noderef`.
+  Aggregate cases cover arrays, nested designators, anonymous records,
+  overlapping union alternatives, atomic pointer elements, compound literals
+  and GNU range initialization, including preservation and removal of marks.
+  Each body has at most one warned dereference because Clang's delayed warning
+  order for multiple accesses is unstable across invocations.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,

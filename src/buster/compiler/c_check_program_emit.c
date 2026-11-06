@@ -2846,6 +2846,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
+                    if (symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SELECTANY)
+                    {
+                        // Weak binding alone cannot give a selectany definition COMDAT's section and relocation
+                        // selection. Keep syntax checking independent of this object-writer boundary.
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "a 'selectany' definition requiring ELF COMDAT section groups";
+                        result->token = attribute->first;
+                        valid = false;
+                    }
                     // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
                     // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
                     // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).
@@ -4136,7 +4145,11 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             const bool restricted = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
                                     check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
                                     check_program_section_prefix(name, ".llvm.");
-            const uint8_t placed = class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
+            const bool loader = check_input_attribute_of(check_input_attributes_at(program->input, placement->token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+            // LLVM's undefined initializer has read-only section kind when explicitly placed. Named BSS/TLS families
+            // still impose their own kind; ordinary loader definitions without a placement keep their default BSS.
+            const uint8_t placed = loader && !bss && !tdata && !tbss && class == BUSTER_LINK_CLASS_BSS ? BUSTER_LINK_CLASS_RODATA :
+                                   class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
             const bool fits = restricted ? false :
                               bss ? class == BUSTER_LINK_CLASS_BSS :
                               tdata ? class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS :
