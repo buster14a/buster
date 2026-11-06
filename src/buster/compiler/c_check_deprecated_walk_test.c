@@ -81,7 +81,9 @@ struct CheckTestDeprecatedWalk
     Arena arena;
     Arena scratch;
     CheckInput input;
+    // Whether the source was set up and read, and the reading's result: false where it has an error (an unavailable use's).
     bool read;
+    bool checked;
 };
 
 static void check_test_deprecated_walk_read(CheckTestDeprecatedWalk* walk, const char* source, uint32_t length, bool scalar)
@@ -94,8 +96,9 @@ static void check_test_deprecated_walk_read(CheckTestDeprecatedWalk* walk, const
                        pp_initialize(&walk->pp, &options, &walk->identifiers) && parse_initialize(&walk->parser, &parse_options, options.language) &&
                        check_test_types_open(&walk->types) && pp_run_source(&walk->pp, "deprecated-walk.c", (const uint8_t*)source, length) &&
                        parse_translation_unit(&walk->parser, &walk->pp);
-    walk->read = ready && check_input_compile(&walk->input, &walk->parser, &walk->pp, &walk->types.table, &walk->arena, &walk->scratch, true,
-                                              walk->parser.tokens.count, NULL);
+    walk->checked = ready && check_input_compile(&walk->input, &walk->parser, &walk->pp, &walk->types.table, &walk->arena, &walk->scratch, true,
+                                                 walk->parser.tokens.count, NULL);
+    walk->read = ready && !walk->input.resource;
 }
 
 static void check_test_deprecated_walk_release(CheckTestDeprecatedWalk* walk)
@@ -165,7 +168,7 @@ static __attribute__((noinline)) void check_test_deprecated_walks(CheckTest* tes
             if (walks[0].read && walks[1].read)
             {
                 snprintf(description, sizeof(description), "deprecated walks: source %u after %u tokens, the vector walk gives the scalar walk's diagnostics", s, shift);
-                check_test_expect(test, check_test_deprecated_walk_equal(&walks[0].input, &walks[1].input, &uses), description);
+                check_test_expect(test, walks[0].checked == walks[1].checked && check_test_deprecated_walk_equal(&walks[0].input, &walks[1].input, &uses), description);
                 compared += 1;
             }
             for (uint32_t path = 0; path < 2; path += 1)
