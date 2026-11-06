@@ -40,10 +40,12 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
     "parser-batch",
 };
 
+// The incomplete array type a use inside its declaration's initializer sees, or 0: the type is read first, which most
+// declarations haven't, so that a use reads the initializer's end alone where there is one (#1489).
 static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
 {
-    return reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count &&
-           token < check_sparse_get(reader->output->initializer_ends, declaration) ? reader->incomplete_array_types[declaration] : 0;
+    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? reader->incomplete_array_types[declaration] : 0;
+    return incomplete != 0 && token < check_sparse_get(reader->output->initializer_ends, declaration) ? incomplete : 0;
 }
 
 // Whether a declared type is const-qualified, through an array's element type as Clang's -Wunused-const-variable sees it.
