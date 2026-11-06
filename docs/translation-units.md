@@ -583,10 +583,14 @@ jobs run with base pages.
 
 ### Huge pages on a busy host (#672)
 
-Those measurements ran one compile at a time. With the other cores busy, it
-goes the other way again. Independent `-c` compiles of the frozen
-`sqlite3.c` on the 9700X, `--lanes 1`, one process pinned to each physical
-core, at main `ec5f0f6b`, medians of 5 rotating rounds:
+Those measurements ran one compile at a time. With the other cores busy, the
+observations go the other way. [The
+record](https://github.com/buster14a/buster-performance/tree/bc07aad4fd01b54bf7a00c332e29b21a939551a0/docs/measurements/page-policy-672-2026-11-06)
+is exploratory: each script held the 9700X's lock around a series of runs, the
+rounds ran in a fixed order, unpaired, and their processes weren't checked one
+by one. Its medians are observations, not established differences.
+Independent `-c` compiles of the frozen `sqlite3.c`, `--lanes 1`, one process
+pinned to each physical core, at main `ec5f0f6b`, 5 rounds:
 
 | compiles at once | huge pages | base pages (`BUSTER_HUGE_PAGES=0`) |
 | ---: | ---: | ---: |
@@ -595,38 +599,42 @@ core, at main `ec5f0f6b`, medians of 5 rotating rounds:
 | 4 | 184.0 MB/s | 184.4 MB/s |
 | 8 | 233.2 MB/s | 269.7 MB/s |
 
-On 8 compiles, base pages take 15% fewer user cycles per compile and 6%
-fewer kernel cycles, though they fault 11 times as often. The 8 compiles
-fill the memory's bandwidth (#672's records), and two effects fit the
-counters; the counters don't separate them:
+Over one round of 8, `perf stat -a` counted 15% fewer user cycles and 6%
+fewer kernel cycles for base pages. These counts are the whole host's. One
+compile alone faults 11 times as often in base pages. Two explanations fit,
+and nothing measured separates or establishes them:
 - **Clearing.** A huge page's first touch clears all 2 MB at once, of which
-  the arena may use little: one compile peaks at 294 MB in huge pages and at
-  225 MB in base pages.
+  the arena may use little. One compile alone peaks at 294 MB in huge pages
+  and at 225 MB in base pages.
 - **Locality.** The other cores' traffic can evict what was cleared before
   the arena writes it. A base page is cleared as it is first written.
 
 So `arena_page_policy` also turns huge pages off where the host is busy when
 the process starts (`arena_host_busy`): its tasks runnable then
 (`/proc/loadavg`), this process's among them, are two or more and at least
-a quarter of its CPUs online, four of the 9700X's 15. A compile alone, as
-the 9700X job's `measure-compile` runs it, keeps them. A process started
-with them off keeps them off, and `BUSTER_HUGE_PAGES` decides instead where
-it is set. `--time-stages` reports `busy` for this case.
+a quarter of its CPUs online. That is four of the 9700X's 15, where the two
+modes' observed medians were closest. A compile alone, as the 9700X job's
+`measure-compile` runs it, keeps them. A process started with them off keeps
+them off, and `BUSTER_HUGE_PAGES` decides instead where it is set.
+`--time-stages` reports `busy` for this case.
 
-With it, against main, 7 rotating rounds ([the
-record](https://github.com/buster14a/buster-performance/tree/29f4551fec87b04eaf47eb286e2bcdae66810c63/docs/measurements/page-policy-672-2026-11-06),
-`final/`):
+An experiment build of this policy was measured against main, 7 rounds in a
+fixed order (the record's `final/`). It is not this change's final
+executable. The record has its worktree's source and that tree's diff to
+this change, both captured after the runs.
 
-| compiles at once | main | this policy |
+| compiles at once | main | the experiment build |
 | ---: | ---: | ---: |
 | 1 | 67.2 MB/s | 67.4 MB/s |
 | 2 | 118.2 MB/s | 118.0 MB/s |
 | 4 | 184.9 MB/s | 184.1 MB/s |
 | 8 | 234.0 MB/s | 270.3 MB/s |
 
-Each of the 8 compiles of a round found the host busy. A fixed floor of base
-pages in front of every arena, 8 or 32 MB, did neither: it cost a compile
-alone 6% to 8% and gained 4% on 8.
+- **The decision.** In the one round of 8 that recorded it, each process
+  reported `busy`.
+- **Fixed floors.** A floor of base pages in front of every arena, 8 or
+  32 MB, had medians 6.5% to 8.7% above main's alone and 3.9% to 4.6% below
+  main's at 8.
 
 ## The link
 

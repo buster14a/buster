@@ -715,13 +715,13 @@ static uint64_t arena_loadavg_runnable(const char* text, uint64_t length)
     return runnable;
 }
 
-// Whether the host is busy: other processes run beside this one on enough of its cores that their memory traffic, not
-// their faults, bounds what each does (#672). Independent compiles of the frozen sqlite3.c on the 9700X, one per core
-// (8 cores, 15 CPUs online): on 8 they ran 15.6% faster with base pages than with huge pages (269.7 against 233.2 MB/s
-// of source; 15% fewer user cycles, 6% fewer kernel cycles though 11 times the faults), as fast on 4, and slower on 2
-// and 1 (11% and 16%). A huge page's first touch clears 2 MB at once, which an arena may use little of, and which the
-// other cores' traffic can evict before the arena writes it; a base page is cleared as it is first written. Reads two
-// small files, the second only where more than this process runs.
+// Whether the host is busy: other processes run beside this one on enough of its cores that their memory traffic, more
+// than their faults, may bound what each does (#672). In that issue's exploratory record (unpaired rounds in a fixed
+// order), independent compiles of the frozen sqlite3.c on the 9700X, one per core (8 cores, 15 CPUs online), had
+// observed medians of 269.7 MB/s of source with base pages against 233.2 with huge pages on 8, about the same on 4,
+// and lower on 2 and 1 (104.8 against 117.8, 56.4 against 67.0). A huge page's first touch clears 2 MB at once, which
+// an arena may use little of, and which the other cores' traffic can evict before the arena writes it; a base page is
+// cleared as it is first written. Reads two small files, the second only where more than this process runs.
 static bool arena_host_busy(void)
 {
     bool result = false;
@@ -1040,8 +1040,8 @@ static void arena_poison(Arena* arena, uint8_t value)
 #define BUSTER_SCRATCH_ARENA_CAPACITY (64ull << 30)
 // The base pages each starts with (#672). A thread's temporaries are mostly a few kilobytes, and its larger ones mostly
 // room of which it touches the start: a large file's windowed preparation (pp_prepare_windows) pushes three arrays of a
-// word for every 64 of its bytes, 3.5 MB for sqlite3.c's 9.5 MB, and touches each one's start. In huge pages those took
-// two, 4 MB; in base pages the C driver's scratch holds 1 MB at sqlite3.c's peak.
+// word for every 64 of its bytes, 3.5 MB for sqlite3.c's 9.5 MB, and touches each one's start. On #672's cloud VM, in
+// huge pages those took two, 4 MB; in base pages the C driver's scratch held 1 MB at sqlite3.c's peak.
 #define BUSTER_SCRATCH_ARENA_SMALL_BYTES (4ull << 20)
 
 typedef struct LaneGroup LaneGroup;
