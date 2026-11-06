@@ -514,19 +514,6 @@ against the measurements above and below:
   bucket's vector. Clang turns `matches != 0 ? id : 0` there into a branch
   around the id's load, and keeps it with `__builtin_unpredictable`; an empty
   `asm` on the loaded id and a mask instead of the `?:` give a `cmov`.
-- Stage 1's plain 32-byte loads at each identifier's start cross a cache line
-  about half the time (#1555). That is 3.6% to 4.6% of the line-crossing
-  loads that `ls_misal_loads.ma64` sampled in `-c` of `sqlite3.c`, about 0.5
-  million. On the 9700X a crossing 32-byte load cost about 0.12 cycles more
-  than an aligned one in a loop that loads bound, and nothing measurable in
-  one they don't. No narrower load avoids the split: a masked load bounded by
-  the identifier's length is counted as crossing, and takes as long, when only
-  its masked-off bytes are past the line. Stage 1 with masked loads alone gave
-  the same objects and as many crossing loads (12.29 million in `-c`, against
-  main's 12.21 million in the same interleaved runs, whose processes range over
-  0.4 to 0.9 million), with stage 1 still 4.2% to 4.5% of the samples. So the
-  plain loads stay
-  ([the record](https://github.com/buster14a/buster-performance/tree/8117a30316b43fd30bbb1ba35a1f5005697d4dc4/docs/measurements/line-crossing-loads-1555-2026-11-06)).
 
 Identifier lengths per occurrence, which set the prefix and the loads' widths:
 

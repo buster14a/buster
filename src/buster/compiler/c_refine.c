@@ -673,10 +673,8 @@ struct RefineHashes
 // ascend), as all but a source's last few do; else with masked loads. bzhi makes the masks in general registers from the
 // lengths: it keeps every bit for an index (its low byte) of 32 to 255, and fewer for some longer ones, so a masked load
 // never reads past its identifier. (The pairs' masks made in vectors, by a byte permute and a compare of each pair's
-// lengths, made sqlite3.c's windowed refinement take 0.01 ms more on the 9700X.) About half of the plain loads cross a
-// cache line, which costs little; a masked load bounded by the length crosses all the same on Zen 5, so they stay plain
-// (#1555, docs/c-refinement.md). A length past BUSTER_INTERN_FAST_LENGTH makes the identifier slow, and its bytes and
-// hash are unused.
+// lengths, made sqlite3.c's windowed refinement take 0.01 ms more on the 9700X.) A length past BUSTER_INTERN_FAST_LENGTH
+// makes the identifier slow, and its bytes and hash are unused.
 BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* source, uint64_t length, const uint32_t* starts, const uint32_t* lengths, uint32_t count,
                                      RefineHashes* hashes, const bool trigraphs)
 {

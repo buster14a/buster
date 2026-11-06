@@ -368,13 +368,6 @@ Discarded, measured the same way (C, C++):
 * The corpus concatenated into 256 KB files lexes 1.4% faster: about 130 cycles per file, not worth attacking.
 * A cheaper index for the pair table: every two-operation form tried (c0 + 2c1, 2c0 + c1, c0 ^ c1, ...) collides for
   the 27 pairs.
-* The next characters by a permute rather than the unaligned load (#1555, C only, 2026-11-06). The chunk's vectors are
-  64-byte aligned, so the load one byte in crosses a cache line in every vector: 1.6% to 1.8% of the line-crossing
-  loads (`ls_misal_loads.ma64`) sampled in `-c sqlite3.c`, about 0.2 million. A crossing 64-byte load took about 0.5
-  cycles more than an aligned one in a probe loop on the 9700X. A `vpermt2b` of `raw[j]` and `raw[j + 1]` removes
-  them, but adds 0.08 instructions per byte (3.182 to 3.262), about 5 per vector: -1.3% to -1.7% against a control
-  copy on `sqlite3.c`, the C library corpus and `src`, with and without digit separators
-  ([the record](https://github.com/buster14a/buster-performance/tree/8117a30316b43fd30bbb1ba35a1f5005697d4dc4/docs/measurements/line-crossing-loads-1555-2026-11-06)).
 
 ## Correctness
 
