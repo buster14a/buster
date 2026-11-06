@@ -2641,8 +2641,8 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
 
 
 // Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
-// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT) and
-// no_caller_saved_registers (a calling convention), which stay refused by name;
+// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, except selectany (handled by its
+// explicit rule) and no_caller_saved_registers (register-preservation semantics not implemented here);
 // and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
 // (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
 // uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency; the

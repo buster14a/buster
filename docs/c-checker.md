@@ -5387,8 +5387,8 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
 - **Differences left.**
   - An attribute clang knows that the checker neither has a rule for nor takes
     generically (the next section's "Attributes without a rule") is refused by
-    name before its subject is checked: `int v __attribute__((selectany));` is
-    refused, where clang takes it.
+    name before its subject is checked. The remaining handler and ABI
+    boundaries are listed there; `selectany` has its own rule.
   - The checker stops at a declaration's first error. So a later
     declaration's warnings, which clang gives too, are missing after an error
     row's error (`int e __attribute__((error("x")));`), as after any other
@@ -5951,10 +5951,16 @@ arguments against the function. The checker now gives these as clang does.
   first token. The checker stops at a declaration's first attribute error,
   where clang goes on to the next declaration's.
 
-  The rest stay refused by name: `selectany` (a COMDAT),
-  `no_caller_saved_registers` (a calling convention), and the attributes
-  whose handlers clang has its own (`pass_object_size`, `ms_struct`,
-  `interrupt` and others).
+  `selectany` has an explicit rule for its arguments, subject and external
+  linkage, so `int v __attribute__((selectany));` is accepted by the checker.
+  This rule does not supply ELF COMDAT emission or duplicate-definition
+  selection; those are tracked separately in
+  [#1458](https://github.com/buster14a/buster/pull/1458).
+
+  The rest stay refused by name: `no_caller_saved_registers` (register
+  preservation), and the attributes whose handlers clang has its own
+  (`pass_object_size`, `ms_struct`, `interrupt` and others). Recognizing their
+  names does not supply those handlers or their ABI effects.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -6252,17 +6258,18 @@ arguments against the function. The checker now gives these as clang does.
   parameter annotations advance in source order together. A body's annotated
   record members request source-order replay before publishing member indexes;
   other body shadows remain immutable in the deferred reader's retained arenas.
+- **C23 type placement.** A list after the declaration specifiers applies to
+  their base type before the declarator is built. Thus
+  `void [[gnu::ms_abi]] f(void);` warns "'ms_abi' only applies to function
+  types; type here is 'void'" and ignores the attribute. A pointer's `_Atomic`
+  qualifier is consumed before checking a following list, so
+  `int * _Atomic [[gnu::unused]] p` gives "an attribute list cannot appear
+  here".
 - **Differences left.**
-  - A C23 function type's attribute after the specifiers
-    (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
-    it to the specifiers' type and warns "'ms_abi' only applies to function
-    types; type here is 'void'".
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
     recovery errors and their notes (a first error's "to match this '('" is
     the parser's: `docs/c-parser.md`).
-  - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
-    "an attribute list cannot appear here".
   - A function definition's attribute whose argument count is wrong
     (`regparm`, `pcs`) is the count's error alone: clang's parser's
     `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
