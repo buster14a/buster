@@ -1039,6 +1039,7 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(EXPECTED_VERSION, "expected a version of the form 'major[.minor[.subminor]]'") \
     X(EXPECTED_PARAMETER, "expected parameter declarator") \
     X(EXPECTED_ASM_STRING, "expected string literal in 'asm'") \
+    X(EXPECTED_ATTRIBUTE_STRING, "expected string literal as argument of '%s' attribute") \
     X(EXPECTED_ASM_QUALIFIER, "expected 'volatile', 'inline', 'goto', or '('") \
     X(DUPLICATE_ASM_VOLATILE, "duplicate asm qualifier 'volatile'") \
     X(DUPLICATE_ASM_INLINE, "duplicate asm qualifier 'inline'") \
@@ -3737,6 +3738,22 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
             f -= 1;
         }
         parse_scalar_unexpected(parser, i, &parser->frames[f]);
+        // Clang consumes a stray declarator name in an attribute's sizeof/alignof type and still handles the outer
+        // attribute. Retain the original error and opener note, and let the diagnostic-only view drop this one name.
+        // No synthesized operand or type is introduced: the complete type and its original ')' remain in the view.
+        bool attribute = false;
+        for (uint32_t outer = f; !attribute && outer > 0; outer -= 1)
+        {
+            const ParseFrame* parent = parser->frames + outer - 1;
+            attribute = parent->role == PARSE_ROLE_OPEN_CALL && parse_scalar_gnu_attribute_group(parser, parent);
+        }
+        if (attribute && parser->frames[f].role == PARSE_ROLE_OPEN_SIZEOF && parser->kinds[i + 1] == PARSE_KIND_R_PAREN &&
+            parser->error_token == i && parser->error_message == PARSE_MESSAGE_EXPECTED_R_PAREN)
+        {
+            parser->error_resumed = true;
+            parser->error_resume_delete = true;
+            parser->error_resume_end = i + 1;
+        }
     }
     else if (kind == PARSE_KIND_IDENTIFIER)
     {
@@ -4215,6 +4232,83 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
     return result;
 }
 
+// An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
+// ParseAttributeArgsCommon diagnoses that slot before parsing expressions (section(1,), for example). Only this
+// already-failed path consults the shared generated argument/fact rows; ordinary attribute parsing pays no lookup.
+static bool parse_scalar_attribute_string_error(ParseScalar* parser, uint32_t token, const ParseFrame* frame)
+{
+    typedef struct ParseAttributeStrings ParseAttributeStrings;
+    struct ParseAttributeStrings
+    {
+        const char* name;
+        uint32_t flags;
+        uint32_t strings;
+    };
+    static const ParseAttributeStrings rows[] = {
+#define BUSTER_CHECK_ARGUMENTS(name, flags, strings) { name, flags, strings },
+#include "c_check_attribute_arguments.inc"
+#undef BUSTER_CHECK_ARGUMENTS
+    };
+    static const char* const common[] = {
+#define BUSTER_CHECK_SUBJECT_GNU(spelling, subjects, error, message)
+#define BUSTER_CHECK_SUBJECT_C23(spelling, subjects, error, message)
+#define BUSTER_CHECK_FACT_GNU(spelling, flags, minimum, maximum) ((flags) & 0x20u) == 0 ? spelling : NULL,
+#define BUSTER_CHECK_FACT_C23(spelling, flags, minimum, maximum)
+#define BUSTER_CHECK_EXCLUSION(first, second)
+#include "c_check_attribute_subjects.inc"
+#undef BUSTER_CHECK_EXCLUSION
+#undef BUSTER_CHECK_FACT_C23
+#undef BUSTER_CHECK_FACT_GNU
+#undef BUSTER_CHECK_SUBJECT_C23
+#undef BUSTER_CHECK_SUBJECT_GNU
+    };
+    const ParseFrame* arguments = frame;
+    while (arguments > parser->frames && !(arguments->role == PARSE_ROLE_OPEN_CALL && parse_scalar_gnu_attribute_group(parser, arguments)))
+    {
+        arguments -= 1;
+    }
+    const uint32_t name_token = arguments > parser->frames ? arguments->opener - 1 : BUSTER_PARSE_NONE;
+    const IdentId name = name_token != BUSTER_PARSE_NONE ? parser->names[name_token] : 0;
+    const ParseAttributeStrings* row = NULL;
+    for (uint32_t r = 0; name != 0 && row == NULL && r < sizeof(rows) / sizeof(rows[0]); r += 1)
+    {
+        // Variadic/strict identifier lists and type arguments use their own grammar, not string slots.
+        if (rows[r].strings != 0 && (rows[r].flags & 0xeu) == 0 && parse_scalar_attribute_spelled(parser, name, true, rows[r].name))
+        {
+            row = rows + r;
+        }
+    }
+    bool known = false;
+    for (uint32_t r = 0; row != NULL && !known && r < sizeof(common) / sizeof(common[0]); r += 1)
+    {
+        known = common[r] != NULL && parse_scalar_attribute_spelled(parser, name, true, common[r]);
+    }
+    uint32_t first = known ? arguments->opener + 1 : token + 1;
+    bool reported = false;
+    for (uint32_t index = 0; !reported && first <= token; index += 1)
+    {
+        uint32_t end = first;
+        uint32_t depth = 0;
+        while (end < token && !(depth == 0 && (parser->kinds[end] == PARSE_KIND_COMMA || parser->kinds[end] == PARSE_KIND_R_PAREN)))
+        {
+            const uint8_t kind = parser->kinds[end];
+            const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+            const bool close = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+            depth = open ? depth + 1 : close && depth != 0 ? depth - 1 : depth;
+            end += 1;
+        }
+        const bool identifier = index == 0 && (row->flags & 0x1u) != 0 && first + 1 == end && parser->kinds[first] == PARSE_KIND_IDENTIFIER;
+        const bool string = index < 32 && ((row->strings >> index) & 1u) != 0;
+        if (string && !identifier && (first == end || parser->kinds[first] != PARSE_KIND_STRING))
+        {
+            parse_scalar_error_argument(parser, first, PARSE_MESSAGE_EXPECTED_ATTRIBUTE_STRING, BUSTER_PARSE_AT_TOKEN, name_token);
+            reported = true;
+        }
+        first = end + 1;
+    }
+    return reported;
+}
+
 static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
     const uint8_t kind = parser->kinds[i];
@@ -4399,7 +4493,10 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
         {
             at -= 1;
         }
-        parse_scalar_error(parser, at, PARSE_MESSAGE_EXPECTED_EXPRESSION, BUSTER_PARSE_AT_TOKEN);
+        if (!parse_scalar_attribute_string_error(parser, at, frame))
+        {
+            parse_scalar_error(parser, at, PARSE_MESSAGE_EXPECTED_EXPRESSION, BUSTER_PARSE_AT_TOKEN);
+        }
     }
 }
 

@@ -37,6 +37,7 @@
 // the read/modify/write ones', its kind's.
 #define BUSTER_CHECK_PROGRAM_HELPER_X86 (BUSTER_CHECK_PROGRAM_HELPER_FIXED + (uint32_t)BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules) * 16u)
 #define BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES (BUSTER_CHECK_PROGRAM_HELPER_X86 + (uint32_t)CBUILTIN_X86_HELPER_COUNT)
+#define BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES (BUSTER_CBUILTIN_X86_IMMEDIATE_COUNT * BUSTER_CBUILTIN_X86_IMMEDIATE_VALUES)
 
 typedef struct CheckProgramHelper CheckProgramHelper;
 struct CheckProgramHelper
@@ -64,6 +65,8 @@ struct CheckProgramHelper
     uint32_t assembly;
     // An x86 builtin's leaf (c_builtin_x86_helpers.c), or CBUILTIN_X86_HELPER_NONE.
     CBuiltinX86HelperKind x86;
+    // A specialized x86 leaf's instruction byte, after its source prototype's conversion.
+    uint8_t x86_immediate;
 };
 
 // The helper families (#1059's inventory), each a row of check_program_helper_contracts: an atomic load or store
@@ -882,9 +885,13 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
         }
     }
     uint32_t keys[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
+    // String-comparison leaves have a distinct body for each imm8. Their dense key table is allocated only for a
+    // unit that reaches one, keeping ordinary units' fixed-key initialization unchanged.
+    uint32_t* immediate_keys = NULL;
     // At most a signature per builtin node, and per key.
     const uint64_t candidates = valid ? (uint64_t)program->builtin_count + (uint32_t)__builtin_popcount(implicit_widths) * 3 : 0;
-    const uint32_t signatures = candidates < BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES ? (uint32_t)candidates : BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES;
+    const uint32_t maximum = BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES + BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES;
+    const uint32_t signatures = candidates < maximum ? (uint32_t)candidates : maximum;
     CheckProgramHelperUse* uses = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelperUse, program->builtin_count) : 0;
     CheckProgramHelper* planned = signatures != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
     uint32_t* first_nodes = planned != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, signatures) : 0;
@@ -994,6 +1001,24 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                             vectors &= !parameter || !vector || check_program_helper_vector(program->types, type);
                         }
                         result->status = vectors ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+                        if (result->status == CHECK_PROGRAM_OK && info->immediate_argument != 0)
+                        {
+                            const uint32_t a = info->immediate_argument - 1u;
+                            const bool present = a < graph->argument_counts[node];
+                            CheckValue value = present ? check_stream_value(stream, graph->argument_nodes[first + a]) : (CheckValue){ 0 };
+                            if (present)
+                            {
+                                check_action_convert_value(program->types, &value, stream->argument_conversions[first + a].type, node);
+                            }
+                            if (!present || value.constant_kind != CHECK_CONSTANT_INTEGER)
+                            {
+                                result->status = CHECK_PROGRAM_INVALID;
+                            }
+                            else
+                            {
+                                helper.x86_immediate = (uint8_t)value.integer;
+                            }
+                        }
                     }
                 }
                 else if (terminal)
@@ -1140,32 +1165,50 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                 }
                 if (result->status == CHECK_PROGRAM_OK && !folded)
                 {
-                    const uint32_t key = helper.x86 != CBUILTIN_X86_HELPER_NONE ? BUSTER_CHECK_PROGRAM_HELPER_X86 + (uint32_t)helper.x86 :
-                                                                                   check_program_helper_key(helper.id, helper.bytes, helper.rmw, helper.rmw_format);
-                    if (key >= BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES)
+                    const bool specialized = helper.x86 != CBUILTIN_X86_HELPER_NONE && cbuiltin_x86_helper_infos[helper.x86].immediate_argument != 0;
+                    const uint32_t key = specialized ? ((uint32_t)helper.x86 - BUSTER_CBUILTIN_X86_IMMEDIATE_FIRST) * BUSTER_CBUILTIN_X86_IMMEDIATE_VALUES + helper.x86_immediate :
+                                         helper.x86 != CBUILTIN_X86_HELPER_NONE ? BUSTER_CHECK_PROGRAM_HELPER_X86 + (uint32_t)helper.x86 :
+                                         check_program_helper_key(helper.id, helper.bytes, helper.rmw, helper.rmw_format);
+                    if (key >= (specialized ? BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES : BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES))
                     {
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
                     }
                     else
                     {
-                        if (keys[key] == 0)
+                        if (specialized && immediate_keys == NULL)
+                        {
+                            immediate_keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES);
+                            if (immediate_keys != NULL)
+                            {
+                                memset(immediate_keys, 0, BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES * sizeof(*immediate_keys));
+                            }
+                        }
+                        uint32_t* entry = specialized ? (immediate_keys != NULL ? immediate_keys + key : NULL) : keys + key;
+                        if (entry == NULL)
+                        {
+                            result->status = CHECK_PROGRAM_RESOURCE;
+                        }
+                        else if (*entry == 0)
                         {
                             first_nodes[result->count] = node;
                             planned[result->count] = helper;
                             result->count += 1;
-                            keys[key] = result->count;
+                            *entry = result->count;
                         }
                         else
                         {
-                            CheckProgramHelper* retained = planned + keys[key] - 1;
+                            CheckProgramHelper* retained = planned + *entry - 1;
                             retained->reads_fp_environment |= helper.reads_fp_environment;
                             retained->may_raise_fp_exceptions |= helper.may_raise_fp_exceptions;
                             retained->may_raise_inexact |= helper.may_raise_inexact;
                         }
-                        uses[result->use_count++] = (CheckProgramHelperUse){
-                            .node = node,
-                            .helper = keys[key] - 1,
-                        };
+                        if (result->status == CHECK_PROGRAM_OK)
+                        {
+                            uses[result->use_count++] = (CheckProgramHelperUse){
+                                .node = node,
+                                .helper = *entry - 1,
+                            };
+                        }
                     }
                 }
             }
@@ -1193,7 +1236,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
         CheckProgramHelper* helper = planned + i;
         if (helper->x86 != CBUILTIN_X86_HELPER_NONE)
         {
-            const CBuiltinX86Helper native = cbuiltin_x86_helper(helper->x86, output);
+            const CBuiltinX86Helper native = cbuiltin_x86_helper(helper->x86, helper->x86_immediate, output);
             helper->code = native.code;
             const uint32_t result_class = helper->result_type == BUSTER_TYPE_VOID  ? BUSTER_TYPED_CLASS_VOID :
                                           helper->result_type == BUSTER_TYPE_ULONG ? BUSTER_TYPED_CLASS_U64 :

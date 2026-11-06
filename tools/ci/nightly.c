@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define BUSTER_NIGHTLY_LINE 2048
 #define BUSTER_NIGHTLY_FIELDS 16
@@ -63,6 +64,7 @@
 #define BUSTER_NIGHTLY_PATHS 262144
 #define BUSTER_NIGHTLY_ROWS 65536
 #define BUSTER_NIGHTLY_CYCLES 1024
+// Dispatches still hidden by the API, not the job's lifetime dispatch count.
 #define BUSTER_NIGHTLY_PENDING 64
 #define BUSTER_NIGHTLY_REFS 8192
 #define BUSTER_NIGHTLY_FILE (64u << 20)
@@ -1719,6 +1721,96 @@ struct NightlyPending
     int64_t dispatched;
 };
 
+// Facts take over once a request is visible, whether queued, running or completed. Until then the existing
+// visibility grace keeps it in flight. Future timestamps stay pending too, rather than permitting a duplicate.
+static bool nightly_pending_active(const NightlyPending* pending, const NightlyFacts* facts, int64_t now)
+{
+    bool active = now - pending->dispatched < BUSTER_NIGHTLY_PENDING_AGE;
+    const uint32_t count = facts->run_count;
+    const NightlyRun* runs = facts->runs;
+    for (uint32_t i = 0; active && i < count; i += 1)
+    {
+        active = !(runs[i].workflow && runs[i].nightly && strcmp(runs[i].request, pending->request) == 0);
+    }
+    return active;
+}
+
+// Validate every row before discarding observed or expired requests: a malformed historical row still rejects the
+// input. Only unseen, unexpired requests consume the bounded active set. The file is replaced only after all of the
+// plan's inputs and options validate, so a late malformed row or active overflow cannot erase the handoff.
+static bool nightly_pending_parse(NightlyText text, const NightlyFacts* facts, int64_t now, NightlyPending* pending, uint32_t* pending_count)
+{
+    size_t offset = 0;
+    char line[BUSTER_NIGHTLY_LINE];
+    bool valid = true;
+    *pending_count = 0;
+    while (valid && nightly_next_line(text, &offset, line, &valid))
+    {
+        char* fields[BUSTER_NIGHTLY_FIELDS];
+        const size_t count = valid ? nightly_split(line, fields, BUSTER_NIGHTLY_FIELDS) : 0;
+        NightlyPending item = { 0 };
+        const size_t purpose = count == 6 ? nightly_find(fields[2], nightly_purpose_names, NIGHTLY_PURPOSE_COUNT) : NIGHTLY_PURPOSE_COUNT;
+        valid = valid && count == 6 && strcmp(fields[0], "pending") == 0 && nightly_token(fields[1], sizeof(item.request)) && purpose < NIGHTLY_PURPOSE_COUNT;
+        valid = valid && (strcmp(fields[3], "admit") == 0 || strcmp(fields[3], "defer") == 0) && nightly_sha(fields[4]) && nightly_epoch(fields[5], &item.dispatched);
+        if (valid)
+        {
+            nightly_copy(item.request, sizeof(item.request), fields[1]);
+            item.purpose = (NightlyPurpose)purpose;
+            item.admit = strcmp(fields[3], "admit") == 0;
+            nightly_copy(item.sha, sizeof(item.sha), fields[4]);
+            if (nightly_pending_active(&item, facts, now))
+            {
+                valid = *pending_count < BUSTER_NIGHTLY_PENDING;
+                if (valid)
+                {
+                    pending[*pending_count] = item;
+                    *pending_count += 1;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// The coordinator owns this ephemeral file. Publish compaction atomically so interrupted writes cannot turn an
+// unseen admission into an empty or partial handoff, including when the next job must recover without a ledger.
+static void nightly_pending_write(const char* path, const NightlyPending* pending, uint32_t count)
+{
+    const size_t capacity = strlen(path) + sizeof(".tmp.XXXXXX");
+    char* temporary = nightly_allocate(capacity, 1);
+    snprintf(temporary, capacity, "%s.tmp.XXXXXX", path);
+    const int descriptor = mkstemp(temporary);
+    FILE* output = descriptor >= 0 ? fdopen(descriptor, "wb") : NULL;
+    bool valid = output != NULL;
+    if (output != NULL)
+    {
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const NightlyPending* item = &pending[i];
+            fprintf(output, "pending\t%s\t%s\t%s\t%s\t%lld\n", item->request, nightly_purpose_names[item->purpose], item->admit ? "admit" : "defer", item->sha, (long long)item->dispatched);
+        }
+        valid = !ferror(output);
+        valid = fclose(output) == 0 && valid;
+    }
+    else if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    if (valid)
+    {
+        valid = rename(temporary, path) == 0;
+    }
+    if (!valid && descriptor >= 0)
+    {
+        remove(temporary);
+    }
+    free(temporary);
+    if (!valid)
+    {
+        nightly_fatal("cannot replace pending dispatches", path);
+    }
+}
+
 typedef struct NightlyPlanInput NightlyPlanInput;
 struct NightlyPlanInput
 {
@@ -1871,12 +1963,7 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
         const bool is_run = i < facts->run_count;
         const NightlyRun* run = is_run ? &facts->runs[i] : NULL;
         const NightlyPending* pending = is_run ? NULL : &input->pending[i - facts->run_count];
-        bool visible = false;
-        for (uint32_t j = 0; !is_run && j < facts->run_count && !visible; j += 1)
-        {
-            visible = facts->runs[j].nightly && strcmp(facts->runs[j].request, pending->request) == 0;
-        }
-        const bool flying = is_run ? run->workflow && run->nightly && !run->completed : !visible && input->now - pending->dispatched < BUSTER_NIGHTLY_PENDING_AGE;
+        const bool flying = is_run ? run->workflow && run->nightly && !run->completed : nightly_pending_active(pending, facts, input->now);
         if (!flying)
         {
             continue;
@@ -3671,6 +3758,7 @@ static int nightly_command_plan(int argc, char** argv)
     NightlyFacts facts = nightly_load_facts(nightly_required(argc, argv, "--facts"));
     const char* mode = nightly_required(argc, argv, "--mode");
     const char* main_head = nightly_required(argc, argv, "--main");
+    const int64_t now = nightly_option_epoch(argc, argv, "--now");
     uint64_t coordinator = 0;
     if ((strcmp(mode, "run") != 0 && strcmp(mode, "dry-run") != 0) || !nightly_sha(main_head) || !nightly_id(nightly_required(argc, argv, "--coordinator"), &coordinator))
     {
@@ -3691,23 +3779,7 @@ static int nightly_command_plan(int argc, char** argv)
     if (pending_path != NULL)
     {
         NightlyText text = nightly_read(pending_path);
-        while (valid && nightly_next_line(text, &offset, line, &valid))
-        {
-            char* fields[BUSTER_NIGHTLY_FIELDS];
-            const size_t count = valid ? nightly_split(line, fields, BUSTER_NIGHTLY_FIELDS) : 0;
-            NightlyPending* item = &pending[pending_count];
-            const size_t purpose = count == 6 ? nightly_find(fields[2], nightly_purpose_names, NIGHTLY_PURPOSE_COUNT) : NIGHTLY_PURPOSE_COUNT;
-            valid = valid && count == 6 && pending_count < BUSTER_NIGHTLY_PENDING && strcmp(fields[0], "pending") == 0 && nightly_token(fields[1], sizeof(item->request)) && purpose < NIGHTLY_PURPOSE_COUNT;
-            valid = valid && (strcmp(fields[3], "admit") == 0 || strcmp(fields[3], "defer") == 0) && nightly_sha(fields[4]) && nightly_epoch(fields[5], &item->dispatched);
-            if (valid)
-            {
-                nightly_copy(item->request, sizeof(item->request), fields[1]);
-                item->purpose = (NightlyPurpose)purpose;
-                item->admit = strcmp(fields[3], "admit") == 0;
-                nightly_copy(item->sha, sizeof(item->sha), fields[4]);
-                pending_count += 1;
-            }
-        }
+        valid = nightly_pending_parse(text, &facts, now, pending, &pending_count);
         free(text.data);
     }
     offset = 0;
@@ -3756,7 +3828,7 @@ static int nightly_command_plan(int argc, char** argv)
         .ref_count = ref_count,
         .refused = refused,
         .refused_count = refused_count,
-        .now = nightly_option_epoch(argc, argv, "--now"),
+        .now = now,
         .main = main_head,
         .run = strcmp(mode, "run") == 0,
         .coordinator = coordinator,
@@ -3775,6 +3847,10 @@ static int nightly_command_plan(int argc, char** argv)
     if (report == NULL)
     {
         nightly_fatal("cannot write the report", NULL);
+    }
+    if (pending_path != NULL)
+    {
+        nightly_pending_write(pending_path, pending, pending_count);
     }
     nightly_plan(&input, stdout, report);
     fclose(report);

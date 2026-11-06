@@ -6754,6 +6754,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_symbol_pragma_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
+#include "c_check_noderef_driver_test.c"
 #include "c_check_attribute_effects_driver_test.c"
 #include "c_check_attribute_arguments_driver_test.c"
 #include "c_check_parse_note_driver_test.c"
@@ -7918,6 +7919,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_initializer_warnings(&test, clang, executable, directory);
+            check_test_driver_initializer_fields(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
