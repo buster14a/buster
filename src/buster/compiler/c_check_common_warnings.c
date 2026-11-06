@@ -73,6 +73,22 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
     return severity;
 }
 
+// Whether a warning may report anywhere in the unit: its command-line mapping, or a source pragma that maps it to
+// anything but ignored, as check_common_severity resolves it at a token. Where it may not, its work is skipped, as
+// Clang skips an analysis whose diagnostics are all ignored.
+static bool check_common_enabled(const Preprocessor* pp, const CheckInput* input, uint32_t id, bool default_ignored)
+{
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, false);
+    bool enabled = !command.quiet && command.severity != CHECK_WARNING_IGNORE;
+    const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
+    for (uint32_t i = 0; !command.quiet && !enabled && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputDiagnosticPragma* record = history->records + i;
+        enabled = record->operation != CHECK_DIAGNOSTIC_IGNORED && check_warning_option(id, record->option);
+    }
+    return enabled;
+}
+
 static void check_common_report_published(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication_source,
                                           uint32_t id, bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch);
 static void check_common_report_published_phase(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication_source,
@@ -585,6 +601,16 @@ static bool check_common_void_pointer_cast(const CheckStream* stream, const Type
     return result;
 }
 
+// The default-ignored warnings whose work a unit does (check_common_enabled): -Wsign-compare's comparison walk,
+// -Wself-assign's plain assignments, and the -Wuninitialized pass, which reports -Wunused-but-set-parameter too.
+typedef struct CheckCommonEnabled CheckCommonEnabled;
+struct CheckCommonEnabled
+{
+    bool sign_compare;
+    bool self_assign;
+    bool uninitialized;
+};
+
 // What the expression walk and -Wuninitialized both read of the graph, made once a unit (check_common_facts).
 typedef struct CheckCommonFacts CheckCommonFacts;
 struct CheckCommonFacts
@@ -656,10 +682,11 @@ typedef struct CheckCommonEmission
 #define BUSTER_CHECK_EMIT_SIGN_OWN 11u
 
 // What a node's subtree holds for check_common_emit_root's walks, a bit each, in CheckCommonEmission.reach: a node whose
-// own frame or comma stages may warn (check_common_own_candidate), a division by a constant, a comparison. Each counts
-// evaluated or not: a comma's operands and a root's expression run their own frames either way, and the scans test
-// evaluation themselves. A frame of a subtree without its walk's bit warns of nothing and marks emitted only nodes of such
-// subtrees, which no other frame then reads to any effect, so the walks skip those subtrees and keep every warning's order.
+// own frame or comma stages may warn (check_common_own_candidate), a division by a constant, a comparison where
+// -Wsign-compare may warn (check_common_enabled). Each counts evaluated or not: a comma's operands and a root's expression
+// run their own frames either way, and the scans test evaluation themselves. A frame of a subtree without its walk's bit
+// warns of nothing and marks emitted only nodes of such subtrees, which no other frame then reads to any effect, so the
+// walks skip those subtrees and keep every warning's order.
 #define BUSTER_CHECK_REACH_TREE 0x01u
 #define BUSTER_CHECK_REACH_DIVISION 0x02u
 #define BUSTER_CHECK_REACH_SIGN 0x04u
@@ -2034,7 +2061,7 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
 // Whether check_common_own may warn at `node`, or its comma stages run there, by what they test first: a constant that an
 // initialization, an assignment, a conversion or a call's argument converts, a self-assignment's two names, a constant
 // index, or a comma the source writes.
-static bool check_common_own_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+static bool check_common_own_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node, bool self_assign)
 {
     const CheckOp op = graph->ops[node];
     bool result = false;
@@ -2046,7 +2073,7 @@ static bool check_common_own_candidate(const Parser* parser, const CheckGraph* g
         const uint32_t right = graph->operand1[node];
         result = (source < graph->count && check_common_integer_constant(stream, source) && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
                   (flags & BUSTER_CHECK_CONVERT_CAST) == 0) ||
-                 (op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
+                 (self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
                   graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE);
     }
     else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
@@ -2073,12 +2100,15 @@ static bool check_common_own_candidate(const Parser* parser, const CheckGraph* g
 }
 
 // A node's own bits of its reach (BUSTER_CHECK_REACH_*): its own frame's candidate, a division by a constant, a comparison.
-static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+// A plain `x = y` is a candidate for -Wself-assign alone, and a comparison's bit is -Wsign-compare's: each counts only where
+// its warning may report.
+static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node,
+                                      const CheckCommonEnabled* enabled)
 {
     const CheckOp op = graph->ops[node];
     const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, graph->operand1[node]);
-    const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, node) ? BUSTER_CHECK_REACH_TREE : 0u) |
+    const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
+    const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
                                      (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u));
     return result;
 }
@@ -4037,7 +4067,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
 // nodes are evaluated. An operand that doesn't precede its node, which the graph's validation rules out, gives it every
 // bit of reach. False where scratch can't hold them.
 static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                               const CheckProgram* program, Arena* scratch, CheckCommonFacts* facts)
+                               const CheckProgram* program, const CheckCommonEnabled* enabled, Arena* scratch, CheckCommonFacts* facts)
 {
     uint32_t* parents = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
     uint8_t* used = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
@@ -4054,7 +4084,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
             // A comma's left operand and a cast to void's, statement-level or explicit, drop their operand's result.
             const TypeId result_type = op == CHECK_OP_CAST ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) : 0;
             const bool discards = op == CHECK_OP_COMMA || (result_type != 0 && type_kind(types, result_type) == BUSTER_TYPE_KIND_VOID);
-            uint8_t bits = check_common_own_reach(parser, graph, stream, node);
+            uint8_t bits = check_common_own_reach(parser, graph, stream, node, enabled);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
@@ -4681,17 +4711,27 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
     check_common_resources.pushes = 0;
     CheckWarningSpelling spell = { 0 };
+    const CheckCommonEnabled enabled =
+    {
+        .sign_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_SIGN_COMPARE, true),
+        .self_assign = check_common_enabled(pp, input, CHECK_WARNING_ID_SELF_ASSIGN, true),
+        .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
+                         check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
+    };
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, scratch, &facts))
+    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, scratch, &facts))
     {
         check_common_exhausted(pp);
     }
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
-    check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
+    if (enabled.uninitialized)
+    {
+        check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
+    }
     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
 }
