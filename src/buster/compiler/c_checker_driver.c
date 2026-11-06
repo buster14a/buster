@@ -3868,7 +3868,7 @@ struct CheckDriverCommand
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
-static bool check_units_remain(const struct CheckUnitsLane* lane);
+static bool check_units_keep_scratch(struct CheckUnitsLane* lane);
 
 // A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
 // worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
@@ -4425,7 +4425,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .asm_helpers = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         // A units lane with a unit left to take keeps its scratch's pages for it (#777).
-                        .keep_scratch = lanes != NULL && lanes->units_lane != NULL && check_units_remain(lanes->units_lane),
+                        .keep_scratch = lanes != NULL && lanes->units_lane != NULL && check_units_keep_scratch(lanes->units_lane),
                     });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
