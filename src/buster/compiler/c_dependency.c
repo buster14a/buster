@@ -273,7 +273,6 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
             const DependencyFile file = files[i];
             if (file.used && (include_system || !file.system) && !dependency_same_path(file.path, source))
             {
-                dependency_append(sink, "\n", 1);
                 dependency_text(sink, file.path, true, scalar, false);
                 dependency_append(sink, ":\n", 2);
             }
