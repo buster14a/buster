@@ -168,6 +168,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .arguments = arguments,
             .argument_count = count,
             .destination_type = destination_type,
+            .fp_evaluation_type = check_action_fp_evaluation_type(context.fp_environment),
             .node = closing,
             .context = context,
             .allow_gnu_index_ice = reader->parser->language.gnu,

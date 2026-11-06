@@ -2911,6 +2911,30 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 }
             }
         }
+        // A late redefine_extname keeps the declaration's asm-label fact, but an earlier emitted reference may have
+        // fixed its original name already. Only the selection's compact live references can decide that; syntax
+        // checking and deferred bodies must not guess from an earlier occurrence of the identifier alone.
+        const CheckInputSymbolPragmas* symbol_pragmas = input->symbol_pragmas;
+        for (uint32_t i = 0; valid && symbol_pragmas != NULL && i < symbol_pragmas->count; i += 1)
+        {
+            const CheckInputSymbolPragma* record = symbol_pragmas->records + i;
+            const uint32_t object = record->declaration < input->token_count ? input->objects[record->declaration] : 0;
+            const SymbolId symbol = object < program->object_count ? program->object_symbols[object] : 0;
+            if (record->after_use && symbol != 0)
+            {
+                if (program->symbol_pragma_originals == NULL)
+                {
+                    result->status = CHECK_PROGRAM_UNSUPPORTED;
+                    result->reason = "source-time symbol renaming without an emission selection";
+                    result->token = record->token;
+                    valid = false;
+                }
+                else if (program->symbol_pragma_originals[i])
+                {
+                    symbol_names[symbol] = (String8){ 0 };
+                }
+            }
+        }
         // GNU's alias, ifunc and weakref attributes (#147): each entry's own symbol, and its name where it is a weakref's,
         // a weak reference to its target's name; a weakref's target's undefined symbol is weak where the unit refers to it
         // through weakrefs alone (BUSTER_CHECK_PROGRAM_ALIAS_WEAK). An alias or ifunc clang's code generation refuses (the

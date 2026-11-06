@@ -65,22 +65,17 @@ static CheckInputPragmaDisposition check_input_pragma_disposition(const CheckInp
             { "push_macro", 1, CHECK_PRAGMA_OWNED },
             { "pop_macro", 1, CHECK_PRAGMA_OWNED },
             { "redefine_extname", 1, CHECK_PRAGMA_SEMANTIC },
-            { "scalar_storage_order", 1 | 2, CHECK_PRAGMA_SEMANTIC },
             { "weak", 1, CHECK_PRAGMA_SEMANTIC },
             { "ms_struct", 1, CHECK_PRAGMA_SEMANTIC },
-            { "section", 1, CHECK_PRAGMA_SEMANTIC },
-            { "code_seg", 1, CHECK_PRAGMA_SEMANTIC },
-            { "data_seg", 1, CHECK_PRAGMA_SEMANTIC },
-            { "bss_seg", 1, CHECK_PRAGMA_SEMANTIC },
-            { "const_seg", 1, CHECK_PRAGMA_SEMANTIC },
-            { "init_seg", 1, CHECK_PRAGMA_SEMANTIC },
             { "float_control", 1, CHECK_PRAGMA_SEMANTIC },
-            { "fenv_access", 1, CHECK_PRAGMA_SEMANTIC },
             { "fp", 4, CHECK_PRAGMA_SEMANTIC },
             { "attribute", 4, CHECK_PRAGMA_SEMANTIC },
             { "FENV_ROUND", 8, CHECK_PRAGMA_SEMANTIC },
             { "acc", 1, CHECK_PRAGMA_SEMANTIC },
         };
+        // Clang's Linux mode does not register scalar_storage_order, GCC target, Microsoft segments or the
+        // unqualified fenv_access handler. They stay unknown, including malformed forms. -fms-extensions,
+        // which registers the latter handlers, is outside the driver's accepted option set.
         if (stdc)
         {
             result = CHECK_PRAGMA_STDC_UNKNOWN;

@@ -70,8 +70,10 @@ enum
     CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 78,
     CHECK_WARNING_ID_INDEPENDENT_CLASS = 79,
     CHECK_WARNING_ID_ASSUME = 80,
-    CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 81,
-    CHECK_WARNING_ID_NODEREF = 82,
+    CHECK_WARNING_ID_WEAK_UNDECLARED = 81,
+    CHECK_WARNING_ID_REDEFINE_EXTNAME = 82,
+    CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES = 83,
+    CHECK_WARNING_ID_NODEREF = 84,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -96,7 +98,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_INITIALIZER_OVERRIDES,
     CHECK_WARNING_EVENT_UNDEFINED_INTERNAL,
     CHECK_WARNING_EVENT_C23_PARAMETER,
-    // A retained directive is lexical, including at parser EOF; source and payload.token are PP coordinates.
+    // A retained directive, including at parser EOF; source and payload.token are PP coordinates. With
+    // BUSTER_CHECK_WARNING_SYMBOL_PRAGMA, payload.data names its symbol-pragma history record plus one.
     CHECK_WARNING_EVENT_PRAGMA,
     CHECK_WARNING_EVENT_LIBRARY_REDECLARATION,
     CHECK_WARNING_EVENT_BUILTIN_HEADER,
@@ -290,6 +293,10 @@ typedef enum CheckWarningCompletion
 #define BUSTER_CHECK_WARNING_DEFAULT_IGNORED 0x01u
 // A semantic proof prevents publication, independently of every requested warning policy (for example sizeof).
 #define BUSTER_CHECK_WARNING_SUPPRESSED 0x02u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputSymbolPragmas only with this discriminator.
+#define BUSTER_CHECK_WARNING_SYMBOL_PRAGMA 0x04u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputMsPragmas only with this discriminator.
+#define BUSTER_CHECK_WARNING_MS_PRAGMA 0x08u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
@@ -367,6 +374,16 @@ static __attribute__((unused)) CheckWarningEvents check_warning_view(const Check
     return result;
 }
 
+// Carrier publication and diagnostic rendering share the same flag contract. History discriminators describe a
+// pragma's payload without affecting its warning policy, and are invalid on every other event kind.
+static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
+{
+    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA;
+    const uint32_t payload = flags & histories;
+    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories)) == 0 &&
+           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories;
+}
+
 static uint32_t check_warning_capacity(uint32_t capacity, uint32_t needed)
 {
     uint32_t result = capacity != 0 ? capacity : 16;
@@ -384,7 +401,8 @@ static __attribute__((unused)) bool check_warning_append(CheckWarningBuffer* buf
 {
     bool valid = buffer != NULL && buffer->arena != NULL && event != NULL && event->id < CHECK_WARNING_ID_COUNT &&
                  event->kind < CHECK_WARNING_EVENT_KIND_COUNT && event->token != UINT32_MAX &&
-                 (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
+                 check_warning_flags_valid(event->kind, event->flags) &&
+                 event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
                  ((event->completion_kind == CHECK_WARNING_COMPLETE_TU_END) == (event->completion == UINT32_MAX)) &&
                  buffer->count <= buffer->capacity && (buffer->count == 0 || buffer->events != NULL) &&
                  buffer->note_count <= buffer->note_capacity && (buffer->note_count == 0 || buffer->notes != NULL) &&

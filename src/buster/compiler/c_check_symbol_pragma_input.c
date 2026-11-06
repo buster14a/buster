@@ -1,16 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Literal file-scope weak/redefine_extname directives (#1135). Preparation retains immutable source coordinates;
-// completion joins them to canonical objects after binding/deferred-body replay. Only the existing weak/asm-label
-// metadata reaches emission. Unsupported expansion, alias, placement and late-use cases stay named hard errors.
+//
+// Retained weak/redefine_extname directives. The cold history owns their source coordinates; the completed binding
+// stream supplies translation-unit declarations, independent of local shadows and of the bodies' reading schedule.
+// This extends #1135's literal handler with source-time expansion and warning policy. Completion belongs to the final
+// unit, including selected lazy-system-header units; deferred lanes borrow the history without mutating it.
+
+typedef enum CheckInputSymbolPragmaKind
+{
+    CHECK_SYMBOL_PRAGMA_WEAK,
+    CHECK_SYMBOL_PRAGMA_REDEFINE,
+    CHECK_SYMBOL_PRAGMA_ALIAS,
+} CheckInputSymbolPragmaKind;
+
+typedef enum CheckInputSymbolPragmaWarning
+{
+    CHECK_SYMBOL_WARNING_NONE,
+    CHECK_SYMBOL_WARNING_IDENTIFIER,
+    CHECK_SYMBOL_WARNING_EXTRA,
+    CHECK_SYMBOL_WARNING_UNDECLARED,
+    CHECK_SYMBOL_WARNING_TYPEDEF,
+    CHECK_SYMBOL_WARNING_INTERNAL,
+} CheckInputSymbolPragmaWarning;
 
 typedef struct CheckInputSymbolPragma CheckInputSymbolPragma;
 struct CheckInputSymbolPragma
 {
     uint32_t pragma;
+    uint32_t source;
+    uint32_t end;
     uint32_t token;
-    IdentId name;
-    IdentId replacement;
+    uint32_t name;
+    uint32_t target;
+    uint32_t diagnostic_source;
+    uint32_t diagnostic_location;
+    uint32_t declaration;
+    uint8_t kind;
+    uint8_t warning;
+    bool supported;
+    bool after_use;
 };
 
 struct CheckInputSymbolPragmas
@@ -19,265 +47,414 @@ struct CheckInputSymbolPragmas
     uint32_t count;
 };
 
-static bool check_input_symbol_pragma_record(const CheckInputReader* reader, uint32_t pragma, uint32_t* previous_end, uint32_t* previous_token, CheckInputSymbolPragma* record)
+static const CheckInputSymbolPragma* check_input_symbol_warning(const CheckInput* input, const CheckWarningEvent* event)
+{
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const uint32_t index = event->payload.data;
+    const CheckInputSymbolPragma* result = event->kind == CHECK_WARNING_EVENT_PRAGMA && (event->flags & BUSTER_CHECK_WARNING_SYMBOL_PRAGMA) != 0 &&
+                                          index != 0 && history != NULL && index <= history->count ?
+                                          history->records + index - 1 : NULL;
+    return result;
+}
+
+static bool check_input_symbol_identifier(const CheckInputReader* reader, uint32_t source, uint32_t end)
+{
+    const PPTokens* output = &reader->pp->output;
+    const bool result = source < end && output->kinds[source] == C_TOKEN_RAW_IDENTIFIER &&
+                        !c_name_is_keyword(output->values[source], reader->pp->options.language);
+    return result;
+}
+
+static bool check_input_symbol_record(CheckInputReader* reader, uint32_t pragma, uint32_t* previous_end,
+                                       uint32_t* previous_token, uint64_t** macros, CheckInputSymbolPragma* record)
 {
     uint32_t source = 0;
     uint32_t end = 0;
     uint32_t token = 0;
-    const bool retained = check_input_retained_pragma(reader, pragma, previous_end, previous_token, &source, &end, &token);
     const PPTokens* output = &reader->pp->output;
-    const bool weak = retained && end - source == 4 && pp_token_is_name(reader->pp, output, source + 2, end, "weak");
-    const bool rename = retained && end - source == 5 && pp_token_is_name(reader->pp, output, source + 2, end, "redefine_extname");
-    const IdentId name = weak || rename ? check_input_pragma_name(reader, source + 3) : 0;
-    const IdentId replacement = rename ? check_input_pragma_name(reader, source + 4) : 0;
-    const bool valid = name != 0 && (weak || replacement != 0);
-    if (valid)
+    const bool retained = check_input_retained_pragma(reader, pragma, previous_end, previous_token, &source, &end, &token);
+    const bool weak = retained && pp_token_is_name(reader->pp, output, source + 2, end, "weak");
+    const bool rename = retained && pp_token_is_name(reader->pp, output, source + 2, end, "redefine_extname");
+    const bool matched = weak || rename;
+    if (matched)
     {
-        *record = (CheckInputSymbolPragma){ .pragma = pragma, .token = token, .name = name, .replacement = replacement };
+        *record = (CheckInputSymbolPragma){ .pragma = pragma, .source = source, .end = end, .token = token,
+                                           .declaration = BUSTER_CHECK_NONE, .kind = rename ? CHECK_SYMBOL_PRAGMA_REDEFINE : CHECK_SYMBOL_PRAGMA_WEAK,
+                                           .supported = true };
+        uint32_t at = source + 3;
+        if (!check_input_symbol_identifier(reader, at, end))
+        {
+            record->warning = CHECK_SYMBOL_WARNING_IDENTIFIER;
+        }
+        else
+        {
+            record->name = output->values[at++];
+            if (weak && at < end && output->kinds[at] == C_TOKEN_EQUAL)
+            {
+                record->kind = CHECK_SYMBOL_PRAGMA_ALIAS;
+                at += 1;
+            }
+            if (rename || record->kind == CHECK_SYMBOL_PRAGMA_ALIAS)
+            {
+                if (!check_input_symbol_identifier(reader, at, end))
+                {
+                    record->warning = CHECK_SYMBOL_WARNING_IDENTIFIER;
+                }
+                else
+                {
+                    record->target = output->values[at++];
+                }
+            }
+            if (record->warning == CHECK_SYMBOL_WARNING_NONE && at != end)
+            {
+                record->warning = CHECK_SYMBOL_WARNING_EXTRA;
+            }
+        }
+        record->diagnostic_source = at < end ? at : end - 1;
+        if (record->warning != CHECK_SYMBOL_WARNING_NONE && at == end)
+        {
+            const uint32_t last = end - 1;
+            const bool named = check_input_pragma_name(reader, last) != 0;
+            record->diagnostic_location = output->locations[last] + (named ? intern_length(reader->pp->table, output->values[last]) : 1);
+        }
+        // Raw -E callers cannot recover a macro's earlier value. The driver's semantic stream already expanded it.
+        for (uint32_t s = source + 3; !reader->pp->options.semantic_pragmas && record->supported && s < end; s += 1)
+        {
+            const IdentId name = check_input_pragma_name(reader, s);
+            record->supported = name == 0 || !check_input_pragma_macro(reader, macros, name);
+        }
+        // An alias can synthesize a typed declaration without a C declarator. It needs its own binding integration;
+        // recognizing its spelling alone must not turn it into an ignored directive.
+        record->supported &= record->warning != CHECK_SYMBOL_WARNING_NONE || record->kind != CHECK_SYMBOL_PRAGMA_ALIAS;
     }
-    return valid;
+    return matched;
 }
 
-static bool check_input_symbol_pragmas(CheckInputReader* reader, uint8_t* handled)
+static bool check_input_symbol_pragmas(CheckInputReader* reader, uint8_t* handled, bool complete_tree)
 {
-    const Parser* parser = reader->parser;
-    const uint32_t pragma_count = parser->tokens.pragma_count;
+    const uint64_t retained = reader->arena->length;
+    const uint64_t temporary = reader->scratch->length;
     uint32_t previous_end = 0;
     uint32_t previous_token = 0;
-    uint32_t capacity = 0;
-    for (uint32_t pragma = 0; pragma < pragma_count; pragma += 1)
+    uint64_t* macros = NULL;
+    uint32_t count = 0;
+    for (uint32_t p = 0; p < reader->parser->tokens.pragma_count; p += 1)
     {
-        CheckInputSymbolPragma record = { 0 };
-        capacity += check_input_symbol_pragma_record(reader, pragma, &previous_end, &previous_token, &record);
+        CheckInputSymbolPragma record;
+        count += check_input_symbol_record(reader, p, &previous_end, &previous_token, &macros, &record);
     }
-    const uint64_t mark = reader->arena->length;
-    const uint64_t scratch_mark = reader->scratch->length;
-    bool valid = true;
-    if (capacity != 0)
+    CheckInputSymbolPragmas* history = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputSymbolPragmas, 1) : NULL;
+    CheckInputSymbolPragma* records = history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputSymbolPragma, count) : NULL;
+    uint32_t* links = count != 0 && complete_tree ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)reader->parser->tokens.count + 1) : NULL;
+    bool valid = !reader->output->resource && (count == 0 || (records != NULL && (!complete_tree || links != NULL)));
+    if (valid && count != 0)
     {
-        CheckInputSymbolPragmas* history = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputSymbolPragmas, 1);
-        CheckInputSymbolPragma* records = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputSymbolPragma, capacity);
-        const uint32_t count = parser->tokens.count;
-        uint32_t* links = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
-        valid = history != NULL && records != NULL && links != NULL;
-        uint64_t* macro_names = NULL;
-        uint32_t used = 0;
-        uint32_t cursor = 0;
-        uint32_t group = BUSTER_CHECK_NONE;
+        *history = (CheckInputSymbolPragmas){ .records = records };
         previous_end = 0;
         previous_token = 0;
-        for (uint32_t pragma = 0; valid && pragma < pragma_count; pragma += 1)
+        uint32_t cursor = 0;
+        uint32_t group = BUSTER_CHECK_NONE;
+        for (uint32_t p = 0; p < reader->parser->tokens.pragma_count; p += 1)
         {
-            CheckInputSymbolPragma record = { 0 };
-            if (check_input_symbol_pragma_record(reader, pragma, &previous_end, &previous_token, &record))
+            CheckInputSymbolPragma record;
+            if (check_input_symbol_record(reader, p, &previous_end, &previous_token, &macros, &record))
             {
-                while (cursor < record.token)
+                while (complete_tree && cursor < record.token)
                 {
-                    const uint8_t role = parser->tree.roles[cursor];
+                    const uint8_t role = reader->parser->tree.roles[cursor];
                     if (role < PARSE_ROLE_COUNT && parse_closer_roles[role] != PARSE_ROLE_NONE)
                     {
                         links[cursor] = group;
                         group = cursor;
                     }
-                    else if (group < count && parser->tree.parents[group] == cursor)
+                    else if (group < reader->parser->tokens.count && reader->parser->tree.parents[group] == cursor)
                     {
                         group = links[group];
                     }
                     cursor += 1;
                 }
-                const uint8_t before = record.token != 0 ? parser->tree.roles[record.token - 1] : PARSE_ROLE_NONE;
-                const bool boundary = group == BUSTER_CHECK_NONE && (record.token == 0 || before == PARSE_ROLE_TERMINATOR || before == PARSE_ROLE_CLOSE_BODY);
-                // Clang expands these operands. The retained stream does not: never attach an unexpanded spelling
-                // to the wrong declaration. The common macro-history helper also conservatively refuses #undef.
-                const bool macro = check_input_pragma_macro(reader, &macro_names, record.name) ||
-                                   (record.replacement != 0 && check_input_pragma_macro(reader, &macro_names, record.replacement));
-                valid = !reader->output->resource;
-                if (valid && boundary && !macro)
+                if (complete_tree && record.warning == CHECK_SYMBOL_WARNING_NONE && record.token != 0)
                 {
-                    records[used++] = record;
+                    const uint8_t role = reader->parser->tree.roles[record.token - 1];
+                    const uint8_t scope = group < reader->parser->tokens.count ? reader->parser->tree.roles[group] : PARSE_ROLE_NONE;
+                    const bool boundary = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_BLOCK ||
+                                          role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK;
+                    record.supported &= boundary && (group == BUSTER_CHECK_NONE || scope == PARSE_ROLE_OPEN_BODY || scope == PARSE_ROLE_OPEN_BLOCK);
                 }
+                records[history->count++] = record;
+                handled[p] = record.supported ? 1 : 0;
             }
         }
-        if (valid)
-        {
-            *history = (CheckInputSymbolPragmas){ .records = records, .count = used };
-            reader->output->symbol_pragmas = history;
-            for (uint32_t i = 0; i < used; i += 1)
-            {
-                handled[records[i].pragma] = 2;
-            }
-        }
+        reader->output->symbol_pragmas = history;
     }
     if (!valid)
     {
-        arena_pop_to(reader->arena, mark);
+        arena_pop_to(reader->arena, retained);
+        reader->output->resource = true;
     }
-    arena_pop_to(reader->scratch, scratch_mark);
+    arena_pop_to(reader->scratch, temporary);
     return valid;
 }
 
-typedef struct CheckInputSymbolPragmaObject CheckInputSymbolPragmaObject;
-struct CheckInputSymbolPragmaObject
+static bool check_input_symbol_warning_append(CheckInputReader* reader, uint32_t index, CheckWarningBuffer* buffer,
+                                               uint32_t token, uint32_t completion_kind, uint32_t completion)
 {
-    uint32_t declaration;
-    uint32_t definition;
-    uint32_t use;
-    const CheckInputAttribute* label;
-    IdentId replacement;
-};
-
-static void check_input_symbol_pragma_refuse(CheckInputReader* reader, const CheckInputSymbolPragma* record)
-{
-    const uint32_t before = reader->output->report_count;
-    check_input_report(reader, record->token, CHECK_INPUT_PRAGMA_SEMANTICS);
-    if (reader->output->report_count != before)
-    {
-        reader->output->reports[before].pragma = record->pragma + 1;
-    }
+    const CheckInputSymbolPragma* record = reader->output->symbol_pragmas->records + index;
+    const CheckWarningEvent event = {
+        .id = record->warning == CHECK_SYMBOL_WARNING_UNDECLARED ? CHECK_WARNING_ID_WEAK_UNDECLARED :
+              record->warning == CHECK_SYMBOL_WARNING_TYPEDEF ? CHECK_WARNING_ID_IGNORED_ATTRIBUTES :
+              record->warning == CHECK_SYMBOL_WARNING_INTERNAL ? CHECK_WARNING_ID_REDEFINE_EXTNAME : CHECK_WARNING_ID_IGNORED_PRAGMA,
+        .kind = CHECK_WARNING_EVENT_PRAGMA,
+        .flags = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA,
+        .token = token,
+        .source = record->diagnostic_source,
+        .completion_kind = completion_kind,
+        .completion = completion,
+        .payload = { .name = record->name, .token = record->source, .data = index + 1 },
+    };
+    const bool valid = check_warning_append(buffer, &event, NULL, 0);
+    reader->output->resource |= !valid;
+    return valid;
 }
 
-static void check_input_symbol_pragma_attribute(CheckInputReader* reader, uint32_t token, IdentId replacement)
+// Append to the independently retained lexical facts after the unknown-pragma collector has published its view.
+static bool check_input_symbol_syntax_warnings(CheckInputReader* reader)
 {
-    const CheckInputAttributeKind kind = replacement != 0 ? CHECK_ATTRIBUTE_ASM_LABEL : CHECK_ATTRIBUTE_WEAK;
-    const CheckInputAttributes* previous = check_input_attributes_at(reader->output, token);
-    if (check_input_attribute_of(previous, kind) == NULL)
+    const CheckInputSymbolPragmas* history = reader->output->symbol_pragmas;
+    const CheckWarningEvents before = reader->output->pragma_warnings;
+    CheckWarningBuffer buffer = { .arena = reader->arena, .events = (CheckWarningEvent*)before.events, .count = before.count, .capacity = before.count };
+    bool valid = true;
+    for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
     {
-        CheckInputAttributes* attributes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
-        bool valid = attributes != NULL;
-        if (valid)
+        const CheckInputSymbolPragma* record = history->records + i;
+        if (record->supported && (record->warning == CHECK_SYMBOL_WARNING_IDENTIFIER || record->warning == CHECK_SYMBOL_WARNING_EXTRA))
         {
-            *attributes = (CheckInputAttributes){ 0 };
-            valid = previous == NULL || check_input_attribute_copy(reader, previous, attributes);
+            valid = check_input_symbol_warning_append(reader, i, &buffer, record->token, CHECK_WARNING_COMPLETE_AT_TOKEN, record->token);
         }
-        const String8 text = replacement != 0 ? (String8){ .pointer = (char*)intern_bytes(reader->pp->table, replacement), .length = intern_length(reader->pp->table, replacement) } : (String8){ 0 };
-        const CheckInputAttribute attribute =
-        {
-            .first = token,
-            .end = token + 1,
-            .name_token = token,
-            .kind = kind,
-            .schema = replacement != 0 ? CHECK_ATTRIBUTE_STRING : CHECK_ATTRIBUTE_NO_ARGUMENTS,
-            .argument_count = replacement != 0,
-            .text = text,
+    }
+    if (valid)
+    {
+        reader->output->pragma_warnings = check_warning_view(&buffer);
+    }
+    return valid;
+}
+
+static uint32_t check_input_symbol_lower(const uint64_t* keys, uint32_t count, uint32_t name)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = (uint32_t)(keys[middle] >> 32) < name;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low;
+}
+
+static bool check_input_symbol_attribute(CheckInputReader* reader, CheckInputSymbolPragma* record, uint32_t token)
+{
+    const CheckInputAttributes* previous = check_input_attributes_at(reader->output, token);
+    CheckInputAttributes* attributes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
+    bool valid = attributes != NULL;
+    if (valid)
+    {
+        *attributes = (CheckInputAttributes){ 0 };
+        valid = previous == NULL || check_input_attribute_copy(reader, previous, attributes);
+        const CheckInputAttribute attribute = {
+            .first = token, .end = token + 1, .name_token = token,
+            .kind = record->kind == CHECK_SYMBOL_PRAGMA_WEAK ? CHECK_ATTRIBUTE_WEAK : CHECK_ATTRIBUTE_ASM_LABEL,
+            .text = record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE ?
+                (String8){ (char*)intern_bytes(reader->pp->table, record->target), intern_length(reader->pp->table, record->target) } : (String8){ 0 },
             .resolved = true,
         };
         valid = valid && check_input_attribute_append(reader, attributes, attribute);
         if (valid)
         {
             check_input_set_attributes_at(reader->output, token, attributes);
+            record->declaration = token;
         }
-        reader->output->resource |= !valid;
     }
+    reader->output->resource |= !valid;
+    return valid;
 }
 
-// One join, not one scan per directive: the linked-name table identifies each canonical object, a scratch map
-// coalesces repeated directives, and one token pass checks its uses and existing asm labels. No work or storage
-// is added to translation units without these pragmas. Completion never mutates a deferred lane's borrowed state.
-static void check_input_symbol_pragmas_complete(CheckInputReader* reader)
+// Only units with these directives pay this scan. Compress file-scope declarations and evaluated external uses from
+// the binding columns, then stable-sort their names/objects. Each directive searches one declaration segment and one
+// earliest-use entry, never the unit's whole token stream. The two sorts share their temporary buffer.
+static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
 {
-    const CheckInputSymbolPragmas* history = reader->output->symbol_pragmas;
-    const uint32_t count = history != NULL ? history->count : 0;
-    const uint64_t mark = reader->scratch->length;
-    if (count != 0)
+    CheckInput* input = reader->output;
+    CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const CBindings* bindings = &reader->bindings;
+    const uint64_t temporary = reader->scratch->length;
+    const bool present = history != NULL && history->count != 0;
+    const uint8_t* const deferred = input->deferred_tokens;
+    const uint32_t names = reader->pp->table->count;
+    bool renames = false;
+    for (uint32_t i = 0; present && !renames && i < history->count; i += 1)
     {
-        const uint32_t tokens = reader->parser->tokens.count;
-        const uint32_t names = reader->pp->table->count;
-        uint32_t* map = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)tokens + 1);
-        CheckInputSymbolPragmaObject* objects = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckInputSymbolPragmaObject, count);
-        uint32_t* deferred_first = reader->output->deferred_tokens != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, names) : NULL;
-        reader->output->resource |= map == NULL || objects == NULL || (reader->output->deferred_tokens != NULL && deferred_first == NULL);
-        uint32_t used = 0;
-        if (!reader->output->resource)
+        renames = history->records[i].supported && history->records[i].kind == CHECK_SYMBOL_PRAGMA_REDEFINE;
+    }
+    uint64_t* keys = present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)bindings->count * (renames ? 3 : 2) + 1) : NULL;
+    uint64_t* uses = keys != NULL && renames ? keys + (uint64_t)bindings->count * 2 : NULL;
+    uint32_t* hidden = present && deferred != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, names) : NULL;
+    bool valid = !present || (keys != NULL && (deferred == NULL || hidden != NULL));
+    uint32_t count = 0;
+    uint32_t use_count = 0;
+    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
+    if (valid && hidden != NULL)
+    {
+        memset(hidden, 0xff, (uint64_t)names * sizeof(uint32_t));
+        const uint32_t tokens = input->token_count;
+        for (uint32_t first = 0; first < tokens; first += 64)
         {
-            memset(map, 0, ((uint64_t)tokens + 1) * sizeof(uint32_t));
-            if (deferred_first != NULL)
+            const uint64_t lanes = scalar ? check_input_scan_all(first, tokens) : check_input_scan_nonzero(deferred, first, tokens);
+            for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
             {
-                memset(deferred_first, 0xff, (uint64_t)names * sizeof(uint32_t));
-            }
-        }
-        for (uint32_t i = 0; !reader->output->resource && i < count; i += 1)
-        {
-            const CheckInputSymbolPragma* record = history->records + i;
-            const uint32_t linked = reader->linked_declarations[record->name];
-            if (linked != 0 && check_input_linkage(reader->declaration_bits, linked - 1) == 2)
-            {
-                const uint32_t object = reader->objects[linked - 1];
-                if (object != 0 && object <= tokens && map[object] == 0)
-                {
-                    objects[used] = (CheckInputSymbolPragmaObject){ .declaration = linked - 1, .definition = reader->definition_origins[linked - 1], .use = tokens };
-                    map[object] = ++used;
-                }
-            }
-        }
-        for (uint32_t token = 0; !reader->output->resource && token < tokens; token += 1)
-        {
-            if (deferred_first != NULL && reader->output->deferred_tokens[token] != 0)
-            {
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
                 const IdentId name = reader->parser->tokens.names[token];
-                if (name != 0 && name < names && deferred_first[name] == BUSTER_CHECK_NONE)
+                if (deferred[token] != 0 && name != 0 && name < names && hidden[name] == BUSTER_CHECK_NONE)
                 {
-                    deferred_first[name] = token;
-                }
-                continue;
-            }
-            const uint32_t declaration = reader->output->declarations[token];
-            const uint32_t object = declaration < tokens ? reader->objects[declaration] : 0;
-            const uint32_t index = object <= tokens ? map[object] : 0;
-            if (index != 0)
-            {
-                CheckInputSymbolPragmaObject* entry = objects + index - 1;
-                if (reader->output->declarations[token] == token)
-                {
-                    const CheckInputAttribute* label = check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_ASM_LABEL);
-                    entry->label = entry->label != NULL ? entry->label : label;
-                }
-                else
-                {
-                    entry->use = token < entry->use ? token : entry->use;
-                }
-            }
-        }
-        for (uint32_t i = 0; !reader->output->resource && i < count; i += 1)
-        {
-            const CheckInputSymbolPragma* record = history->records + i;
-            const uint32_t linked = reader->linked_declarations[record->name];
-            const uint32_t object = linked != 0 ? reader->objects[linked - 1] : 0;
-            const uint32_t index = object <= tokens ? map[object] : 0;
-            const bool hidden_before = deferred_first != NULL && record->name < names && deferred_first[record->name] < record->token;
-            if (hidden_before)
-            {
-                // A skipped body may contain an earlier use or declaration. Refuse only the affected name;
-                // unrelated spellings cannot change this pragma's ordering or binding.
-                check_input_symbol_pragma_refuse(reader, record);
-            }
-            else if (index == 0)
-            {
-                // An unused external-name mapping is a no-op, unlike an unmatched weak directive (Clang warns).
-                if (record->replacement == 0 || linked != 0)
-                {
-                    check_input_symbol_pragma_refuse(reader, record);
-                }
-            }
-            else
-            {
-                CheckInputSymbolPragmaObject* entry = objects + index - 1;
-                const bool late = (entry->definition != 0 && entry->definition - 1 < record->token) || entry->use < record->token;
-                const String8 text = record->replacement != 0 ? (String8){ .pointer = (char*)intern_bytes(reader->pp->table, record->replacement), .length = intern_length(reader->pp->table, record->replacement) } : (String8){ 0 };
-                const bool conflict = record->replacement != 0 && entry->label != NULL &&
-                                      (entry->label->text.length != text.length || memcmp(entry->label->text.pointer, text.pointer, text.length) != 0);
-                if (late || conflict)
-                {
-                    // Clang's emission timing affects late changes. Until that timing and its warnings are
-                    // represented, a hard refusal is safer than retroactively changing a symbol already used.
-                    check_input_symbol_pragma_refuse(reader, record);
-                }
-                else if (record->replacement == 0 || entry->replacement == 0)
-                {
-                    check_input_symbol_pragma_attribute(reader, entry->declaration, record->replacement);
-                    entry->replacement = record->replacement != 0 ? record->replacement : entry->replacement;
+                    hidden[name] = token;
                 }
             }
         }
     }
-    arena_pop_to(reader->scratch, mark);
+    for (uint32_t first = 0; valid && present && first < bindings->count; first += 64)
+    {
+        const uint64_t lanes = scalar ? check_input_scan_all(first, bindings->count) : check_input_scan_equal(bindings->operation, first, bindings->count, C_BINDING_DECLARE);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t event = first + (uint32_t)__builtin_ctzll(selected);
+            if (bindings->operation[event] == C_BINDING_DECLARE && bindings->depth[event] == 0 &&
+                bindings->key[event] < bindings->name_capacity && bindings->declaration[event] < input->token_count)
+            {
+                keys[count++] = (uint64_t)bindings->key[event] << 32 | event;
+            }
+        }
+        const uint64_t references = !renames ? 0 : scalar ? check_input_scan_all(first, bindings->count) :
+                                    check_input_scan_equal(bindings->operation, first, bindings->count, C_BINDING_USE);
+        for (uint64_t selected = references; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t event = first + (uint32_t)__builtin_ctzll(selected);
+            const uint32_t token = bindings->declaration[event];
+            const uint32_t declaration = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+            if (bindings->operation[event] == C_BINDING_USE && bindings->key[event] < bindings->name_capacity &&
+                declaration < input->token_count && check_input_linkage(input->declaration_bits, declaration) == 2 &&
+                !check_input_warning_unevaluated(reader, token))
+            {
+                uses[use_count++] = (uint64_t)input->objects[declaration] << 32 | bindings->point[event];
+            }
+        }
+    }
+    const uint64_t* references = valid && use_count > 1 ? c_bindings_sort(uses, keys + bindings->count, use_count, !scalar, UINT32_MAX) : uses;
+    uint32_t unique = 0;
+    for (uint32_t i = 0; valid && i < use_count; i += 1)
+    {
+        const uint64_t key = references[i];
+        if (unique != 0 && (uint32_t)(uses[unique - 1] >> 32) == (uint32_t)(key >> 32))
+        {
+            const uint32_t first = (uint32_t)uses[unique - 1];
+            uses[unique - 1] = (key & UINT64_C(0xFFFFFFFF00000000)) | (first < (uint32_t)key ? first : (uint32_t)key);
+        }
+        else
+        {
+            uses[unique++] = key;
+        }
+    }
+    const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(keys, keys + bindings->count, count, !scalar, UINT32_MAX) : keys;
+    for (uint32_t i = 0; valid && present && i < history->count; i += 1)
+    {
+        CheckInputSymbolPragma* record = history->records + i;
+        const bool eligible = record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->token <= reader->expression_limit;
+        const bool hidden_before = hidden != NULL && record->name < names && hidden[record->name] < record->token;
+        if (eligible && hidden_before)
+        {
+            // A selected-out body has no binding proof. Retain the upstream refusal only for this name; an
+            // unrelated skipped body must not suppress every directive in an otherwise complete selected unit.
+            const uint32_t before = input->report_count;
+            check_input_report(reader, record->token, CHECK_INPUT_PRAGMA_SEMANTICS);
+            if (input->report_count != before)
+            {
+                input->reports[before].pragma = record->pragma + 1;
+            }
+        }
+        if (eligible && !hidden_before)
+        {
+            const uint32_t begin = check_input_symbol_lower(ordered, count, record->name);
+            uint32_t end = begin;
+            uint32_t previous = BUSTER_CHECK_NONE;
+            uint32_t next = BUSTER_CHECK_NONE;
+            uint32_t definition = BUSTER_CHECK_NONE;
+            uint32_t label = BUSTER_CHECK_NONE;
+            while (end < count && (uint32_t)(ordered[end] >> 32) == record->name)
+            {
+                const uint32_t event = (uint32_t)ordered[end++];
+                const uint32_t token = bindings->declaration[event];
+                previous = bindings->point[event] <= record->token ? token : previous;
+                next = next == BUSTER_CHECK_NONE && bindings->point[event] > record->token ? token : next;
+                const uint32_t point = bindings->point[event];
+                const bool body = input->declaration_kinds[token] == C_BINDING_FUNCTION && point < input->token_count &&
+                                  reader->parser->tree.roles[point] == PARSE_ROLE_OPEN_BODY;
+                const uint32_t initialized = check_sparse_get(input->initializer_ends, token);
+                const uint32_t completed = body ? reader->parser->tree.parents[point] + 1 : initialized < input->token_count ? initialized : point;
+                definition = definition == BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? completed : definition;
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+                for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + a;
+                    label = label == BUSTER_CHECK_NONE && !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL ? token : label;
+                }
+            }
+            const uint32_t selected = previous != BUSTER_CHECK_NONE ? previous : next;
+            const uint8_t kind = selected != BUSTER_CHECK_NONE ? input->declaration_kinds[selected] : C_BINDING_KINDS;
+            const bool external = selected != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, selected) == 2;
+            const bool entity = kind == C_BINDING_OBJECT || kind == C_BINDING_FUNCTION;
+            if (record->kind == CHECK_SYMBOL_PRAGMA_WEAK)
+            {
+                if (external && entity && (definition == BUSTER_CHECK_NONE || definition > record->token))
+                {
+                    valid = check_input_symbol_attribute(reader, record, selected);
+                }
+                else if (previous == BUSTER_CHECK_NONE && kind == C_BINDING_TYPEDEF)
+                {
+                    record->warning = CHECK_SYMBOL_WARNING_TYPEDEF;
+                    record->diagnostic_source = record->source + 3;
+                    valid = check_input_symbol_warning_append(reader, i, &reader->warning_events, record->token, CHECK_WARNING_COMPLETE_AT_TOKEN, selected);
+                }
+                else if (previous == BUSTER_CHECK_NONE && complete)
+                {
+                    record->warning = CHECK_SYMBOL_WARNING_UNDECLARED;
+                    record->diagnostic_source = record->source + 3;
+                    valid = check_input_symbol_warning_append(reader, i, &reader->warning_events, record->token, CHECK_WARNING_COMPLETE_TU_END, BUSTER_CHECK_NONE);
+                }
+            }
+            else if (record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE && entity)
+            {
+                if (!external)
+                {
+                    record->warning = CHECK_SYMBOL_WARNING_INTERNAL;
+                    record->diagnostic_source = reader->parser->tokens.sources[selected];
+                    record->declaration = selected;
+                    valid = check_input_symbol_warning_append(reader, i, &reader->warning_events, selected, CHECK_WARNING_COMPLETE_AT_TOKEN,
+                                                               previous != BUSTER_CHECK_NONE ? record->token : selected);
+                }
+                else if (label == BUSTER_CHECK_NONE && (definition == BUSTER_CHECK_NONE || definition > record->token))
+                {
+                    // The declaration keeps its asm-label fact even when code generation already cached its old
+                    // spelling. The emission selection resolves that distinction from live references and the
+                    // source completion of eagerly emitted bodies, rather than treating every parsed use as emitted.
+                    const uint32_t object = input->objects[selected];
+                    const uint32_t first = check_input_symbol_lower(uses, unique, object);
+                    record->after_use = first < unique && (uint32_t)(uses[first] >> 32) == object && (uint32_t)uses[first] < record->token;
+                    valid = check_input_symbol_attribute(reader, record, selected);
+                }
+            }
+        }
+    }
+    input->warning_events = check_warning_view(&reader->warning_events);
+    input->resource |= !valid;
+    arena_pop_to(reader->scratch, temporary);
 }

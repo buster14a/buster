@@ -467,6 +467,46 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
     const CheckSourceFixture fixtures[] =
     {
         {
+            "double evaluation widens expressions and preserves conversion barriers",
+            "#pragma clang fp eval_method(double)\n"
+            "#define T(e,t) _Static_assert(_Generic((e),t:1,default:0),\"evaluation type\")\n"
+            "float x,y;float _Complex z;T(x,float);T(1.0f,float);T(+x,double);T(-x,double);T(x+y,double);T(x?x:y,double);"
+            "T((x,y),float);T((x=y),float);T(x+=1,float);T(++x,float);T(x++,float);T((float)(x+y),float);"
+            "T(__real__ z,float);T(__imag__ z,float);T(z+z,double _Complex);T(~z,double _Complex);"
+            "T((_Float16)1+(_Float16)2,double);T((__bf16)1+(__bf16)2,double);"
+            "T(__builtin_elementwise_abs(x),double);T(__builtin_fabsf(x),float);"
+            "_Static_assert(sizeof(x+y)==8 && sizeof((x,y))==4,\"sizeof evaluation\");"
+            "_Static_assert((16777216.0f+1.0f)-16777216.0f==1,\"wide constant\");"
+            "_Static_assert((float)(16777216.0f+1.0f)-16777216.0f==0,\"cast barrier\");"
+            "_Static_assert(16777217.0f-16777216.0f==0,\"literal source rounding\");\n",
+        },
+        {
+            "extended evaluation widens scalar and complex operands without changing vector elements",
+            "#pragma clang fp eval_method(extended)\n"
+            "#define T(e,t) _Static_assert(_Generic((e),t:1,default:0),\"evaluation type\")\n"
+            "float x;double y;float _Complex z;double _Complex w;typedef float V __attribute__((vector_size(16)));V v;"
+            "T(+x,long double);T(x+x,long double);T(+y,long double);T(x?y:y,long double);T((double)(y+y),double);"
+            "T(z+z,long double _Complex);T(w+w,long double _Complex);T(~w,long double _Complex);T(__real__ w,double);"
+            "T(v+v,V);T(x?v:v,V);T(v+x,V);T(__builtin_elementwise_abs(v),V);T(__builtin_elementwise_abs(y),long double);"
+            "_Static_assert(sizeof(x+x)==16 && sizeof(y+y)==16 && sizeof(v+v)==16,\"evaluation sizes\");"
+            "_Static_assert((9007199254740992.0+1.0)-9007199254740992.0==1,\"extended constant\");\n",
+        },
+        {
+            "evaluation method restores nested compounds and float control stack",
+            "#define TYPE(e,t) _Static_assert(_Generic((e),t:1,default:0),\"scope type\")\n"
+            "#define METHOD double\n#pragma clang fp eval_method(METHOD)\n"
+            "float x;TYPE(+x,double);int f(void){\n#pragma clang fp eval_method(extended)\nTYPE(+x,long double);{\n"
+            "#pragma clang fp eval_method(source)\nTYPE(+x,float);}TYPE(+x,long double);return 0;}TYPE(+x,double);\n"
+            "#pragma float_control(push)\n#pragma clang fp eval_method(extended)\nTYPE(+x,long double);\n"
+            "#pragma float_control(pop)\nTYPE(+x,double);\n",
+        },
+        {
+            "implicit translation evaluation permits default-method-only typedef uses",
+            "typedef float T __attribute__((available_only_in_default_eval_method));typedef float float_t;\n"
+            "#pragma clang fp eval_method(double)\nT value;float_t ordinary;"
+            "int f(void){T x=1;return sizeof(T)+sizeof((T)1)+sizeof(__typeof__(x+x))+sizeof(ordinary);}\n",
+        },
+        {
             "generic controls use intrinsic result types",
             "_Static_assert(_Generic(__builtin_ia32_rdpid(),unsigned:1,default:0),\"rdpid type\");\n"
             "int g(unsigned char x){return _Generic(__builtin_rotateleft8(x,1),unsigned char:1,default:0);}\n",

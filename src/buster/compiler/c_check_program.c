@@ -360,7 +360,7 @@ struct CheckProgram
     // The function declarations with a target, target_clones, always_inline, flatten or noreturn attribute, as keys of
     // their object in the high half and their token in the low, sorted by object (per object, the target attributes' in
     // token order, then the others'), for code generation's check of target features at -c (#775,
-    // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
+    // check_program_target_features), or a late symbol rename's emission walk. Other units retain no keys.
     uint64_t* attribute_keys;
     uint32_t attribute_key_count;
     // Each body's source labels' places, its controls' indices where code after them begins, in the order the writer
@@ -382,8 +382,12 @@ struct CheckProgram
     // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
     // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
     // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
-    // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
+    // target attribute, an x86 builtin's call (#148), such a query, or a symbol rename after an earlier use.
     uint8_t* body_eager;
+    // For a unit with a redefine_extname after an earlier use, one byte per retained symbol pragma: whether an
+    // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
+    // view; the input's asm-label facts remain unchanged for syntax and type checks.
+    uint8_t* symbol_pragma_originals;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
     // lifetime_first (by the block's closing brace, BUSTER_CHECK_NONE for a block without them) through lifetime_next (by
     // declaration), in token order; null otherwise.
@@ -551,7 +555,7 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // resolves each body's instruction set from: keys of their object in the high half and their token in the low, in each
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
 // Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
-// only code generation's check of target features reads, and only in a unit with a target attribute (#775,
+// code generation's check of target features or a late symbol rename's emission walk reads (#775,
 // CheckProgram.attribute_keys); and the file-scope declarations with an alias, ifunc or weakref attribute, which
 // check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
@@ -3395,20 +3399,30 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
 // The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
 // unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
 // so each object's are still in token order) and then the always_inline, flatten and noreturn ones, sorted stably by
-// object with the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it
-// can lack a feature by clang's rule. Returns false if there was no room.
+// object with the radix kernel's twins (c_bindings_sort). A late symbol rename also needs the callee keys for the
+// shared emission walk's noreturn decisions. Other units without a target attribute keep none. Returns false if
+// there was no room.
 __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
 {
     const uint64_t total = (uint64_t)events->count + events->callee_count;
     bool valid = events->room && total <= UINT32_MAX;
-    if (valid && events->count != 0)
+    bool late = false;
+    const CheckInputSymbolPragmas* pragmas = program->input->symbol_pragmas;
+    for (uint32_t i = 0; events->callee_count != 0 && pragmas != NULL && !late && i < pragmas->count; i += 1)
+    {
+        late = pragmas->records[i].after_use;
+    }
+    if (valid && (events->count != 0 || late))
     {
         uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
         uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);
         valid = keys != 0 && temporary != 0;
         if (valid)
         {
-            memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            if (events->count != 0)
+            {
+                memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            }
             if (events->callee_count != 0)
             {
                 memcpy(keys + events->count, events->callee_keys, (uint64_t)events->callee_count * sizeof(uint64_t));
@@ -3994,6 +4008,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     return valid;
 }
 
+#include "c_check_program_symbol_pragma.c"
 #include "c_check_program_select.c"
 #include "c_check_program_helpers.c"
 #include "c_check_program_asm.c"

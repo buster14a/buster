@@ -4871,7 +4871,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 const bool retained = original_pragmas != NULL || repair == NULL || token < check_repair_pragma_end(repair);
                 if (retained)
                 {
-                    check_driver_pragma_report(pp, pragma_input, record, quiet);
+                    check_driver_pragma_report(parser, pp, pragma_input, record, quiet);
                 }
                 pragma += 1;
             }
@@ -4945,7 +4945,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
         // source spelling and warning policy are independent of that expression and precede the parser failure.
         for (; !pp->fatal && original_pragmas != NULL && pragma < pragma_input->fp_pragma_count; pragma += 1)
         {
-            check_driver_pragma_report(pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+            check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
         }
     }
     arena_pop_to(scratch, mark);
@@ -6081,6 +6081,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_undeclared_test.c"
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
+#include "c_check_ms_struct_driver_test.c"
 #include "c_check_ignored_pragma_driver_test.c"
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"

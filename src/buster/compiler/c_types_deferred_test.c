@@ -278,7 +278,7 @@ static void type_deferred_run_op(TypeTable* table, const TypeDeferredOp* op, uin
             // A union of two members of one size can be made transparent.
             const TypeId first = a != 0 ? a : BUSTER_TYPE_INT;
             const TypeMember members[2] = { type_test_member(1, first, BUSTER_TYPE_NOT_BIT_FIELD), type_test_member(2, op->tag_kind == BUSTER_TYPE_KIND_UNION ? first : (b != 0 ? b : BUSTER_TYPE_CHAR), BUSTER_TYPE_NOT_BIT_FIELD) };
-            type_complete_record(table, value, members, 2, (TypeRecordAttributes){ 0 });
+            type_complete_record(table, value, members, 2, (TypeRecordAttributes){ .ms_struct = (index & 1) != 0 });
         }
         else if (value != 0 && op->kind == TYPE_DEFERRED_ENUM)
         {
@@ -290,7 +290,7 @@ static void type_deferred_run_op(TypeTable* table, const TypeDeferredOp* op, uin
         const TypeMember members[2] = { type_test_member(1, b != 0 ? b : BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD), type_test_member(2, c != 0 ? c : BUSTER_TYPE_LONG, BUSTER_TYPE_NOT_BIT_FIELD) };
         if (type_kind(table, a) != BUSTER_TYPE_KIND_ENUM)
         {
-            type_complete_record(table, a, members, 2, (TypeRecordAttributes){ 0 });
+            type_complete_record(table, a, members, 2, (TypeRecordAttributes){ .ms_struct = (index & 1) != 0 });
         }
         value = a;
     }
@@ -332,6 +332,7 @@ static bool type_deferred_same_tables(const TypeTable* a, const TypeTable* b)
            memcmp(a->tags.member_begin, b->tags.member_begin, tags * sizeof(uint32_t)) == 0 &&
            memcmp(a->tags.member_count, b->tags.member_count, tags * sizeof(uint32_t)) == 0 &&
            memcmp(a->tags.completion, b->tags.completion, tags * sizeof(uint32_t)) == 0 && memcmp(a->tags.packed, b->tags.packed, tags) == 0 &&
+           memcmp(a->tags.ms_struct, b->tags.ms_struct, tags) == 0 &&
            memcmp(a->tags.pack_log2, b->tags.pack_log2, tags) == 0 && memcmp(a->tags.alignment_log2, b->tags.alignment_log2, tags) == 0 &&
            memcmp(a->tags.lookup, b->tags.lookup, tags * sizeof(uint32_t)) == 0 && memcmp(a->tags.lookup_log2, b->tags.lookup_log2, tags) == 0;
     const uint64_t members = a->members.count;

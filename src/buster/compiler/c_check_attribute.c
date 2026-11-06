@@ -116,6 +116,8 @@ typedef enum CheckInputAttributeKind
     // An attribute of clang's thread-safety analysis (#147, check_input_thread_attribute), which changes nothing here past
     // its handler's checks.
     CHECK_ATTRIBUTE_THREAD_SAFETY,
+    CHECK_ATTRIBUTE_MS_STRUCT,
+    CHECK_ATTRIBUTE_GCC_STRUCT,
     // #1361: conservative object-size compatibility, without hidden ABI arguments.
     CHECK_ATTRIBUTE_PASS_OBJECT_SIZE,
     CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE,
@@ -302,6 +304,8 @@ struct CheckInputAttributeRule
 static const CheckInputAttributeRule check_input_attribute_rules[] =
 {
     { "packed", CHECK_ATTRIBUTE_PACKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "ms_struct", CHECK_ATTRIBUTE_MS_STRUCT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "gcc_struct", CHECK_ATTRIBUTE_GCC_STRUCT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "aligned", CHECK_ATTRIBUTE_ALIGNED, CHECK_ATTRIBUTE_INTEGER, 0, 1 },
     { "mode", CHECK_ATTRIBUTE_MODE, CHECK_ATTRIBUTE_IDENTIFIER, 1, 1 },
     { "vector_size", CHECK_ATTRIBUTE_VECTOR_SIZE, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
@@ -2682,17 +2686,18 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
 // explicit rule) and no_caller_saved_registers (register-preservation semantics not implemented here);
 // and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
 // (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
-// uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency; the
+// uninitialized, no_sanitize_memory, analyzer_noreturn and carries_dependency; the
 // thread-safety analysis's (check_input_thread_rows); one of no C subject (`subjectless`: Objective-C's, C++'s and the like,
 // whose subject's diagnostic is all clang gives in C); and these, whose handlers change nothing in C past their subjects,
-// counts and arguments' kinds (#147): available_only_in_default_eval_method (whose `#pragma clang fp eval_method` the
-// checker refuses), btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
+// counts and arguments' kinds (#147): btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
 // -frandomize-layout-seed), Objective-C's boxable and bridge_mutable, Fuchsia's handles (the analyzer's), suppress, Swift's
 // bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone).
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact, bool subjectless)
 {
     static const char* const unchanged[] = {
-        "available_only_in_default_eval_method", "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
+        // Its resolved typedef uses are checked after expression reading, including constant-only type queries.
+        "available_only_in_default_eval_method",
+        "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
         "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
@@ -2722,7 +2727,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
     bool handled = check_input_attribute_equal(name, "minsize") || check_input_attribute_equal(name, "optnone") ||
                    check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
-                   check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
+                   check_input_attribute_equal(name, "uninitialized") ||
                    check_input_attribute_equal(name, "no_sanitize_memory") || check_input_attribute_equal(name, "analyzer_noreturn") ||
                    check_input_attribute_equal(name, "carries_dependency") || check_input_thread_row(name) != NULL || subjectless;
     for (uint32_t i = 0; !handled && i < BUSTER_ARRAY_LENGTH(unchanged); i += 1)
@@ -3872,6 +3877,8 @@ static bool check_input_attribute_multiversion_allowed(CheckInputMultiversionKin
         case CHECK_ATTRIBUTE_ARTIFICIAL: result = !inline_function; break;
         // Type attributes. aligned and may_alias are FunctionDecl attributes to clang, which refuses them there.
         case CHECK_ATTRIBUTE_PACKED:
+        case CHECK_ATTRIBUTE_MS_STRUCT:
+        case CHECK_ATTRIBUTE_GCC_STRUCT:
         case CHECK_ATTRIBUTE_ALIGNAS:
         case CHECK_ATTRIBUTE_MODE:
         case CHECK_ATTRIBUTE_VECTOR_SIZE:
@@ -5113,6 +5120,8 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
     const Parser* parser = reader->parser;
     const uint32_t pointer_variable = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER;
     const uint32_t subjects = declaration | ((declaration & pointer_variable) == pointer_variable ? BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE : 0);
+    uint32_t microsoft_layout = UINT32_MAX;
+    uint32_t ordinary_layout = UINT32_MAX;
     bool valid = true;
     for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
     {
@@ -5359,7 +5368,14 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         // After its subject's check, as clang's handleCommonAttributeFeatures has them (#147): an attribute already on the
         // declaration that excludes it (diagMutualExclusion), with the note at that one, then its count of arguments.
         const bool kept = valid && !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
-        const uint32_t excluding = kept ? check_input_attribute_excluding(reader, attributes, i) : UINT32_MAX;
+        // Layout handlers reject the opposite kind on this declaration, but permit both across redeclarations.
+        // Remember each first local attribute once: repeated identical attributes must not rescan the whole prefix.
+        const bool microsoft = kept && attribute->kind == CHECK_ATTRIBUTE_MS_STRUCT && attribute->first >= begin;
+        const bool ordinary = kept && attribute->kind == CHECK_ATTRIBUTE_GCC_STRUCT && attribute->first >= begin;
+        const uint32_t excluding = microsoft ? ordinary_layout : ordinary ? microsoft_layout :
+                                   kept ? check_input_attribute_excluding(reader, attributes, i) : UINT32_MAX;
+        microsoft_layout = microsoft && microsoft_layout == UINT32_MAX ? i : microsoft_layout;
+        ordinary_layout = ordinary && ordinary_layout == UINT32_MAX ? i : ordinary_layout;
         if (excluding != UINT32_MAX)
         {
             const uint32_t before = reader->output->report_count;
@@ -5567,6 +5583,7 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
 {
     const CheckInputAttributeKind kind = attribute->kind;
     const bool excluded = attribute->keyword || check_input_attribute_late_kind(attribute) || kind == CHECK_ATTRIBUTE_UNKNOWN || kind == CHECK_ATTRIBUTE_PACKED ||
+                          kind == CHECK_ATTRIBUTE_MS_STRUCT || kind == CHECK_ATTRIBUTE_GCC_STRUCT ||
                           kind == CHECK_ATTRIBUTE_ALIGNAS || kind == CHECK_ATTRIBUTE_MODE || kind == CHECK_ATTRIBUTE_VECTOR_SIZE ||
                           kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE || kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION || kind == CHECK_ATTRIBUTE_ALIAS ||
                           kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_ASM_LABEL ||

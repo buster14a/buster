@@ -232,10 +232,11 @@ therefore share the actual emitted functions' symbols.
 
 Semantic checking currently uses one C LP64 target model: 32-bit `wchar_t`,
 80-bit x87 `long double` stored in 16 bytes, and floating arithmetic evaluated
-in its source format, with plain `char` signed (x86-64's) or unsigned, as
+in its source format unless a lexical `clang fp eval_method` pragma changes
+its usual unary conversions, with plain `char` signed (x86-64's) or unsigned, as
 `-funsigned-char` and its spellings say. Options that advertise a different
 model are rejected before declaration elaboration. This includes short
-`wchar_t`, 64/128-bit `long double`, double/extended floating evaluation, and
+`wchar_t`, 64/128-bit `long double`, command-line double/extended evaluation, and
 default extended evaluation when SSE is disabled. Explicit source-format
 evaluation is accepted. Assembly is outside this adapter, and the C language
 option parser does not admit C++ modes.
@@ -389,19 +390,68 @@ does, each rule checked against clang's answers on probes of it:
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
-  `#pragma fenv_access(on|off)` at file scope or a compound's start updates
-  the same runtime `FENV_ACCESS` column as the STDC form, with the same
-  nested-scope restoration; `#pragma clang fp contract(on|off|fast)` retains
-  its state (`fast` distinct) without contracting anything; and
-  `#pragma float_control(precise, on)` records the precise policy already used.
-  The handler names are not macro-expanded, but their argument words are, so a
-  spelling that was a macro anywhere in the unit is refused conservatively
-  rather than read unexpanded. Other arguments, stack operations, additional
-  clauses, malformed forms and invalid placements are hard semantic-pragma
-  errors. Clang enables `fenv_access` only with `-fms-extensions` (or a strict
-  floating model) and silently ignores a mid-block spelling; buster refuses
-  that option, recognizes these spellings unconditionally as #1135 asks, and
-  refuses the placements it cannot apply.
+  `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
+  `reassociate(on|off)`, `reciprocal(on|off)`, `eval_method(source|double|extended)` and
+  `exceptions(ignore|maytrap|strict)`. `#pragma float_control` accepts
+  `precise` and `except`, with optional `on`/`off`, `push` modifiers, and
+  standalone `push`/`pop`. The file-scope stack saves every floating setting;
+  compound-scope settings restore at the closing brace. An empty `pop` reports
+  Clang's `-Wignored-pragmas` warning with ordinary command-line, source and
+  system-header policy. Illegal precision/exception combinations and stack
+  operations inside a compound have Clang's diagnostic text and location.
+  Permission to contract, reassociate, use reciprocals or relax precision does
+  not require those transformations; generated evaluation remains precise.
+  `strict` and `maytrap` preserve runtime operations and conversions through the
+  existing floating-environment path, including discarded results and constant
+  operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
+  one does not erase the other.
+
+  `eval_method` changes ordinary scalar and complex evaluation through the
+  existing conversions and lowering: `double` widens narrower floating
+  operands to `double`, and `extended` to x87 `long double`. Literals retain
+  their source rounding. Casts, assignments, returns and fixed prototype
+  parameters retain their destination formats; increment/decrement retain
+  their lvalue format. Compound assignment applies usual unary evaluation
+  only to its right operand before finding the common arithmetic type.
+  Variadic `float` arguments still pass as `double` under extended evaluation,
+  while an original `double` argument widens. Vector element types do not
+  change. Constant expressions, type queries and runtime expressions use the
+  same state. The optional graph byte stores evaluation separately from
+  runtime `FENV_ACCESS`, so wider constant evaluation does not itself require
+  runtime execution.
+
+  A later separate `reassociate(on)` or `reciprocal(on)` conflicts with an
+  active evaluation pragma, even after `eval_method(source)` or a
+  `float_control(pop)`. The semantic reader diagnoses conflicts with
+  effective global approximation, reassociation and reciprocal permissions.
+  The production driver retains its named refusal for these unsupported
+  command-line modes before reading source.
+  `__FLT_EVAL_METHOD__` expansion in an active evaluation-pragma scope is an
+  error, including macro expansions consumed by `#if`; a closing compound
+  restores the enclosing scope. Cold preprocessing events retain expansion
+  provenance and their order among adjacent pragmas. Ordinary `-E` remains
+  unaffected.
+
+  With an explicit command-line evaluation method, a typedef marked
+  `available_only_in_default_eval_method` cannot be used under a differing
+  last pragma method. File-scope `float_t` and `double_t` receive the same
+  implicit restriction. `float_control(pop)` restores arithmetic precision
+  but retains that last method; a closing compound restores both. A cold
+  pass over resolved uses handles redeclarations and constant-only type
+  queries in source order, without applying later
+  attributes to earlier uses. Command-line `double`/`extended` selection
+  remains an explicit target-model refusal; lexical methods above are
+  implemented within the existing LP64 model.
+  The handler names are not macro-expanded. Semantic preprocessing expands
+  their operands at the original source point, including `_Pragma`, function
+  macros and subsequent redefinitions. Ordinary `-E` output keeps them raw;
+  direct checker callers supplying that raw stream retain the conservative
+  refusal for argument words that were macro names. Unsupported arguments,
+  malformed forms and invalid placements are hard semantic-pragma errors.
+  The unqualified `#pragma fenv_access` uses the unknown-pragma warning
+  policy in the accepted Linux mode, as Clang 23 does. Its handler requires
+  `-fms-extensions`, which the driver refuses. Use `#pragma STDC FENV_ACCESS`
+  for runtime floating-environment semantics.
 - **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
   `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
   number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
@@ -5941,7 +5991,7 @@ arguments against the function. The checker now gives these as clang does.
     Objective-C's) is kept with no effect, for its subject's check and its
     argument count's;
   - so are some whose own handlers check what is checked here: `minsize`,
-    `optnone`, `noescape`, `annotate`, `uninitialized`, `gcc_struct`,
+    `optnone`, `noescape`, `annotate`, `uninitialized`,
     `no_sanitize_memory`, `analyzer_noreturn` and `carries_dependency`. With
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
@@ -5954,10 +6004,12 @@ arguments against the function. The checker now gives these as clang does.
   - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
     `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
     subject's diagnostic is all clang gives in C;
+  - `available_only_in_default_eval_method`, whose typedef-use restriction
+    under an explicit translation-unit method is checked against the lexical
+    evaluation history, including inherited and implicit `float_t`/`double_t`
+    marks (see the floating-point pragmas above);
   - and these, whose handlers change nothing in C past their subjects,
-    counts and arguments' kinds: `available_only_in_default_eval_method`
-    (whose `#pragma clang fp eval_method` the checker refuses),
-    `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
+    counts and arguments' kinds: `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
     `-frandomize-layout-seed`), `objc_boxable`, `objc_bridge_mutable`,
     Fuchsia's `use_handle` and `release_handle`, `suppress`, `swift_bridge`,
     `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`.
@@ -6183,7 +6235,7 @@ arguments against the function. The checker now gives these as clang does.
 
   The rest stay refused by name: `no_caller_saved_registers` (register
   preservation), and the attributes whose handlers clang has its own
-  (`pass_object_size`, `ms_struct`, `interrupt` and others). Recognizing their
+  (`pass_object_size`, `interrupt` and others). Recognizing their
   names does not supply those handlers or their ABI effects.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
@@ -6583,7 +6635,12 @@ is not an implementation of COFF linker directives or automatic library loading.
 GCC optimization hints such as `ivdep`, `push_options`, `pop_options`,
 `reset_options`, `target`, and `optimize` use the unknown-pragma policy, as in
 the pinned Clang 23.1.4 oracle. In particular, accepting `GCC target("avx2")`
-does **not** enable AVX2; use the implemented per-function `target` attribute.
+does not enable AVX2; use the implemented per-function `target` attribute.
+The same policy covers plain and GCC `scalar_storage_order`,
+unqualified `section`, `code_seg`, `data_seg`, `bss_seg`, `const_seg`, `init_seg`
+and `fenv_access` in the accepted Linux mode. Their arguments do not change
+layout, symbol placement or floating evaluation, even when malformed; enabling
+`-Wunknown-pragmas` reports them and promoting that warning prevents emission.
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
@@ -6594,29 +6651,77 @@ reading source (the instrumentation boundary in the introduction), while a
 non-emitting action refuses each `#pragma omp` directive through the checker. A
 subsequent `-fno-openmp` restores the ignore behavior for both.
 
-Literal file-scope `#pragma weak name` and `#pragma redefine_extname old new`
-are implemented for externally linked functions and objects, before their first
-use or non-tentative definition. They attach the existing weak-binding and
-assembler-label metadata to the canonical declaration, preserving redeclaration
-identity, object emission and relocations. A prototype may precede the pragma;
-a weak directive may follow a tentative definition. Repeated renamings keep the
-first mapping. An unused external-name mapping has no effect.
+`#pragma weak NAME` applies weak ELF binding to an external variable or function,
+including tentative definitions and undefined references. A directive after an
+explicit definition keeps that definition's existing binding. Lookup uses the
+translation unit's declarations, so a local shadow does not redirect it. Forward
+directives that never acquire an external declaration warn at EOF; forward
+typedefs and internal `redefine_extname` declarations retain Clang's distinct
+warning groups and locations. A weak directive after an existing internal declaration
+or typedef is a silent no-op, as in the oracle.
 
-This is a bounded subset of #1135, not full pragma compatibility. Weak aliases
-(`weak a = b`), unmatched weak names, internal-linkage subjects, macro operands,
-nested/interrupted placement, trailing tokens, conflicting assembler labels,
-and changes after a use/definition still produce a named unsupported-semantic
-error. Clang expands both directives' operands; retained macro spellings must
-not accidentally alter a different symbol. Late changes also depend on Clang's
-code-emission timing, so they are refused rather than applied retroactively.
+`#pragma redefine_extname NAME SYMBOL` uses the existing asm-label emission path
+for declarations and subsequent references. The first pending rename and explicit
+asm labels take precedence; a directive after an explicit definition keeps its
+already emitted name. Source-time macro expansion applies to both directives'
+operands. Malformed forms use `-Wignored-pragmas`, including missing names and
+trailing tokens. These lexical warnings survive parser recovery.
+
+For a rename after a parsed use, emission selection decides whether an earlier
+emitted reference has already fixed the original name. Compact references select
+candidate eager bodies; the existing target-feature emission walk finds their
+actual references, with each body's definition-completion point. It preserves
+source labels and constant-false loop bodies while skipping plain statements
+after a return or an ordinary noreturn call. Static initializers retain their
+eager/deferred rules. Unevaluated expressions, unselected operands and deferred
+functions do not block a later rename. A
+directive inside an eager function still precedes that function's emission. This
+cost and its cold per-pragma decisions exist only in units with a late rename;
+the declaration's retained asm-label fact and source coordinates stay immutable.
+The object oracle covers 43 late-rename shapes, including eager/deferred static
+data, unreachable labels, loops, gotos, overloaded noreturn calls and trapping builtins, and
+compares scalar/vector objects and poisoned multi-lane objects. The shared walk
+borrows live preprocessing options only during selection and retains no new
+pointer to a worker's preprocessor.
+
+`#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
+declaration without a C declarator. This is separate from ordinary weak binding.
+
 With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
 deferred body is conservatively refused because its binding was not checked;
 unrelated deferred bodies do not suppress weak or renamed symbol metadata.
-These refusal boundaries remain errors under `-w` and diagnostic suppression.
+The unified handler retains the literal handler's allocation rollback, native
+ELF, separately linked strong-override, and selected-header regressions.
 
-Other unsupported semantic effects, including `scalar_storage_order` and
-layout-changing `align=packed`, remain hard, named errors. Already supported
-directives keep their original handlers and syntax validation.
+`#pragma ms_struct on`, `off` and `reset` select the layout sampled by subsequent
+record definitions. The state follows source order across function boundaries;
+forward declarations do not capture it. Macro operands expand when the semantic
+preprocessor retains the directive. Malformed state names, missing operands and
+extra tokens warn under `-Wignored-pragmas` and leave the previous state intact.
+A directive between struct members is a hard placement error.
+
+Explicit `ms_struct` and `gcc_struct` attributes attach to structs and unions,
+including attributes inherited from a forward declaration. `gcc_struct` selects
+ordinary layout even while the pragma is on. Both attributes on one declaration
+conflict, with a note at the earlier one; Clang permits them across separate
+declarations, where `gcc_struct` wins. The type table implements complete
+bit-field storage units, same-size sharing, zero-width and union rules, and
+packed/aligned interactions in both layout paths (see [types](c-types.md)).
+Units whose byte size is not a power of two, such as a `_BitInt(129)` bit-field,
+are explicitly refused because their Microsoft alignment cannot fit the current
+type representation. A raw preprocessor client without semantic pragma expansion
+also refuses a macro-dependent setting instead of guessing its expanded state.
+
+The reader fixtures check all four parser schedules and retained state across
+function boundaries; the driver compares warning controls and exact diagnostic
+locations with Clang. Separately compiled Clang and Buster callers/callees exchange
+ordinary, packed, zero-width and union records in both directions at `-O0` and
+`-O2`, with fixed layout assertions and scalar/vector object equality.
+
+Other unsupported semantic effects remain hard, named errors, including
+layout-changing `align=packed`.
+Warning suppression cannot approve these directives. Already
+supported directives keep their original handlers and syntax validation.
 
 Directive warnings are sparse lexical facts with independent preprocessing
 source coordinates. Command-line policy, source-ordered diagnostic push/pop,

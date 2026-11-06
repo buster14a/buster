@@ -335,7 +335,7 @@ struct PPOptions
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
-    // Semantic consumers expand pack operands at their original source point. The default -E stream keeps them raw.
+    // Semantic consumers expand supported pragma operands at their original source point. Ordinary -E keeps them raw.
     bool semantic_pragmas;
     // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
     // -ftrigraphs or -fno-trigraphs.
@@ -1281,6 +1281,18 @@ struct PPHistoryRun
 };
 _Static_assert(sizeof(PPHistoryRun) == 8, "an output history run is eight bytes");
 
+// A semantic use of __FLT_EVAL_METHOD__, including expansions consumed by #if or another directive. The output
+// boundary and preceding pragma count retain the expansion's place even when a capture has not lifted its pragmas
+// into the output yet. No record is made for ordinary -E, or for tokens that were never expanded.
+typedef struct PPEvalMethodUse PPEvalMethodUse;
+struct PPEvalMethodUse
+{
+    uint32_t position;
+    uint32_t pragmas;
+    uint32_t location;
+    uint32_t origin;
+};
+
 // The most invocations in one invocation's arguments that pp_finish_simple expands in place (Preprocessor.nested).
 #define BUSTER_PP_NESTED_PLANS 8
 
@@ -1544,6 +1556,10 @@ struct Preprocessor
     int64_t unit_seconds;
     // The builtin __FLT_EVAL_METHOD__'s value (predefines_text).
     uint32_t flt_eval_method;
+    // Cold semantic expansion uses, in preprocessing order. History replay supplies their retained origins too.
+    PPEvalMethodUse* eval_method_uses;
+    uint32_t eval_method_use_count;
+    uint32_t eval_method_use_capacity;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
     uint64_t ticks[PP_PHASE_COUNT];
     uint64_t input_tokens;
@@ -1744,6 +1760,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
 
 #include "c_preprocessor_history.c"
 
@@ -11971,6 +11988,43 @@ static __attribute__((unused)) uint32_t pp_path_file_name(const char* path, uint
     return size != 0 ? size : length;
 }
 
+static void pp_eval_method_use(Preprocessor* pp, PPToken name)
+{
+    if (pp->options.semantic_pragmas && !pp->fatal)
+    {
+        const uint32_t count = pp->eval_method_use_count;
+        if (count == pp->eval_method_use_capacity)
+        {
+            const uint64_t capacity = count != 0 ? (uint64_t)count * 2 : 8;
+            PPEvalMethodUse* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(&pp->arena, PPEvalMethodUse, capacity) : NULL;
+            if (records == NULL)
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for floating evaluation macro uses");
+            }
+            else
+            {
+                if (count != 0)
+                {
+                    memcpy(records, pp->eval_method_uses, (uint64_t)count * sizeof(PPEvalMethodUse));
+                }
+                pp->eval_method_uses = records;
+                pp->eval_method_use_capacity = (uint32_t)capacity;
+            }
+        }
+        if (!pp->fatal)
+        {
+            pp->eval_method_uses[count] = (PPEvalMethodUse)
+            {
+                .position = pp->output.count,
+                .pragmas = pp->pragma_lines,
+                .location = name.location,
+                .origin = name.origin,
+            };
+            pp->eval_method_use_count = count + 1;
+        }
+    }
+}
+
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     const uint32_t saved_history = pp->history_current;
@@ -12025,6 +12079,7 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             break;
         case PP_BUILTIN_FLT_EVAL_METHOD:
             // The translation unit's: under -E, clang's `#pragma clang fp eval_method` doesn't change it.
+            pp_eval_method_use(pp, name);
             pp_emit(pp, pp_number_token(pp, pp->flt_eval_method, flags));
             break;
         case PP_BUILTIN_DATE:
@@ -14065,7 +14120,7 @@ typedef enum PPPragmaKind
     PP_PRAGMA_DEPENDENCY,
     PP_PRAGMA_DIAGNOSTIC,
     PP_PRAGMA_OMP, // Printed expanded (-E's printer expands it, as OpenMP says).
-    PP_PRAGMA_PACK, // Expanded only for an opted-in semantic consumer; ordinary -E retains raw operands.
+    PP_PRAGMA_SEMANTIC, // Expanded only for an opted-in semantic consumer; ordinary -E retains raw operands.
     PP_PRAGMA_IDENT, // #ident and #sccs: not pragmas, but read and printed alike.
     PP_PRAGMA_REGION, // clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage: begin and end.
     PP_PRAGMA_MACRO_NOTE, // clang deprecated, final and restrict_expansion, of a macro: not printed.
@@ -14111,9 +14166,12 @@ static PPPragmaKind pp_pragma_kind(const Preprocessor* pp, const PPTokens* token
     {
         result = PP_PRAGMA_OMP;
     }
-    else if (pp->options.semantic_pragmas && pp_token_is_name(pp, tokens, begin, end, "pack"))
+    else if (pp->options.semantic_pragmas &&
+             (pp_token_is_name(pp, tokens, begin, end, "pack") || pp_token_is_name(pp, tokens, begin, end, "weak") ||
+              pp_token_is_name(pp, tokens, begin, end, "redefine_extname") || pp_token_is_name(pp, tokens, begin, end, "ms_struct") ||
+              pp_token_is_name(pp, tokens, begin, end, "float_control")))
     {
-        result = PP_PRAGMA_PACK;
+        result = PP_PRAGMA_SEMANTIC;
     }
     else if (space && second != 0)
     {
@@ -14127,6 +14185,7 @@ static PPPragmaKind pp_pragma_kind(const Preprocessor* pp, const PPTokens* token
                  : !clang && second == C_NAME_ERROR ? PP_PRAGMA_ERROR
                  : clang && (pp_token_is_name(pp, tokens, begin + 1, end, "assume_nonnull") || pp_token_is_name(pp, tokens, begin + 1, end, "arc_cf_code_audited") ||
                              pp_token_is_name(pp, tokens, begin + 1, end, "unsafe_buffer_usage")) ? PP_PRAGMA_REGION
+                 : clang && pp->options.semantic_pragmas && pp_token_is_name(pp, tokens, begin + 1, end, "fp") ? PP_PRAGMA_SEMANTIC
                  : clang && (pp_token_is_name(pp, tokens, begin + 1, end, "deprecated") || pp_token_is_name(pp, tokens, begin + 1, end, "final") ||
                              pp_token_is_name(pp, tokens, begin + 1, end, "restrict_expansion")) ? PP_PRAGMA_MACRO_NOTE
                  : PP_PRAGMA_OTHER;
@@ -14721,10 +14780,13 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             pp_pragma_diagnostic(pp, tokens, names_begin, begin, end, location, from_operator);
         } break;
         case PP_PRAGMA_OMP:
-        case PP_PRAGMA_PACK:
+        case PP_PRAGMA_SEMANTIC:
         {
             pp_emit_pragma_start(pp, C_NAME_PRAGMA, location, from_operator);
-            pp_emit_pragma_token(pp, pp_stack_token(names, names_begin), true);
+            for (uint32_t i = names_begin; i < operands; i += 1)
+            {
+                pp_emit_pragma_token(pp, pp_stack_token(names, i), i == names_begin);
+            }
             for (uint32_t i = begin; i < end; i += 1)
             {
                 pp_emit_pragma_token(pp, pp_stack_token(tokens, i), i == begin);
@@ -14768,7 +14830,7 @@ static bool pp_pragma(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t l
         pp_check_poison_range(pp, 0, 0, tokens, begin, kind == PP_PRAGMA_POISON ? operands : end, kind == PP_PRAGMA_DEPENDENCY ? operands : BUSTER_PP_NONE, false);
     }
     const bool expanded = kind == PP_PRAGMA_MESSAGE || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR || kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO ||
-                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_PACK || kind == PP_PRAGMA_IDENT;
+                          kind == PP_PRAGMA_OMP || kind == PP_PRAGMA_SEMANTIC || kind == PP_PRAGMA_IDENT;
     bool started = false;
     // Not among a macro's arguments (or a builtin's operand), where clang's macro expansion is off (as for #line). An
     // #ident reads its string expanded (Preprocessor::HandleIdentSCCSDirective), and push_macro and pop_macro their '(',
@@ -14808,18 +14870,28 @@ static void pp_finish_pragma(Preprocessor* pp)
     copy.flags = arena_push(scratch.arena, (uint64_t)count + names + 1, 1);
     copy.values = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
     copy.locations = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
-    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0)
+    copy.origins = !pp->options.no_history ? arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4) : NULL;
+    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0 && (pp->options.no_history || copy.origins != NULL))
     {
-        // The names first, then the expanded operands.
+        // The names first, then the expanded operands. The copy outlives this capture's reset, so it must retain
+        // the tokens' origins as well as their spelling locations for later semantic diagnostics.
         for (uint32_t i = 0; i < names; i += 1)
         {
             const PPToken token = pp_stack_token(&pp->arguments, capture.directive + i);
             pp_tokens_set(&copy, i, token.kind, token.flags, token.value, token.location);
+            if (copy.origins != NULL)
+            {
+                copy.origins[i] = token.origin;
+            }
         }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const PPToken token = pp_stack_token(&pp->captures, capture.begin + i);
             pp_tokens_set(&copy, names + i, token.kind, token.flags, token.value, token.location);
+            if (copy.origins != NULL)
+            {
+                copy.origins[names + i] = token.origin;
+            }
         }
         copy.count = names + count;
         pp->captures.count = capture.begin;
@@ -18626,6 +18698,21 @@ static bool pp_tokens_same(const PPTokens* a, const PPTokens* b)
            memcmp(a->values, b->values, (uint64_t)a->count * sizeof(uint32_t)) == 0 && memcmp(a->locations, b->locations, (uint64_t)a->count * sizeof(uint32_t)) == 0;
 }
 
+// The semantic event timeline is part of replay identity even for expansions that left no output token. Origins
+// are intentionally excluded: the deferred first pass has none, and the replay supplies their exact history.
+static bool pp_eval_method_uses_same(const Preprocessor* a, const Preprocessor* b)
+{
+    const uint32_t count = a->eval_method_use_count;
+    bool same = count == b->eval_method_use_count;
+    for (uint32_t i = 0; same && i < count; i += 1)
+    {
+        const PPEvalMethodUse* left = a->eval_method_uses + i;
+        const PPEvalMethodUse* right = b->eval_method_uses + i;
+        same = left->position == right->position && left->pragmas == right->pragmas && left->location == right->location;
+    }
+    return same;
+}
+
 // Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
 // with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
 // and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
@@ -18658,7 +18745,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
-               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output);
+               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output) &&
+               pp_eval_method_uses_same(pp, replay);
     }
     if (same)
     {
@@ -18684,6 +18772,9 @@ static void pp_history_record(Preprocessor* pp, bool report)
         pp->history_runs = replay->history_runs;
         pp->history_run_count = replay->history_run_count;
         pp->history_run_capacity = replay->history_run_capacity;
+        pp->eval_method_uses = replay->eval_method_uses;
+        pp->eval_method_use_count = replay->eval_method_use_count;
+        pp->eval_method_use_capacity = replay->eval_method_use_capacity;
         // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
@@ -18766,6 +18857,21 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
         pp_history_record(pp, false);
     }
     return pp->history != 0;
+}
+
+// A source expansion may have no output token (#if), so its retained location/origin is the diagnostic source.
+// Group its lexical error with the active pragma's own source history. The caller supplies the final boundary
+// after preceding captured pragmas and that pragma's retained `fp` output token, including for macro _Pragma.
+BUSTER_PREPROCESSOR_ENTRY void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source)
+{
+    pp_history_ensure(pp);
+    if (use < pp->eval_method_use_count && !pp->fatal)
+    {
+        const PPEvalMethodUse record = pp->eval_method_uses[use];
+        const PPOutputDiagnosticNote note = { .token = pragma_source, .message = "#pragma entered here" };
+        pp_diagnose_source_notes_phase(pp, PP_SEVERITY_ERROR, record.location, record.origin, position, PP_DIAGNOSTIC_LEXICAL, &note, 1,
+                                      "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'");
+    }
 }
 
 // Preprocesses the main file (pp_preprocess_file); with PPOptions.defer_history, then prints the diagnostics the run

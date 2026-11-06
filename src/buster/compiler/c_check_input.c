@@ -236,6 +236,13 @@ typedef enum CheckInputMessage
     CHECK_INPUT_RESTRICT_NOT_POINTER,
     CHECK_INPUT_INLINE_NOT_FUNCTION,
     CHECK_INPUT_NORETURN_NOT_FUNCTION,
+    // The current type table stores alignments as powers of two; some wide Microsoft bit-field units need others.
+    CHECK_INPUT_MS_STRUCT_ALIGNMENT,
+    // __FLT_EVAL_METHOD__ expanded after an eval_method pragma in its active scope. The subject is the cold PP
+    // expansion-use index plus one, detail its publication boundary, and value the active pragma's output token.
+    CHECK_INPUT_FP_EVAL_USE,
+    // A typedef whose available_only_in_default_eval_method attribute forbids the active pragma's evaluation method.
+    CHECK_INPUT_FP_EVAL_TYPE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -358,9 +365,12 @@ static const char* const check_input_messages[] =
     "tentative definition has incomplete type",
     "redefinition of enumerator",
     "conflicting types",
-    "restrict requires a pointer or reference",
-    "'inline' can only appear on functions",
-    "'_Noreturn' can only appear on functions",
+    [CHECK_INPUT_RESTRICT_NOT_POINTER] = "restrict requires a pointer or reference",
+    [CHECK_INPUT_INLINE_NOT_FUNCTION] = "'inline' can only appear on functions",
+    [CHECK_INPUT_NORETURN_NOT_FUNCTION] = "'_Noreturn' can only appear on functions",
+    [CHECK_INPUT_MS_STRUCT_ALIGNMENT] = "ms_struct bit-field storage with non-power-of-two size is not supported",
+    [CHECK_INPUT_FP_EVAL_USE] = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'",
+    [CHECK_INPUT_FP_EVAL_TYPE] = "type is set according to the default eval method for the translation unit",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -426,7 +436,7 @@ struct CheckInputReport
     // (CHECK_INPUT_ATTRIBUTE_CONVENTIONS's, the one asked for in the low byte); or 0.
     uint32_t detail;
     // The value a message prints (CHECK_ARGUMENT_TOO_LARGE's), the times a CHECK_INPUT_UNAVAILABLE_USE is given again
-    // (a tag's, once for each declarator, #147), or 0.
+    // (a tag's, once for each declarator, #147), CHECK_INPUT_FP_EVAL_USE's pragma output token, or 0.
     uint64_t value;
     // The type a message names (CHECK_INPUT_VECTOR_ELEMENT's), and its typedef specifier's declaration
     // (check_input_typedef_spelling), or 0.
@@ -511,6 +521,7 @@ typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputVisibilityPragmas CheckInputVisibilityPragmas;
 typedef struct CheckInputSymbolPragmas CheckInputSymbolPragmas;
+typedef struct CheckInputMsPragmas CheckInputMsPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
 typedef struct CheckInputPackedMember CheckInputPackedMember;
@@ -614,6 +625,8 @@ struct CheckInput
     CheckInputPackPragmas* pack_pragmas;
     CheckInputVisibilityPragmas* visibility_pragmas;
     CheckInputSymbolPragmas* symbol_pragmas;
+    CheckInputMsPragmas* ms_pragmas;
+    uint8_t* ms_struct;
     uint8_t* object_visibility;
     bool visibility_error;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
@@ -1284,6 +1297,7 @@ static bool check_deferred_shared(const CheckDeferred* deferred);
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
+typedef struct CheckInputFpEvalUse CheckInputFpEvalUse;
 typedef struct CheckWarningQueryPoint CheckWarningQueryPoint;
 struct CheckWarningQueryPoint
 {
@@ -1385,6 +1399,9 @@ struct CheckInputReader
     // This reader's append-only warning suffix. Lanes reset it rather than append into the top level's buffer.
     CheckWarningBuffer warning_events;
     CheckConstBuffer const_values;
+    // Cold preprocessor uses rejected by the FP scope pass, appended as reports only after reading the graph.
+    CheckInputFpEvalUse* fp_eval_uses;
+    uint32_t fp_eval_use_count;
     uint32_t const_warning_capacity;
     bool literal_tables_disabled;
     CheckWarningSet literal_warnings;
@@ -3990,6 +4007,8 @@ static inline __attribute__((always_inline)) bool check_input_spelling(CheckInpu
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
 #include "c_check_symbol_pragma_input.c"
+#include "c_check_ms_struct_input.c"
+#include "c_check_fp_eval_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
@@ -5754,6 +5773,7 @@ struct CheckTagFrame
     uint32_t negative_bits;
     uint32_t positive_bits;
     uint8_t pack_log2;
+    bool ms_struct;
     CheckInputAttributes* attributes;
     CheckConstantInput* enum_job;
     CheckInputAttributes* enumerator_attributes;
@@ -5872,6 +5892,7 @@ static bool check_input_tag_frame(CheckInputReader* reader, CheckTagFrame* frame
             .first = BUSTER_CHECK_NONE,
             .last = BUSTER_CHECK_NONE,
             .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[body] : 0,
+            .ms_struct = reader->output->ms_struct != NULL && reader->output->ms_struct[token] != 0,
             .attributes = check_input_attributes_at(reader->output, token),
         };
         *depth += 1;
@@ -5915,6 +5936,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             .first = BUSTER_CHECK_NONE,
             .last = BUSTER_CHECK_NONE,
             .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[open] : 0,
+            .ms_struct = reader->output->ms_struct != NULL && reader->output->ms_struct[token] != 0,
             .attributes = check_input_attributes_at(reader->output, token),
         };
         reader->ignored[open] = true;
@@ -5991,8 +6013,13 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     .pack_log2 = frame->pack_log2,
                     .packed = frame->attributes != 0 && frame->attributes->packed,
                     .alignment_log2 = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0,
+                    .ms_struct = check_input_record_ms_struct(frame->attributes, frame->ms_struct),
                 };
                 valid = valid && type_complete_record(reader->types, frame->type, packed, frame->count, attributes);
+                if (!valid && reader->types->last_error == TYPE_ERROR_MS_STRUCT_ALIGNMENT)
+                {
+                    check_input_report(reader, frame->token, CHECK_INPUT_MS_STRUCT_ALIGNMENT);
+                }
                 // The marked members, by the indexes the completion gave the record's members in order (#147).
                 const uint32_t record_tag = valid ? reader->types->types.index[type_index(frame->type)] : 0;
                 uint32_t position = valid ? reader->types->tags.member_begin[record_tag] : 0;
@@ -9028,7 +9055,8 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_node(Check
         }
         if (__builtin_expect(reader->output->graph.fp_environments != 0, 0))
         {
-            reader->output->graph.fp_environments[node] = reader->constant_contexts[token] == 0 ? reader->output->fp_environments[token] : 0;
+            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+            reader->output->graph.fp_environments[node] = reader->output->fp_environments[token] & mask;
         }
     }
     return node;
@@ -11436,12 +11464,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_visibility_pragmas(&reader, handled, true);
-                prepared = prepared && check_input_symbol_pragmas(&reader, handled);
+                prepared = prepared && check_input_symbol_pragmas(&reader, handled, true);
+                prepared = prepared && check_input_ms_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_ignored_pragmas(&reader, handled);
+                prepared = prepared && check_input_symbol_syntax_warnings(&reader);
+                prepared = prepared && check_input_ms_warnings(&reader);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -11559,11 +11590,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
-            // Symbol pragmas can also finish a selected unit: their completion detects names hidden in deferred bodies.
-            if (complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && !input->resource)
-            {
-                check_input_symbol_pragmas_complete(&reader);
-            }
             if (reader.fallthrough_count != 0 && !input->resource)
             {
                 check_input_fallthrough_placements(&reader);
@@ -11681,6 +11707,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_packed_members(&reader);
                 }
                 check_input_multiversion_flush(&reader);
+                if (input->symbol_pragmas != NULL && !input->resource)
+                {
+                    check_input_symbol_finish(&reader, complete_translation_unit && input->report_count == 0);
+                }
+                if (!input->resource)
+                {
+                    check_input_fp_types(&reader);
+                }
+                check_input_fp_eval_finish(&reader);
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
                 if (!input->resource)
                 {
