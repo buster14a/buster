@@ -3382,20 +3382,23 @@ static bool pp_test_same_lookups(const Preprocessor* a, const Preprocessor* b)
 // gives the same paths, files and errors. Names the listing can't rule out are still opened: one it has in another
 // case, a directory, a dangling link, "." and "..", a name past ASCII, and one longer than NAME_MAX (ENAMETOOLONG,
 // not ENOENT). A second unit that shares the cache uses the listing at once. A directory with a name past ASCII is never
-// listed. On a file system whose lookups a listing can't answer for (file_cache_exact_names), nothing is listed and
-// every candidate is opened.
+// listed, and one with more names than a first look reads (BUSTER_FILE_CACHE_SMALL_LISTING) is listed only at
+// BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes. On a file system whose lookups a listing can't answer for
+// (file_cache_exact_names), nothing is listed and every candidate is opened.
 static bool pp_test_directory_listings(const char* directory)
 {
     char first[4200];
     char second[4200];
     char latin[4200];
+    char large[4200];
     char sub[4300];
     char path[4400];
     snprintf(first, sizeof(first), "%s/listing-first", directory);
     snprintf(second, sizeof(second), "%s/listing-second", directory);
     snprintf(latin, sizeof(latin), "%s/listing-latin", directory);
+    snprintf(large, sizeof(large), "%s/listing-large", directory);
     snprintf(sub, sizeof(sub), "%s/sub", first);
-    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(latin, 0700) == 0 && mkdir(sub, 0700) == 0;
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(latin, 0700) == 0 && mkdir(large, 0700) == 0 && mkdir(sub, 0700) == 0;
     snprintf(path, sizeof(path), "%s/Mixed.H", first);
     result = result && pp_test_write_file(path, "int mixed;\n");
     snprintf(path, sizeof(path), "%s/inner.h", sub);
@@ -3408,6 +3411,12 @@ static bool pp_test_directory_listings(const char* directory)
     {
         snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
         result = pp_test_write_file(path, "int header;\n");
+    }
+    // More names than a first look's buffer holds (each record is at least 24 bytes).
+    for (uint32_t i = 0; result && i < 64; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/large-%02u.h", large, i);
+        result = pp_test_write_file(path, "int large;\n");
     }
     // Whether this file system's lookups match its listings, so that `first` is listed at its sixteenth miss (a listing
     // is tried there either way).
@@ -3440,6 +3449,7 @@ static bool pp_test_directory_listings(const char* directory)
     };
     const char* const directories[] = { first, second };
     const char* const latin_directories[] = { latin, second };
+    const char* const large_directories[] = { large };
     PPOptions options = {
         .language = {
             .standard = 2023,
@@ -3449,15 +3459,16 @@ static bool pp_test_directory_listings(const char* directory)
         .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
         .quiet = true,
     };
-    // Units 0 (listings) and 1 (the oracle) search every name; unit 2 shares unit 0's cache, and unit 3 searches
-    // `latin` first.
-    static InternTable tables[4];
-    static Preprocessor units[4];
-    for (uint32_t u = 0; u < 4; u += 1)
+    // Units 0 (listings) and 1 (the oracle) search every name; unit 2 shares unit 0's cache, unit 3 searches `latin`
+    // first, and unit 4 `large` alone.
+    static InternTable tables[5];
+    static Preprocessor units[5];
+    for (uint32_t u = 0; u < 5; u += 1)
     {
         units[u] = (Preprocessor){ 0 };
         options.files = u == 2 ? units[0].cache : 0;
-        options.include_directories = u == 3 ? latin_directories : directories;
+        options.include_directories = u == 3 ? latin_directories : u == 4 ? large_directories : directories;
+        options.include_directory_count = u == 4 ? 1 : 2;
         result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, u == 2 ? &tables[0] : &tables[u]);
     }
     if (result)
@@ -3526,13 +3537,36 @@ static bool pp_test_directory_listings(const char* directory)
                    (unsigned long)units[3].probes.listed, (unsigned long)units[3].probes.listings);
         }
     }
-    for (uint32_t u = 4; u > 0; u -= 1)
+    // A directory of 64 names: its first look, at the sixteenth miss, puts it off, and it is read whole at the 128th.
+    const uint32_t later = misses * BUSTER_FILE_CACHE_LARGE_LISTING;
+    for (uint32_t c = 0; result && c < later + 12; c += 1)
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "m%03u.h", c);
+        uint32_t found;
+        const uint32_t file = pp_find_include(&units[4], (const uint8_t*)header, (uint32_t)strlen(header), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found,
+                                              BUSTER_PP_NONE);
+        const uint32_t opens = listable ? (c < later ? c + 1 : later) : c + 1;
+        const uint32_t looks = (c + 1 >= misses ? 1u : 0u) + (listable && c + 1 >= later ? 1u : 0u);
+        result = file == BUSTER_PP_NONE && units[4].probes.opens == opens && units[4].probes.listed == c + 1 - opens && units[4].probes.listings == looks;
+        if (!result)
+        {
+            printf("directory listings: %s in a large directory: opens %lu/%u, listed %lu, listings %lu/%u\n", header, (unsigned long)units[4].probes.opens, opens,
+                   (unsigned long)units[4].probes.listed, (unsigned long)units[4].probes.listings, looks);
+        }
+    }
+    for (uint32_t u = 5; u > 0; u -= 1)
     {
         pp_release(&units[u - 1]);
     }
-    for (uint32_t u = 0; u < 4; u += 1)
+    for (uint32_t u = 0; u < 5; u += 1)
     {
         intern_release(&tables[u]);
+    }
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/large-%02u.h", large, i);
+        unlink(path);
     }
     for (uint32_t i = 0; i < 40; i += 1)
     {
@@ -3551,7 +3585,9 @@ static bool pp_test_directory_listings(const char* directory)
     rmdir(first);
     rmdir(second);
     rmdir(latin);
-    printf("directory listings: %s (%s; skipped opens, names a listing can't rule out, a shared cache, a name past ASCII)\n", result ? "as expected" : "WRONG",
+    rmdir(large);
+    printf("directory listings: %s (%s; skipped opens, names a listing can't rule out, a shared cache, a name past ASCII, a large directory)\n",
+           result ? "as expected" : "WRONG",
            listable ? "listed" : "this file system's directories aren't listed");
     return result;
 }
