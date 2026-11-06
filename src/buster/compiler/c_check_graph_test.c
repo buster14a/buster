@@ -1017,9 +1017,11 @@ static void check_test_leaf_records(CheckTest* test)
     check_test_expect(test, differences == 0 && rows != 0 && merged_rows != 0, "graph leaf records and rows read back as their dense twin's, merged too");
 }
 
-// Both validators on a graph's leaf rows (#628, #1562's review): sixteen leaves, the first with a row, accepted whole; then
-// refused with its rows' column null, with more rows than their room, with a row past the rows (in a block, and on one
-// node, which the vector path takes by its exact tail), and with a row that holds another value than its record.
+// Both validators on a graph's leaf rows (#628, #1562's review): sixteen leaves, a block of the vector path's, each with a
+// row, accepted whole, and with a first category past a byte, which a row keeps and its record holds as a byte; then, at
+// each leaf in turn, refused with a row past the rows and with a row whose value differs from its record's in each field
+// both hold; and refused with the rows' column null, with more rows than their room, and with a row past the rows on one
+// node, which the vector path takes by its exact tail.
 static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
 {
     const uint64_t mark = storage->length;
@@ -1028,44 +1030,66 @@ static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
     check_test_expect(test, ready, "leaf rows' validation graph allocation");
     for (uint32_t i = 0; ready && i < 16; i += 1)
     {
-        check_test_leaf(&graph, i, check_test_integer(BUSTER_TYPE_INT, i == 0 ? (unsigned __int128)1 << 100 : i));
+        CheckValue value = check_test_integer(BUSTER_TYPE_INT, ((unsigned __int128)1 << 100) + i);
+        value.category = i == 0 ? (CheckCategory)(256 + CHECK_RVALUE) : CHECK_RVALUE;
+        check_test_leaf(&graph, i, value);
     }
     uint8_t pure[17];
     CheckGraphValidation state;
     uint32_t failed = 0;
-    uint32_t verdicts = 0;
-    for (uint32_t step = 0; ready && step < 6; step += 1)
+    uint32_t wrong = 0;
+    uint32_t cases = 0;
+    // Step 0 is the whole graph; steps 1 to 8, at each leaf, its row past the rows and each of the seven fields both hold;
+    // steps 9 to 11, once, the column, the room and one node's row.
+    for (uint32_t leaf = 0; ready && leaf < 16; leaf += 1)
     {
-        CheckValue* const payloads = graph.leaf_payloads;
-        const uint32_t capacity = graph.leaf_payload_capacity;
-        const uint32_t row = graph.leaf_records[0].row;
-        const uint32_t flags = payloads[0].flags;
-        switch (step)
+        for (uint32_t step = 0; step < 12; step += 1)
         {
-            case 1: graph.leaf_payloads = NULL; break;
-            case 2: graph.leaf_payload_capacity = 0; break;
-            case 3: graph.leaf_records[0].row = graph.leaf_payload_count + 1; break;
-            case 4:
+            if (step >= 9 && leaf != 0)
             {
-                graph.leaf_records[0].row = graph.leaf_payload_count + 1;
-                graph.count = 1;
-                graph.leaf_count = 1;
-            } break;
-            case 5: payloads[0].flags ^= 1; break;
-            default: break;
+                continue;
+            }
+            CheckValue* const payloads = graph.leaf_payloads;
+            const uint32_t capacity = graph.leaf_payload_capacity;
+            CheckGraphLeaf* const record = graph.leaf_records + leaf;
+            const uint32_t row = record->row;
+            CheckValue* const value = payloads + row - 1;
+            const CheckValue saved = *value;
+            switch (step)
+            {
+                case 1: record->row = graph.leaf_payload_count + 1; break;
+                case 2: value->type = BUSTER_TYPE_UINT; break;
+                case 3: value->flags ^= BUSTER_CHECK_ICE; break;
+                case 4: value->object += 1; break;
+                case 5: value->overload_head += 1; break;
+                case 6: value->integer += 1; break;
+                case 7: value->category = (CheckCategory)((uint32_t)value->category ^ 1); break;
+                case 8: value->constant_kind = CHECK_CONSTANT_FLOATING; break;
+                case 9: graph.leaf_payloads = NULL; break;
+                case 10: graph.leaf_payload_capacity = graph.leaf_payload_count - 1; break;
+                case 11:
+                {
+                    record->row = graph.leaf_payload_count + 1;
+                    graph.count = 1;
+                    graph.leaf_count = 1;
+                } break;
+                default: break;
+            }
+            const bool scalar = check_graph_validate(&graph, pure, &state, &failed);
+            const bool vector = check_graph_validate_vector(&graph, pure, &state, &failed);
+            wrong += scalar != (step == 0) || vector != (step == 0);
+            cases += 1;
+            graph.leaf_payloads = payloads;
+            graph.leaf_payload_capacity = capacity;
+            record->row = row;
+            *value = saved;
+            graph.count = 16;
+            graph.leaf_count = 16;
         }
-        const bool scalar = check_graph_validate(&graph, pure, &state, &failed);
-        const bool vector = check_graph_validate_vector(&graph, pure, &state, &failed);
-        verdicts += scalar == (step == 0) && vector == (step == 0);
-        graph.leaf_payloads = payloads;
-        graph.leaf_payload_capacity = capacity;
-        graph.leaf_records[0].row = row;
-        payloads[0].flags = flags;
-        graph.count = 16;
-        graph.leaf_count = 16;
     }
-    check_test_expect(test, ready && graph.leaf_payload_count == 1 && verdicts == 6,
-                      "both validators accept a graph's leaf rows whole and refuse a null column, rows past their room, a row past the rows and a row unlike its record");
+    check_test_expect(test, ready && graph.leaf_payload_count == 16 && cases == 16 * 9 + 3 && wrong == 0,
+                      "both validators accept a graph's leaf rows whole and refuse, at every leaf of a block, a row past the rows or unlike its record, "
+                      "and a null column, rows past their room and a row past the rows on one node");
     arena_pop_to(storage, mark);
 }
 
