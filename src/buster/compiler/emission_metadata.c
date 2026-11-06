@@ -43,6 +43,16 @@
 #define BUSTER_EMISSION_X86_RSP 7u
 #define BUSTER_EMISSION_X86_RETURN 16u
 static const uint8_t emission_x86_registers[16] __attribute__((unused)) = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
+// Past them, the vector and mask registers a frame may save for its caller (#147, a preserving frame's): xmm0 to xmm15
+// (17 to 32), xmm16 to xmm31 (67 to 82) and k0 to k7 (118 to 125), whose rules say where a slot holds one or that it
+// holds its caller's value; the namespace's frame events count to the last.
+#define BUSTER_EMISSION_X86_DWARF_REGISTERS 126u
+
+// Whether `reg` is one of the vector or mask registers' DWARF numbers a frame's rules may name past the general ones.
+static __attribute__((unused)) bool emission_x86_saved_vector(uint32_t reg)
+{
+    return (reg >= 17 && reg <= 32) || (reg >= 67 && reg <= 82) || (reg >= 118 && reg <= 125);
+}
 
 typedef enum EmissionError
 {

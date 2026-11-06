@@ -17,6 +17,12 @@
 
 #define BUSTER_UNWIND_TIER0_BATCH 8
 
+// The general registers a preserving frame may push past the callee-saved ones (#147, Tier0Code.frame_preserved): the
+// caller-saved ones, rax, rcx, rdx, rsi, rdi and r8 to r11.
+#define UNWIND_TIER0_PRESERVABLE                                                                                          \
+    (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDI | \
+     1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 | 1u << X86_REGISTER_R11)
+
 static const uint8_t unwind_tier0_saved_registers[] = {
     X86_REGISTER_RBX,
     X86_REGISTER_RBP,
@@ -424,11 +430,21 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     // is no transition either.
     const bool eh = code != 0 && code->frame_eh_return;
     const uint32_t eh_pushes = eh ? 2 : 0;
+    // A preserving function's (#147, Tier0Code.frame_preserved): its general registers pushed after the others, in their
+    // numbers' order, and popped first, after the release; then its block of vector and mask registers reserved below
+    // them (`block` bytes) and each stored (`stores`), before the frame's reservation; with a frame pointer, none of them a
+    // transition (their saves' rows are emitted_tier0_preserve_rows'). The block's loads come before the epilogue's
+    // release, the body's to the CFA.
+    const uint32_t preserved = code != 0 ? code->frame_preserved : 0;
+    const uint32_t kept = (uint32_t)__builtin_popcount(preserved);
+    const uint32_t block = code != 0 ? tier0_preserve_block_bytes(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes) : 0;
+    const uint32_t stores = code != 0 ? tier0_preserve_moves(code->frame_preserve_vectors, code->frame_preserve_mask_bytes) : 0;
+    const uint32_t blocked = block != 0 ? 1 + stores : 0;
     // The prologue's records, and the epilogue's: its teardown, from its release (a frame pointer's lea or mov, which is
     // no transition), and its ret.
     const uint32_t realignment = tier0_realignment_records(probe, alignment_log2) + (base ? 1 : 0);
-    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + reservation + realignment : pushes + (reserved ? reservation : 0));
-    const uint32_t teardown = pointer ? 1 + pushes + 1 : pushes + (reserved ? 1 : 0);
+    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + kept + blocked + reservation + realignment : pushes + (reserved ? reservation : 0));
+    const uint32_t teardown = pointer ? 1 + kept + pushes + 1 : pushes + (reserved ? 1 : 0);
     const uint32_t epilogue = open ? 0 : teardown + 1;
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
     // one of its pushes.
@@ -436,7 +452,8 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     // Without final offsets, each transition's position is its record boundary (the record after it's index), as
     // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
     if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 || (eh && (!pointer || open)) ||
-        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
+        ((preserved != 0 || block != 0) && (!pointer || open || eh || code->tail_count != 0 || (preserved & ~UNWIND_TIER0_PRESERVABLE) != 0)) ||
+        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue + (block != 0 ? stores : 0) > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
         (final_offsets == 0 && size != code->count))
     {
         error = UNWIND_ERROR_INVALID;
@@ -480,6 +497,31 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
         error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, X86_REGISTER_RDX) && unwind_tier0_stack(&records[at + 1], X86_FORM_PUSH_R64, X86_REGISTER_RAX) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
         at += 2;
     }
+    for (uint32_t r = 0; records != 0 && error == UNWIND_OK && r < 16; r += 1)
+    {
+        if ((preserved & (1u << r)) != 0)
+        {
+            error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, (uint8_t)r) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            at += 1;
+        }
+    }
+    if (records != 0 && error == UNWIND_OK && block != 0)
+    {
+        // The block's sub, then its stores, and its loads right before the epilogue's release: each the very record
+        // tier0_emit_preserve writes, whole, so that a decorated (an opmask's partial) or otherwise different move isn't
+        // described as the register's save or reload.
+        uint32_t amount = 0;
+        error = unwind_tier0_adjustment(&records[at], true, &amount) && amount == block ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        const int32_t start = -(int32_t)(8 * (pushes + kept) + block);
+        const uint32_t loads = code->count - epilogue - stores;
+        for (uint32_t k = 0; error == UNWIND_OK && k < stores; k += 1)
+        {
+            const X86Instruction store = tier0_preserve_move(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes, start, k, true);
+            const X86Instruction load = tier0_preserve_move(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes, start, k, false);
+            error = memcmp(&records[at + 1 + k], &store, sizeof(store)) == 0 && memcmp(&records[loads + k], &load, sizeof(load)) == 0 ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        }
+        at += blocked;
+    }
     uint32_t amount = 0;
     if (records != 0 && error == UNWIND_OK && code->frame_size != 0)
     {
@@ -504,13 +546,21 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     at = code != 0 ? code->count - epilogue : 0;
     if (records != 0 && error == UNWIND_OK && !open && (pointer || reserved))
     {
-        error = pointer ? (unwind_tier0_release(&records[at], pushes) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
+        error = pointer ? (unwind_tier0_release(&records[at], pushes + kept) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED)
                         : (unwind_tier0_adjustment(&records[at], false, &amount) && amount == code->frame_size ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED);
         if (reserved)
         {
             events[count++] = at;
         }
         at += 1;
+    }
+    for (uint32_t r = 16; records != 0 && error == UNWIND_OK && r > 0; r -= 1)
+    {
+        if ((preserved & (1u << (r - 1))) != 0)
+        {
+            error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, (uint8_t)(r - 1)) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            at += 1;
+        }
     }
     for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); records != 0 && error == UNWIND_OK && !open && r > 0; r -= 1)
     {
