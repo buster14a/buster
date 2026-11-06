@@ -958,6 +958,44 @@ What the peaks still hold for little, after this:
 - **The stream's conversions**, 32 bytes a node, 10 MB from `check-expressions`
   through the backend, where a leaf's is its type.
 
+### The expansion history's replay (#628)
+
+A unit whose diagnostics need the macro expansions' history records none while
+it is preprocessed (`PPOptions.defer_history`) and, when a reader first asks for
+it (`pp_history_ensure`), preprocesses itself again with the history on: a
+replay, which must give the same output, token for token.
+- **Every unit replayed.** #1455 (`f4272a46`) made a macro's number after a
+  comma a candidate for `__clang__`'s `_Clang` reading
+  (`parse_clang_scope_numbers`), which only a C23 attribute list's comma can
+  be. The first candidate asks for the history, so every unit with a macro's
+  number in a call's arguments replayed its preprocessing at the parse: on the
+  VM, `sqlite3.c`'s `-c` parse added 12.5 MB, and the compiler's own `main.c`'s
+  `-fsyntax-only` parse took about 250 ms and 140 MB more. A comma's candidate
+  now counts only past the unit's first `[[`, which an attribute list's comma
+  follows; both paths track it, the vector path as the bits from the first token
+  right after a `[[`. `test-parser` checks that a unit without one keeps its
+  history deferred by both paths, and that one with a `[[` before such a comma
+  asks for it.
+- **The replay's output.** A replay kept its output token columns to the unit's
+  end, though nothing reads them after its comparison with the unit's output:
+  12 MB of `sqlite3.c`'s, in the backend's peak, for a unit with any diagnostic.
+  They are released once the replay is taken; its origins, which a collected
+  diagnostic's group may own, stay.
+- **The diagnostics.** With the history recorded at the parse, main's vector
+  path doesn't give #1339's false `-Wempty-body` at `sqlite3.c:74649`, since
+  the warning reads the history when it's there. With the change, it gives it
+  again, as before #1455, until #1547 fixes the warning: its objects are the
+  same bytes, and the `--scalar` path's diagnostics too.
+
+On the VM, main `67cd05ca` against the change, `-c sqlite3.c` with huge pages
+(`BUSTER_HUGE_PAGES=1`), three runs each, which agree within 12 KiB:
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| `parse`'s peak added | 97,716 KiB | 79,600 KiB |
+| peak RSS, with `-w` | 297,664 KiB | 279,552 KiB |
+| peak RSS, with the warning | 297,732 KiB | 279,620 KiB |
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
