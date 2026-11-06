@@ -3947,11 +3947,12 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // buffer of that look (about 25 names: a directory with more is put off), the factor of failed probes after which a
 // larger directory is read whole, the largest getdents64 record (its 19 bytes and a name of NAME_MAX bytes and its NUL,
 // aligned to 8), and the buffer a whole read reads with (about 200 names a call). A unit with only <stdio.h> fails 26
-// probes in each of clang's resource directory and /usr/local/include: on the 9700X, listing the former at 16 made its
-// include searches 15 us slower (62 to 77 us), and sqlite3.c's (155 there) 60 us faster (file_cache_list_directory).
-#define BUSTER_FILE_CACHE_LISTING_MISSES 16u
+// probes in each of clang's resource directory and /usr/local/include. On the 9700X, its include searches took 60 us
+// with first looks at 32 misses or none, and 64 us at 16; deflate.c's 159, 154 and 158 us, and sqlite3.c's 582, 576
+// and 601 us. Listing every directory whole at 16 made the first 77 us and sqlite3.c's 540 (file_cache_list_directory).
+#define BUSTER_FILE_CACHE_LISTING_MISSES 32u
 #define BUSTER_FILE_CACHE_SMALL_LISTING 1024u
-#define BUSTER_FILE_CACHE_LARGE_LISTING 16u
+#define BUSTER_FILE_CACHE_LARGE_LISTING 8u
 #define BUSTER_FILE_CACHE_RECORD_MAX 280u
 #define BUSTER_FILE_CACHE_LISTING_BUFFER (8u << 10)
 // The longest name a directory entry has (NAME_MAX on every file system file_cache_exact_names takes).
@@ -4477,7 +4478,7 @@ static bool file_cache_list_names(FileCache* cache, const uint8_t* buffer, long 
 //
 // A directory's first look reads one small buffer (BUSTER_FILE_CACHE_SMALL_LISTING, about 25 names) and, unless that is
 // filled to within a record of its end, finds the directory's end with one more call. A directory with more names is
-// `deferred`, unread, and read whole at BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes. On the 9700X (Btrfs) a
+// `deferred`, unread, and read whole at BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes (256). On the 9700X (Btrfs) a
 // failed probe took 0.24 to 0.31 us, and the calls of a small directory's listing (open, two getdents64, fstatfs, close)
 // about 1.2 us, which the probes it saves next repay; a first look at clang's resource directory or /usr/include took
 // 2.3 to 3.5 us in its getdents64 alone, and reading the 263 names of the former whole about 20 us in the compiler.

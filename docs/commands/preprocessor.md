@@ -134,9 +134,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `pp_parse_options` models or refuses where their family's last option turns
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
   the search directories' listings (`pp_test_directory_listings`, #653): the opens a listed directory saves after its
-  sixteenth failed probe, the names it can't rule out still opened (another case, a subdirectory, a dangling link,
+  32nd failed probe, the names it can't rule out still opened (another case, a subdirectory, a dangling link,
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
-  ASCII never listed, and every path, file and error the same as with listings off;
+  ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
+  error the same as with listings off;
   the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
   `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
   its error, three columns before it (clang reads one past an identifier's first character silently); one in an
@@ -408,7 +409,7 @@ not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
 must all give the same output. `--listing-misses` does the same for the failed
-probes after which a search directory's names are read (16 by default; 0 never
+probes after which a search directory's names are first looked at (32 by default; 0 never
 reads them: `docs/c-files.md`, "Search directories' listings"), each with each
 read limit, so that one executable compares listings on and off, in turns.
 The probe counts then also give the directories listed and the opens their

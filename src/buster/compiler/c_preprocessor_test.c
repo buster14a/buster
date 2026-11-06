@@ -3418,8 +3418,8 @@ static bool pp_test_directory_listings(const char* directory)
         snprintf(path, sizeof(path), "%s/large-%02u.h", large, i);
         result = pp_test_write_file(path, "int large;\n");
     }
-    // Whether this file system's lookups match its listings, so that `first` is listed at its sixteenth miss (a listing
-    // is tried there either way).
+    // Whether this file system's lookups match its listings, so that `first` is listed at its
+    // BUSTER_FILE_CACHE_LISTING_MISSES-th miss (a listing is tried there either way).
     struct statfs system;
     const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
     // The names after h00.h to h39.h, each with the opens it takes with `first` listed: its paths in `first` and
@@ -3522,7 +3522,7 @@ static bool pp_test_directory_listings(const char* directory)
         }
     }
     // A directory with a name past ASCII: its listing is tried once, and every path in it is still opened.
-    for (uint32_t c = 0; result && c < 20; c += 1)
+    for (uint32_t c = 0; result && c < 40; c += 1)
     {
         char header[64];
         snprintf(header, sizeof(header), "h%02u.h", c);
@@ -3537,7 +3537,8 @@ static bool pp_test_directory_listings(const char* directory)
                    (unsigned long)units[3].probes.listed, (unsigned long)units[3].probes.listings);
         }
     }
-    // A directory of 64 names: its first look, at the sixteenth miss, puts it off, and it is read whole at the 128th.
+    // A directory of 64 names: its first look puts it off, and it is read whole at BUSTER_FILE_CACHE_LARGE_LISTING times
+    // the misses.
     const uint32_t later = misses * BUSTER_FILE_CACHE_LARGE_LISTING;
     for (uint32_t c = 0; result && c < later + 12; c += 1)
     {

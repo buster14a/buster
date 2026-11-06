@@ -136,28 +136,60 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
 A system header found in the last search directory costs a failed `open` in
 every directory before it. `<stdio.h>` fails in clang's resource directory and
 `/usr/local/include`, and on Debian in the multiarch directory too, and each
-of its own headers does the same. `deflate.c`'s compile made 122 failed opens
-of 204. A unit with a hundred `-I` directories makes a hundred for each
-header. So the cache reads a directory's names once that pays:
+of its own headers does the same. On the 9700X, `deflate.c`'s compile made 110
+failed opens of 190, and `sqlite3.c`'s 310 of 485. A unit with a hundred `-I`
+directories makes a hundred for each header. So the cache reads a directory's
+names once that pays:
 
 - **Counting.** Each directory the search looks in (a search directory, or
   an includer's for a quoted name) has a `FileCacheDirectory`. It counts the
   failed probes of paths in it that the cache never looked up before, ENOENT
   only (which also says the directory could be searched).
-- **Listing.** At the 16th failed probe (`BUSTER_FILE_CACHE_LISTING_MISSES`),
-  the cache reads the directory's names (`file_cache_list_directory`). That
-  takes an `open`, an `fstatfs`, `getdents64` to the end and a `close`, and
-  puts the names' hashes in a table. A listing costs about as much as 10 to 20
-  failed probes. Listing only after 16 failures keeps the cost bounded:
-  - a short search path, or a unit with few includes, never pays for one;
-  - a directory that fails 16 times and then never again pays at most about
-    twice what probing alone would have cost.
+- **What a listing costs.** On the 9700X (Btrfs), a failed probe took 0.24
+  to 0.31 µs. A listing (`file_cache_list_directory`: an `open`,
+  `getdents64` to the end, an `fstatfs`, a `close`, and the names' keys in a
+  table) costs a few system calls and then about a tenth of a probe per name:
+  - a small directory's calls take about 1.2 µs in all;
+  - a 1 KB `getdents64` of clang's resource directory (263 names) takes
+    2.3 µs, and of `/usr/include` (440) 3.5 µs;
+  - reading clang's directory whole took 13.5 µs alone, and about 20 µs in
+    the compiler.
+
+  A unit with only `<stdio.h>` fails 26 probes in each of the first two
+  directories. Listing every directory whole at its 16th failed probe made
+  that unit's include searches 15 µs slower (62 to 77 µs), because clang's
+  directory never paid back. It also cost zlib's units 0.6% to 1% more user
+  cycles. Only `sqlite3.c` gained, 60 µs of its 600.
+- **When to list.** So the size decides:
+  - At its 32nd failed probe (`BUSTER_FILE_CACHE_LISTING_MISSES`), a
+    directory gets a first look: one 1 KB `getdents64` buffer
+    (`BUSTER_FILE_CACHE_SMALL_LISTING`, about 25 names).
+  - If that buffer isn't filled to within a record of its end, one more call
+    finds the directory's end. The directory is then listed at once:
+    `/usr/local/include`, an empty `-I` directory, a project's small header
+    directory.
+  - A larger one is `deferred`: not read any further, and read whole only at
+    8 times the misses (`BUSTER_FILE_CACHE_LARGE_LISTING`: 256). That is past
+    `sqlite3.c`'s 155 in clang's directory, where reading it whole cost about
+    as much as the probes it saved. A run of many units through one cache
+    gets there.
+  - `fstatfs` runs only for a listing that will be kept.
+  - The first look comes at 32 rather than 16: a unit with only `<stdio.h>`
+    fails 26 probes in each directory. Its include searches took 60 µs with
+    first looks at 32 or none, and 64 µs at 16, while deflate.c's took 159,
+    154 and 158 µs.
+  - So a unit with few includes, or a short search path, never pays for a
+    listing, and a small directory pays for its listing within the next few
+    probes it saves.
+  - `st_size` doesn't tell the size across file systems: this repository's
+    Ubuntu image gives 4096 for a `/usr/include` of 226 names.
 - **Answering.** Afterwards a path in the directory is "absent" when its first
   component (`sys` of `sys/types.h`) isn't in the listing
   (`file_cache_listed_absent`). Its path entry is then the one a failed probe
   gives it, ENOENT, with no system call. Any other path is opened by its full
-  path as before, so a listing only ever answers "no file here". Hashes
-  compare, so a collision only costs a probe.
+  path as before, so a listing only ever answers "no file here". The table
+  holds 32-bit keys of the names, and two names with one key only cost a
+  probe.
 - **Exactly what a probe would find.** Every name a listing rules out would
   fail with ENOENT:
   - The file system's type must be one whose lookups find what its listings
