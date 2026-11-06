@@ -235,6 +235,38 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .errors = 1,
     },
     {
+        .name = "float conversion error does not promote literal conversion",
+        .source = "int a=1.5;\n",
+        .options = { "-Werror=float-conversion" },
+        .warnings = 1,
+    },
+    {
+        .name = "float conversion disabled does not suppress literal conversion",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-float-conversion" },
+        .warnings = 1,
+    },
+    {
+        .name = "literal disabled before float conversion error",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-literal-conversion", "-Werror=float-conversion" },
+    },
+    {
+        .name = "literal error after float conversion disabled",
+        .source = "int a=1.5;\n",
+        .options = { "-Wno-float-conversion", "-Werror=literal-conversion" },
+        .errors = 1,
+    },
+    {
+        .name = "float conversion source policy does not promote literal conversion",
+        .source = "#pragma clang diagnostic error \"-Wfloat-conversion\"\nint a=1.5;\n",
+        .warnings = 1,
+    },
+    {
+        .name = "literal source policy remains disabled across float conversion error",
+        .source = "#pragma clang diagnostic ignored \"-Wliteral-conversion\"\n#pragma clang diagnostic error \"-Wfloat-conversion\"\nint a=1.5;\n",
+    },
+    {
         .name = "file initializer discards pointer qualifiers at its declaration",
         .source = "const int b=1;\nint *c=&b;\n",
         .warnings = 1,
