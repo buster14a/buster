@@ -4278,6 +4278,102 @@ static uint32_t check_common_next_entry(CheckSparseColumn column, uint32_t token
     return result;
 }
 
+// The first token in [begin, end) that can be a brace initializer's read of its own object (#1349): an identifier
+// spelled `name` that does not follow `.` or `->`, or `end` when there is none. Tokens before `begin` count as the
+// previous token's kind, so the caller's range may start anywhere. The vector form classifies 64 kinds a block,
+// shifts the member-operator mask one lane and carries its last lane into the next block, and compares the 32-bit
+// names only in the quarters that hold an identifier. Every load is masked to [begin, end). The scalar loop is its
+// twin under --scalar.
+static uint32_t check_common_self_candidate(const uint8_t* kinds, const uint32_t* names, uint32_t name, uint32_t begin, uint32_t end,
+                                            bool vector)
+{
+    uint32_t result = end;
+    if (vector)
+    {
+        const uint8_t before = begin > 0 && begin < end ? kinds[begin - 1] : 0;
+        uint64_t carry = before == PARSE_KIND_PERIOD || before == PARSE_KIND_ARROW ? 1 : 0;
+        for (uint32_t first = begin; result == end && first < end; first += 64)
+        {
+            const uint32_t length = end - first < 64 ? end - first : 64;
+            const uint64_t lanes = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+            const __m512i kind_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+            const uint64_t member = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)PARSE_KIND_PERIOD)) |
+                                    _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)PARSE_KIND_ARROW));
+            const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)PARSE_KIND_IDENTIFIER));
+            const uint64_t candidates = identifiers & ~((member << 1) | carry);
+            uint64_t named = 0;
+            for (uint32_t quarter = 0; candidates != 0 && quarter < 4; quarter += 1)
+            {
+                const __mmask16 quarter_lanes = (__mmask16)(candidates >> (quarter * 16));
+                if (quarter_lanes != 0)
+                {
+                    const __m512i spelled = _mm512_maskz_loadu_epi32(quarter_lanes, names + first + quarter * 16);
+                    const uint64_t equal = _mm512_mask_cmpeq_epi32_mask(quarter_lanes, spelled, _mm512_set1_epi32((int)name));
+                    named |= equal << (quarter * 16);
+                }
+            }
+            carry = member >> 63;
+            result = named != 0 ? first + (uint32_t)__builtin_ctzll(named) : end;
+        }
+    }
+    else
+    {
+        for (uint32_t at = begin; result == end && at < end; at += 1)
+        {
+            const bool member = at > 0 && (kinds[at - 1] == PARSE_KIND_PERIOD || kinds[at - 1] == PARSE_KIND_ARROW);
+            if (kinds[at] == PARSE_KIND_IDENTIFIER && names[at] == name && !member)
+            {
+                result = at;
+            }
+        }
+    }
+    return result;
+}
+
+// Whether `token` is inside a sizeof or alignof operand: it, or an ancestor in the parse tree, is the operand's
+// parenthesis (PARSE_ROLE_OPEN_SIZEOF or PARSE_ROLE_CLOSE_SIZEOF). The climb stops at a root or after `count` steps.
+// `known`, when present, memoizes the answer per token (0 not yet, 1 outside, 2 inside): a climb stops at the first
+// token whose answer is known, and a second climb writes the answer along the same path. Each token is then written
+// once, so a unit's climbs cost O(tokens) in total however many reads ask (#1349). Without `known`, it is the plain
+// climb, and the tests' reference.
+static bool check_common_sizeof_operand(const uint8_t* roles, const uint32_t* parents, uint32_t count, uint8_t* known, uint32_t token)
+{
+    uint8_t answer = 1;
+    uint32_t steps = 0;
+    bool done = false;
+    for (uint32_t up = token; !done && up < count && steps < count; steps += 1)
+    {
+        const uint32_t parent = parents[up];
+        if (known != NULL && known[up] != 0)
+        {
+            answer = known[up];
+            done = true;
+        }
+        else if (roles[up] == PARSE_ROLE_OPEN_SIZEOF || roles[up] == PARSE_ROLE_CLOSE_SIZEOF)
+        {
+            answer = 2;
+            done = true;
+        }
+        else if (parent == BUSTER_CHECK_NONE || parent >= count || parent == up)
+        {
+            done = true;
+        }
+        else
+        {
+            up = parent;
+        }
+    }
+    // A climb that ran out of steps found a cycle, which a parse tree doesn't have; its answer is the plain climb's,
+    // and nothing is memoized from it.
+    for (uint32_t up = token, written = 0; known != NULL && done && written < steps && up < count && known[up] == 0; written += 1)
+    {
+        known[up] = answer;
+        const uint32_t parent = parents[up];
+        up = parent == BUSTER_CHECK_NONE || parent >= count ? count : parent;
+    }
+    return answer == 2;
+}
+
 static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                        TypeTable* types, const CheckCommonFacts* facts, Arena* scratch)
 {
@@ -4571,6 +4667,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 }
             }
         }
+        // The brace initializers' sizeof answers, per parser token (check_common_sizeof_operand): allocated at the
+        // unit's first candidate read, so a unit without one pays nothing.
+        uint8_t* sizeof_known = NULL;
+        bool sizeof_failed = false;
         // A local declaration is one with a body, an entry of its column: no other warns.
         for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count, vector); valid && declaration < count;
              declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count, vector))
@@ -4619,28 +4719,33 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 const uint32_t close = parser->tree.parents[brace_open];
                 scan_end = close < parser->tokens.count ? close + 1 : parser->tokens.count;
             }
-            for (uint32_t at = scan_begin; braced && at < scan_end && at < parser->tokens.count; at += 1)
+            // Only an identifier spelled as the object's name, and not a member after `.` or `->`, can be its read
+            // (check_common_self_candidate), so only those climb for an enclosing sizeof, memoized across the unit.
+            // The earliest read is the warning's position, so the scan ends at the earliest one found so far.
+            const uint32_t candidate_end = scan_end < parser->tokens.count ? scan_end : parser->tokens.count;
+            for (uint32_t at = braced ? check_common_self_candidate(parser->tokens.kinds, parser->tokens.names, name, scan_begin, candidate_end, vector)
+                                      : candidate_end;
+                 at < candidate_end && at < read_token;
+                 at = check_common_self_candidate(parser->tokens.kinds, parser->tokens.names, name, at + 1, candidate_end, vector))
             {
-                const bool member = at > 0 && (parser->tokens.kinds[at - 1] == PARSE_KIND_PERIOD ||
-                                               parser->tokens.kinds[at - 1] == PARSE_KIND_ARROW);
-                bool query = false;
-                for (uint32_t up = at, steps = 0; up < parser->tokens.count && steps < parser->tokens.count && !query; steps += 1)
+                if (sizeof_known == NULL && !sizeof_failed)
                 {
-                    const uint8_t up_role = parser->tree.roles[up];
-                    query = up_role == PARSE_ROLE_OPEN_SIZEOF || up_role == PARSE_ROLE_CLOSE_SIZEOF;
-                    const uint32_t parent = parser->tree.parents[up];
-                    if (parent == BUSTER_CHECK_NONE || parent >= parser->tokens.count || parent == up)
+                    sizeof_known = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, parser->tokens.count);
+                    sizeof_failed = sizeof_known == NULL;
+                    if (sizeof_failed)
                     {
-                        break;
+                        check_common_exhausted(pp);
                     }
-                    up = parent;
+                    else
+                    {
+                        memset(sizeof_known, 0, parser->tokens.count);
+                    }
                 }
+                const bool query = check_common_sizeof_operand(parser->tree.roles, parser->tree.parents, parser->tokens.count, sizeof_known, at);
                 // Only an evaluated value read of the declared object counts: address operands, assignment targets,
                 // discarded comma operands and the unselected arms of constant folds are not reads. The earliest
                 // such token is where clang's warning points.
-                const uint32_t order = input->token_nodes != NULL && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER &&
-                                               parser->tokens.names[at] == name && !member && !query ?
-                                           input->token_nodes[at] : BUSTER_CHECK_NONE;
+                const uint32_t order = input->token_nodes != NULL && !query ? input->token_nodes[at] : BUSTER_CHECK_NONE;
                 if (order < graph->count && graph->ops[order] == CHECK_OP_VALUE && evaluated[order] != 0 && nonread[order] == 0 &&
                     check_stream_category(stream, order) == CHECK_LVALUE && check_stream_object(stream, order) == declaration + 1 &&
                     at < read_token)

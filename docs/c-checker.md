@@ -3807,7 +3807,12 @@ controlling expression, and an assignment target are not reads, while an
 initializer's value, a compound assignment and an increment are, with the write
 ordered after the read. A brace initializer writes its object even without an
 expression node, and a variable read in its own initializer (braced or not) gets
-Clang's "within its own initialization" message. An unmodeled write through inline
+Clang's "within its own initialization" message. The brace initializer's read is
+found by a scan of its tokens (#1349). An AVX-512 pass, with its scalar twin
+under `--scalar`, keeps only identifiers spelled as the object's name that don't
+follow `.` or `->`, 64 tokens a block. Only those climb the parse tree for an
+enclosing `sizeof`, and the climbs are memoized per unit, so a table of N
+elements costs O(N). An unmodeled write through inline
 assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
 keeps a separate read that is not the target of the same compound assignment or
 increment.
