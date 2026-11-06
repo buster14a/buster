@@ -124,7 +124,10 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # compilation, a timeout or abnormal native execution fails rather than falling back to Tier 0 or leaving a test out.
 "$BUSTER_COMPILER" test-ssa-source --typed --tier1 $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 == Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
-"$BUSTER_COMPILER" test-ssa-source --typed --tier1 tests/interpreter/source.c
+# Preserve the interpreter's 520-byte aggregate; Tier 1 admits stack arguments up to 512 bytes, so compare a 64-long
+# variant strictly through both native paths as well (docs/tier1-selection.md, "By-value aggregates").
+"$BUSTER_COMPILER" test-ssa-source --typed tests/interpreter/source.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 -DBUSTER_INTERPRETER_LARGE_WORDS=64 tests/interpreter/source.c
 "$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 "$BUSTER_COMPILER" test-unwind --cross-check

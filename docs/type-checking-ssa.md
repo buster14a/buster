@@ -113,7 +113,10 @@ output from c-testsuite or Clang's generated-program oracle.
 
 The correctness inventory enables this comparison for all 220 pinned
 c-testsuite programs, 48 generated programs, 24 more generated programs with
-local lifetime markers, and the aggregate/variadic/indirect-call fixture.
+local lifetime markers, and a 512-byte aggregate/variadic/indirect-call fixture
+variant. The original fixture's 520-byte by-value aggregate continues through
+all four interpreted forms; the native variant uses Tier 1's documented
+[512-byte stack-aggregate boundary](tier1-selection.md#supported-slice).
 Its self-test retains the interpreter failure controls and adds native
 compile refusal, missing coverage, wrong output/status, failed launch and
 parent-enforced timeout controls. Successful 127/255 exits remain valid.

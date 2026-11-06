@@ -23,7 +23,10 @@ requirements. [Command index](README.md). The event protocol it resolves is
   register values as CFA offsets, entry values and save slots, checked at every
   reached record; a rule that fails past a form `x86_semantics.c` doesn't cover,
   such as `monitorx`'s leaf's, unproven rather than refuted, which the driver
-  keeps), with `--verify` and in the tests. `emitted_code_test.c`
+  keeps), with `--verify` and in the tests. A rejected driver verification
+  reports its record, frame event and first failing rule's expected and actual
+  values, with bounded instruction/event context after the lanes have joined.
+  `emitted_code_test.c`
   supplies `test-emitted-code [--seed N] [--count N] [--cross-check] [--keep]`:
   row programs against the fixed writer for every descriptor, Tier 0's programs
   and the Tier 1 planner's every flag against the previous readers byte for byte,

@@ -99,6 +99,15 @@ typedef enum EmittedVerifyError
     EMITTED_VERIFY_MEMORY,
 } EmittedVerifyError;
 
+typedef enum EmittedVerifyRule
+{
+    EMITTED_VERIFY_RULE_NONE,
+    EMITTED_VERIFY_RULE_CFA,
+    EMITTED_VERIFY_RULE_SAME,
+    EMITTED_VERIFY_RULE_OFFSET,
+    EMITTED_VERIFY_RULE_REGISTER,
+} EmittedVerifyRule;
+
 typedef struct EmittedVerdict EmittedVerdict;
 struct EmittedVerdict
 {
@@ -106,6 +115,14 @@ struct EmittedVerdict
     // The record where the rules first fail, and the last event applied before it (frame_count for none).
     uint32_t record;
     uint32_t event;
+    // The first rule that fails (refuted or unproven only). Registers use DWARF numbering; holder is a REGISTER
+    // rule's location. CFA/OFFSET compare CFA-relative offsets; SAME/REGISTER compare entry-register identities.
+    // BUSTER_EMITTED_UNKNOWN means the actual value is unknown. These fields do not decide the verdict.
+    EmittedVerifyRule rule;
+    uint32_t reg;
+    uint32_t holder;
+    int64_t expected;
+    int64_t actual;
 };
 
 static __attribute__((unused)) EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool sources, bool assembly, Arena* arena);
@@ -786,6 +803,52 @@ static bool emitted_holds(const EmittedRules* rules, const EmittedState* state)
     return valid;
 }
 
+// Explain a failed emitted_holds without changing its proof: the first failing rule in the same order. This is
+// diagnostic work only, after a failure, and emits nothing (the verifier's mutation tests expect refutations).
+static EmittedVerdict emitted_failed_rule(const EmittedRules* rules, const EmittedState* state, uint32_t record, uint32_t event)
+{
+    EmittedVerdict failed = {
+        .error = state->unproven ? EMITTED_VERIFY_UNPROVEN : EMITTED_VERIFY_REFUTED,
+        .record = record,
+        .event = event,
+    };
+    const uint32_t cfa = emitted_dwarf_gpr(rules->cfa_register);
+    const int64_t offset = rules->cfa_offset;
+    if (!(cfa < 16 && offset >= 0 && state->value[cfa] != BUSTER_EMITTED_UNKNOWN && state->value[cfa] == -offset))
+    {
+        failed.rule = EMITTED_VERIFY_RULE_CFA;
+        failed.reg = rules->cfa_register;
+        failed.expected = offset >= 0 ? -offset : BUSTER_EMITTED_UNKNOWN;
+        failed.actual = cfa < 16 ? state->value[cfa] : BUSTER_EMITTED_UNKNOWN;
+    }
+    for (uint32_t d = 0; failed.rule == EMITTED_VERIFY_RULE_NONE && d < BUSTER_EMITTED_TRACKED; d += 1)
+    {
+        const uint32_t g = d < 16 ? emitted_dwarf_gpr(d) : 16;
+        const uint32_t kind = rules->kinds[d];
+        if (kind == EMITTED_RULE_OFFSET && !(state->slots[g] != BUSTER_EMITTED_UNKNOWN && state->slots[g] == rules->values[d]))
+        {
+            failed.rule = EMITTED_VERIFY_RULE_OFFSET;
+            failed.reg = d;
+            failed.expected = rules->values[d];
+            failed.actual = state->slots[g];
+        }
+        else if (kind == EMITTED_RULE_SAME || kind == EMITTED_RULE_REGISTER)
+        {
+            const uint32_t holder = kind == EMITTED_RULE_SAME ? g : emitted_dwarf_gpr((uint32_t)rules->values[d]);
+            const uint32_t held = holder < 16 ? state->holds[holder] : BUSTER_EMITTED_NONE;
+            if (!(holder < 16 && held == g))
+            {
+                failed.rule = kind == EMITTED_RULE_SAME ? EMITTED_VERIFY_RULE_SAME : EMITTED_VERIFY_RULE_REGISTER;
+                failed.reg = d;
+                failed.holder = kind == EMITTED_RULE_SAME ? d : (uint32_t)rules->values[d];
+                failed.expected = d;
+                failed.actual = held < 16 ? emission_x86_registers[held] : BUSTER_EMITTED_UNKNOWN;
+            }
+        }
+    }
+    return failed;
+}
+
 // Proves a function's frame events against its records and their control flow, as an unwinder reads them: at every
 // record the code reaches, the rules in force there (the events anchored at or before its start, in order, from the
 // CIE's) must hold of every path that reaches it. A forward dataflow over the code's blocks (from its entry, each
@@ -960,9 +1023,7 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
         state = leaders[i] != UINT32_MAX ? states[leaders[i]] : state;
         if (state.reached && !emitted_handed(code->records, i) && !emitted_holds(&rules, &state))
         {
-            const EmittedVerdict failed = { .error = state.unproven ? EMITTED_VERIFY_UNPROVEN : EMITTED_VERIFY_REFUTED,
-                                            .record = i,
-                                            .event = event != 0 ? event - 1 : code->frame_count };
+            const EmittedVerdict failed = emitted_failed_rule(&rules, &state, i, event != 0 ? event - 1 : code->frame_count);
             verdict = state.unproven ? verdict : failed;
             unproven = state.unproven && unproven.error == EMITTED_VERIFY_OK ? failed : unproven;
         }
