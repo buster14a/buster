@@ -698,6 +698,19 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 12,
                       "static pointer arithmetic retains byte addend");
     const CheckValue address = result.value;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 62);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 0,
+                      "a 2^62 int index wraps the byte addend to zero");
+    CheckValue bytes = address;
+    bytes.offset = 0;
+    bytes.type = type_pointer(table, BUSTER_TYPE_CHAR);
+    action.operands[0] = bytes;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 63);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 &&
+                           result.value.offset == (int64_t)((uint64_t)1 << 63),
+                      "a 2^63 byte index is the signed relocation addend");
     action = (CheckAction){
         .op = CHECK_OP_SUBTRACT,
         .operands = {

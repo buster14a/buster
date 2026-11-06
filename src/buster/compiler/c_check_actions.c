@@ -1767,6 +1767,27 @@ static uint64_t check_action_pointer_stride(const TypeTable* table, TypeId point
     return gnu_byte ? 1 : type_size(table, element);
 }
 
+// The low 64 bits of an integer constant, sign-extended when the type is narrower than 64 bits and negative.
+// A relocation addend is those bits times the stride, modulo 2^64: a value that does not fit in signed int64
+// still has a 64-bit addend (1ul << 63, and 1ul << 62 scaled by an int's stride, which is 0 modulo 2^64).
+static bool check_action_address_index(const TypeTable* table, const CheckValue* value, uint64_t* bits)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
+                         check_action_integer_type(table, value->type, &width, &is_signed) && width != 0 && width <= 128;
+    *bits = 0;
+    if (integer)
+    {
+        const unsigned __int128 mask = check_action_mask(width);
+        const unsigned __int128 stored = value->integer & mask;
+        const bool narrow_negative = is_signed && width < 64 && (stored >> (width - 1)) != 0;
+        const uint64_t narrow = width >= 64 ? UINT64_MAX : ((uint64_t)1 << width) - 1;
+        *bits = narrow_negative ? (uint64_t)stored | ~narrow : (uint64_t)stored;
+    }
+    return integer;
+}
+
 static bool check_action_i64(const TypeTable* table, const CheckValue* value, int64_t* number)
 {
     uint32_t width = 0;
@@ -1834,21 +1855,19 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
             result->value.category = action->op == CHECK_OP_SUBSCRIPT ? CHECK_LVALUE : CHECK_RVALUE;
             result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED);
             result->value.flags |= action->op == CHECK_OP_SUBSCRIPT && (pointer.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
-            int64_t number = 0;
+            uint64_t index_bits = 0;
             const uint64_t stride = check_action_pointer_stride(table, pointer.type);
-            int64_t delta = 0;
-            int64_t addend = 0;
             if (!check_action_runtime_size(table, type_element(table, pointer.type)) && pointer.constant_kind == CHECK_CONSTANT_ADDRESS &&
-                pointer.fault == CHECK_FAULT_NONE && stride <= INT64_MAX && check_action_i64(table, &index, &number) &&
-                !__builtin_mul_overflow(number, (int64_t)stride, &delta))
+                pointer.fault == CHECK_FAULT_NONE && check_action_address_index(table, &index, &index_bits))
             {
-                const bool fits = action->op == CHECK_OP_SUBTRACT ? !__builtin_sub_overflow(pointer.offset, delta, &addend) : !__builtin_add_overflow(pointer.offset, delta, &addend);
-                if (fits)
-                {
-                    result->value.constant_kind = CHECK_CONSTANT_ADDRESS;
-                    result->value.object = pointer.object;
-                    result->value.offset = addend;
-                }
+                // The addend is the low 64 bits, the same bits a relocation stores. Signed overflow is a wrap, not a
+                // reason to drop the constant: 2^63 is the addend -2^63, and 2^62 elements of an int are zero bytes.
+                const uint64_t delta = index_bits * stride;
+                const uint64_t base = (uint64_t)pointer.offset;
+                const uint64_t addend = action->op == CHECK_OP_SUBTRACT ? base - delta : base + delta;
+                result->value.constant_kind = CHECK_CONSTANT_ADDRESS;
+                result->value.object = pointer.object;
+                result->value.offset = (int64_t)addend;
             }
         }
     }
