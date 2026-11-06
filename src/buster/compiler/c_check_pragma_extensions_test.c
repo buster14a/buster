@@ -242,9 +242,12 @@ struct CheckPragmaExtensionFixture
 {
     const char* source;
     const char* loop_text;
+    const char* first;
+    const char* second;
     CheckInputMessage message;
     uint32_t records;
     uint32_t ms_records;
+    uint8_t fp_error;
     bool accepted;
 };
 
@@ -331,6 +334,16 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma clang fp reciprocal(on)\n#pragma STDC FENV_ACCESS ON\nint x;\n", .message = CHECK_INPUT_DECLARATION },
         { .source = "int f(void){\n#pragma float_control(push)\nreturn 0;}\n", .message = CHECK_INPUT_DECLARATION },
         { .source = "#pragma clang fp eval_method(double)\nint x;\n", .records = 1, .accepted = true },
+        // The semantic reader receives resolved options directly; the production driver retains its separate
+        // refusal for these global code-generation modes. Pinned Clang probes establish each effective conflict.
+        { .source = "#pragma clang fp eval_method(double)\nint x;\n", .first = "-ffast-math", .records = 1,
+          .fp_error = CHECK_FP_ERROR_EVAL_OPTIONS, .message = CHECK_INPUT_DECLARATION },
+        { .source = "#pragma clang fp eval_method(source)\nint x;\n", .first = "-freciprocal-math", .records = 1,
+          .fp_error = CHECK_FP_ERROR_EVAL_RECIPROCAL_OPTION, .message = CHECK_INPUT_DECLARATION },
+        { .source = "#pragma clang fp eval_method(double)\nint x;\n", .first = "-fassociative-math", .records = 1, .accepted = true },
+        { .source = "#pragma clang fp eval_method(double)\nint x;\n", .first = "-fassociative-math", .second = "-fno-signed-zeros", .records = 1,
+          .fp_error = CHECK_FP_ERROR_EVAL_REASSOCIATE_OPTION, .message = CHECK_INPUT_DECLARATION },
+        { .source = "#pragma clang fp eval_method(double)\nint x;\n", .first = "-ffast-math", .second = "-fno-fast-math", .records = 1, .accepted = true },
         { .source = "#pragma clang fp eval_method(source)\n#pragma clang fp eval_method(extended)\nint x;\n", .records = 2, .accepted = true },
         { .source = "#pragma clang fp eval_method(double) reassociate(on)\nint x;\n", .records = 1, .accepted = true },
         { .source = "#pragma clang fp reciprocal(on) eval_method(extended)\nint x;\n", .records = 1, .accepted = true },
@@ -371,7 +384,14 @@ static void check_test_pragma_extension_sources(CheckTest* test)
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
     {
         const CheckPragmaExtensionFixture* expected = fixtures + fixture;
-        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+        uint8_t floats[3] = { 0 };
+        PPOptions configured = options;
+        configured.predefines.floats = floats;
+        configured.predefines.float_capacity = BUSTER_ARRAY_LENGTH(floats);
+        configured.semantic_pragmas = expected->first != NULL;
+        bool ready = expected->first == NULL || predefines_option(&configured.predefines, expected->first, NULL) == PREDEFINES_PARSE_TAKEN;
+        ready = ready && (expected->second == NULL || predefines_option(&configured.predefines, expected->second, NULL) == PREDEFINES_PARSE_TAKEN);
+        ready = ready && intern_initialize(&identifiers) && pp_initialize(&pp, &configured, &identifiers);
         ready = ready && pp_run_source(&pp, "pragma-extensions.c", (const uint8_t*)expected->source, strlen(expected->source));
         check_test_expect(test, ready, "pragma extension source fixture preprocesses");
         for (uint32_t schedule = 0; ready && schedule < 4; schedule += 1)
@@ -388,6 +408,12 @@ static void check_test_pragma_extension_sources(CheckTest* test)
             const bool rejected = parsed && !input.resource && input.report_count != 0 && input.reports[0].message == expected->message;
             const uint32_t ms_records = input.ms_pragmas != NULL ? input.ms_pragmas->count : 0;
             check_test_expect(test, expected->accepted ? accepted && input.fp_pragma_count == expected->records && ms_records == expected->ms_records : rejected, expected->source);
+            if (expected->first != NULL)
+            {
+                check_test_expect(test, input.fp_pragma_count == 1 && input.fp_pragmas[0].error == expected->fp_error &&
+                                       (expected->fp_error == 0 || input.fp_pragmas[0].error_source == parser.tokens.pragma_sources[0] + 3),
+                                  "effective global floating permissions retain the exact evaluation conflict and source");
+            }
             if (expected->loop_text != NULL)
             {
                 check_test_expect(test, rejected && input.loop_diagnostic != NULL && input.loop_diagnostic->pragma == 1 &&

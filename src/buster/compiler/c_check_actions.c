@@ -105,6 +105,10 @@ typedef enum CheckFault
 #define BUSTER_CHECK_FP_ENV_MASK (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)
 // Token history only: an evaluation-method pragma occurred in this lexical scope, even if it selected source.
 #define BUSTER_CHECK_FP_EVAL_PRAGMA 0x08u
+// Typedef restrictions use the last pragma's method, which float_control(pop) does not restore with arithmetic.
+#define BUSTER_CHECK_FP_EVAL_LAST_DOUBLE 0x10u
+#define BUSTER_CHECK_FP_EVAL_LAST_EXTENDED 0x20u
+#define BUSTER_CHECK_FP_EVAL_LAST_MASK (BUSTER_CHECK_FP_EVAL_LAST_DOUBLE | BUSTER_CHECK_FP_EVAL_LAST_EXTENDED)
 
 typedef struct CheckValue CheckValue;
 struct CheckValue

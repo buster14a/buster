@@ -2118,7 +2118,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->reports[report].pragma == right->reports[report].pragma;
         if (equal && left->reports[report].message == CHECK_INPUT_FP_EVAL_USE)
         {
-            equal = left->reports[report].subject == right->reports[report].subject && left->reports[report].detail == right->reports[report].detail;
+            equal = left->reports[report].subject == right->reports[report].subject && left->reports[report].detail == right->reports[report].detail &&
+                    left->reports[report].value == right->reports[report].value;
         }
     }
     for (uint32_t token = 0; equal && !a->resource && trees && left->declarations != 0 && right->declarations != 0 && token < left_parser->tokens.count; token += 1)

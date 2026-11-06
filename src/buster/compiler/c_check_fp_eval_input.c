@@ -10,12 +10,13 @@ struct CheckInputFpEvalUse
     uint32_t token;
     uint32_t use;
     uint32_t publication;
+    uint32_t pragma_source;
 };
 
 // Consume uses before the next pragma or ordinary token, under the state that precedes that source boundary.
 // Called before each pragma, then before the ordinary token after those pragmas, including the EOF boundary.
 static __attribute__((unused)) void check_input_fp_eval_uses(CheckInputReader* reader, uint32_t* cursor, uint32_t position,
-                                                             uint32_t pragmas, uint32_t token, bool restricted)
+                                                             uint32_t pragmas, uint32_t token, uint32_t pragma_source)
 {
     const Preprocessor* pp = reader->pp;
     const uint32_t count = pp->eval_method_use_count;
@@ -27,7 +28,7 @@ static __attribute__((unused)) void check_input_fp_eval_uses(CheckInputReader* r
         {
             break;
         }
-        if (restricted)
+        if (pragma_source != 0)
         {
             if (reader->fp_eval_uses == NULL)
             {
@@ -51,6 +52,7 @@ static __attribute__((unused)) void check_input_fp_eval_uses(CheckInputReader* r
                     .token = token,
                     .use = use,
                     .publication = publication,
+                    .pragma_source = pragma_source,
                 };
             }
         }
@@ -86,6 +88,7 @@ static void check_input_fp_eval_finish(CheckInputReader* reader)
             .message = CHECK_INPUT_FP_EVAL_USE,
             .subject = use->use + 1,
             .detail = use->publication,
+            .value = use->pragma_source,
             .repeated = true,
         };
     }

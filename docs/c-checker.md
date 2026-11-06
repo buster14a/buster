@@ -422,8 +422,10 @@ does, each rule checked against clang's answers on probes of it:
 
   A later separate `reassociate(on)` or `reciprocal(on)` conflicts with an
   active evaluation pragma, even after `eval_method(source)` or a
-  `float_control(pop)`. Effective command-line approximation, reassociation
-  and reciprocal permissions also produce Clang's individual errors.
+  `float_control(pop)`. The semantic reader diagnoses conflicts with
+  effective global approximation, reassociation and reciprocal permissions.
+  The production driver retains its named refusal for these unsupported
+  command-line modes before reading source.
   `__FLT_EVAL_METHOD__` expansion in an active evaluation-pragma scope is an
   error, including macro expansions consumed by `#if`; a closing compound
   restores the enclosing scope. Cold preprocessing events retain expansion
@@ -432,9 +434,11 @@ does, each rule checked against clang's answers on probes of it:
 
   With an explicit command-line evaluation method, a typedef marked
   `available_only_in_default_eval_method` cannot be used under a differing
-  active method. File-scope `float_t` and `double_t` receive the same implicit
-  restriction. A cold pass over resolved uses handles redeclarations and
-  constant-only type queries in source order, without applying later
+  last pragma method. File-scope `float_t` and `double_t` receive the same
+  implicit restriction. `float_control(pop)` restores arithmetic precision
+  but retains that last method; a closing compound restores both. A cold
+  pass over resolved uses handles redeclarations and constant-only type
+  queries in source order, without applying later
   attributes to earlier uses. Command-line `double`/`extended` selection
   remains an explicit target-model refusal; lexical methods above are
   implemented within the existing LP64 model.
