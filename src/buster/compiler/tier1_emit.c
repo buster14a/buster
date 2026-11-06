@@ -282,7 +282,8 @@ struct Tier1EmitResult
     uint32_t jumps;
     // In the CFG consumer, each of the function's labels' first record (IrFunction.labels, #789), where the driver defines
     // its symbol: its block's first record, or where the indirect jump that may go to it has a stub for that edge, the
-    // stub's (tier1_emit_cfg_labels); label_count of them, the function's, and none in a function without labels.
+    // stub's (tier1_emit_cfg_labels), or UINT32_MAX for an absent label no indirect branch reaches. There are label_count
+    // entries, preserving the function's label indices, and none in a function without labels.
     uint32_t* label_records;
     uint32_t label_count;
     // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),

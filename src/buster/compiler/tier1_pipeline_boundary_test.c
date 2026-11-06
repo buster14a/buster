@@ -423,10 +423,13 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
             ok = body->label_count == 0 || (f == 0 && count == 1 && body->label_count == 2);
             for (uint32_t label = 0; ok && label < body->label_count; label += 1)
             {
-                ok = body->label_records[label] < body->count && offsets[f][body->label_records[label]] < sizes[f];
+                // An absent label keeps the driver's entry placeholder; every other label must name a real record.
+                const uint32_t record = body->label_records[label];
+                const uint32_t offset = record < body->count ? offsets[f][record] : 0;
+                ok = (record == UINT32_MAX || record < body->count) && offset < sizes[f];
                 if (ok)
                 {
-                    symbols[count + 1 + label] = starts[f] + offsets[f][body->label_records[label]];
+                    symbols[count + 1 + label] = starts[f] + offset;
                     defined[count + 1 + label] = true;
                 }
             }

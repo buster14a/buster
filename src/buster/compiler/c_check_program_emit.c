@@ -1065,7 +1065,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             body->length = (uint64_t)length;
             for (uint32_t k = 0; k < code->label_count; k += 1)
             {
-                body->label_offsets[k] = code->label_records[k] < code->count ? offsets[code->label_records[k]] : UINT32_MAX;
+                // An optimized-away label has no control-flow target. Keep its symbol's existing entry placeholder
+                // and index; only that explicit sentinel is accepted without a record in the emitted function.
+                const uint32_t record = code->label_records[k];
+                body->label_offsets[k] = record == UINT32_MAX ? 0 : record < code->count ? offsets[record] : UINT32_MAX;
             }
             // A template's label may be its code's end.
             for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
@@ -3750,7 +3753,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
                 }
             }
-            // Each label at its first record's offset, after branch sizing: the program's definition.
+            // Each label at its resolved offset, after branch sizing, including an absent label's entry placeholder.
             for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
             {
                 valid = labels < result->lowered.label_symbol_count && body->label_offsets[k] != UINT32_MAX &&

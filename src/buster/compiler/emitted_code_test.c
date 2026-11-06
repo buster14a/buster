@@ -639,6 +639,45 @@ static void emitted_test_counterexamples(EmittedTest* test)
                              "a compare right before its jne still decides the jne's edges", 4);
 }
 
+// An optimized-away label stays absent beside a live indirect target: it must not add an edge back to the prologue.
+// A real label at record zero still adds that edge, and a live label skipping the epilogue still refutes the frame.
+static void emitted_test_labels(EmittedTest* test)
+{
+    X86Instruction records[] = {
+        { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_RBX },
+        { .form = X86_FORM_JMP_RM64, .rm = X86_REGISTER_RAX },
+        { .form = X86_FORM_POP_R64, .rm = X86_REGISTER_RBX },
+        { .form = X86_FORM_RET },
+    };
+    EmissionFrameEvent frames[] = {
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_OFFSET, .reg = BUSTER_EMISSION_X86_RBX, .value = -16 },
+        { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 },
+        { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_RESTORE, .reg = BUSTER_EMISSION_X86_RBX },
+    };
+    uint32_t labels[] = { UINT32_MAX, 2 };
+    const EmittedCode code = {
+        .records = records,
+        .count = BUSTER_ARRAY_LENGTH(records),
+        .label_records = labels,
+        .label_count = BUSTER_ARRAY_LENGTH(labels),
+        .frames = frames,
+        .frame_count = BUSTER_ARRAY_LENGTH(frames),
+        .frame_status = EMITTED_FRAME_DESCRIBED,
+    };
+    EmittedVerdict verdict = emitted_verify_frames(&code, &test->arena);
+    emitted_test_expect(test, verdict.error == EMITTED_VERIFY_OK, "an absent label does not become an indirect edge to the prologue", 1);
+    labels[0] = 0;
+    verdict = emitted_verify_frames(&code, &test->arena);
+    emitted_test_expect(test, verdict.error == EMITTED_VERIFY_REFUTED && verdict.record == 0 && verdict.rule == EMITTED_VERIFY_RULE_CFA,
+                        "a real indirect target at record zero still refutes the entry frame", 2);
+    labels[0] = UINT32_MAX;
+    labels[1] = 3;
+    verdict = emitted_verify_frames(&code, &test->arena);
+    emitted_test_expect(test, verdict.error == EMITTED_VERIFY_REFUTED && verdict.record == 3 && verdict.rule == EMITTED_VERIFY_RULE_CFA,
+                        "an indirect target skipping the epilogue still refutes the return frame", 3);
+}
+
 // Code through a form x86_semantics.c doesn't cover, whose conservative record may write rsp (monitorx's, an x86
 // builtin's per-unit leaf, which main.c's --verify compile emits): a rule it leaves unknown is unproven, not refuted, on
 // every path through it, and the driver keeps such a frame; a rule that fails before it, or on a path that doesn't go
@@ -1002,6 +1041,7 @@ static int emitted_test_run(bool cross, bool keep, uint64_t seed, uint32_t round
         emitted_test_tier1(&test);
         emitted_test_limits(&test);
         emitted_test_counterexamples(&test);
+        emitted_test_labels(&test);
         char directory[PATH_MAX];
         const bool made = emitted_test_directory(directory, sizeof(directory), "buster-emitted-leaves");
         emitted_test_expect(&test, made, "make a directory for the leaves' compile", 0);

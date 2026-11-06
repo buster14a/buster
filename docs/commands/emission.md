@@ -26,12 +26,19 @@ requirements. [Command index](README.md). The event protocol it resolves is
   keeps), with `--verify` and in the tests. A rejected driver verification
   reports its record, frame event and first failing rule's expected and actual
   values, with bounded instruction/event context after the lanes have joined.
+  A label with no surviving IR block keeps its index and has `UINT32_MAX` as
+  its emitted record. No indirect branch may name that absent label; other
+  branches with explicit target lists may remain in the function. The verifier
+  therefore gives it no edge, while the driver retains the symbol's previous
+  placeholder at byte offset zero. A real label at record zero remains a destination
+  and is verified normally.
   `emitted_code_test.c`
   supplies `test-emitted-code [--seed N] [--count N] [--cross-check] [--keep]`:
   row programs against the fixed writer for every descriptor, Tier 0's programs
   and the Tier 1 planner's every flag against the previous readers byte for byte,
   mutants refuted, `emitted_code_limits_test.c`'s near-2 GB frames with wide CFA values (#1149), compile-only
   `-c`/`--verify` coverage, overflow-safe verifier tracking and
+  absent-label acceptance with real entry-target and incorrect-CFA controls,
   `emitted_unwind_same`'s resource answer, uncovered forms' verdicts and
   `--verify -c` of `monitorx`'s
   and `mwaitx`'s leaves, and with `--cross-check` a probe frame natively under

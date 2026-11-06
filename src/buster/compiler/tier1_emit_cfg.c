@@ -1851,9 +1851,11 @@ static Tier1EmitError tier1_emit_cfg_indirect(Tier1EmitResult* emitted, uint32_t
 
 // Each of the function's labels' first record (Tier1EmitResult.label_records, #789): its block's, or where the indirect
 // jump that may go to it has a stub for that edge, the stub's, which the jump reaches through the label's address alone.
-// A label no block holds, in a function without br_indirect, gets the function's first record. An indirect jump with one
-// successor jumps there directly, and its label is its block's. A label is one address for every indirect jump that may
-// go to it. The C lowering puts each on one jump's list (a jump table's, or the dispatch block's of GNU C's goto *), but
+// A label no block holds keeps UINT32_MAX: no indirect branch reaches it, though other indirect branches with explicit
+// target lists may remain. The driver still defines its symbol at the function's start, without adding a control-flow
+// target. An indirect jump with one successor jumps there directly, and its label is its block's. A label is one
+// address for every indirect jump that may go to it. The C lowering puts each on one jump's list (a jump table's, or
+// the dispatch block's of GNU C's goto *), but
 // for a dispatch block that lists none, which may go to every label, where goto * has no label of its own, and the IR
 // doesn't require it. A label two jumps may go to is its block's where neither edge has a stub, and otherwise the
 // function is refused, TIER1_EMIT_UNSUPPORTED: one jump would enter the other's stub (#1016's review).
@@ -1873,7 +1875,7 @@ static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1Em
     uint8_t* stubbed = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 1, &ok) : 0;
     for (uint32_t k = 0; ok && k < function->label_count; k += 1)
     {
-        records[k] = function->labels[k] == BUSTER_IR_NONE ? 0 : block_first[function->labels[k] + added];
+        records[k] = function->labels[k] == BUSTER_IR_NONE ? UINT32_MAX : block_first[function->labels[k] + added];
         owners[k] = BUSTER_IR_NONE;
         owner_counts[k] = 0;
         stubbed[k] = 0;

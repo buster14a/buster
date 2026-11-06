@@ -13,7 +13,8 @@
 //
 // - the code: the instruction records, the branch columns (each branch's record and its target's record, ascending,
 //   which branch sizing reads), the symbolic references (LinkReference, by marked instruction) and each label's first
-//   record, where the emission defines the label's symbol;
+//   record, where the emission defines the label's symbol. UINT32_MAX marks a label without code, which no indirect
+//   branch reaches; its symbol still gets a placeholder at the function's start. Record 0 remains a real target;
 // - optional source events (-g only; none otherwise, so a compile without -g pays for none): `source_count` events, event
 //   e at the RIGHT side of record boundary source_records[e] (nondecreasing), whose origin is source_origins[e], an
 //   index into the body's typed entries (the lowering's entry tokens), or event e itself where source_origins is null
@@ -62,6 +63,7 @@ struct EmittedCode
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
+    // First records by label index; UINT32_MAX is an absent label, not an indirect control-flow target.
     uint32_t* label_records;
     uint32_t label_count;
     const uint32_t* source_records;

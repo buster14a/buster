@@ -1508,7 +1508,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             memcpy(candidate.parameter_types, f->parameter_types, f->parameter_count);
         }
         // The ABI records and the incoming frame as they were (each call keeps its index), and each label at its block
-        // as threaded: a label whose block is dead has none, which only a function no br_indirect reaches leaves.
+        // as threaded: a label whose block is dead has none, and no surviving br_indirect may list or reach it.
         if (f->abi_call_count != 0)
         {
             memcpy(candidate.abi_calls, f->abi_calls, (uint64_t)f->abi_call_count * sizeof(IrAbiCall));
