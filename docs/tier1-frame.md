@@ -249,8 +249,9 @@ start from a touched rsp, or its first touch could land a page below an
 untouched reservation, past a guard page (LLVM's constraint). Other frames
 under a page, with a frame pointer or not, leave less than a page untouched,
 and the next call's return address is the next touch. Until #1450 a frame
-pointer alone made both tiers touch: a read-modify-write of `[rsp]` on every
-call, which cost Tier 0's `closures.lua` 4.59% (#177).
+pointer alone made both tiers touch, so with `-fno-omit-frame-pointer` every
+call did a read-modify-write of `[rsp]`. That isn't the default: Tier 0's Lua
+touches in two functions only (#1450's record).
 
 - **Tier 1's prologue** takes `PROBE_STACK` (`Tier1EmitOptions.frame_flags`):
   the planner's `PROBE_ALLOCATE` and `PROBE_ALIGN` above, with their frame

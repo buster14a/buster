@@ -8830,8 +8830,8 @@ static X86Instruction tier0_realignment(uint32_t alignment_log2)
 // under a page could otherwise take rsp past a guard page before its first touch (LLVM's constraint: a dynamic
 // allocation starts from a probed rsp). A frame pointer the options keep (#1450) isn't one: a frame under a page that
 // doesn't move rsp leaves less than a page untouched, and its next call's return address is the next touch. Probing it
-// cost Tier 0 a read-modify-write of [rsp] on every call (closures.lua +4.59%, #177). Tier 1's frame does the same. The
-// unwind tables' reader (unwind_tier0_frame_tails) asks it of the frame Tier0Code publishes.
+// made -fno-omit-frame-pointer's every call a read-modify-write of [rsp]. Tier 1's frame does the same. The unwind
+// tables' reader (unwind_tier0_frame_tails) asks it of the frame Tier0Code publishes.
 static bool tier0_probes_reservation(bool probe, uint32_t size, uint32_t alignment_log2, bool moves)
 {
     return probe && size != 0 && (size >= BUSTER_TIER0_PAGE_BYTES || alignment_log2 != 0 || moves);
