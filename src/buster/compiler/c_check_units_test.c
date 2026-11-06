@@ -2625,6 +2625,8 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
         { "--units", "2x" },
         { "--", "--lanes", "1" },
         { "--", "--lanes=1" },
+        { "--", "--lane-cpus", "0" },
+        { "--", "--lane-cpus=0" },
         { "--", "--worker-budget", "1" },
         { "--", "--worker-budget=1" },
     };

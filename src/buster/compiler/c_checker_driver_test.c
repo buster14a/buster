@@ -3839,14 +3839,14 @@ static void check_test_driver_layout_options(CheckTest* test, const char* execut
     const int preprocess_status = check_test_driver_spawn(preprocess, &text);
     check_test_expect(test, preprocess_status == 0, "preprocessing accepts layout flags that do not affect its output");
     free(text);
-    static const char* const value_options[] = { "--lanes", "--worker-budget", "--id-order", "-l", "-L" };
+    static const char* const value_options[] = { "--lanes", "--lane-cpus", "--worker-budget", "--id-order", "-l", "-L" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(value_options); i += 1)
     {
         char* const valued[] = { (char*)executable, (char*)value_options[i], "-fshort-enums", "-fsyntax-only", source, NULL };
         text = NULL;
         const int valued_status = check_test_driver_spawn(valued, &text);
         check_test_expect(test, text != NULL && strstr(text, "the checker does not implement its ABI layout") == NULL &&
-                                (i >= 3 || valued_status != 0),
+                                (i >= 4 || valued_status != 0),
                           "a driver option's operand is not interpreted as a layout option");
         free(text);
     }
@@ -4472,6 +4472,84 @@ static void check_test_driver_clock_reader(CheckTest* test)
                       "--time-stages' walk reader takes each part once within the walk, and a numeric or wholly unavailable usage, and refuses a missing, "
                       "repeated, excess or negative part, a missing or negative usage and a half-unavailable one");
     check_test_driver_clock_printer(test);
+}
+
+static void check_test_driver_cpu_pinning(CheckTest* test, const char* executable, const char* directory)
+{
+    uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed);
+    uint32_t cpus[2] = { 0 };
+    uint32_t count = 0;
+    for (uint32_t cpu = 0; bytes > 0 && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64u && count < 2; cpu += 1)
+    {
+        if ((allowed[cpu / 64] & (UINT64_C(1) << (cpu % 64))) != 0)
+        {
+            cpus[count++] = cpu;
+        }
+    }
+    char source[PATH_MAX];
+    char reference[PATH_MAX];
+    char pinned[PATH_MAX];
+    char cpu_list[32];
+    char duplicate[32];
+    char receipt[100];
+    snprintf(source, sizeof(source), "%s/pin.c", directory);
+    snprintf(reference, sizeof(reference), "%s/pin-reference.o", directory);
+    snprintf(pinned, sizeof(pinned), "%s/pin-result.o", directory);
+    snprintf(cpu_list, sizeof(cpu_list), "%u", cpus[0]);
+    snprintf(duplicate, sizeof(duplicate), "%u,%u", cpus[0], cpus[0]);
+    snprintf(receipt, sizeof(receipt), "lane-pin\tindex=0\texpected=%u\tobserved=%u\tstatus=0", cpus[0], cpus[0]);
+    static const char program[] = "int f(int x) { return x * 2; }\n";
+    const bool made = count > 0 && parse_test_write(source, program, sizeof(program) - 1);
+    char* const plain[] = { (char*)executable, "--lanes", "1", "-c", source, "-o", reference, NULL };
+    char* const one[] = { (char*)executable, "--lanes", "1", "--lane-cpus", cpu_list, "--time-stages", "-c", source, "-o", pinned, NULL };
+    char* text = NULL;
+    const int plain_status = made ? check_test_driver_spawn(plain, &text) : -1;
+    free(text);
+    text = NULL;
+    const int one_status = made ? check_test_driver_spawn(one, &text) : -1;
+    check_test_expect(test, plain_status == 0 && one_status == 0 && text != NULL && strstr(text, receipt) != NULL &&
+                            check_test_driver_same_files(reference, pinned), "a pinned lane reports its actual CPU and preserves the object");
+    free(text);
+    static const char* const bad_lists[] = { "", "1024", "-1", "0,", "0,,1", " 0", "99999999999999999999" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bad_lists); i += 1)
+    {
+        char* const bad[] = { (char*)executable, "--lanes", "1", "--lane-cpus", (char*)bad_lists[i], "-c", source, "-o", pinned, NULL };
+        text = NULL;
+        const int status = made ? check_test_driver_spawn(bad, &text) : -1;
+        check_test_expect(test, status == 1, "a malformed or unavailable CPU list is refused");
+        free(text);
+    }
+    char* const repeated[] = { (char*)executable, "--lanes", "2", "--lane-cpus", duplicate, "-c", source, "-o", pinned, NULL };
+    char* const missing_lanes[] = { (char*)executable, "--lane-cpus", cpu_list, "-c", source, "-o", pinned, NULL };
+    text = NULL;
+    const int repeated_status = made ? check_test_driver_spawn(repeated, &text) : -1;
+    free(text);
+    text = NULL;
+    const int missing_status = made ? check_test_driver_spawn(missing_lanes, &text) : -1;
+    free(text);
+    check_test_expect(test, repeated_status == 1 && missing_status == 1, "duplicate CPUs and a list without explicit lanes are refused");
+    if (count == 2)
+    {
+        snprintf(cpu_list, sizeof(cpu_list), "%u,%u", cpus[0], cpus[1]);
+        char* const two[] = { (char*)executable, "--lanes", "2", "--lane-cpus", cpu_list, "--time-stages", "-c", source, "-o", pinned, NULL };
+        text = NULL;
+        const int status = check_test_driver_spawn(two, &text);
+        snprintf(receipt, sizeof(receipt), "lane-pin\tindex=1\texpected=%u\tobserved=%u\tstatus=0", cpus[1], cpus[1]);
+        check_test_expect(test, status == 0 && text != NULL && strstr(text, receipt) != NULL && check_test_driver_same_files(reference, pinned),
+                          "two distinct pinned lanes report their CPUs and preserve the object");
+        free(text);
+        unlink(pinned);
+        char* const capped[] = { (char*)executable, "--lanes", "2", "--lane-cpus", cpu_list, "--worker-budget", "1", "-c", source, "-o", pinned, NULL };
+        text = NULL;
+        const int capped_status = check_test_driver_spawn(capped, &text);
+        check_test_expect(test, capped_status == 1 && access(pinned, F_OK) != 0,
+                          "a worker budget smaller than the pinned lane count fails before output");
+        free(text);
+    }
+    unlink(source);
+    unlink(reference);
+    unlink(pinned);
 }
 
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
@@ -8392,6 +8470,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_time_stages(&test, executable, directory);
+                check_test_driver_cpu_pinning(&test, executable, directory);
             }
         }
         rmdir(directory);
