@@ -100,6 +100,9 @@ typedef enum CheckInputMessage
     // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
     CHECK_INPUT_WIDE_LITERAL,
     CHECK_INPUT_PRAGMA_SEMANTICS,
+    // __FLT_EVAL_METHOD__ expanded after an eval_method pragma in its active scope. The subject is the cold PP
+    // expansion-use index plus one, and detail its final preprocessor publication boundary.
+    CHECK_INPUT_FP_EVAL_USE,
     // clang's musttail attribute (#147) where it doesn't go, at the attribute: with arguments, on a declaration (a label
     // among them), and on a statement other than a return.
     CHECK_INPUT_MUSTTAIL_ARGUMENTS,
@@ -233,6 +236,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_NORETURN_NOT_FUNCTION,
     // The current type table stores alignments as powers of two; some wide Microsoft bit-field units need others.
     CHECK_INPUT_MS_STRUCT_ALIGNMENT,
+    // A typedef whose available_only_in_default_eval_method attribute forbids the active pragma's evaluation method.
+    CHECK_INPUT_FP_EVAL_TYPE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -356,6 +361,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_INLINE_NOT_FUNCTION] = "'inline' can only appear on functions",
     [CHECK_INPUT_NORETURN_NOT_FUNCTION] = "'_Noreturn' can only appear on functions",
     [CHECK_INPUT_MS_STRUCT_ALIGNMENT] = "ms_struct bit-field storage with non-power-of-two size is not supported",
+    [CHECK_INPUT_FP_EVAL_TYPE] = "type is set according to the default eval method for the translation unit",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -1283,6 +1289,7 @@ static bool check_deferred_shared(const CheckDeferred* deferred);
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
+typedef struct CheckInputFpEvalUse CheckInputFpEvalUse;
 typedef struct CheckWarningQueryPoint CheckWarningQueryPoint;
 struct CheckWarningQueryPoint
 {
@@ -1384,6 +1391,9 @@ struct CheckInputReader
     // This reader's append-only warning suffix. Lanes reset it rather than append into the top level's buffer.
     CheckWarningBuffer warning_events;
     CheckConstBuffer const_values;
+    // Cold preprocessor uses rejected by the FP scope pass, appended as reports only after reading the graph.
+    CheckInputFpEvalUse* fp_eval_uses;
+    uint32_t fp_eval_use_count;
     uint32_t const_warning_capacity;
     bool literal_tables_disabled;
     CheckWarningSet literal_warnings;
@@ -4047,6 +4057,7 @@ static inline __attribute__((always_inline)) bool check_input_spelling(CheckInpu
 #include "c_check_visibility_input.c"
 #include "c_check_symbol_pragma_input.c"
 #include "c_check_ms_struct_input.c"
+#include "c_check_fp_eval_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
@@ -7814,14 +7825,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
-                // A visible prototype survives a C17 empty-list redeclaration in its composite type. Its note
-                // sources survive with it; a hidden linked declaration below contributes no visible prototype.
-                if (kind == C_BINDING_FUNCTION &&
-                    (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0)
-                {
-                    check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, token,
-                                     check_sparse_get(reader->output->parameter_sources, previous));
-                }
+                // The visible prototype survives an empty-list redeclaration in the composite type, but
+                // parameter notes still belong to the latest declaration's own written parameter list.
                 reader->declared_types[token] = composite;
             }
         }
@@ -8960,7 +8965,8 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_columns(Ch
         }
         if (__builtin_expect(reader->output->graph.fp_environments != 0, 0))
         {
-            reader->output->graph.fp_environments[node] = reader->constant_contexts[token] == 0 ? reader->output->fp_environments[token] : 0;
+            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+            reader->output->graph.fp_environments[node] = reader->output->fp_environments[token] & mask;
         }
     }
     return node;
@@ -11608,6 +11614,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 {
                     check_input_symbol_finish(&reader, complete_translation_unit && input->report_count == 0);
                 }
+                if (!input->resource)
+                {
+                    check_input_fp_types(&reader);
+                }
+                check_input_fp_eval_finish(&reader);
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
                 if (!input->resource)
                 {

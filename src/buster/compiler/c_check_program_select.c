@@ -362,8 +362,8 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
     return ordered;
 }
 
-// The first emitted reference of each object, for the rare unit with a source-time rename after a parsed use. A
-// selected body's compact references already exclude constant-dead statements and operands. Deferred bodies are
+// The first emitted reference of each renamed object, for the rare unit with a source-time rename after a parsed use.
+// A selected body's compact references are candidates; the shared emission walk excludes dead statements. Deferred bodies are
 // emitted at the unit's end; an eager body's references appear when its complete definition is handed to codegen,
 // so a directive inside that body precedes all of them. Data references follow their owning body's emission, or the
 // file-scope object's eager/deferred rule. One pass over each compact reference view avoids a scan per directive.
@@ -377,19 +377,22 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
     bool valid = first != NULL && program->symbol_pragma_originals != NULL;
     if (valid)
     {
-        memset(first, 0xff, (uint64_t)program->object_count * sizeof(uint32_t));
+        memset(first, 0, (uint64_t)program->object_count * sizeof(uint32_t));
         memset(program->symbol_pragma_originals, 0, history->count);
-        for (uint32_t b = 0; b < program->body_count; b += 1)
+        for (uint32_t i = 0; i < history->count; i += 1)
         {
-            const CheckProgramBody* body = program->bodies + b;
-            const uint32_t point = program->body_eager[b] ? program->parser->tree.parents[body->opening] + 1 : BUSTER_CHECK_NONE;
-            for (uint32_t r = 0; r < body->reference_count; r += 1)
+            const CheckInputSymbolPragma* record = history->records + i;
+            if (record->after_use && record->declaration < input->token_count)
             {
-                const uint32_t object = program->references[body->reference_first + r];
-                first[object] = point < first[object] ? point : first[object];
+                const uint32_t object = input->objects[record->declaration];
+                if (object != 0 && object < program->object_count)
+                {
+                    first[object] = BUSTER_CHECK_NONE;
+                }
             }
         }
-        for (uint32_t d = 0; d < data->count; d += 1)
+        valid = check_program_symbol_bodies(program, first, scratch);
+        for (uint32_t d = 0; valid && d < data->count; d += 1)
         {
             const CheckDataObject* object = data->objects + d;
             const uint32_t body = check_program_token_body(program, object->token);
@@ -410,13 +413,13 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
                 first[target] = point < first[target] ? point : first[target];
             }
         }
-        for (uint32_t i = 0; i < history->count; i += 1)
+        for (uint32_t i = 0; valid && i < history->count; i += 1)
         {
             const CheckInputSymbolPragma* record = history->records + i;
             if (record->after_use && record->declaration < input->token_count)
             {
                 const uint32_t object = input->objects[record->declaration];
-                program->symbol_pragma_originals[i] = object < program->object_count && first[object] <= record->token;
+                program->symbol_pragma_originals[i] = object != 0 && object < program->object_count && first[object] != 0 && first[object] <= record->token;
             }
         }
     }

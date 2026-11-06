@@ -118,6 +118,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTEXPR_CONTEXT: result = "constexpr can only be used in variable declarations"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
+        case CHECK_INPUT_FP_EVAL_USE: result = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'"; break;
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
         case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
@@ -800,7 +801,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
     return valid;
 }
 
-static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
+static void check_driver_pragma_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
     if ((record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0)
     {
@@ -825,7 +826,10 @@ static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input
         {
             const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                            severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-            pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record),
+            // The parser consumes this annotation after preprocessing the following ordinary token. Malformed
+            // retained pragmas before that lookahead publish first, even when they follow the pop in the source.
+            const uint32_t publication = check_driver_publication_position(parser, pp, record->token, pp->output.count);
+            pp_diagnose_output_phase(pp, pp_severity, check_diagnostic_pragma_source(record), publication, PP_DIAGNOSTIC_SEMANTIC,
                 "%s [%s-Wignored-pragmas]", check_diagnostic_pragma_message(record), check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
@@ -958,7 +962,7 @@ static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* p
         const uint32_t first_visibility = *visibility < count ? history->records[*visibility].source : UINT32_MAX;
         if (first_fp < first_visibility)
         {
-            check_driver_pragma_report(pp, input, input->fp_pragmas + *fp, quiet);
+            check_driver_pragma_report(parser, pp, input, input->fp_pragmas + *fp, quiet);
             *fp += 1;
         }
         else
@@ -1656,7 +1660,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 {
                     if (retained)
                     {
-                        check_driver_pragma_report(pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+                        check_driver_pragma_report(original, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
                     }
                     pragma += 1;
                 }
@@ -1778,6 +1782,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                                                          check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                     const uint32_t located = phase == 2 ? extra[index].token : phase == 1 ? stream->reports[index].token : input->reports[index].token;
                     const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                    const CheckInputFpPragma* fp_error = phase == 0 ? check_input_fp_report(input, input->reports + index) : NULL;
                     const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
                     const uint32_t node = phase == 1 ? stream->reports[index].node :
                                           phase == 2 && located < input->token_count && input->token_nodes != NULL ? input->token_nodes[located] : BUSTER_CHECK_NONE;
@@ -1803,7 +1808,12 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     {
                         x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, scratch);
                     }
-                    if (source != BUSTER_CHECK_NONE)
+                    if (phase == 0 && input->reports[index].message == CHECK_INPUT_FP_EVAL_USE)
+                    {
+                        const CheckInputReport* report = input->reports + index;
+                        pp_diagnose_eval_method_use(pp, report->subject - 1, report->detail);
+                    }
+                    else if (source != BUSTER_CHECK_NONE)
                     {
                         const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
@@ -1914,6 +1924,23 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &conflicting, other < count ? 1u : 0u, "'%.*s%s%.*s' %s%s",
                                                         (int)scope_text.length, scope_text.pointer, scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer,
                                                         other < count ? "" : "attribute ", ending);
+                        }
+                        else if (fp_error != NULL && (fp_error->error & CHECK_FP_ERROR_EVAL_OPTIONS) != 0)
+                        {
+                            for (uint8_t bit = CHECK_FP_ERROR_EVAL_APPROX_OPTION; bit <= CHECK_FP_ERROR_EVAL_RECIPROCAL_OPTION; bit <<= 1)
+                            {
+                                if ((fp_error->error & bit) != 0)
+                                {
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", check_input_fp_error_message(bit));
+                                }
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_FP_EVAL_TYPE && located < count)
+                        {
+                            const uint32_t name = parser->tokens.names[located];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                  "cannot use type '%.*s' within '#pragma clang fp eval_method'; type is set according to the default eval method for the translation unit",
+                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_UNAVAILABLE_USE && token < count)
                         {

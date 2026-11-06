@@ -1495,6 +1495,16 @@ preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
 Under `-E`, clang's `#pragma clang fp eval_method` doesn't change it, and it
 doesn't here.
 
+Semantic preprocessing retains each expansion's original location and macro
+origin, output boundary and preceding pragma ordinal. The checker joins these
+cold records to its lexical evaluation history: expansion is an error inside
+a scope containing an accepted evaluation pragma, even when the expansion is
+consumed by `#if` or follows `eval_method(source)`. Adjacent pragmas and uses
+can share a C-token position without losing their order. Closing the compound
+restores permission from its enclosing scope. The numeric expansion remains
+available for parsing; diagnostics are published after constructing the
+ordinary semantic graph, with their original preprocessing provenance.
+
 `-E -dM` prints every macro defined at the end instead of the tokens, as
 `clang -dM -E` does (`pp_print_macros`): sorted by name, the parameters as
 written without spaces (`__VA_ARGS__` as `...`, GNU's `x...`), one space before

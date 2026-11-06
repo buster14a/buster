@@ -74,6 +74,93 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 6,
     },
     {
+        .name = "binary operand calls visit literal conversions right to left",
+        .source = "int f(int);int h(void){return f(1.5)+f(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "comma assignment conversions visit the right operand first",
+        .source = "int h(void){int a,b;a=1.5,b=2.5;return a+b;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "reverse conversions precede source ordered bounds and unused results",
+        .source = "int f(int);void h(void){int a[1];(f(1.5)+a[2]),(f(2.5)+a[3]);}\n",
+        .warnings = 6,
+        .notes = 2,
+    },
+    {
+        .name = "reverse conversions preserve each inner comma marker before its bounds warning",
+        .source = "void f(int);void h(void){int a[1];(a[2],f(1.5)),(a[3],f(2.5));}\n",
+        .warnings = 6,
+        .notes = 2,
+    },
+    {
+        .name = "comma integer call conversions follow the same reverse walk",
+        .source = "short f(short);void h(void){f(65536),f(65537);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "brace initializer conversions precede nested call conversions",
+        .source = "int f(int);int h(void){int a[2]={(f(1.5),2.5),(f(3.5),4.5)};return a[0];}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "unreachable return and local initializer retain literal conversion warnings",
+        .source = "int f(void){if(0)return 1.5;if(0){int a=2.5;(void)a;}return 0;}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable call conversion precedes the later reachable conversion",
+        .source = "void f(int);void h(void){if(0)f(1.5);f(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable literal conversions do not enable runtime warning families",
+        .source = "int f(void){int a[1];if(0){int x=1.5;(void)x;1;a[2];return 1/0;}return 0;}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "short-circuited and conditional call literals remain source checks",
+        .source = "int g(int);int f(void){return 0&&g(1.5);}int h(void){return 1?0:g(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unevaluated sizeof and generic arms suppress literal conversions",
+        .source = "int f(void){return sizeof((int){1.5})+_Generic(0,int:0,default:(int){2.5});}\n",
+    },
+    {
+        .name = "conditional literal arms inherit initializer and return targets",
+        .source = "int a=0?1.5:2.5;int b=1?3.5:4.5;int f(int c){return c?5.5:6.5;}\n",
+        .warnings = 6,
+    },
+    {
+        .name = "conditional brace initializer and unreachable argument targets",
+        .source = "int a[1]={0?1.5:2.5};void f(int);void h(int c){if(0)f(c?3.5:4.5);}\n",
+        .warnings = 4,
+    },
+    {
+        .name = "conditional integer conversions retain selected-arm pruning",
+        .source = "short a=0?65536:65537;short b=1?65538:65539;\n",
+        .warnings = 2,
+    },
+    {
+        .name = "nested integer argument conversions follow right to left order",
+        .source = "void f(short,short);short g(short);void h(void){f(g(65536),65537);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "unreachable integer conversion families remain suppressed",
+        .source = "void f(short);short g(void){if(0)return 65536;if(0){short a=65536;(void)a;}return 0;}"
+                  "void h(void){if(0)f(65536);f(65537);}int i(void){return 0&&(f(65536),1);}int j(void){return 1?0:(f(65536),1);}\n",
+        .warnings = 1,
+    },
+    {
+        .name = "initializers after return retain only literal source conversions",
+        .source = "int h(void){return 0;short a=65536;int b=1.5;(void)a;(void)b;}\n",
+        .warnings = 1,
+    },
+    {
         .name = "floating literal boolean conversions",
         .source = "_Bool a=1.5;_Bool b=2.0;_Bool c=1.0;\n",
         .warnings = 2,
@@ -179,11 +266,10 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
-        .name = "empty-list redeclaration retains the visible prototype parameter",
+        .name = "empty-list redeclaration retains conversion checks without a parameter note",
         .source = "void f(int *first);void f();void g(const int *p){f(p);}\n",
         .options = { "-Wno-deprecated-non-prototype" },
         .warnings = 1,
-        .notes = 1,
     },
     {
         .name = "closed-block prototype supplies no parameter note to an unprototyped call",

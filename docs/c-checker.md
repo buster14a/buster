@@ -241,10 +241,11 @@ therefore share the actual emitted functions' symbols.
 
 Semantic checking currently uses one C LP64 target model: 32-bit `wchar_t`,
 80-bit x87 `long double` stored in 16 bytes, and floating arithmetic evaluated
-in its source format, with plain `char` signed (x86-64's) or unsigned, as
+in its source format unless a lexical `clang fp eval_method` pragma changes
+its usual unary conversions, with plain `char` signed (x86-64's) or unsigned, as
 `-funsigned-char` and its spellings say. Options that advertise a different
 model are rejected before declaration elaboration. This includes short
-`wchar_t`, 64/128-bit `long double`, double/extended floating evaluation, and
+`wchar_t`, 64/128-bit `long double`, command-line double/extended evaluation, and
 default extended evaluation when SSE is disabled. Explicit source-format
 evaluation is accepted. Assembly is outside this adapter, and the C language
 option parser does not admit C++ modes.
@@ -399,7 +400,7 @@ does, each rule checked against clang's answers on probes of it:
   here contracts `a * b + c` into a fused operation.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
   `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
-  `reassociate(on|off)`, `reciprocal(on|off)` and
+  `reassociate(on|off)`, `reciprocal(on|off)`, `eval_method(source|double|extended)` and
   `exceptions(ignore|maytrap|strict)`. `#pragma float_control` accepts
   `precise` and `except`, with optional `on`/`off`, `push` modifiers, and
   standalone `push`/`pop`. The file-scope stack saves every floating setting;
@@ -412,8 +413,40 @@ does, each rule checked against clang's answers on probes of it:
   `strict` and `maytrap` preserve runtime operations and conversions through the
   existing floating-environment path, including discarded results and constant
   operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
-  one does not erase the other. `eval_method` remains refused because changing
-  intermediate evaluation precision requires additional lowering support.
+  one does not erase the other.
+
+  `eval_method` changes ordinary scalar and complex evaluation through the
+  existing conversions and lowering: `double` widens narrower floating
+  operands to `double`, and `extended` to x87 `long double`. Literals retain
+  their source rounding. Casts, assignments, returns and fixed prototype
+  parameters retain their destination formats; increment/decrement retain
+  their lvalue format. Compound assignment applies usual unary evaluation
+  only to its right operand before finding the common arithmetic type.
+  Variadic `float` arguments still pass as `double` under extended evaluation,
+  while an original `double` argument widens. Vector element types do not
+  change. Constant expressions, type queries and runtime expressions use the
+  same state. The optional graph byte stores evaluation separately from
+  runtime `FENV_ACCESS`, so wider constant evaluation does not itself require
+  runtime execution.
+
+  A later separate `reassociate(on)` or `reciprocal(on)` conflicts with an
+  active evaluation pragma, even after `eval_method(source)` or a
+  `float_control(pop)`. Effective command-line approximation, reassociation
+  and reciprocal permissions also produce Clang's individual errors.
+  `__FLT_EVAL_METHOD__` expansion in an active evaluation-pragma scope is an
+  error, including macro expansions consumed by `#if`; a closing compound
+  restores the enclosing scope. Cold preprocessing events retain expansion
+  provenance and their order among adjacent pragmas. Ordinary `-E` remains
+  unaffected.
+
+  With an explicit command-line evaluation method, a typedef marked
+  `available_only_in_default_eval_method` cannot be used under a differing
+  active method. File-scope `float_t` and `double_t` receive the same implicit
+  restriction. A cold pass over resolved uses handles redeclarations and
+  constant-only type queries in source order, without applying later
+  attributes to earlier uses. Command-line `double`/`extended` selection
+  remains an explicit target-model refusal; lexical methods above are
+  implemented within the existing LP64 model.
   The handler names are not macro-expanded. Semantic preprocessing expands
   their operands at the original source point, including `_Pragma`, function
   macros and subsequent redefinitions. Ordinary `-E` output keeps them raw;
@@ -5830,10 +5863,12 @@ arguments against the function. The checker now gives these as clang does.
   - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
     `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
     subject's diagnostic is all clang gives in C;
+  - `available_only_in_default_eval_method`, whose typedef-use restriction
+    under an explicit translation-unit method is checked against the lexical
+    evaluation history, including inherited and implicit `float_t`/`double_t`
+    marks (see the floating-point pragmas above);
   - and these, whose handlers change nothing in C past their subjects,
-    counts and arguments' kinds: `available_only_in_default_eval_method`
-    (whose `#pragma clang fp eval_method` the checker refuses),
-    `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
+    counts and arguments' kinds: `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
     `-frandomize-layout-seed`), `objc_boxable`, `objc_bridge_mutable`,
     Fuchsia's `use_handle` and `release_handle`, `suppress`, `swift_bridge`,
     `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`.
@@ -6479,15 +6514,21 @@ operands. Malformed forms use `-Wignored-pragmas`, including missing names and
 trailing tokens. These lexical warnings survive parser recovery.
 
 For a rename after a parsed use, emission selection decides whether an earlier
-emitted reference has already fixed the original name. It reads the compact live
-references of eager function bodies and static initializers once, with each
-body's definition-completion point. Constant-dead statements, unselected operands,
-unevaluated expressions and deferred functions do not block a later rename. A
+emitted reference has already fixed the original name. Compact references select
+candidate eager bodies; the existing target-feature emission walk finds their
+actual references, with each body's definition-completion point. It preserves
+source labels and constant-false loop bodies while skipping plain statements
+after a return or an ordinary noreturn call. Static initializers retain their
+eager/deferred rules. Unevaluated expressions, unselected operands and deferred
+functions do not block a later rename. A
 directive inside an eager function still precedes that function's emission. This
 cost and its cold per-pragma decisions exist only in units with a late rename;
 the declaration's retained asm-label fact and source coordinates stay immutable.
-The object oracle covers 26 late-rename shapes, including eager/deferred static
-data, and compares scalar/vector objects and poisoned multi-lane objects.
+The object oracle covers 43 late-rename shapes, including eager/deferred static
+data, unreachable labels, loops, gotos, overloaded noreturn calls and trapping builtins, and
+compares scalar/vector objects and poisoned multi-lane objects. The shared walk
+borrows live preprocessing options only during selection and retains no new
+pointer to a worker's preprocessor.
 
 `#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
 declaration without a C declarator. This is separate from ordinary weak binding.

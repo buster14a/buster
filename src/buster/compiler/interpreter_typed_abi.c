@@ -86,9 +86,16 @@ static InterpreterStatus interpreter_typed_variadic(const Tier0Function* functio
     if (status == INTERPRETER_OK)
     {
         memset(area.registers, 0, BUSTER_ABI_SAVE_AREA_BYTES);
-        memset(area.registers_defined, 0, BUSTER_ABI_SAVE_AREA_BYTES);
+        // An unchecked range or an empty overflow area may have no definedness map.
+        if (area.registers_defined != 0)
+        {
+            memset(area.registers_defined, 0, BUSTER_ABI_SAVE_AREA_BYTES);
+        }
         memset(area.stack, 0, call.stack_bytes);
-        memset(area.stack_defined, 0, call.stack_bytes);
+        if (area.stack_defined != 0)
+        {
+            memset(area.stack_defined, 0, call.stack_bytes);
+        }
         if (hidden != 0)
         {
             interpreter_native_store(area.registers, area.registers_defined, (const uint8_t*)&incoming->destination, 0, 8);

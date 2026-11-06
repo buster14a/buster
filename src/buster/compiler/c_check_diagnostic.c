@@ -526,7 +526,7 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
     // when no state was supplied, retains _Pragma's expansion history and therefore its invocation location.
     const uint32_t offset = record->error != 0 ? (record->kind == CHECK_FP_PRAGMA_FENV_ACCESS ? 3 : 2) :
                             (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? 2 : record->source_end - record->source_begin > 5 ? 4 : 3;
-    const uint32_t source = record->source_begin + offset;
+    const uint32_t source = record->error_source != 0 ? record->error_source : record->source_begin + offset;
     return source;
 }
 
@@ -553,6 +553,8 @@ static uint32_t check_diagnostic_input_report_source(const CheckInput* input, co
     source = section != NULL ? section->source : source;
     const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
     source = optimize != NULL ? optimize->source : source;
+    const CheckInputMsPragma* layout = check_input_ms_report(input, report);
+    source = layout != NULL ? layout->source + 2 : source;
     for (uint32_t i = 0; report->pragma != 0 && i < input->fp_pragma_count; i += 1)
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
