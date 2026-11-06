@@ -1328,6 +1328,8 @@ static void check_init_test_index(CheckTest* test)
     check_test_expect(test, valid, "initializer lookup matches a merge for 0..129 plans with an unreadable tail, missing keys and UINT32_MAX");
 }
 
+#include "c_check_init_old_style_test.c"
+
 static __attribute__((noinline)) void check_test_initializers(CheckTest* test, const char* clang)
 {
     check_init_test_index(test);
@@ -1362,6 +1364,7 @@ static __attribute__((noinline)) void check_test_initializers(CheckTest* test, c
     check_init_test_source(test, unmarked, plain, BUSTER_ARRAY_LENGTH(plain), true, true, clang);
     check_init_test_vectors(test, clang);
     check_init_test_ranges(test, clang);
+    check_init_test_old_style(test, clang);
     check_init_test_flexible(test, clang);
     check_init_test_complex(test, clang);
     check_init_test_diagnostics(test, clang);

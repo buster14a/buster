@@ -464,7 +464,7 @@ static void check_test_program_helper_contracts(CheckTest* test)
     for (uint32_t k = CBUILTIN_X86_HELPER_NONE + 1; ready && k < CBUILTIN_X86_HELPER_COUNT; k += 1)
     {
         const uint64_t mark = output.length;
-        const CBuiltinX86Helper native = cbuiltin_x86_helper((CBuiltinX86HelperKind)k, &output);
+        const CBuiltinX86Helper native = cbuiltin_x86_helper((CBuiltinX86HelperKind)k, 0, &output);
         const CheckProgramHelper helper = { .id = CBUILTIN_NONE, .result_type = BUSTER_TYPE_ULONG, .compiler_barrier = true, .x86 = (CBuiltinX86HelperKind)k };
         const char* reason = NULL;
         const bool kept = check_test_helper_contract(&helper, &native.code, &scratch, &reason);
@@ -522,6 +522,91 @@ static void check_test_program_helper_contracts(CheckTest* test)
            total, checked[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS], checked[CHECK_PROGRAM_HELPER_ATOMIC_RMW], checked[CHECK_PROGRAM_HELPER_FENCE], checked[CHECK_PROGRAM_HELPER_TERMINAL],
            checked[CHECK_PROGRAM_HELPER_ROUNDS], checked[CHECK_PROGRAM_HELPER_MATH], checked[CHECK_PROGRAM_HELPER_X86], checked[CHECK_PROGRAM_HELPER_UNMODELED]);
     arena_release(&scratch);
+    arena_release(&output);
+}
+
+// Independent bytes for the string leaves' fixed-register ABI, for every control byte. Explicit lengths move from
+// edi/esi to eax/edx before PCMPxSTRx; indices leave ecx for eax, flag results are zero-extended and masks stay in xmm0.
+static void check_test_program_string_helpers(CheckTest* test)
+{
+    static const struct
+    {
+        CBuiltinX86HelperKind kind;
+        uint8_t opcode;
+        uint8_t condition;
+        bool explicit_length;
+        bool mask;
+    } cases[] = {
+        { CBUILTIN_X86_HELPER_PCMPESTRI, 0x61, 0, true, false },
+        { CBUILTIN_X86_HELPER_PCMPESTRIA, 0x61, 0x97, true, false },
+        { CBUILTIN_X86_HELPER_PCMPESTRIC, 0x61, 0x92, true, false },
+        { CBUILTIN_X86_HELPER_PCMPESTRIO, 0x61, 0x90, true, false },
+        { CBUILTIN_X86_HELPER_PCMPESTRIS, 0x61, 0x98, true, false },
+        { CBUILTIN_X86_HELPER_PCMPESTRIZ, 0x61, 0x94, true, false },
+        { CBUILTIN_X86_HELPER_PCMPESTRM, 0x60, 0, true, true },
+        { CBUILTIN_X86_HELPER_PCMPISTRI, 0x63, 0, false, false },
+        { CBUILTIN_X86_HELPER_PCMPISTRIA, 0x63, 0x97, false, false },
+        { CBUILTIN_X86_HELPER_PCMPISTRIC, 0x63, 0x92, false, false },
+        { CBUILTIN_X86_HELPER_PCMPISTRIO, 0x63, 0x90, false, false },
+        { CBUILTIN_X86_HELPER_PCMPISTRIS, 0x63, 0x98, false, false },
+        { CBUILTIN_X86_HELPER_PCMPISTRIZ, 0x63, 0x94, false, false },
+        { CBUILTIN_X86_HELPER_PCMPISTRM, 0x62, 0, false, true },
+    };
+    Arena output = arena_reserve(1u << 16);
+    const bool ready = output.base != NULL && x86_encoder_initialize();
+    check_test_expect(test, ready, "string helper resources");
+    for (uint32_t c = 0; ready && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t immediate = 0; immediate < 256; immediate += 1)
+        {
+            arena_pop_to(&output, 0);
+            const CBuiltinX86Helper native = cbuiltin_x86_helper(cases[c].kind, (uint8_t)immediate, &output);
+            uint8_t expected[20];
+            uint32_t count = 0;
+            if (cases[c].explicit_length)
+            {
+                const uint8_t lengths[] = { 0x8b, 0xc7, 0x8b, 0xd6 };
+                memcpy(expected, lengths, sizeof(lengths));
+                count += sizeof(lengths);
+            }
+            const uint8_t comparison[] = { 0x66, 0x0f, 0x3a, cases[c].opcode, 0xc1, (uint8_t)immediate };
+            memcpy(expected + count, comparison, sizeof(comparison));
+            count += sizeof(comparison);
+            if (!cases[c].mask && cases[c].condition == 0)
+            {
+                expected[count++] = 0x8b;
+                expected[count++] = 0xc1;
+            }
+            else if (cases[c].condition != 0)
+            {
+                const uint8_t flag[] = { 0x0f, cases[c].condition, 0xc0, 0x0f, 0xb6, 0xc0 };
+                memcpy(expected + count, flag, sizeof(flag));
+                count += sizeof(flag);
+            }
+            expected[count++] = 0xc3;
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                // The longest leaf has six records. Both encoders require their full store capacity, even when
+                // the independently expected machine code is shorter than one vector store.
+                uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(6)];
+                char description[256];
+                const int64_t written = path == 0 ? x86_encode_scalar(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0) :
+                                                   x86_encode(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0);
+                snprintf(description, sizeof(description), "%s imm8=%u %s encoder: fixed lengths, index/flag/mask result and ABI (%lld encoded bytes, %u expected)",
+                         cbuiltin_x86_helper_infos[cases[c].kind].name, immediate, path == 0 ? "scalar" : "vector", (long long)written, count);
+                check_test_expect(test, native.code.error == TIER0_OK && native.parameter_count == (cases[c].explicit_length ? 5 : 3) &&
+                                       native.result_class == (cases[c].mask ? BUSTER_TYPED_CLASS_VECTOR : BUSTER_TYPED_CLASS_U64) &&
+                                       written == count && memcmp(bytes, expected, count) == 0,
+                                  description);
+            }
+        }
+        arena_pop_to(&output, 0);
+        Arena short_output = output;
+        short_output.capacity = sizeof(X86Instruction) - 1;
+        const CBuiltinX86Helper refused = cbuiltin_x86_helper(cases[c].kind, 255, &short_output);
+        check_test_expect(test, refused.code.error == TIER0_ERROR_MEMORY && refused.code.records == NULL && refused.code.count == 0 && short_output.length == 0,
+                          "string specialization cannot publish partial code when its output is short");
+    }
     arena_release(&output);
 }
 
@@ -1031,6 +1116,7 @@ static void check_test_program_helpers(CheckTest* test)
     arena_release(&scratch);
     arena_release(&output);
     check_test_program_math_helpers(test);
+    check_test_program_string_helpers(test);
     check_test_program_helper_contracts(test);
 }
 

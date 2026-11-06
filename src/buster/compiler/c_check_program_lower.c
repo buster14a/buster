@@ -290,6 +290,14 @@ struct CheckLowerTable
 
 #include "c_check_program_initializers.c"
 
+// Source declaration attached to a local home, retained only by the source-aware lowering.
+typedef struct CheckDebugBinding CheckDebugBinding;
+struct CheckDebugBinding
+{
+    uint32_t token;
+    bool indirect;
+};
+
 typedef struct CheckProgramLowered CheckProgramLowered;
 struct CheckProgramLowered
 {
@@ -309,6 +317,7 @@ struct CheckProgramLowered
     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
     uint32_t** entry_tokens;
+    CheckDebugBinding** debug_bindings;
     uint32_t runtime_symbol_count;
     uint32_t count;
     CheckProgramStatus status;
@@ -9495,14 +9504,15 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     const uint32_t count = graph->argument_counts[node];
     const BuiltinIntrinsicInfo* info = effect != NULL ? effect->info : NULL;
     const CheckX86LowerRule* rule = info != NULL ? check_x86_lower_rule(info->name, info->name_length) : NULL;
-    // The immediate the rule's records take, and its rounding control, its last argument where it has one.
+    // The immediate the rule's records take, its optional second byte, and a separate rounding control at the end.
     const uint32_t skipped = rule != NULL ? rule->immediate : BUSTER_CHECK_X86_NO_IMMEDIATE;
-    const uint32_t rounded = rule != NULL && rule->rounding != CHECK_X86_ROUND_NONE && count != 0 ? count - 1 : BUSTER_CHECK_X86_NO_IMMEDIATE;
-    CheckValue immediates[2] = { 0 };
+    const uint32_t rounded = rule != NULL && rule->rounding != CHECK_X86_ROUND_NONE && rule->rounding != CHECK_X86_ROUND_IMMEDIATE_SAE && count != 0 ? count - 1 : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    const uint32_t paired = rule != NULL && rule->immediate_extra != 0 ? rule->immediate_extra - 1u : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    CheckValue immediates[3] = { 0 };
     bool constants = true;
-    for (uint32_t i = 0; i < 2; i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(immediates); i += 1)
     {
-        const uint32_t a = i == 0 ? skipped : rounded;
+        const uint32_t a = i == 0 ? skipped : i == 1 ? rounded : paired;
         if (a < count)
         {
             // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
@@ -9532,10 +9542,12 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     const bool packed = rule != NULL && rule->fixed == CHECK_X86_PREDICATE_FCMP &&
                         (rule->family == CHECK_X86_LOWER_COMPARE || rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE);
     const bool strict = packed && check_lower_half_strict(writer);
+    const uint64_t immediate = paired != BUSTER_CHECK_X86_NO_IMMEDIATE ?
+        ((uint64_t)immediates[0].integer & 0xff) | (((uint64_t)immediates[2].integer & 0xff) << 8) : (uint64_t)immediates[0].integer;
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
-                         check_x86_lower_row_of(&writer->target, rule, (uint64_t)immediates[0].integer,
+                         check_x86_lower_row_of(&writer->target, rule, immediate,
                                                 rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, strict, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
@@ -9550,7 +9562,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
         const uint8_t class = check_lower_x86_bits_class(writer, stream->argument_conversions[first + a].type);
-        const bool taken = a != skipped && a != rounded;
+        const bool taken = a != skipped && a != rounded && a != paired;
         if (taken && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR &&
             row.operand_classes[operand] != BUSTER_TYPED_CLASS_MASK)
         {
@@ -9600,7 +9612,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         uint32_t taken = operand;
         for (uint32_t a = count; a-- > 0;)
         {
-            if (a != skipped && a != rounded)
+            if (a != skipped && a != rounded && a != paired)
             {
                 // The argument at its prototype's type, then widened, or a mask's converted to the mask class (the tasks
                 // run in the reverse of their pushes).
@@ -13658,8 +13670,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
+    lowered->debug_bindings = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding*, program->body_count) : 0;
     valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
-            (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
+            (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || (lowered->entry_tokens != 0 && lowered->debug_bindings != 0));
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -14613,6 +14626,38 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 memcpy(tokens, writer->tokens, (uint64_t)writer->count * sizeof(uint32_t));
                 lowered->entry_tokens[b] = tokens;
+                CheckDebugBinding* bindings = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding, (uint64_t)writer->local_count + 1);
+                lowered->debug_bindings[b] = bindings;
+                if (bindings != NULL)
+                {
+                    for (uint32_t l = 0; l < writer->local_count; l += 1)
+                    {
+                        bindings[l] = (CheckDebugBinding){ .token = BUSTER_CHECK_NONE };
+                    }
+                    for (uint32_t slot = shared->local_start[b + 1]; slot < shared->local_start[b + 2]; slot += 1)
+                    {
+                        const uint32_t local = writer->local_map[shared->local_objects[slot]];
+                        if (local < writer->local_count)
+                        {
+                            bindings[local] = (CheckDebugBinding){
+                                .token = shared->local_tokens[slot],
+                                .indirect = writer->indirect[local] != 0,
+                            };
+                        }
+                    }
+                    for (uint32_t parameter = check_sparse_get(input->parameters, body.opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
+                    {
+                        const uint32_t local = writer->local_map[input->objects[parameter]];
+                        if (local < writer->local_count)
+                        {
+                            bindings[local] = (CheckDebugBinding){ .token = parameter };
+                        }
+                    }
+                }
+                else
+                {
+                    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+                }
             }
             else
             {

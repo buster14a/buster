@@ -3852,6 +3852,23 @@ selector's tag type names, so a fixed underlying type and a shadowing tag in
 another scope resolve correctly. The return-flow walk runs for non-aggregate
 functions only where `-Wreturn-type` is enabled.
 
+The graph's passes share one pass in graph order, `check_common_facts`, which
+gives each node its parent, whether another node uses its value, whether it is
+evaluated, a conditional's or comma's arm effect, and its reach: a bit each for
+whether its subtree holds a node whose own warning may fire, a division by a
+constant, or a comparison (#1340). The expression walk starts only at a root that
+reaches something or whose discarded expression may get the statement's
+unused-value warning, and enters only the subtrees that hold its walk's bit;
+every warning keeps its order. The default-ignored warnings' work runs only
+where the command line or a source pragma may enable them: the comparison bit
+for `-Wsign-compare`, a plain `x = y` for `-Wself-assign`, and the
+`-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
+an analysis whose diagnostics are ignored. The token passes find their roles
+and kinds 64 tokens at a time, the node passes their operators 16 nodes at a
+time through an operator bitset, and `-Wuninitialized`'s declaration loops a
+sparse column's next entry by its directory (`check_sparse_next`). Each scalar
+path, the twin, visits every item and runs the same tests.
+
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
 `-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
@@ -4336,9 +4353,10 @@ the oracle.
   (`check_input_expression_fold`, #1144), read 64 tokens at a time:
   - a separator that `expression_commas` marks is a comma operator's BINARY,
     and the other separators are lists;
-  - an initializer's assignment (`initializers`) is the walk's;
-  - so is a builtin's token (`builtins`) of a class whose action left builtins
-    to the walk (`check_input_builtin_codes`);
+  - an initializer's assignment (`initializers`) is an INITIALIZE, a class of
+    its own (#1038's stages 2 and 4, below; until then the walk's);
+  - a builtin's token (`builtins`) of a class whose action left builtins
+    to the walk (`check_input_builtin_codes`) is the walk's;
   - so is an intrinsic's call (`intrinsic_ids`).
 
   The actions test none of these as the walk reaches each token. An intrinsic's
@@ -4366,6 +4384,9 @@ the oracle.
   - lists and groups;
   - terminators' discards, a statement expression's last statement's result
     among them, and conditions;
+  - an initializer's assignment: the INITIALIZE of its one value, recorded as
+    its declaration's initializer (`initializer_nodes`), or a braced
+    initializer's values passed on as a list;
   - a return's conversion to the function's type, or its missing value's
     report;
   - plain calls, with their arguments' slice and the library builtins' marks.
@@ -4391,11 +4412,9 @@ the oracle.
   below, this needs no flush: the node ids still come from the walk, and only
   the leaves' contents are made ahead.
 
-  The node is `check_input_add_node`'s: `check_graph_add`'s, with its checks
-  and columns, and the columns the reader gives every node. `check_input_add`
-  records the nodes before it first. The coded walk doesn't: the next
-  `check_input_add` or `check_graph_record_finish` records them, in node order,
-  from their final columns. An action tests what its class can't say: the
+  An action doesn't write its node to the graph: it numbers it into a batch,
+  whose columns are written at once (the graph by passes, below), with
+  `check_graph_add`'s checks. An action tests what its class can't say: the
   values the children have, and the columns the walk writes as it goes. Where
   they don't hold, the token goes to the walk's
   own visit (`check_input_expression_visit`, the action factored out as
@@ -4409,7 +4428,8 @@ the oracle.
   without the DROPs, against a random postorder, every column ending at a
   `PROT_NONE` page. It checks the identifiers' leaves by both paths on random
   chunks over random columns, each ending at a `PROT_NONE` page, the byte
-  columns at every alignment. The coded walk counts, by class, the tokens it acted at by
+  columns at every alignment, and the batch's flush the same way (below). The
+  coded walk counts, by class, the tokens it acted at by
   the class's action and those it left to the walk's visit
   (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
   it to act by class at tokens of every fixture whose features it takes, and
@@ -4425,7 +4445,9 @@ the oracle.
   nanoseconds and the timing's own ticks a token, which it takes off every
   class's, and an `expression-class` line per class with its tokens, those its
   action left (whose visits its time includes), its nanoseconds (the median
-  over the passes) and its share. Every comparison of the two paths compares the
+  over the passes) and its share. A class's time includes the batch's flushes
+  its tokens make (the graph by passes, below): the scalar class's, those
+  before its visits. Every comparison of the two paths compares the
   graphs, leaves, argument slices, overload calls and `token_nodes`:
   - `test-checker`, for every source fixture
     (`check_test_source_graphs_equal`), with the overload heads;
@@ -4702,8 +4724,93 @@ the oracle.
   - the nodes' recording is no barrier: nothing reads it before
     `check_graph_record_finish`.
 
-  The operators stay per token until a vector numbering is built and
-  measured against that bound; the stages stay open in #1038.
+  What was built instead is the batch below. The probe stays, and takes a
+  braced initializer's INITIALIZE as a list that passes its values on.
+- **The graph by passes, built (stages 2 and 4).** The class actions number
+  their nodes before the graph has any of them, and the graph's columns are
+  written 16 nodes at a time (`CheckInputBatch`,
+  `check_input_expression_flush`):
+  - **Numbering.** An action appends its node to the batch
+    (`check_input_batch_add`, with `check_graph_add`'s checks): its operator,
+    token, operands and form (an operator's, a leaf's, a discard's or an
+    initializer's). Its id is the graph's count before the batch plus its place
+    in it: the prefix sum of the actions' node counts, taken as they go, since a
+    terminator's count is its values' and a declined token's none. The batch
+    holds 1,024 nodes, a column of each on the scratch, in the first two cache
+    levels. An action reads an earlier node of the batch through the batch (a
+    call's callee and its designator, an address's operand's token for the
+    overload heads, an argument's token), and writes what a node takes after it
+    is made (a member's name, a call's argument slice, a static list's
+    element's value context) into it. The value chains (`value_next` and the
+    tokens' first values) are written as the actions go, since a parent reads
+    them at once, and so are the leaves, whose slots the batch gives.
+  - **Writing.** The flush writes the batch's nine columns as they are, and
+    gathers at the nodes' tokens what every node takes from its token: the type
+    its query asked for (an operator's and an initializer's), a static
+    initializer's context (an operator's `STATIC`, an initializer's `VALUE`),
+    where its expression ends (`check_input_expression_end`), its warnings'
+    suppression and its floating-point environment, a byte column through
+    `check_input_gather_bytes`. It then records the nodes
+    (`check_graph_record_nodes`, after any a visit made before them) while their
+    columns are hot. The scalar path, the twin, writes a node at a time.
+  - **Barriers.** The walk's visit reads and writes the graph itself: the batch
+    is flushed before each (the actions' time, not the visit's), and the batch's
+    next node is the one after the visit's. A batch without room for a token's
+    nodes is flushed first, and a terminator of more values than a batch holds
+    is the walk's.
+  - **Initializers.** The batch alone saved little: on `sqlite3.c` half of the
+    walk's visits, each a flush, were initializers' assignments (4,163 of about
+    7,800, each about 430 ns with the record of the nodes before it). They are
+    now a class of their own, INITIALIZE (above), whose action makes the walk's
+    INITIALIZE node or passes a braced initializer's values on. The walk's own
+    visits fall from 6,639 of the frozen corpus's `sqlite3.c` tokens to 2,627,
+    and 4,012 initializers are acted at by class.
+  - **The twins.** The scan test writes random batches of up to 200 nodes,
+    after up to 40 a visit made, over random token columns of up to 200 tokens,
+    each ending at a `PROT_NONE` page and the byte columns at every alignment,
+    by both paths: the two graphs must agree column for column, the gathered
+    columns must be their tokens', and the records alike. A deliberate one-node
+    difference in the scalar path made it report 1,842 of 38,098 nodes.
+    `test-checker`'s graph comparisons, `test-checker-corpus` and c-testsuite's
+    objects compare the batch's graphs with `--scalar`'s walk.
+
+  Measured on the 9700X, the frozen corpus's `sqlite3.c` (`-c`, CPU 2, under
+  the lock), against `main` at `0eca996a`; the objects are byte-identical by
+  both builds and `--scalar`, and so are `main.c`'s:
+
+  | | `main` | the batch | with INITIALIZE |
+  | --- | --- | --- | --- |
+  | the walk (`check-input.expressions`, ms) | 14.00 to 14.22 | 14.09 | 13.17 to 13.55 |
+  | its actions, ms | 8.90 to 9.01 | 7.08 | 10.20 to 10.39 |
+  | its visits, ms | 2.37 to 2.41 | 4.11 | 0.21 to 0.22 |
+  | user cycles (millions, rotated) | 846.7 to 850.3 | 844.9 to 845.9 | 842.2 to 843.8 |
+  | instructions (millions) | 2,151.6 | 2,150.8 | 2,147.1 |
+
+  The walk's rows are `measure-compile`'s medians of 11 runs, twice per build;
+  the batch's own visits still held its flushes then. The cycles are the
+  medians of 5 rotated rounds of 11 whole processes each (`ab` with
+  `time-runs`), whose rounds don't overlap: with INITIALIZE, 0.67% of the
+  compile (about 5.7 million cycles, 1.0 ms of wall time). `perf stat` of 11
+  runs agrees: 848.2 against 843.9 million cycles. Over six placements of the
+  checker's unit and three fresh copies of each executable (#509's comparison,
+  `build.sh shifts` and `time-runs --copies`, 3 rounds of 54 runs a build), the
+  branch's user cycles are 0.81%, 0.71% and 0.89% below `main`'s, every
+  placement's range below in every round, and its wall time 0.69%, 0.58% and
+  0.76%; `main`'s second set of executables, the comparison's floor, is within
+  0.14% of the first in both. Warm
+  (`benchmark-checker-bindings`, 5 passes), the class actions take 3.31 ms
+  against 3.92. The runs, their scripts, the profiles and the visits' breakdown
+  by role are in the
+  [record](https://github.com/buster14a/buster-performance/tree/aedaec4d23a58d586b88b3158051f047beb19c62/docs/measurements/check-input-1038-graph-by-passes-2026-11-05).
+
+  Not built: the numbering by counts and a prefix sum in a pass before the
+  actions, and the operands by pointer jumping and segmented scans. A class's
+  node count needs its children's values (a terminator makes one discard a
+  value, a declined token none), which the value chains give each parent at
+  once; the probe above, which finds them by consumer lists in a pass of its
+  own, takes 3.21 ms warm, three times the operators' and lists' 1.06 ms, so
+  the chains stay. The batch's numbering is the actions' own count, and what
+  the stages asked to be data-parallel, the nodes' columns, is.
 - **The graph's first node.** The walk's first node, in `sqlite3.c` a string
   at token 14, touches every graph column for the first time: each starts a
   huge page the kernel clears. That one node took 3.2 ms of the walk on the VM
@@ -5437,8 +5544,8 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
 - **Differences left.**
   - An attribute clang knows that the checker neither has a rule for nor takes
     generically (the next section's "Attributes without a rule") is refused by
-    name before its subject is checked: `int v __attribute__((selectany));` is
-    refused, where clang takes it.
+    name before its subject is checked. The remaining handler and ABI
+    boundaries are listed there; `selectany` has its own rule.
   - The checker stops at a declaration's first error. So a later
     declaration's warnings, which clang gives too, are missing after an error
     row's error (`int e __attribute__((error("x")));`), as after any other
@@ -5779,7 +5886,11 @@ arguments against the function. The checker now gives these as clang does.
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
     "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
-    argument must be a string literal;
+    argument must be a string literal. Its later arguments must be constant
+    expressions, including floating values and addresses. A rejected extra
+    argument names its position starting at 1 after the string, with the
+    evaluator's note at the failing subexpression or division operator
+    (`check_input_attribute_annotate`);
   - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
     `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
     subject's diagnostic is all clang gives in C;
@@ -5814,11 +5925,16 @@ arguments against the function. The checker now gives these as clang does.
     function's declarator is its type's, clang's "non-member function has no
     implicit object parameter" error; elsewhere its subjects' error.
   - `loader_uninitialized`'s variable is a definition without an initializer,
-    in `.bss`, never common: where common linkage would be clang's (`-fcommon`,
+    in `.bss` by default, never common: where common linkage would be clang's (`-fcommon`,
     or `common`, without `nocommon` or a section) a weak one, as clang's code
     makes it for an initializer that isn't zero. An initializer, `extern`, an
     incomplete type, and adding it after the variable's definition are clang's
-    errors (the last with its note at the definition).
+    errors. An incomplete variable names its type and its tag's forward
+    declaration; a redefinition names the variable and its earlier definition.
+    An ordinary explicit `section` places its undefined initializer in
+    read-only storage, while named BSS and TLS families retain their section
+    kind. Both the executable's atom class and the object's section flags
+    retain that choice.
   - `weak_import`'s declaration is a weak reference where the unit doesn't
     define its entity. On a variable's definition (a tentative one, a local's
     or a parameter's) it is clang's warning "cannot be specified on a
@@ -5836,7 +5952,8 @@ arguments against the function. The checker now gives these as clang does.
   `requires_capability`, `acquire_capability`, `capability` and the others,
   `check_input_thread_rows`) change nothing here past their handlers'
   checks (`c_check_thread_safety_input.c`). Their arguments are
-  expressions that clang's parser reads where the attribute is, so each of
+  complete expressions, evaluated with the declaration evaluator, including
+  members, calls, casts and binary operators. Each of
   their names must be the scope's there: an earlier declaration (not the
   one being declared), a struct's earlier member, or a function
   declarator's own parameter; one that names nothing is clang's "use of
@@ -5846,6 +5963,14 @@ arguments against the function. The checker now gives these as clang does.
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of
   bounds" error and its extra information.
+
+  `-Wthread-safety-attributes`, off by default, retains capability-type,
+  pointer-subject, non-static-method, invalid-string and acquire-order-context
+  warnings as sparse events. Capability checks preserve the typedef
+  declaration that carries an annotation; annotating one typedef of `int`
+  does not annotate every `int`. The completed declarator's parameters and
+  earlier record members supply expression bindings without reopening the
+  ordinary scope.
 
   The retain-ownership attributes (`cf_consumed`, `ns_consumed`,
   `os_consumed`, `cf_returns_retained`, `cf_returns_not_retained`,
@@ -5985,10 +6110,16 @@ arguments against the function. The checker now gives these as clang does.
   first token. The checker stops at a declaration's first attribute error,
   where clang goes on to the next declaration's.
 
-  The rest stay refused by name: `selectany` (a COMDAT),
-  `no_caller_saved_registers` (a calling convention), and the attributes
-  whose handlers clang has its own (`pass_object_size`,
-  `interrupt` and others).
+  `selectany` has an explicit rule for its arguments, subject and external
+  linkage, so `int v __attribute__((selectany));` is accepted by the checker.
+  This rule does not supply ELF COMDAT emission or duplicate-definition
+  selection; those are tracked separately in
+  [#1458](https://github.com/buster14a/buster/pull/1458).
+
+  The rest stay refused by name: `no_caller_saved_registers` (register
+  preservation), and the attributes whose handlers clang has its own
+  (`pass_object_size`, `interrupt` and others). Recognizing their
+  names does not supply those handlers or their ABI effects.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -6014,12 +6145,33 @@ arguments against the function. The checker now gives these as clang does.
   "expected a type" alone, and a second argument "expected ')'" without its
   note, as clang's balanced reading of it gives them.
 - **Argument counts.** An attribute's count of arguments other than clang's
-  is clang's error, worded as clang's three messages: "'X' attribute takes no
+  is clang's error, worded as clang's messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at
-  least N arguments", "takes no more than N arguments". A generic attribute's
-  is checked after its subject, as clang checks it; a supported one's as its
-  arguments are read. `cleanup`'s is checked after its subject already, and an
-  attribute whose arguments clang parses its own way isn't counted.
+  least N arguments", "takes no more than N arguments". Declaration attributes
+  are counted after their subject and their arguments' parser errors: a
+  required string slot, an undeclared name, a malformed type, an incomplete
+  `sizeof` operand, a call or a builtin (`check_input_attribute_parsed`,
+  `check_input_attribute_expressions`). The shared expression evaluator retains
+  the actual operation, types and callee so those errors keep their locations
+  and notes. A trailing empty argument is an expression error, while an empty
+  required string slot is the string's error first (`section(,)`). The type
+  attributes `noreturn`, `packed`, `may_alias`, `transparent_union` and
+  nullability, and `sentinel`, keep their count-first checks.
+
+  The scalar parser uses those same generated string-slot facts when a
+  malformed expression would otherwise hide an earlier string error, as in
+  `section(1,)`. A stray name immediately before the closing parenthesis of a
+  `sizeof` or `alignof` type inside a GNU attribute is retained as a parser
+  error with its opener note. The diagnostic-only recovery view drops that
+  name, keeping the original complete type and closing parenthesis, so the
+  outer attribute can still diagnose its count. This view cannot accept or
+  emit the source. A delayed count diagnostic takes its name from its source
+  report and publishes after the arguments, independently of its sort key.
+
+  Custom grammars keep their handlers' rules: `cpu_specific` and
+  `cpu_dispatch` require at least one identifier, `no_sanitize` at least one
+  string, and `target_clones` requires a default target. Their zero-argument
+  forms reach those checks after the subject instead of a generic refusal.
 - **Arguments' errors** (`CHECK_INPUT_ATTRIBUTE_ARGUMENT`, with
   c_check_attribute.c's `CheckAttributeArgumentError` in its detail). An
   argument a handler refuses is clang's error, in clang's words and at its
@@ -6069,7 +6221,8 @@ arguments against the function. The checker now gives these as clang does.
     enumeration types", "mode attribute only supported for integer and
     floating-point types", "type of machine mode does not match type of base
     type", "unsupported machine mode 'M'" and "type of machine mode does not
-    support base vector types".
+    support base vector types". A wrong base does not suppress the separate
+    unsupported-mode error when both apply.
   - `mode` on an enum gives it the mode's integer type, signed (an enum of no
     integer type yet takes `int`'s, as clang's `AddModeAttr` defaults it).
     Before its body, as clang's `EnumDecl::setIntegerType` makes it, the enum
@@ -6099,15 +6252,22 @@ arguments against the function. The checker now gives these as clang does.
   (-Wunknown-sanitizers) and format's "GCC requires a function with the
   'format' attribute to be variadic" (-Wgcc-compat) at the declaration's
   name. A cleanup's name that names nothing is clang's parser's error alone:
-  the attribute is dropped, its subject unchecked.
+  the attribute is dropped, its subject unchecked. Target warnings name the
+  decoded string fragment, including permitted escapes, rather than the
+  source literal's escape spelling.
 - **Subject before arguments** (`CheckInputAttribute.deferred`). The
   handlers clang runs once an attribute's subject takes it give their
-  arguments' errors only then: tls_model's model, constructor's, destructor's
-  and assume_aligned's integers. The reader evaluates them where it reads them
+  arguments' errors only then: tls_model's model, constructor's, destructor's,
+  assume_aligned's, alloc_size's and alloc_align's integers, and format's kind
+  and indices. The reader evaluates them where it reads them
   (a tag's subjects are reached from the constant evaluator) and moves the
   error into the attribute (`check_input_attribute_defer`), which
   `check_input_attribute_subjects` gives after the subject, the exclusions and
-  the count; a use of an undeclared name, clang's parser's error, stays. The
+  the count; a use of an undeclared name, clang's parser's error, stays. An
+  unsupported format kind or a non-pointer allocation result warns and ignores
+  the attribute before any constant-value error. A malformed format kind is
+  likewise checked only after its subject: `format(1, 2, 3)` on a variable
+  has only the subject's warning. The
   type attributes clang leaves to a declarator's type (regparm,
   ext_vector_type) are ignored on a tag's declaration without a word, their
   arguments unread (`CheckInputReader.tag_attributes`).
@@ -6188,10 +6348,12 @@ arguments against the function. The checker now gives these as clang does.
   the attributes after it are checked against, only from a block's first
   declaration of its entity, which a later file-scope declaration that sees
   none links to and inherits from; the late masks take file scope's and
-  those. Each attributed block-scope declaration with linkage that has a
+  those. Each block-scope declaration with linkage that has a
   visible previous one records its scope's end
   (`CheckInputReader.declaration_scope_ends`, allocated at the first); the
-  others count as file scope's.
+  others count as file scope's. Recording the scope does not depend on
+  whether attribute evaluation has published the declaration's attributes
+  yet, so delayed publication cannot make a closed block visible again.
 - **Bodies on lanes** (`check_input_attribute_late`). A body read on a lane
   can't read its entity's other declarations' attributes, which other lanes'
   columns hold, nor publish its own to later ones. A redeclaration there that
@@ -6205,45 +6367,72 @@ arguments against the function. The checker now gives these as clang does.
   unit of 19 glibc headers with their extern inline functions (merged). So
   source order costs nothing measured there, where publishing the attribute
   state across lanes would take a merge of its own.
+- **GNU `noderef`** (`c_check_noderef_types.c`, `c_check_noderef_input.c`,
+  `c_check_noderef_graph.c`). Source-only immutable shadows retain annotations
+  through pointers, arrays, function results and parameters, typedefs, record
+  members, `typeof` and inferred declarations. They never enter canonical type
+  identity, layout or generated values. A sparse token column exists only in
+  units spelling `noderef` or `__noderef__`; ordinary units take no expression
+  pass or annotation allocation. Declarator and constant/type-name readers
+  compose the same shadow shape. An attribute just inside declarator parentheses
+  marks that chunk's type without adding a canonical layer. An invalid
+  placement retains its type sugar and gives `-Wignored-attributes`, as Clang
+  does; a trailing declaration
+  spelling has no dereference effect. C23 `clang::noderef` remains ignored.
+  The checked graph transfers the annotations through calls, casts, pointer
+  arithmetic, assignments, comma and conditional expressions, then gives
+  `-Wnoderef` for dereferences, subscripts and arrow accesses. A pointer or array
+  identifier's warning names it and notes its declaration; an atomic operand
+  uses the generic expression warning. Unary dereferences that select array
+  values compute addresses without a warning; subscripts retain their annotation
+  check. `sizeof`, `alignof`, `typeof`
+  and generic controlling expressions suppress the warning. Taking an address
+  cancels its lvalue's dereference, including array-member address computations,
+  while loading an intermediate pointer member still warns. Implicit pointer
+  conversions that remove the annotation warn; explicit casts do not. The
+  check uses the original source and destination pointer types before array
+  decay or atomic value conversion, and only fixed prototype parameters
+  supply assignment conversions at calls. Conversion locations share the
+  attribute argument reader's expression spelling, including parentheses.
+  This lookup follows the first token's parent chain once, retaining a
+  subscript base's location without repeatedly scanning nested prefixes.
+  Checked subscripts also consult the existing operand type and value category:
+  an implicit lvalue or array conversion reports the base's beginning, as does
+  the value conversion of a materialized record's member (`get().pointer`).
+  A value such as `p++` keeps its own operator location. The pointer operand
+  supplies that location in reversed subscripts such as `0[p]` too.
+  Initializer conversion diagnostics follow the actual selected member or
+  array element, including nested designators, union alternatives, atomic
+  pointer elements and GNU ranges. The graph pass retains one bit per value
+  for these consumers; its temporary expression shadows remain disposable.
+  The initializer's warning sink keeps one conversion warning per selected
+  range element, while dropping scalar initializers already diagnosed by the
+  graph pass. Conversion warnings also apply in unevaluated operands;
+  dereference warnings keep their query suppression.
+  Function redeclarations preserve the previous composite function type's
+  sugar, while an object's most recent declaration and a definition's own
+  parameters keep their own sugar. Parameter adjustment preserves atomic
+  wrappers; K&R declarations retain the adjusted annotations and the typed
+  parameter's location for declaration notes. Call arguments and their sparse
+  parameter annotations advance in source order together. A body's annotated
+  record members request source-order replay before publishing member indexes;
+  other body shadows remain immutable in the deferred reader's retained arenas.
+- **C23 type placement.** A list after the declaration specifiers applies to
+  their base type before the declarator is built. Thus
+  `void [[gnu::ms_abi]] f(void);` warns "'ms_abi' only applies to function
+  types; type here is 'void'" and ignores the attribute. A pointer's `_Atomic`
+  qualifier is consumed before checking a following list, so
+  `int * _Atomic [[gnu::unused]] p` gives "an attribute list cannot appear
+  here".
 - **Differences left.**
-  - A C23 function type's attribute after the specifiers
-    (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
-    it to the specifiers' type and warns "'ms_abi' only applies to function
-    types; type here is 'void'".
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
     recovery errors and their notes (a first error's "to match this '('" is
     the parser's: `docs/c-parser.md`).
-  - GNU's `noderef` is refused by name.
-  - A thread-safety attribute's argument is checked for its names alone: an
-    expression of other errors (`g.x` of an `int`) is taken, where clang
-    gives its error; a trylock's first argument's type is worked out from a
-    literal or a name alone. Their `-Wthread-safety-attributes` warnings,
-    off by default, aren't made.
-  - A `loader_uninitialized` variable's incomplete type is the generic
-    "object has incomplete type", and a definition after one the generic
-    "conflicting declaration", as every incomplete object's and redefinition's
-    are here, where clang names the type and the variable (with notes). With a
-    `section` attribute too, clang's object marks its section read-only
-    (LLVM's kind of an undefined initializer), which a write faults in; its
-    section here is writable.
-  - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
-    "an attribute list cannot appear here".
-  - An argument's undeclared name after a type's keyword or a `sizeof` stays
-    the generic error, which comes first, where clang's parser gives the
-    type's errors in turn and then the name's. A format kind's warning, and
-    alloc_size's and alloc_align's of a function that returns no pointer,
-    come after the arguments are evaluated: an argument that is no constant
-    is its error first, where clang's handler warns and stops. `mode`'s base
-    of the wrong type is one error, where clang goes on to "unsupported
-    machine mode" where both apply. A string argument with escapes names the
-    piece of target's string from its spelling.
   - A function definition's attribute whose argument count is wrong
     (`regparm`, `pcs`) is the count's error alone: clang's parser's
     `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
     made (nor `-Wreturn-type` but for a function returning an aggregate).
-  - `annotate`'s arguments after its string must be constant expressions,
-    clang's error with its evaluator's notes otherwise; they are taken here.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker
     error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
     stops at "requested alignment is not a power of 2", where clang goes on
@@ -6268,23 +6457,6 @@ arguments against the function. The checker now gives these as clang does.
     (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
     clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
     that print such a type differ the same way.
-  - A block-scope declaration whose attributes are set after it binds (by a
-    constant's job) records no scope, and is taken as a file scope's.
-  - A supported attribute's argument count is checked after its subject, as
-    clang's (`int x __attribute__((format(printf)));` is the subject's
-    warning alone), and after the errors clang's parser gives of its
-    arguments: a string literal's position that holds none, and a name that
-    names nothing (`check_input_attribute_parsed`). An argument whose
-    parser errors clang gives otherwise (a tag's or `typeof`'s type, a call,
-    a builtin, an empty one) keeps the count's error first, where clang gives
-    those (`aligned(sizeof(struct q), 2)` is the count's error, where clang
-    gives the incomplete type's). A type's (`noreturn`, `packed`,
-    `may_alias`, `transparent_union`, nullability) and `sentinel`'s count
-    is checked first, as clang's. Those whose arguments clang parses its own
-    way (`cpu_specific()`, `no_sanitize()`, `target_clones()`) aren't
-    counted against clang's and are refused; `format`'s first argument that
-    is no identifier is its error before the subject's, where clang's
-    handler checks it after.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6320,7 +6492,14 @@ arguments against the function. The checker now gives these as clang does.
     `c_check_lane_attribute_driver_test.c`).
 
   `test-checker` checks the exclusions table's order and pairs, and that the
-  facts tell C's attributes from another language's.
+  facts tell C's attributes from another language's. The binding tests retain
+  a block declaration's effective scope before its attributes are published.
+  `c_check_attribute_arguments_driver_test.c` compares complete diagnostic
+  streams for malformed expressions, custom empty lists, annotate constants,
+  deferred format/allocation checks, secondary mode errors and escaped target
+  strings. `c_check_attribute_effects_driver_test.c` covers complete
+  thread-safety expressions with their warning option, loader diagnostics and
+  loader section bytes and flags, through the scalar and vector paths.
 
 ## Ignorable and unsupported pragmas
 

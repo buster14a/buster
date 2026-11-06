@@ -282,7 +282,8 @@ struct Tier1EmitResult
     uint32_t jumps;
     // In the CFG consumer, each of the function's labels' first record (IrFunction.labels, #789), where the driver defines
     // its symbol: its block's first record, or where the indirect jump that may go to it has a stub for that edge, the
-    // stub's (tier1_emit_cfg_labels); label_count of them, the function's, and none in a function without labels.
+    // stub's (tier1_emit_cfg_labels), or UINT32_MAX for an absent label no indirect branch reaches. There are label_count
+    // entries, preserving the function's label indices, and none in a function without labels.
     uint32_t* label_records;
     uint32_t label_count;
     // Each return's ret, in record order: its record's index in `code`, right after its epilogue (tier1_frame_emit's),
@@ -411,7 +412,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         for (uint32_t node = 0; node < count; node += 1)
         {
             prepared.value_intervals[node] = BUSTER_IR_NONE;
-            widths[node] = (uint8_t)tier1_select_width(plan->function->type[node]);
+            widths[node] = (uint8_t)tier1_select_storage_width(plan, node);
             if (options->rematerialize && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_CONSTANT)
             {
                 operations[node] = BUSTER_TIER1_REMAT_INTEGER;
