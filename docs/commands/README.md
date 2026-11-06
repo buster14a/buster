@@ -45,7 +45,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
 | `test-executable, test-dynamic, test-static` | `executable.c` | [executable](executable.md) |
 | `test-files, benchmark-files` | `c_files.c` | [files](files.md) |
-| `benchmark-floors` | `link_benchmark.c` | [floors](floors.md) |
+| `benchmark-floors, test-floors-input` | `floors_benchmark.c` | [floors](floors.md) |
 | `test-foreign, benchmark-foreign` | `foreign.c` | [foreign](foreign.md) |
 | `test-foreign-corpus` | `foreign_corpus_test.c` | [foreign-corpus](foreign-corpus.md) |
 | `link-foreign (DWARF)` | `foreign_debug.c` | [foreign-debug](foreign-debug.md) |

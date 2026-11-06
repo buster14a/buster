@@ -1926,6 +1926,7 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 #define BUSTER_LANE_SESSION_PARK_AT_END 1u
 #define BUSTER_LANE_SESSION_LAZY 2u
 #define BUSTER_LANE_SESSION_PER_CORE 4u
+#define BUSTER_LANE_SESSION_REQUIRE_START 8u
 
 // Runs entry(argument) on every lane of a new session of `capacity` lanes (#905), the process's outer flow: the calling
 // thread is lane 0, and the session creates capacity - 1 threads (none for one; with BUSTER_LANE_SESSION_PER_CORE, one
@@ -1934,7 +1935,8 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 // itself to its CPU, and lane 0 waits for the pins; without, it waits for nothing but each thread's creation, or with
 // BUSTER_LANE_SESSION_LAZY for lane 1's alone. A failed creation or pin cancels every lane created, which the session
 // joins, and runs the flow on lane 0 alone: one lane, never a retry. Returns how many lanes ran it (0 if a session of
-// the calling thread's is live: sessions don't nest). The lanes are joined when the flow ends, but with
+// the calling thread's is live: sessions don't nest). With REQUIRE_START, a failed start returns 0 without running the
+// flow, rather than falling back to one lane. The lanes are joined when the flow ends, but with
 // BUSTER_LANE_SESSION_PARK_AT_END (`flags`).
 static __attribute__((unused)) uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument),
                                                          void* argument, uint32_t flags);
@@ -2590,7 +2592,7 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         session->park_at_end = (flags & BUSTER_LANE_SESSION_PARK_AT_END) != 0 && !BUSTER_SANITIZER_RESOURCES;
         session->per_core = (flags & BUSTER_LANE_SESSION_PER_CORE) != 0 && cpus == 0 && lanes > 1;
         // Lazily from 3 lanes, or from 2 counting the cores, which lane 1 then does.
-        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && cpus == 0 && (lanes > 2 || session->per_core);
+        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && (flags & BUSTER_LANE_SESSION_REQUIRE_START) == 0 && cpus == 0 && (lanes > 2 || session->per_core);
         if (session->per_core && !session->lazy)
         {
             const uint32_t cores = lane_core_count();
@@ -2669,7 +2671,11 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         };
         thread_context.taken = 0;
         thread_context.running = true;
-        entry(argument);
+        const bool run_entry = started || (flags & BUSTER_LANE_SESSION_REQUIRE_START) == 0;
+        if (run_entry)
+        {
+            entry(argument);
+        }
         // A lazy flow that never met its lanes: they are lane 1's to start, and the session's to end.
         lane_session_settle();
         thread_context.running = false;
@@ -2684,7 +2690,7 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         {
             syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity);
         }
-        result = session->count;
+        result = run_entry ? session->count : 0;
     }
     return result;
 }

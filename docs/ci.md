@@ -386,13 +386,35 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    ledger's own fallbacks are safe: harvest reads its rows from the records
    again, and the pin comes as an output too.
 4. **Measure.** Inside the window it admits one 9700X run at a time: the
-   snapshot's comprehensive run first, then the oldest ready state. While the
+   snapshot's comprehensive run first, then the oldest ready state whose own
+   worker window is open and has room for the run. While the
    snapshot's hosted rows are in flight, it keeps room for the snapshot. If
    the snapshot is ineligible, it measures the newest eligible earlier state
    and says so. The comprehensive run is a daily requirement: only one
    completed in this cycle meets it. An unchanged main still gets its daily
    full run and oracle audit, though an earlier cycle measured the same
    commit.
+
+**Historical worker windows.** A `nightly/SHA` dispatch runs that state's own
+workflow and tool. States before the window expansion still admit only
+04:00-07:00 Europe/Madrid. The coordinator reads each state's literal
+`BUSTER_NIGHTLY_WINDOW_START_HOUR` and `BUSTER_NIGHTLY_WINDOW_END_HOUR`
+declarations from its immutable `tools/ci/nightly.c` blob, once per distinct
+blob in a job. `nightly worker-window` reads those bytes as data; it does not
+build or execute historical code. The supported contracts are 04:00-07:00 and
+02:00-08:00. Missing, malformed or unsupported declarations are reported as
+unknown, and the state's hardware remains pending until reviewed.
+
+The planner intersects the worker's civil-time window with the current
+02:00-08:00 limit and reserves the whole dispatch-to-completion bound. It skips
+an old worker before 04:00 or too late to finish by 07:00, considering later
+eligible states immediately. If only workers whose opening is still ahead
+remain, the window job waits for them. The same rule applies to the snapshot
+and its substitute, and a waiting snapshot reserves room before its own
+deadline. A state that cannot fit stays in the backlog; it is never marked
+complete or pruned for this reason. Each job rebuilds the metadata from Git,
+including after a prepare/window/continuation handoff. The worker still checks
+its window independently after taking the shared lock.
 
 States move between `not-required`, `complete`, `in-flight`, `ready`,
 `preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and

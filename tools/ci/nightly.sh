@@ -299,7 +299,7 @@ load_ledger()
 }
 
 # main's first-parent states from the epoch (the first-parent commit that added tools/ci/nightly.c, or NIGHTLY_EPOCH),
-# oldest first, each with its first-parent change's paths; main_head is main's head.
+# oldest first, each with its worker's declared window and first-parent change's paths; main_head is main's head.
 main_head=''
 earlier_states=0
 load_states()
@@ -316,13 +316,27 @@ load_states()
         return 1
     fi
     : > "$states"
-    local commit parent committed started=false
+    # Historical workers execute their own policy. Read its literal hour declarations as data, cached once per source
+    # blob, never by compiling or running historical code. Rebuilt at each job: no handoff can lose this constraint.
+    local workers="$work/worker-windows"
+    mkdir -p "$workers"
+    local commit parent committed blob started=false
     while read -r commit parent committed; do
         if [ "$commit" = "$epoch" ]; then
             started=true
         fi
         if [ "$started" = true ]; then
             printf 'state\t%s\t%s\t%s\n' "$commit" "$parent" "$committed" >> "$states"
+            blob=$(git -C "$history" rev-parse "$commit:tools/ci/nightly.c" 2> /dev/null) || blob=''
+            if sha "$blob"; then
+                if [ ! -f "$workers/$blob.tsv" ]; then
+                    git -C "$history" cat-file blob "$blob" > "$workers/source.c"
+                    "$tool" worker-window < "$workers/source.c" > "$workers/$blob.tsv"
+                fi
+                cat "$workers/$blob.tsv" >> "$states"
+            else
+                printf 'worker-window\t-\t-\n' >> "$states"
+            fi
             if [ "$parent" != - ]; then
                 git -C "$history" diff --no-renames --name-only "$parent" "$commit" | sed 's/^/path\t/' >> "$states"
             fi
