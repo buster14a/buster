@@ -2461,9 +2461,8 @@ static bool check_common_literal_contexts(const CheckGraph* graph, const Parser*
     return valid;
 }
 
-// The ordinary and conversion walks both inspect assignment-conversion edges. Read each edge once and
-// retain both reach bits: integer constants can also feed the ordinary walk; floating constants and
-// conditional/comma sources are candidates only for the conversion walk.
+// The conversion walk handles all implicit-conversion warnings. The ordinary walk needs only self-assignment,
+// subscript and comma candidates, so a constant conversion does not force a redundant ordinary subtree walk.
 static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGraph* graph, const CheckStream* stream,
                                            uint32_t node, bool self_assign)
 {
@@ -2482,7 +2481,6 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
-                own = assignment && constant == CHECK_CONSTANT_INTEGER;
                 conversion = assignment;
             }
         }
@@ -2492,7 +2490,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
     else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
     {
         const uint32_t offset = graph->argument_offsets[node];
-        for (uint32_t i = 0; !(own && conversion) && i < graph->argument_counts[node]; i += 1)
+        for (uint32_t i = 0; !conversion && i < graph->argument_counts[node]; i += 1)
         {
             const uint32_t source = graph->argument_nodes[offset + i];
             if (source < graph->count && source < stream->count)
@@ -2502,8 +2500,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 {
                     const uint32_t flags = stream->argument_conversions[offset + i].flags;
                     const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
-                    own |= assignment && constant == CHECK_CONSTANT_INTEGER;
-                    conversion |= assignment;
+                    conversion = assignment;
                 }
             }
         }
