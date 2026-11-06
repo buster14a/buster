@@ -1235,7 +1235,8 @@ static void files_advance(FilesRun* run, FilesLane* mine)
             const PPCandidate candidate = files_candidate(run, search, search->candidate, path, &path_length, &directory, &directory_length);
             const uint64_t hash = candidate == PP_CANDIDATE_PATH ? intern_hash_bytes((const uint8_t*)path, path_length) : 0;
             const FileCachePath* entry = candidate == PP_CANDIDATE_PATH ? file_cache_find_path(cache, path, path_length, hash) : 0;
-            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && file_cache_in_directory(path, path_length, directory_length);
+            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && cache->listed_directories != 0 &&
+                                file_cache_in_directory(path, path_length, directory_length);
             const FileCacheDirectory* place =
                 listed ? file_cache_find_directory(cache, path, directory_length, intern_hash_bytes((const uint8_t*)path, directory_length)) : 0;
             const bool absent = place != 0 && file_cache_listed_absent(place, path, path_length);
@@ -1335,8 +1336,8 @@ static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
     for (uint32_t p = 0; p < run->probe_count; p += 1)
     {
         const FilesPath* path = &run->probes[p];
-        const bool listed = file_cache_in_directory(path->path, path->length, path->directory_length);
-        FileCacheDirectory* directory = listed ? file_cache_directory(cache, path->path, path->directory_length) : 0;
+        const bool missed = run->found[p].error == ENOENT && file_cache_in_directory(path->path, path->length, path->directory_length);
+        FileCacheDirectory* directory = missed ? file_cache_directory(cache, path->path, path->directory_length) : 0;
         file_cache_count_miss(cache, directory, &run->found[p], counts);
         FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, &run->found[p]);
         if (entry != 0)

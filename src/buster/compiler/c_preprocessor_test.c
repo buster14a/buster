@@ -3216,7 +3216,7 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
                      pp->statistics.include_searches == BUSTER_ARRAY_LENGTH(cases) + 1 && pp->statistics.include_ticks != 0 && pp->input_tokens == 0 &&
                      pp->cache->prepared_records == 0 && pp->ticks[PP_PHASE_LEX] == 0 && pp->ticks[PP_PHASE_REFINE] == 0 && pp->ticks[PP_PHASE_DIRECTIVES] == 0;
             // A missing main-file path keeps ENOENT and has no fstat, whether first probed or cached by the other unit.
-            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_NONE, BUSTER_PP_USER_FILE);
+            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_NONE, 0, BUSTER_PP_USER_FILE);
             result = result && root != BUSTER_PP_NONE && pp->files[root].data == BUSTER_PP_NONE && pp->files[root].error == ENOENT &&
                      pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats &&
                      pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
@@ -6788,7 +6788,7 @@ static bool pp_test_header_beside(void)
             search = strcmp(pp.directories[i], resource) == 0 ? i : search;
         }
         result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.fallback_directory);
-        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_NONE, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
+        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
         uint32_t found_in = BUSTER_PP_NONE;
         const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
