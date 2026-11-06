@@ -1337,17 +1337,73 @@ static void check_lower_classify_types_scalar(const TypeTable* types, uint32_t c
     }
 }
 
+// The builtin types' classes and facts by the rules (check_lower_type_class and check_lower_type_facts), at their codes,
+// with plain char signed: every unit's type table has the same builtins, the first BUSTER_TYPE_BUILTIN_COUNT types, whose
+// rows differ only in plain char's class, U8 where TypeTable.char_unsigned makes it unsigned. So check_lower_classify_types
+// copies them rather than classify each unit's builtins by the rules again (#442), and its twin classifies them by the
+// rules, which test-checker compares with the copy in both char modes (check_test_program_type_facts). A code without a
+// type, as _Complex bool's, __fp16's and the codes past the complex types, has no class (UINT8_MAX) and no facts.
+static const uint8_t check_lower_builtin_classes[BUSTER_TYPE_BUILTIN_COUNT] __attribute__((aligned(64))) = {
+    // none, void, bool, char, signed char, unsigned char, short, unsigned short
+    UINT8_MAX, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_I8, BUSTER_TYPED_CLASS_I8, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_I16,
+    BUSTER_TYPED_CLASS_U16,
+    // int, unsigned int, long, unsigned long, long long, unsigned long long, __int128, unsigned __int128
+    BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64,
+    BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128,
+    // __bf16, _Float16, __fp16, float, double, long double, __float128 (an aggregate's address), nullptr_t
+    BUSTER_CHECK_LOWER_CLASS_BFLOAT16, BUSTER_CHECK_LOWER_CLASS_BINARY16, BUSTER_CHECK_LOWER_CLASS_BINARY16, BUSTER_TYPED_CLASS_F32,
+    BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F80, UINT8_MAX, BUSTER_TYPED_CLASS_U64,
+    // The _BitInt codes, the conversions' deferred code and the complex types (aggregates' addresses): no class.
+    UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX,
+    UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX,
+    UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX,
+    UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX,
+    UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX,
+};
+
+#define BUSTER_CHECK_LOWER_COMPLEX_FACTS (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS)
+static const uint8_t check_lower_builtin_facts[BUSTER_TYPE_BUILTIN_COUNT] __attribute__((aligned(64))) = {
+    [BUSTER_TYPE_CODE_BOOL] = BUSTER_CHECK_LOWER_TYPE_BOOL,
+    [BUSTER_TYPE_CODE_FLOAT128] = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_SCHAR] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UCHAR] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_SHORT] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_USHORT] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_INT] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_ULONG] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LLONG] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_ULLONG] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_INT128] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_BF16] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT16] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+    [BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT128] = BUSTER_CHECK_LOWER_COMPLEX_FACTS,
+};
+#undef BUSTER_CHECK_LOWER_COMPLEX_FACTS
+_Static_assert(BUSTER_TYPE_BUILTIN_COUNT == 64, "the builtins' rows are one 64-byte vector each");
+
 // Every type's class and facts, `count` of each from index 0, as check_lower_classify_types_scalar makes them, before the
-// bodies, which ask them of each node's types (check_lower_class): the builtins by the rules, then 64 types at a time,
-// each one's by its kind from the kinds' tables, and by the rules the few whose kind the tables don't answer for. Reads
-// the types' kinds alone (the last 64 masked to the `count` types), and writes `count` bytes of each column.
+// bodies, which ask them of each node's types (check_lower_class): the builtins' copied from their rows
+// (check_lower_builtin_classes and check_lower_builtin_facts), then 64 types at a time, each one's by its kind from the
+// kinds' tables, and by the rules the few whose kind the tables don't answer for. Reads the types' kinds alone (the last
+// 64 masked to the `count` types), and writes `count` bytes of each column.
 static void check_lower_classify_types(const TypeTable* types, uint32_t count, uint8_t* classes, uint8_t* facts)
 {
 #if !BUSTER_HOST_VECTOR
     check_lower_classify_types_scalar(types, count, classes, facts);
 #else
     const uint32_t builtins = count < BUSTER_TYPE_BUILTIN_COUNT ? count : BUSTER_TYPE_BUILTIN_COUNT;
-    check_lower_classify_types_scalar(types, builtins, classes, facts);
+    const __mmask64 prefix = builtins < 64 ? (UINT64_C(1) << builtins) - 1 : UINT64_MAX;
+    const __mmask64 plain_char = types->char_unsigned ? UINT64_C(1) << BUSTER_TYPE_CODE_CHAR : 0;
+    const __m512i builtin_classes = _mm512_mask_mov_epi8(_mm512_load_si512(check_lower_builtin_classes), plain_char, _mm512_set1_epi8(BUSTER_TYPED_CLASS_U8));
+    _mm512_mask_storeu_epi8(classes, prefix, builtin_classes);
+    _mm512_mask_storeu_epi8(facts, prefix, _mm512_load_si512(check_lower_builtin_facts));
     const __m512i kind_facts = _mm512_load_si512(check_lower_kind_facts);
     const __m512i kind_classes = _mm512_load_si512(check_lower_kind_classes);
     const __m512i kind_bit = _mm512_set1_epi8((char)BUSTER_CHECK_LOWER_TYPE_KIND);
