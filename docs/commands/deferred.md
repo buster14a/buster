@@ -93,7 +93,8 @@ lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
-`--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+`--cpus` parser must refuse 65 CPUs without a write past its room for 64,
+and its `--rss` must see 16 MB of fresh pages in a peak it reset first.
 A lane's per-name columns must be laid out with their names' entries
 committed, kept, cleared after a poisoned reading and laid out again for more
 names, cleared where the kernel keeps their old pages
@@ -114,14 +115,18 @@ requiring real expression execution on the caller and at least one other lane.
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
 left to source order by reason. `./build/compiler benchmark-checker-deferred
-[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [-E's options]
-file...` times source order's reader against the deferred one on one lane and
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold] [--raw]
+[--rss] [-E's options] file...` times source order's reader against the deferred one on one lane and
 on up to N, with the parse, the top level, the bodies' walks, their position
 checks, the lanes' span and the merge apart (and the merge's parts: its replay,
 appended tables, events, tags, pass and rest), and what a lane costs: its copy of
 the reader, the launcher's dispatch, the other lanes' wake-up, which no lane
 waits for, and the lanes' arenas before the lanes start; and in how many passes
-the first lane read the largest body. Each deferred reading releases its state,
+the first lane read the largest body; then each reading's absolute median in
+nanoseconds (#447), with `--raw` every pass's unrounded samples, and with
+`--rss` each reading's peak resident memory and its growth over the reading's
+start, taken outside its time (`--cold`: fresh caller arenas, so the growth is
+all the reading touched). Each deferred reading releases its state,
 as a process's one reading does, or with `--warm` keeps it for the next, as a
 process's later readings do. One active lane uses
 the existing `lane_run_cold(1, ..., NULL)`, which starts no worker, makes no

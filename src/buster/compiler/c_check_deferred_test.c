@@ -29,7 +29,7 @@
 // lane, which must wait for no other, also inside a running pinned team with an unfinished take and impossible pin
 // target, and on 8. The caller's context and running state, its installed team and worker identities, and its affinity
 // must survive; the entry's dispatch and the wake-up must fall within the lanes' span. Then
-// benchmark-checker-deferred's --cpus parser, the difference report on a deferred path that made no input, which must
+// benchmark-checker-deferred's --cpus parser and its --rss reading of the resident memory, the difference report on a deferred path that made no input, which must
 // say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept across readings and
 // unmapped by check_deferred_release; and the arena of rare columns' pages, base pages throughout where more than one
 // lane writes it, and otherwise huge past its prefix (check_input_sparse_arena, by the kernel's advice for the mapping).
@@ -426,6 +426,39 @@ static bool check_deferred_test_cpus(void)
         munmap(pages, page * 2);
     }
     return valid;
+}
+
+static uint64_t check_deferred_benchmark_resident_begin(void);
+static uint64_t check_deferred_benchmark_resident_peak(void);
+static uint64_t check_deferred_benchmark_growth(uint64_t start, uint64_t peak);
+
+// The bytes check_deferred_test_resident touches between its readings' begin and end.
+#define BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES (UINT64_C(16) << 20)
+
+// benchmark-checker-deferred's --rss (#447): a reading that faults in 16 MB of fresh pages must grow the peak by at least
+// three quarters of them, and once they are unmapped, a reading that touches nothing must start its peak afresh and grow
+// it by less than a quarter (without the peak's reset, it would keep the 16 MB). A host that can't reset or read the peak
+// passes, as the benchmark then says the resident memory is unknown.
+static bool check_deferred_test_resident_peak(void)
+{
+    uint8_t* pages = mmap(0, BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = pages != MAP_FAILED;
+    const uint64_t touched_start = check_deferred_benchmark_resident_begin();
+    for (uint64_t at = 0; valid && at < BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES; at += 4096)
+    {
+        pages[at] = (uint8_t)(at >> 12 | 1);
+    }
+    const uint64_t touched_peak = touched_start != 0 ? check_deferred_benchmark_resident_peak() : 0;
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES);
+    }
+    const uint64_t idle_start = check_deferred_benchmark_resident_begin();
+    const uint64_t idle_peak = idle_start != 0 ? check_deferred_benchmark_resident_peak() : 0;
+    const uint64_t quarter = BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES / 4;
+    const bool grew = check_deferred_benchmark_growth(touched_start, touched_peak) >= BUSTER_CHECK_DEFERRED_TEST_RESIDENT_BYTES - quarter;
+    const bool reset = check_deferred_benchmark_growth(idle_start, idle_peak) < quarter;
+    return valid && (touched_start == 0 || touched_peak == 0 || grew) && (idle_start == 0 || idle_peak == 0 || reset);
 }
 
 // The difference report on a deferred path that made no input (#432's second review): the vector path's tokens have
@@ -1546,6 +1579,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!cpus)
     {
         fprintf(stderr, "test-checker-deferred: benchmark-checker-deferred's --cpus parser read a list wrong\n");
+    }
+    const bool resident_peak = check_deferred_test_resident_peak();
+    checks += 1;
+    failures += !resident_peak;
+    if (!resident_peak)
+    {
+        fprintf(stderr, "test-checker-deferred: benchmark-checker-deferred's --rss missed 16 MB of fresh pages or didn't reset its peak\n");
     }
     const bool no_input = check_deferred_test_no_input();
     checks += 1;
