@@ -6327,6 +6327,11 @@ arguments against the function. The checker now gives these as clang does.
   specifier (`#pragma pack`, `weak`, `GCC visibility`: any but those its
   preprocessor takes alone, such as `message` and the diagnostic ones) stops
   the recovery, as it does clang's.
+
+  Malformed K&R parameter declaration tails also have bounded repairs. The
+  repaired view discards the recorded tail while preserving the original
+  parse error and any delimiter note. All these views serve diagnostics only;
+  the original unit remains rejected.
 - **Alignment specifiers** (`check_input_alignas_error`, C11 6.7.5). On a
   parameter, a `register` variable or a bit-field, "'_Alignas' attribute cannot
   be applied to a function parameter" (and the others); on a typedef or a
@@ -6434,10 +6439,11 @@ arguments against the function. The checker now gives these as clang does.
   `int * _Atomic [[gnu::unused]] p` gives "an attribute list cannot appear
   here".
 - **Differences left.**
-  - The checker stops at a declaration's first error. So clang's later errors
-    of the same declaration are missing: a second list's, and its parser's
-    recovery errors and their notes (a first error's "to match this '('" is
-    the parser's: `docs/c-parser.md`).
+  - Arbitrary semantic-error continuation remains unsupported: after a
+    declaration fails, later semantic diagnostics can be missing. The bounded
+    missing-semicolon and malformed K&R-tail repairs above preserve their
+    original parse errors and notes; they do not make every parser or semantic
+    failure resumable (`docs/c-parser.md`).
   - A function definition's attribute whose argument count is wrong
     (`regparm`, `pcs`) is the count's error alone: clang's parser's
     `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
@@ -6446,10 +6452,9 @@ arguments against the function. The checker now gives these as clang does.
     error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
     stops at "requested alignment is not a power of 2", where clang goes on
     to the second declaration's errors); a unit's later parse errors are
-    printed. A pragma that clang's recovery skips (`GCC visibility push`) is
-    still applied. `-Wduplicate-decl-specifier` (`inline inline;`) isn't
-    made, and `__private_extern__` is refused by name, with or without a
-    declarator.
+    printed.
+  - `-Wduplicate-decl-specifier` (`inline inline;`) isn't made, and
+    `__private_extern__` is refused by name, with or without a declarator.
   - A function type's attribute's warnings come in clang's order
     (`check_input_attribute_type_warnings`) but for three places. A parameter's
     attributes' warnings, which clang gives as it reads the parameter list,

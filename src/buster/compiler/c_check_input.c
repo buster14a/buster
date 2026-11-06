@@ -2628,9 +2628,12 @@ static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint3
 static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type);
 static bool check_input_vla_modified(const TypeTable* types, TypeId type);
 
-static bool check_input_qualifier(uint32_t name, uint32_t* qualifiers)
+static bool check_input_qualifier(const Parser* parser, uint32_t token, uint32_t* qualifiers)
 {
     uint32_t bit = 0;
+    // A keyword's interned spelling is also an ordinary identifier when the language mode doesn't enable it.
+    // In particular, C89's `restrict` may name a variable or typedef; the parser's kind is authoritative.
+    const uint32_t name = parser->tokens.kinds[token] == PARSE_KIND_QUALIFIER ? parser->tokens.names[token] : 0;
     switch (name)
     {
         case C_NAME_CONST: case C_NAME_GNU_CONST: case C_NAME_GNU_CONST2: bit = BUSTER_TYPE_CONST; break;
@@ -2733,6 +2736,30 @@ static bool check_input_free_standing(const Parser* parser, uint32_t first, uint
         t = reading ? (next > t ? next : t + 1) : t;
     }
     return reading && t < end && parser->tokens.kinds[t] == PARSE_KIND_SEMI;
+}
+
+// An attribute-only null declaration has no declaration specifiers to warn about. GNU lists are parsed and ignored;
+// C23 lists are applied to the null declaration, so their subject diagnostics still run.
+static bool check_input_attribute_only(const Parser* parser, uint32_t first, uint32_t end)
+{
+    bool attribute = false;
+    uint32_t token = first;
+    while (token < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, token, end)))
+        {
+            attribute = true;
+            const uint32_t open = kind == PARSE_KIND_L_SQUARE ? token : token + 1;
+            const uint32_t close = open < end ? parser->tree.parents[open] : end;
+            token = close > open && close < end ? close + 1 : end;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return attribute && token == end;
 }
 
 // A directly written tag declaration can declare its tag without a declarator. A member without a declarator is
@@ -2915,7 +2942,7 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     {
         const uint32_t name = parser->tokens.names[i];
         const uint8_t kind = parser->tokens.kinds[i];
-        if (check_input_qualifier(name, &qualifiers))
+        if (check_input_qualifier(parser, i, &qualifiers))
         {
             // const and volatile dropped, as clang drops them (with a warning); restrict, which needs a pointer, refused.
             valid = (qualifiers & BUSTER_TYPE_RESTRICT) == 0;
@@ -3395,7 +3422,7 @@ static __attribute__((noinline)) uint32_t check_input_auto_type_clash(const Chec
     uint32_t i = first;
     uint32_t qualifiers = 0;
     while (finish && i < end && (i <= token || parser->tokens.kinds[i] == PARSE_KIND_TYPE || parser->tokens.kinds[i] == PARSE_KIND_STORAGE ||
-           check_input_qualifier(parser->tokens.names[i], &qualifiers) || check_input_attribute_starts(parser, i, end)))
+           check_input_qualifier(parser, i, &qualifiers) || check_input_attribute_starts(parser, i, end)))
     {
         if (check_input_attribute_starts(parser, i, end))
         {
@@ -3527,7 +3554,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             saw = true;
             continue;
         }
-        if (check_input_qualifier(name, &qualifiers))
+        if (check_input_qualifier(parser, i, &qualifiers))
         {
             restrict_token = restrict_token == BUSTER_CHECK_NONE && (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? i : restrict_token;
         }
@@ -4928,7 +4955,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 const uint32_t attribute_first = frame->attributes != NULL ? frame->attributes->count : 0;
                 while (valid && i < frame->end)
                 {
-                    if (check_input_qualifier(parser->tokens.names[i], &qualifiers))
+                    if (check_input_qualifier(parser, i, &qualifiers))
                     {
                         reader->ignored[i++] = true;
                     }
@@ -5128,7 +5155,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     valid &= !minimum;
                     minimum = true;
                 }
-                else if (!check_input_qualifier(parser->tokens.names[bound], &qualifiers))
+                else if (!check_input_qualifier(parser, bound, &qualifiers))
                 {
                     break;
                 }
@@ -6393,7 +6420,13 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             }
             else
             {
+                const uint32_t reports = reader->output->report_count;
                 check_input_report(reader, parameter, CHECK_INPUT_KR_IMPLICIT_INT);
+                if (reader->output->report_count != reports)
+                {
+                    // The missing type becomes known when the old-style declaration list ends, after its parser errors.
+                    reader->output->reports[reports].completion = body;
+                }
                 valid = false;
             }
         }
@@ -6450,7 +6483,7 @@ static uint32_t check_input_main(CheckInputReader* reader, TypeId type, uint32_t
         uint32_t token = first;
         uint32_t qualifiers = 0;
         while (token < name && (check_input_attribute_starts(parser, token, name) || parser->tokens.kinds[token] == PARSE_KIND_STORAGE ||
-               parser->tokens.kinds[token] == PARSE_KIND_EXTENSION || check_input_qualifier(parser->tokens.names[token], &qualifiers)))
+               parser->tokens.kinds[token] == PARSE_KIND_EXTENSION || check_input_qualifier(parser, token, &qualifiers)))
         {
             token = check_input_attribute_starts(parser, token, name) ? check_input_skip_attributes(parser, token, name) : token + 1;
         }
@@ -7008,9 +7041,15 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     // ParsedFreeStandingDeclSpec's (#147): restrict, whatever the type, then the function specifiers inline and
     // _Noreturn, each at its first keyword; it then warns as it would without them, and stops.
     const bool declares_nothing = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
+    const bool attribute_only = declares_nothing && free_standing && check_input_attribute_only(parser, first, i);
     const uint32_t restrict_token = !continuation && declares_nothing ? reader->specifier_restrict : BUSTER_CHECK_NONE;
     reader->specifier_restrict = BUSTER_CHECK_NONE;
-    if (declares_nothing)
+    if (attribute_only)
+    {
+        valid = check_input_attribute_subjects(reader, common_attributes, 0, 0, first, BUSTER_CHECK_NONE) &&
+                check_input_attribute_ignored_lists(reader, first, i, false, 0, i);
+    }
+    if (declares_nothing && !attribute_only)
     {
         const uint32_t inline_token = is_inline ? check_input_inline_token(parser, first, i) : BUSTER_CHECK_NONE;
         const uint32_t noreturn_token = check_input_noreturn_keyword(common_attributes);
@@ -7038,8 +7077,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         if (valid)
         {
             const bool tag = check_input_empty_declaration_tag(parser, first, i, false);
-            // (At the specifiers' first token, after C23 attribute lists that begin the declaration, as clang's DeclSpec starts.)
-            uint32_t specifiers = first;
+            // At the specifiers' first token, after transparent __extension__ markers and leading C23 attribute lists,
+            // as clang's DeclSpec starts. A GNU attribute is itself a declaration specifier.
+            uint32_t specifiers = check_input_declaration_start(parser, first, i);
             while (specifiers < i && parser->tokens.kinds[specifiers] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, specifiers, i))
             {
                 specifiers = check_input_skip_attributes(parser, specifiers, i);

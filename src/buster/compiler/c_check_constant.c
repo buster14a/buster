@@ -492,7 +492,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         {
             i = input->attribute_starts[i - input->first]->end - 1;
         }
-        else if (check_input_qualifier(name, &qualifiers))
+        else if (check_input_qualifier(parser, i, &qualifiers))
         {
         }
         else if (kind == PARSE_KIND_STORAGE)
@@ -753,7 +753,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 bool atomic = false;
                 bool noderef = false;
                 while (valid && i < frame->end && (input->attribute_starts[i - input->first] != 0 ||
-                       check_input_qualifier(parser->tokens.names[i], &qualifiers) || parser->tokens.names[i] == C_NAME_ATOMIC))
+                       check_input_qualifier(parser, i, &qualifiers) || parser->tokens.names[i] == C_NAME_ATOMIC))
                 {
                     CheckConstantAttributes* pointer_attribute = input->attribute_starts[i - input->first];
                     if (pointer_attribute != 0)
