@@ -1,0 +1,34 @@
+name: Issue1447 evaluation stack oracle
+on:
+  push:
+    branches: [codex/issue-1447-eval-pop-oracle-01a1ad8e]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang and tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Compare arithmetic restoration and typedef history
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          for method in default source double extended; do
+            options=()
+            if [ "$method" != default ]; then
+              options+=("-ffp-eval-method=$method")
+            fi
+            for case_number in $(seq 1 10); do
+              echo "EVAL_POP METHOD=$method CASE=$case_number"
+              oracle_status=0
+              clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics -DCASE="$case_number" "${options[@]}" tools/issue1447-eval-pop.c > "$RUNNER_TEMP/eval-pop.log" 2>&1 || oracle_status=$?
+              cat "$RUNNER_TEMP/eval-pop.log"
+              echo "EVAL_POP_STATUS=$oracle_status"
+            done
+          done
