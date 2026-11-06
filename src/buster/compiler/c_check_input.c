@@ -100,9 +100,6 @@ typedef enum CheckInputMessage
     // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
     CHECK_INPUT_WIDE_LITERAL,
     CHECK_INPUT_PRAGMA_SEMANTICS,
-    // __FLT_EVAL_METHOD__ expanded after an eval_method pragma in its active scope. The subject is the cold PP
-    // expansion-use index plus one, and detail its final preprocessor publication boundary.
-    CHECK_INPUT_FP_EVAL_USE,
     // clang's musttail attribute (#147) where it doesn't go, at the attribute: with arguments, on a declaration (a label
     // among them), and on a statement other than a return.
     CHECK_INPUT_MUSTTAIL_ARGUMENTS,
@@ -236,6 +233,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_NORETURN_NOT_FUNCTION,
     // The current type table stores alignments as powers of two; some wide Microsoft bit-field units need others.
     CHECK_INPUT_MS_STRUCT_ALIGNMENT,
+    // __FLT_EVAL_METHOD__ expanded after an eval_method pragma in its active scope. The subject is the cold PP
+    // expansion-use index plus one, detail its publication boundary, and value the active pragma's output token.
+    CHECK_INPUT_FP_EVAL_USE,
     // A typedef whose available_only_in_default_eval_method attribute forbids the active pragma's evaluation method.
     CHECK_INPUT_FP_EVAL_TYPE,
 } CheckInputMessage;
@@ -361,6 +361,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_INLINE_NOT_FUNCTION] = "'inline' can only appear on functions",
     [CHECK_INPUT_NORETURN_NOT_FUNCTION] = "'_Noreturn' can only appear on functions",
     [CHECK_INPUT_MS_STRUCT_ALIGNMENT] = "ms_struct bit-field storage with non-power-of-two size is not supported",
+    [CHECK_INPUT_FP_EVAL_USE] = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'",
     [CHECK_INPUT_FP_EVAL_TYPE] = "type is set according to the default eval method for the translation unit",
 };
 
@@ -429,7 +430,7 @@ struct CheckInputReport
     // (CHECK_INPUT_ATTRIBUTE_CONVENTIONS's, the one asked for in the low byte); or 0.
     uint32_t detail;
     // The value a message prints (CHECK_ARGUMENT_TOO_LARGE's), the times a CHECK_INPUT_UNAVAILABLE_USE is given again
-    // (a tag's, once for each declarator, #147), or 0.
+    // (a tag's, once for each declarator, #147), CHECK_INPUT_FP_EVAL_USE's pragma output token, or 0.
     uint64_t value;
     // The type a message names (CHECK_INPUT_VECTOR_ELEMENT's), and its typedef specifier's declaration
     // (check_input_typedef_spelling), or 0.

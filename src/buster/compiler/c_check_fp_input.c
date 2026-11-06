@@ -6,7 +6,8 @@
 // floating policy. Complex range is a permission to relax evaluation, so retaining full-range actions is valid.
 // FP_CONTRACT, reassociation, reciprocal evaluation and float_control(precise, off) grant permissions that this
 // compiler need not use. Exception-sensitive scopes use the existing runtime environment path, which retains their
-// operations and conversions. File-scope float_control push/pop snapshots all settings, including STDC's.
+// operations and conversions. File-scope float_control push/pop snapshots the arithmetic settings, including STDC's.
+// The last evaluation pragma's method and location persist across pop for lexical restrictions.
 // Evaluation methods use the same lexical history but insert ordinary floating promotions, including in constants.
 
 #define CHECK_FP_PRAGMA_FENV_ACCESS 0
@@ -41,12 +42,16 @@
 #define CHECK_FP_EVAL_DOUBLE 2
 #define CHECK_FP_EVAL_EXTENDED 3
 #define CHECK_FP_EVAL_METHOD_MASK 0x03
+#define CHECK_FP_EVAL_LAST_SHIFT 2
+#define CHECK_FP_EVAL_LAST_MASK 0x0c
 #define CHECK_FP_EVAL_SEEN 0x80
 
 typedef struct CheckFpState CheckFpState;
 struct CheckFpState
 {
     uint8_t values[CHECK_FP_PRAGMA_STATE_COUNT];
+    // The last eval_method pragma's output `fp` token, or zero before any pragma in this scope.
+    uint32_t eval_pragma_source;
 };
 
 typedef struct CheckFpDirective CheckFpDirective;
@@ -85,8 +90,10 @@ static uint8_t check_input_fp_environment(CheckFpState state)
     const uint8_t exceptions = state.values[CHECK_FP_PRAGMA_EXCEPTIONS];
     const uint8_t evaluation = state.values[CHECK_FP_PRAGMA_EVAL_METHOD];
     const uint8_t method = evaluation & CHECK_FP_EVAL_METHOD_MASK;
+    const uint8_t last = (evaluation & CHECK_FP_EVAL_LAST_MASK) >> CHECK_FP_EVAL_LAST_SHIFT;
     return (state.values[CHECK_FP_PRAGMA_FENV_ACCESS] != 0 || (exceptions != 0 && exceptions != CHECK_FP_EXCEPTIONS_DEFAULT) ? BUSTER_CHECK_FP_ENV_ACCESS : 0) |
            (method == CHECK_FP_EVAL_DOUBLE ? BUSTER_CHECK_FP_EVAL_DOUBLE : method == CHECK_FP_EVAL_EXTENDED ? BUSTER_CHECK_FP_EVAL_EXTENDED : 0) |
+           (last == CHECK_FP_EVAL_DOUBLE ? BUSTER_CHECK_FP_EVAL_LAST_DOUBLE : last == CHECK_FP_EVAL_EXTENDED ? BUSTER_CHECK_FP_EVAL_LAST_EXTENDED : 0) |
            ((evaluation & CHECK_FP_EVAL_SEEN) != 0 ? BUSTER_CHECK_FP_EVAL_PRAGMA : 0);
 }
 
@@ -169,15 +176,17 @@ static bool check_input_fp_extension(CheckInputReader* reader, uint64_t** macros
             const bool maytrap = pp_token_is_name(reader->pp, output, at + 2, last, "maytrap");
             const bool strict = pp_token_is_name(reader->pp, output, at + 2, last, "strict");
             const bool source_method = pp_token_is_name(reader->pp, output, at + 2, last, "source");
-            const bool double_method = pp_token_is_name(reader->pp, output, at + 2, last, "double");
+            // Semantic preprocessing classifies the expanded operand as a C keyword.
+            const bool double_method = check_input_fp_name(reader, at + 2, "double");
             const bool extended_method = pp_token_is_name(reader->pp, output, at + 2, last, "extended");
             supported = output->kinds[at + 1] == C_TOKEN_L_PAREN && output->kinds[at + 3] == C_TOKEN_R_PAREN &&
                         ((contract && (on || off || fast)) || ((reassociate || reciprocal) && (on || off)) ||
                          (exceptions && (ignore || maytrap || strict)) || (evaluation && (source_method || double_method || extended_method)));
             const uint8_t kind = contract ? CHECK_FP_PRAGMA_FP_CONTRACT : reassociate ? CHECK_FP_PRAGMA_REASSOCIATE :
                                  reciprocal ? CHECK_FP_PRAGMA_RECIPROCAL : evaluation ? CHECK_FP_PRAGMA_EVAL_METHOD : CHECK_FP_PRAGMA_EXCEPTIONS;
+            const uint8_t method = source_method ? CHECK_FP_EVAL_SOURCE : double_method ? CHECK_FP_EVAL_DOUBLE : CHECK_FP_EVAL_EXTENDED;
             selected.mask |= (uint8_t)(1u << kind);
-            selected.state.values[kind] = evaluation ? CHECK_FP_EVAL_SEEN | (source_method ? CHECK_FP_EVAL_SOURCE : double_method ? CHECK_FP_EVAL_DOUBLE : CHECK_FP_EVAL_EXTENDED) :
+            selected.state.values[kind] = evaluation ? CHECK_FP_EVAL_SEEN | method | (method << CHECK_FP_EVAL_LAST_SHIFT) :
                                           exceptions ? (strict ? 2 : (uint8_t)maytrap) : fast ? 2 : (uint8_t)on;
             selected.kind = length == 8 ? kind : CHECK_FP_PRAGMA_OPTIONS;
         }
@@ -285,8 +294,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
             while (pragma < parser->tokens.pragma_count && parser->tokens.pragma_positions[pragma] == token)
             {
                 const uint32_t source = parser->tokens.pragma_sources[pragma];
-                check_input_fp_eval_uses(reader, &eval_use, source, pragma, token,
-                                         (check_input_fp_environment(state) & BUSTER_CHECK_FP_EVAL_PRAGMA) != 0);
+                check_input_fp_eval_uses(reader, &eval_use, source, pragma, token, state.eval_pragma_source);
                 const bool complex = check_input_fp_name(reader, source + 3, "CX_LIMITED_RANGE");
                 const bool contract = check_input_fp_name(reader, source + 3, "FP_CONTRACT");
                 const bool file_boundary = token == 0 || parser->tree.roles[token - 1] == PARSE_ROLE_TERMINATOR ||
@@ -360,10 +368,13 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                             }
                             if (directive.pop && !empty)
                             {
+                                const uint8_t last = state.values[CHECK_FP_PRAGMA_EVAL_METHOD] & (CHECK_FP_EVAL_LAST_MASK | CHECK_FP_EVAL_SEEN);
+                                const uint32_t eval_pragma_source = state.eval_pragma_source;
                                 state = stack[--pushed];
-                                // Popping float_control restores precision, but Clang retains the last evaluation
-                                // pragma location until the enclosing compound ends. Keep that scope fact separate.
-                                state.values[CHECK_FP_PRAGMA_EVAL_METHOD] |= evaluation ? CHECK_FP_EVAL_SEEN : 0;
+                                // Clang restores arithmetic precision here, but its preprocessor retains the last
+                                // evaluation method and pragma location until the enclosing compound ends.
+                                state.values[CHECK_FP_PRAGMA_EVAL_METHOD] = (state.values[CHECK_FP_PRAGMA_EVAL_METHOD] & CHECK_FP_EVAL_METHOD_MASK) | last;
+                                state.eval_pragma_source = eval_pragma_source;
                             }
                             for (uint32_t kind = 0; kind < CHECK_FP_PRAGMA_STATE_COUNT; kind += 1)
                             {
@@ -371,6 +382,10 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                                 {
                                     state.values[kind] = directive.state.values[kind];
                                 }
+                            }
+                            if ((directive.mask & (1u << CHECK_FP_PRAGMA_EVAL_METHOD)) != 0)
+                            {
+                                state.eval_pragma_source = source + 3;
                             }
                             if (directive.kind == CHECK_FP_PRAGMA_PRECISE)
                             {
@@ -397,16 +412,8 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         };
                         if (error == CHECK_FP_ERROR_EVAL_REASSOCIATE || error == CHECK_FP_ERROR_EVAL_RECIPROCAL || (error & CHECK_FP_ERROR_EVAL_OPTIONS) != 0)
                         {
-                            const char* option = error == CHECK_FP_ERROR_EVAL_REASSOCIATE ? "reassociate" :
-                                                 error == CHECK_FP_ERROR_EVAL_RECIPROCAL ? "reciprocal" : "eval_method";
-                            for (uint32_t at = source + 4; at < directive.end; at += 4)
-                            {
-                                if (check_input_fp_name(reader, at, option))
-                                {
-                                    input->fp_pragmas[input->fp_pragma_count - 1].error_source = at;
-                                    break;
-                                }
-                            }
+                            // Clang locates these conflicts at the retained 'fp' token, including combined options.
+                            input->fp_pragmas[input->fp_pragma_count - 1].error_source = source + 3;
                         }
                         if (empty)
                         {
@@ -419,7 +426,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                 pragma += 1;
             }
             check_input_fp_eval_uses(reader, &eval_use, token < parser->tokens.count ? parser->tokens.sources[token] : reader->pp->output.count, pragma, token,
-                                     (check_input_fp_environment(state) & BUSTER_CHECK_FP_EVAL_PRAGMA) != 0);
+                                     state.eval_pragma_source);
             input->fp_environments[token] = check_input_fp_environment(state);
             input->cx_limited_ranges[token] = state.values[CHECK_FP_PRAGMA_CX_LIMITED_RANGE];
             if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
@@ -517,8 +524,8 @@ static void check_input_fp_types(CheckInputReader* reader)
             check_input_fp_mark_type(reader, &marked, declaration);
         }
     }
-    const uint8_t baseline = requested == BUSTER_PREDEFINES_EVAL_DOUBLE ? BUSTER_CHECK_FP_EVAL_DOUBLE :
-                             requested == BUSTER_PREDEFINES_EVAL_EXTENDED ? BUSTER_CHECK_FP_EVAL_EXTENDED : 0;
+    const uint8_t baseline = requested == BUSTER_PREDEFINES_EVAL_DOUBLE ? BUSTER_CHECK_FP_EVAL_LAST_DOUBLE :
+                             requested == BUSTER_PREDEFINES_EVAL_EXTENDED ? BUSTER_CHECK_FP_EVAL_LAST_EXTENDED : 0;
     for (uint32_t token = 0; marked != NULL && !input->resource && token < count; token += 1)
     {
         const uint32_t declaration = input->declarations[token];
@@ -536,7 +543,7 @@ static void check_input_fp_types(CheckInputReader* reader)
         }
         if (declaration < count && declaration != token && (marked[declaration] & 4) != 0 &&
             (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0) &&
-            (environment & BUSTER_CHECK_FP_EVAL_PRAGMA) != 0 && (environment & BUSTER_CHECK_FP_EVAL_MASK) != baseline)
+            (environment & BUSTER_CHECK_FP_EVAL_PRAGMA) != 0 && (environment & BUSTER_CHECK_FP_EVAL_LAST_MASK) != baseline)
         {
             const uint32_t before = input->report_count;
             check_input_report(reader, declaration, CHECK_INPUT_FP_EVAL_TYPE);

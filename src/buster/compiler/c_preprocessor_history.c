@@ -871,12 +871,11 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
     pp_diagnose_output_location(pp, severity, token, token < pp->output.count ? pp->output.locations[token] : 0, position, phase, notes, note_count, format, arguments);
 }
 
-// pp_diagnose_output_arguments at `location`, a place in the spelling of output token `token` (with its history).
-static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
+// Explicit source coordinates can name a consumed preprocessing token. The caller has ensured history, so both
+// its origin and every output note's origin belong to the same replay. They publish as one diagnostic group.
+static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, uint32_t position, PPDiagnosticPhase phase,
                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
-    pp_history_ensure(pp);
-    const uint32_t origin = pp_history_at(pp, token);
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
     const PPSeverity requested = severity;
@@ -891,11 +890,11 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
     {
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + phase, location, pp_history_at(pp, token), NULL, notes, note_count, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + phase, location, origin, NULL, notes, note_count, format, arguments);
         }
         else
         {
-            pp_render_diagnostic(pp, severity, location, pp_history_at(pp, token), NULL, format, arguments);
+            pp_render_diagnostic(pp, severity, location, origin, NULL, format, arguments);
             for (uint32_t i = 0; notes != NULL && i < note_count; i += 1)
             {
                 const uint32_t at = notes[i].token;
@@ -903,6 +902,24 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
             }
         }
     }
+}
+
+// pp_diagnose_output_arguments at `location`, a place in the spelling of output token `token` (with its history).
+static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
+                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
+{
+    pp_history_ensure(pp);
+    pp_diagnose_source_location(pp, severity, location, pp_history_at(pp, token), position, phase, notes, note_count, format, arguments);
+}
+
+static __attribute__((format(printf, 9, 10))) void pp_diagnose_source_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin,
+                                                                                uint32_t position, PPDiagnosticPhase phase, const PPOutputDiagnosticNote* notes,
+                                                                                uint32_t note_count, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_source_location(pp, severity, location, origin, position, phase, notes, note_count, format, arguments);
+    va_end(arguments);
 }
 
 // The diagnostic location and its publication boundary can differ. A runtime warning, for example, completes

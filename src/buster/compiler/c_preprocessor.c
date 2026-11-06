@@ -1766,7 +1766,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
-BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
 
 #include "c_preprocessor_history.c"
 
@@ -18818,22 +18818,17 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
 }
 
 // A source expansion may have no output token (#if), so its retained location/origin is the diagnostic source.
-// Use the ordinary lexical diagnostic path, including error limits and macro notes; never invent a token origin
-// from a neighboring output token. The caller supplies the final boundary after preceding captured pragmas.
-BUSTER_PREPROCESSOR_ENTRY void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position)
+// Group its lexical error with the active pragma's own source history. The caller supplies the final boundary
+// after preceding captured pragmas and that pragma's retained `fp` output token, including for macro _Pragma.
+BUSTER_PREPROCESSOR_ENTRY void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source)
 {
     pp_history_ensure(pp);
     if (use < pp->eval_method_use_count && !pp->fatal)
     {
         const PPEvalMethodUse record = pp->eval_method_uses[use];
-        const uint32_t saved_origin = pp->diagnostic_origin;
-        const uint32_t saved_position = pp->diagnostic_position;
-        pp->diagnostic_origin = record.origin;
-        pp->diagnostic_position = position;
-        pp_diagnose(pp, PP_SEVERITY_ERROR, record.location,
-                    "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'");
-        pp->diagnostic_origin = saved_origin;
-        pp->diagnostic_position = saved_position;
+        const PPOutputDiagnosticNote note = { .token = pragma_source, .message = "#pragma entered here" };
+        pp_diagnose_source_notes_phase(pp, PP_SEVERITY_ERROR, record.location, record.origin, position, PP_DIAGNOSTIC_LEXICAL, &note, 1,
+                                      "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'");
     }
 }
 

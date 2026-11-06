@@ -1812,7 +1812,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     if (phase == 0 && input->reports[index].message == CHECK_INPUT_FP_EVAL_USE)
                     {
                         const CheckInputReport* report = input->reports + index;
-                        pp_diagnose_eval_method_use(pp, report->subject - 1, report->detail);
+                        pp_diagnose_eval_method_use(pp, report->subject - 1, report->detail, (uint32_t)report->value);
                     }
                     else if (source != BUSTER_CHECK_NONE)
                     {
