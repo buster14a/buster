@@ -30,6 +30,7 @@ requirements. [Command index](README.md).
   with clang's after them for the headers they don't supply (never for a name
   they have, so their `#include_next` reaches the C library's), and
   `-nobuiltininc` leaves out the compiler's headers, whichever they are.
+  `-I-` is rejected (`please use -iquote instead`); a directory named `-` is `-I./-`.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
