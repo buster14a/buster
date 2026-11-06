@@ -221,11 +221,27 @@ static bool ssa_source_native_one(const char* source, char** options, uint32_t o
         ready = !result->timed_out && result->build_status >= 0 && WIFEXITED(result->build_status) && WEXITSTATUS(result->build_status) == 0;
     }
     uint64_t log_bytes = 0;
-    char* text = ready ? c_testsuite_read(log, &log_bytes) : NULL;
+    char* text = result->status == SSA_SOURCE_NATIVE_BUILD ? c_testsuite_read(log, &log_bytes) : NULL;
     if (ready)
     {
         result->status = SSA_SOURCE_NATIVE_COVERAGE;
         ready = ssa_source_native_report(text, functions, &result->functions);
+    }
+    if (!ready && text != NULL)
+    {
+        // Hosted jobs retain their output even when the temporary directory disappears. Keep a bounded diagnostic
+        // beside the failing source/path instead of reporting only the compiler's nonzero status.
+        const uint64_t shown = log_bytes < 16384 ? log_bytes : 16384;
+        fprintf(stderr, "test-ssa-source: native=%s compiler log (%s):\n", scalar ? "scalar" : "vector", log);
+        fwrite(text, 1, shown, stderr);
+        if (shown != 0 && text[shown - 1] != '\n')
+        {
+            fputc('\n', stderr);
+        }
+        if (shown < log_bytes)
+        {
+            fprintf(stderr, "test-ssa-source: compiler log truncated after %" PRIu64 " of %" PRIu64 " bytes\n", shown, log_bytes);
+        }
     }
     free(text);
     SsaSourceNativeRun run = { .status = -1 };
