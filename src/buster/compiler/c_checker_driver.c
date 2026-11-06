@@ -119,6 +119,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
         case CHECK_INPUT_FP_EVAL_USE: result = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'"; break;
+        case CHECK_INPUT_FP_EVAL_TYPE: result = "type is set according to the default eval method for the translation unit"; break;
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
         case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
