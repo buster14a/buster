@@ -359,7 +359,7 @@ static uint32_t tier1_cert_emitted_narrow(uint32_t type)
     return type == IR_I1 || type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
 }
 
-// General register `reg`'s low `width` bytes (1 or 2), as a new location: a narrow parameter's as its caller passed it.
+// General register `reg`'s low `width` bytes, as a new location: the caller's bytes before an explicit entry conversion.
 static uint32_t tier1_cert_emitted_low(Tier1CertEmittedBuild* build, uint32_t reg, uint32_t width)
 {
     uint32_t result = BUSTER_CERT_NONE;
@@ -369,7 +369,7 @@ static uint32_t tier1_cert_emitted_low(Tier1CertEmittedBuild* build, uint32_t re
         build->locations[result] = (Tier1CertLocation){
             .unit = 8 * reg,
             .width = (uint16_t)width,
-            .extent = (uint16_t)width,
+            .extent = (uint16_t)(width == 4 ? 8 : width),
             .class = TIER1_CERT_GPR,
             .reg = (uint8_t)reg,
         };
@@ -2879,8 +2879,8 @@ static void tier1_cert_emitted_range(const Tier1CertEmittedBuild* build, Tier1Ce
     *high = end - shift > *high ? end - shift : *high;
 }
 
-// Record `r` of the entry block's body, its origin ENTRY's: a narrow parameter's extension into its canonical form, which
-// is the parameter itself, or a parameter's move into its register.
+// Record `r` of the entry block's body, its origin ENTRY's: a parameter's explicit representation conversion,
+// which defines the parameter itself from only its caller's logical bytes, or a parameter's move into its register.
 static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
 {
     const Tier1EmitResult* emitted = build->emitted;
@@ -2889,7 +2889,8 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
     const uint32_t node = emitted->origin_values[r];
     const bool parameter = node < function->instruction_count && function->op[node] == IR_PARAM;
     const uint32_t type = parameter ? function->type[node] : IR_VOID;
-    const uint16_t extend = type == IR_I1 || type == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_NONE;
+    const bool signed_parameter = parameter && type == IR_I32 && build->plan->patterns[node].sign_result;
+    const uint16_t extend = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : type == IR_I1 || type == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_NONE;
     const Tier1SelectPlace place = parameter ? tier1_select_parameter_place(function, function->a[node]) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
     const bool narrowed = extend != X86_FORM_NONE && record.form == extend && place.kind == BUSTER_TIER1_PLACE_GENERAL && record.reg == tier1_select_parameter_registers[place.index] && record.rm == record.reg &&
                           record.mode == BUSTER_X86_REGISTER_DIRECT;
@@ -2899,15 +2900,15 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
     int32_t offset = 0;
     const bool incoming = place.kind == BUSTER_TIER1_PLACE_STACK && tier1_emit_cfg_incoming(emitted, (uint64_t)BUSTER_ABI_SLOT_BYTES * place.index, &base, &offset) && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == base && record.displacement == offset;
     const uint32_t float_width = parameter ? tier1_select_float_width(type) : 0;
-    const uint16_t general_form = type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : extend;
+    const uint16_t general_form = signed_parameter ? extend : type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : extend;
     const uint16_t vector_form = float_width != 0 ? tier1_select_float_forms(float_width)->load : X86_FORM_NONE;
     bool valid = !incoming || record.form == general_form || record.form == vector_form;
-    const uint32_t narrow = tier1_cert_emitted_narrow(type);
+    const uint32_t narrow = signed_parameter ? 4 : tier1_cert_emitted_narrow(type);
     const uint32_t value = parameter ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
     if (valid && ((incoming && extend != X86_FORM_NONE && record.reg < 16) || narrowed))
     {
-        // A narrow parameter's extension into its canonical 32-bit storage: the instruction that reads its caller's bytes
-        // (in its register's low bytes, or its slot's) and defines the parameter's value, so that without it nothing does.
+        // Read only the caller's logical bytes and define the selected representation. Exact instruction form,
+        // source and destination are required: omitting it or reading unspecified upper bytes defines no value.
         const uint32_t from = narrowed ? tier1_cert_emitted_low(build, record.reg, narrow) : tier1_cert_emitted_memory(build, record, narrow);
         Tier1CertSource* source = 0;
         Tier1CertInstruction* instruction = 0;
@@ -2926,7 +2927,7 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
             source->use_count = 1;
             source->def_count = 1;
             instruction->locations[0] = from;
-            instruction->locations[1] = tier1_cert_emitted_gpr(record.reg, 4);
+            instruction->locations[1] = tier1_cert_emitted_gpr(record.reg, signed_parameter ? 8 : 4);
             instruction->operand_count = 2;
             build->stats->originals += 1;
         }
@@ -3372,7 +3373,12 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             valid = !stacked || incoming || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
             // A narrow one is only its caller's bytes, its own value at entry (tier1_cert_emitted_entry's extension reads
             // them into its canonical storage).
-            const uint32_t narrow = tier1_cert_emitted_narrow(function->type[node]);
+            const bool signed_parameter = function->type[node] == IR_I32 && plan->patterns[node].sign_result;
+            const uint32_t narrow = signed_parameter ? 4 : tier1_cert_emitted_narrow(function->type[node]);
+            if (signed_parameter)
+            {
+                cert_values[build.incoming + function->a[node]].width = 4;
+            }
             const uint32_t width = narrow != 0 ? narrow : tier1_cert_emitted_width(emitted, v);
             const uint32_t location = stacked ? (incoming ? tier1_cert_emitted_entry_frame(&build, slot, width) : BUSTER_CERT_NONE)
                                     : narrow != 0 && general ? tier1_cert_emitted_low(&build, reg, narrow)
