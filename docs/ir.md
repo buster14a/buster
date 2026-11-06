@@ -1050,6 +1050,39 @@ more of its dispatch slots left empty by the front end. The lowering of the
 generated programs does 1.8% more work, the new kinds' and records' tests, and
 takes 3% to 8% longer there (within 1% on the laptop's larger programs).
 
+### The verifier, the CFG builder and the optimizer over placements (#786)
+
+#786 asked that the verifier's, the CFG builder's and the optimizer's hot loops run
+alike over the code's placements on the 9700X, and that `benchmark-ir` and
+`benchmark-ir-optimize` be at or below #774's base, `9bb5060e`. Their data-parallel
+graph check, the type windows and the optimizer's single verification per
+preparation, with AUTO verifying by the vector twin, measured over six placements
+of the backend's unit and three rounds against `9bb5060e` and main `ec5f0f6b`
+([the record](https://github.com/buster14a/buster-performance/tree/a9e342e4530c18ef293700010648b2e26a1b3d92/docs/measurements/ir-graph-786-2026-11-06)):
+
+| Row (median over placements) | `9bb5060e` | Main | #786 | Spread over placements, #786 |
+| --- | ---: | ---: | ---: | ---: |
+| Vector verifier, 32 instructions (ns/instruction) | 5.866 | 5.289 | 1.804 | 2.4% |
+| Vector verifier, 262,144 instructions | 5.604 | 5.101 | 1.269 | 1.1% |
+| Scalar verifier, 32 instructions | 9.445 | 9.332 | 9.225 | 2.4% |
+| Scalar verifier, 262,144 instructions | 8.790 | 8.582 | 8.108 | 1.4% |
+| CFG, 32 instructions | 1.683 | 1.500 | 1.488 | 2.2% |
+| CFG, 262,144 instructions | 1.357 | 1.480 | 1.080 | 1.6% |
+| Uses, 262,144 instructions | 12.529 | 11.680 | 7.726 | 1.0% |
+| Optimizer, phi-diamond, scalar (ns/input instruction) | 150.916 | 168.841 | 133.337 | 1.8% |
+| Optimizer, loop, scalar | 133.305 | 146.459 | 116.136 | 2.2% |
+| Optimizer, jump-chain, scalar | 60.731 | 63.488 | 49.005 | 0.6% |
+| Optimizer, small-dag, AUTO | – | 59.444 | 39.368 | 3.1% |
+
+Every row of both benchmarks is below `9bb5060e`'s at its median, and in 106 of 108
+pairs at the same placement (the 32-instruction scalar verifier at two, +0.1% and
++0.5%); the verifier's and the CFG builder's spreads over placements are 1.1% to 2.4%,
+against `9bb5060e`'s 3.8% to 25.2%. The vector verifier's front end leaves 0.09% of its
+dispatch slots empty, against main's 12.4%, with 76 taken branches per 1,000
+instructions against 108. On the frozen `sqlite3.c`'s functions `benchmark-ir-source`'s
+`verify` takes 11.59 ns per typed entry against main's 21.14, with 181 instructions
+against 331, and `promote`, whose result it verifies, 127.22 against 142.16.
+
 ### Initial 9700X qualification
 
 [Protected run 39934441798](https://github.com/buster14a/buster/actions/runs/39934441798)
