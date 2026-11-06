@@ -126,14 +126,15 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     }
     // A return's keyword: goto, break and continue, of its role, are the walk's.
     code = role == PARSE_ROLE_RETURN && kind == PARSE_KIND_RETURN ? CHECK_INPUT_CODE_RETURN : code;
-    // The columns the reader wrote before the walk refine a class (#1038): a separator of a comma operator is a BINARY,
-    // and an initializer's assignment, a builtin's token where the class's action would leave it to the walk, and an
-    // intrinsic's call are the walk's.
+    // The columns the reader wrote before the walk refine a class (#1038): a separator of a comma operator is a BINARY, and
+    // an initializer's assignment an INITIALIZE; a builtin's token where the class's action would leave it to the walk,
+    // and an intrinsic's call, are the walk's.
     code = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[i] != 0 ? CHECK_INPUT_CODE_BINARY : code;
-    code = code == CHECK_INPUT_CODE_BINARY && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
+    code = code == CHECK_INPUT_CODE_BINARY && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_INITIALIZE : code;
     const bool builtin_declines = code == CHECK_INPUT_CODE_PREFIX || code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_CAST ||
                                   code == CHECK_INPUT_CODE_TERNARY || code == CHECK_INPUT_CODE_SUBSCRIPT || code == CHECK_INPUT_CODE_MEMBER ||
-                                  code == CHECK_INPUT_CODE_POSTFIX || code == CHECK_INPUT_CODE_CONDITION || code == CHECK_INPUT_CODE_CALL;
+                                  code == CHECK_INPUT_CODE_POSTFIX || code == CHECK_INPUT_CODE_CONDITION || code == CHECK_INPUT_CODE_CALL ||
+                                  code == CHECK_INPUT_CODE_INITIALIZE;
     code = builtin_declines && reader->builtins[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
     code = code == CHECK_INPUT_CODE_CALL && reader->output->intrinsic_ids != NULL && reader->output->intrinsic_ids[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
     if (reader->ignored[i] != 0)
@@ -1483,6 +1484,206 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
              "decimals missed (%u plain)", differences, entries, wrong, missed, plain);
     check_test_expect(test, ready && differences == 0 && wrong == 0 && missed == 0 && entries != 0 && plain != 0, description);
     arena_release(&scratch);
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], 2 * page);
+        }
+    }
+}
+
+// The coded walk's batch written to the graph (check_input_expression_flush, #1038's stages 2 and 4) by both paths: random
+// batches of up to 200 nodes after up to 40 nodes a visit made, over random token columns of up to 200 tokens, which both
+// paths must write into two graphs column for column and record alike (each node's purity and the graph's counts). Its
+// nodes are operators, leaves, discards and initializers at random tokens, with random operands among the nodes before them, contexts,
+// members and arguments; the unit has a warnings' suppression column or none and a floating-point environment or none.
+// Every token column ends at a PROT_NONE page, the byte columns at every alignment of their ends, so a gather past a
+// column's last dword faults: the vector path reads each byte as the aligned dword that holds it.
+static __attribute__((noinline)) void check_test_expression_flush(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    enum
+    {
+        QUERY_TYPES,
+        STATICS,
+        ROLES,
+        ENDS,
+        SUPPRESSED,
+        CONSTANTS,
+        ENVIRONMENTS,
+        COLUMNS,
+    };
+    enum
+    {
+        CAPACITY = 256,
+    };
+    uint8_t* mappings[COLUMNS];
+    bool ready = true;
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        mappings[i] = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "guarded flush columns' allocation");
+    // A builtin type, which a VALUE leaf of it and a typed operator of it make pure, and another.
+    const TypeId types[] = { 0, BUSTER_TYPE_INT, BUSTER_TYPE_VOID, BUSTER_TYPE_DOUBLE, 5u << BUSTER_TYPE_INDEX_SHIFT };
+    const uint8_t roles[] = { PARSE_ROLE_CLOSE_CONDITION, PARSE_ROLE_CLOSE_CASE, PARSE_ROLE_OPERAND, PARSE_ROLE_ADDITIVE, PARSE_ROLE_TERMINATOR };
+    const CheckOp ops[] = { CHECK_OP_ADD, CHECK_OP_NEGATIVE, CHECK_OP_CAST, CHECK_OP_CONVERT, CHECK_OP_CONDITION, CHECK_OP_CALL, CHECK_OP_MEMBER, CHECK_OP_VALUE,
+                            CHECK_OP_SUBSCRIPT, CHECK_OP_CONDITIONAL };
+    static CheckInputBatch batches[2];
+    static CheckValue leaves[2][CAPACITY];
+    static CheckOp graph_ops[2][CAPACITY];
+    static uint32_t graph_words[2][9][CAPACITY];
+    static TypeId graph_types[2][CAPACITY];
+    static uint8_t graph_bytes[2][4][CAPACITY];
+    uint32_t differences = 0;
+    uint32_t written = 0;
+    for (uint32_t round = 0; ready && round < 400; round += 1)
+    {
+        const uint32_t count = 1 + check_test_random(test) % 200;
+        const uint32_t before = check_test_random(test) % 41;
+        const uint32_t nodes = check_test_random(test) % 201;
+        Parser parser = { 0 };
+        parser.tokens.count = count;
+        parser.tree.roles = check_test_scan_column(mappings[ROLES] + page, count, 1);
+        CheckInputReader reader = { 0 };
+        reader.parser = &parser;
+        reader.query_types = check_test_scan_column(mappings[QUERY_TYPES] + page, count, 4);
+        reader.static_initializers = check_test_scan_column(mappings[STATICS] + page, count, 1);
+        reader.ends = check_test_scan_column(mappings[ENDS] + page, count, 4);
+        reader.warning_suppressed = (round & 3) == 1 ? NULL : check_test_scan_column(mappings[SUPPRESSED] + page, count, 1);
+        reader.constant_contexts = check_test_scan_column(mappings[CONSTANTS] + page, count, 1);
+        CheckInput inputs[2] = { 0 };
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            parser.tree.roles[i] = roles[check_test_random(test) % BUSTER_ARRAY_LENGTH(roles)];
+            reader.query_types[i] = types[check_test_random(test) % BUSTER_ARRAY_LENGTH(types)];
+            reader.static_initializers[i] = (uint8_t)(check_test_random(test) % 3 == 0);
+            ((uint32_t*)reader.ends)[i] = i + check_test_random(test) % (count - i);
+            reader.constant_contexts[i] = (uint8_t)(check_test_random(test) % 3 == 0);
+            if (reader.warning_suppressed != NULL)
+            {
+                reader.warning_suppressed[i] = (uint8_t)(check_test_random(test) % 4);
+            }
+        }
+        uint8_t* environments = check_test_scan_column(mappings[ENVIRONMENTS] + page, count, 1);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            environments[i] = (uint8_t)(1 + check_test_random(test) % 3);
+        }
+        // The batch: nodes after the `before` nodes a visit made, each an operator, a leaf or a discard.
+        CheckInputBatch* batch = &batches[0];
+        batch->base = before;
+        batch->leaf_base = before / 2;
+        batch->count = nodes;
+        batch->leaves = 0;
+        for (uint32_t k = 0; k < nodes; k += 1)
+        {
+            const CheckOp op = ops[check_test_random(test) % BUSTER_ARRAY_LENGTH(ops)];
+            const uint32_t node = before + k;
+            const bool leaf = op == CHECK_OP_VALUE;
+            batch->ops[k] = op;
+            batch->tokens[k] = check_test_random(test) % count;
+            batch->operand0[k] = leaf || node == 0 || check_test_random(test) % 4 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % node;
+            batch->operand1[k] = leaf || node == 0 || check_test_random(test) % 2 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % node;
+            batch->operand2[k] = leaf || node == 0 || check_test_random(test) % 4 != 0 ? BUSTER_CHECK_NONE : check_test_random(test) % node;
+            batch->leaf_slots[k] = leaf ? batch->leaf_base + batch->leaves : BUSTER_CHECK_NONE;
+            batch->leaves += leaf;
+            batch->members[k] = check_test_random(test) % 4 == 0 ? check_test_random(test) : 0;
+            batch->argument_offsets[k] = op == CHECK_OP_CALL ? check_test_random(test) % 100 : 0;
+            batch->argument_counts[k] = op == CHECK_OP_CALL ? check_test_random(test) % 5 : 0;
+            const uint32_t form = check_test_random(test) % 4;
+            batch->forms[k] = (uint8_t)(leaf ? CHECK_INPUT_FORM_LEAF : form == 0 ? CHECK_INPUT_FORM_DISCARD : form == 1 ? CHECK_INPUT_FORM_INITIALIZER : CHECK_INPUT_FORM_OPERATOR);
+            batch->contexts[k] = check_test_random(test) % 3 == 0 ? BUSTER_CHECK_CONTEXT_VALUE : 0;
+        }
+        batches[1] = batches[0];
+        const bool suppressions = (round & 1) == 0;
+        const bool floating = (round % 5) == 2;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            CheckInput* input = &inputs[scalar];
+            CheckGraph* graph = &input->graph;
+            memset(graph_ops[scalar], 0xa5, sizeof(graph_ops[scalar]));
+            memset(graph_words[scalar], 0xa5, sizeof(graph_words[scalar]));
+            memset(graph_types[scalar], 0xa5, sizeof(graph_types[scalar]));
+            memset(graph_bytes[scalar], 0xa5, sizeof(graph_bytes[scalar]));
+            graph->capacity = CAPACITY;
+            graph->ops = graph_ops[scalar];
+            graph->tokens = graph_words[scalar][0];
+            graph->operand0 = graph_words[scalar][1];
+            graph->operand1 = graph_words[scalar][2];
+            graph->operand2 = graph_words[scalar][3];
+            graph->leaf_slots = graph_words[scalar][4];
+            graph->members = graph_words[scalar][5];
+            graph->argument_offsets = graph_words[scalar][6];
+            graph->argument_counts = graph_words[scalar][7];
+            graph->source_positions = graph_words[scalar][8];
+            graph->types = graph_types[scalar];
+            graph->contexts = graph_bytes[scalar][0];
+            graph->recorded_pure = graph_bytes[scalar][1];
+            graph->warning_suppressed = suppressions ? graph_bytes[scalar][2] : NULL;
+            graph->fp_environments = floating ? graph_bytes[scalar][3] : NULL;
+            graph->leaves = leaves[scalar];
+            input->fp_environments = environments;
+            // The nodes before the batch: a visit's, none of them recorded yet, and the leaves before the batch's.
+            for (uint32_t node = 0; node < before; node += 1)
+            {
+                graph->ops[node] = node % 3 == 0 ? CHECK_OP_VALUE : CHECK_OP_ADD;
+                graph->operand0[node] = BUSTER_CHECK_NONE;
+                graph->operand1[node] = BUSTER_CHECK_NONE;
+                graph->operand2[node] = BUSTER_CHECK_NONE;
+                graph->leaf_slots[node] = node % 3 == 0 ? node / 3 : BUSTER_CHECK_NONE;
+                graph->types[node] = node % 2 == 0 ? BUSTER_TYPE_INT : 0;
+                graph->argument_counts[node] = 0;
+            }
+            graph->count = before;
+            graph->leaf_count = batch->leaf_base;
+            graph->recorded_nodes = 0;
+            for (uint32_t slot = 0; slot < CAPACITY; slot += 1)
+            {
+                // The same leaves in both graphs: each round's draws are made once, for the first.
+                leaves[scalar][slot] = scalar == 0 ? (CheckValue){ .type = types[check_test_random(test) % BUSTER_ARRAY_LENGTH(types)],
+                                                                    .overload_head = check_test_random(test) % 4 == 0 } : leaves[0][slot];
+            }
+            reader.output = input;
+            check_input_expression_flush(&reader, &batches[scalar], scalar != 0);
+        }
+        const CheckGraph* x = &inputs[0].graph;
+        const CheckGraph* y = &inputs[1].graph;
+        const uint32_t total = before + nodes;
+        // An empty batch writes nothing and records nothing: the visit's nodes wait for the next record.
+        const uint32_t recorded = nodes != 0 ? total : 0;
+        differences += x->count != total || y->count != total || x->leaf_count != y->leaf_count || x->recorded_nodes != recorded || y->recorded_nodes != recorded ||
+                       memcmp(&x->recorded, &y->recorded, sizeof(x->recorded)) != 0 || batches[0].count != 0 || batches[1].count != 0 ||
+                       batches[0].base != total || batches[1].base != total;
+        for (uint32_t node = before; node < total && x->count == total && y->count == total; node += 1)
+        {
+            const uint32_t token = batch->tokens[node - before];
+            const bool operator = batches[1].forms[node - before] == CHECK_INPUT_FORM_OPERATOR;
+            const bool initializer = batches[1].forms[node - before] == CHECK_INPUT_FORM_INITIALIZER;
+            const bool discard = batches[1].forms[node - before] == CHECK_INPUT_FORM_DISCARD;
+            // Each column against the other path's, and the gathered ones against the token's columns too.
+            differences += x->ops[node] != y->ops[node] || x->tokens[node] != y->tokens[node] || x->operand0[node] != y->operand0[node] ||
+                           x->operand1[node] != y->operand1[node] || x->operand2[node] != y->operand2[node] || x->leaf_slots[node] != y->leaf_slots[node] ||
+                           x->members[node] != y->members[node] || x->argument_offsets[node] != y->argument_offsets[node] ||
+                           x->argument_counts[node] != y->argument_counts[node] || x->types[node] != y->types[node] || x->contexts[node] != y->contexts[node] ||
+                           x->source_positions[node] != y->source_positions[node] || x->recorded_pure[node] != y->recorded_pure[node] ||
+                           (suppressions && x->warning_suppressed[node] != y->warning_suppressed[node]) ||
+                           (floating && x->fp_environments[node] != y->fp_environments[node]);
+            const uint8_t statics = (operator || initializer) && reader.static_initializers[token] ? (operator ? BUSTER_CHECK_CONTEXT_STATIC : BUSTER_CHECK_CONTEXT_VALUE) : 0;
+            differences += y->types[node] != (operator || initializer ? reader.query_types[token] : discard ? BUSTER_TYPE_VOID : 0) ||
+                           y->contexts[node] != (statics | batches[1].contexts[node - before]) || y->source_positions[node] != check_input_expression_end(&reader, token);
+            written += 1;
+        }
+        for (uint32_t node = 0; node < before && nodes != 0; node += 1)
+        {
+            differences += x->recorded_pure[node] != y->recorded_pure[node];
+        }
+    }
+    char description[200];
+    snprintf(description, sizeof(description), "the coded walk's batches written by both paths: %u of %u nodes differ", differences, written);
+    check_test_expect(test, ready && differences == 0 && written != 0, description);
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {
         if (mappings[i] != MAP_FAILED)

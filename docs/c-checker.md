@@ -4286,9 +4286,10 @@ the oracle.
   (`check_input_expression_fold`, #1144), read 64 tokens at a time:
   - a separator that `expression_commas` marks is a comma operator's BINARY,
     and the other separators are lists;
-  - an initializer's assignment (`initializers`) is the walk's;
-  - so is a builtin's token (`builtins`) of a class whose action left builtins
-    to the walk (`check_input_builtin_codes`);
+  - an initializer's assignment (`initializers`) is an INITIALIZE, a class of
+    its own (#1038's stages 2 and 4, below; until then the walk's);
+  - a builtin's token (`builtins`) of a class whose action left builtins
+    to the walk (`check_input_builtin_codes`) is the walk's;
   - so is an intrinsic's call (`intrinsic_ids`).
 
   The actions test none of these as the walk reaches each token. An intrinsic's
@@ -4316,6 +4317,9 @@ the oracle.
   - lists and groups;
   - terminators' discards, a statement expression's last statement's result
     among them, and conditions;
+  - an initializer's assignment: the INITIALIZE of its one value, recorded as
+    its declaration's initializer (`initializer_nodes`), or a braced
+    initializer's values passed on as a list;
   - a return's conversion to the function's type, or its missing value's
     report;
   - plain calls, with their arguments' slice and the library builtins' marks.
@@ -4341,11 +4345,9 @@ the oracle.
   below, this needs no flush: the node ids still come from the walk, and only
   the leaves' contents are made ahead.
 
-  The node is `check_input_add_node`'s: `check_graph_add`'s, with its checks
-  and columns, and the columns the reader gives every node. `check_input_add`
-  records the nodes before it first. The coded walk doesn't: the next
-  `check_input_add` or `check_graph_record_finish` records them, in node order,
-  from their final columns. An action tests what its class can't say: the
+  An action doesn't write its node to the graph: it numbers it into a batch,
+  whose columns are written at once (the graph by passes, below), with
+  `check_graph_add`'s checks. An action tests what its class can't say: the
   values the children have, and the columns the walk writes as it goes. Where
   they don't hold, the token goes to the walk's
   own visit (`check_input_expression_visit`, the action factored out as
@@ -4359,7 +4361,8 @@ the oracle.
   without the DROPs, against a random postorder, every column ending at a
   `PROT_NONE` page. It checks the identifiers' leaves by both paths on random
   chunks over random columns, each ending at a `PROT_NONE` page, the byte
-  columns at every alignment. The coded walk counts, by class, the tokens it acted at by
+  columns at every alignment, and the batch's flush the same way (below). The
+  coded walk counts, by class, the tokens it acted at by
   the class's action and those it left to the walk's visit
   (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
   it to act by class at tokens of every fixture whose features it takes, and
@@ -4375,7 +4378,9 @@ the oracle.
   nanoseconds and the timing's own ticks a token, which it takes off every
   class's, and an `expression-class` line per class with its tokens, those its
   action left (whose visits its time includes), its nanoseconds (the median
-  over the passes) and its share. Every comparison of the two paths compares the
+  over the passes) and its share. A class's time includes the batch's flushes
+  its tokens make (the graph by passes, below): the scalar class's, those
+  before its visits. Every comparison of the two paths compares the
   graphs, leaves, argument slices, overload calls and `token_nodes`:
   - `test-checker`, for every source fixture
     (`check_test_source_graphs_equal`), with the overload heads;
@@ -4652,8 +4657,93 @@ the oracle.
   - the nodes' recording is no barrier: nothing reads it before
     `check_graph_record_finish`.
 
-  The operators stay per token until a vector numbering is built and
-  measured against that bound; the stages stay open in #1038.
+  What was built instead is the batch below. The probe stays, and takes a
+  braced initializer's INITIALIZE as a list that passes its values on.
+- **The graph by passes, built (stages 2 and 4).** The class actions number
+  their nodes before the graph has any of them, and the graph's columns are
+  written 16 nodes at a time (`CheckInputBatch`,
+  `check_input_expression_flush`):
+  - **Numbering.** An action appends its node to the batch
+    (`check_input_batch_add`, with `check_graph_add`'s checks): its operator,
+    token, operands and form (an operator's, a leaf's, a discard's or an
+    initializer's). Its id is the graph's count before the batch plus its place
+    in it: the prefix sum of the actions' node counts, taken as they go, since a
+    terminator's count is its values' and a declined token's none. The batch
+    holds 1,024 nodes, a column of each on the scratch, in the first two cache
+    levels. An action reads an earlier node of the batch through the batch (a
+    call's callee and its designator, an address's operand's token for the
+    overload heads, an argument's token), and writes what a node takes after it
+    is made (a member's name, a call's argument slice, a static list's
+    element's value context) into it. The value chains (`value_next` and the
+    tokens' first values) are written as the actions go, since a parent reads
+    them at once, and so are the leaves, whose slots the batch gives.
+  - **Writing.** The flush writes the batch's nine columns as they are, and
+    gathers at the nodes' tokens what every node takes from its token: the type
+    its query asked for (an operator's and an initializer's), a static
+    initializer's context (an operator's `STATIC`, an initializer's `VALUE`),
+    where its expression ends (`check_input_expression_end`), its warnings'
+    suppression and its floating-point environment, a byte column through
+    `check_input_gather_bytes`. It then records the nodes
+    (`check_graph_record_nodes`, after any a visit made before them) while their
+    columns are hot. The scalar path, the twin, writes a node at a time.
+  - **Barriers.** The walk's visit reads and writes the graph itself: the batch
+    is flushed before each (the actions' time, not the visit's), and the batch's
+    next node is the one after the visit's. A batch without room for a token's
+    nodes is flushed first, and a terminator of more values than a batch holds
+    is the walk's.
+  - **Initializers.** The batch alone saved little: on `sqlite3.c` half of the
+    walk's visits, each a flush, were initializers' assignments (4,163 of about
+    7,800, each about 430 ns with the record of the nodes before it). They are
+    now a class of their own, INITIALIZE (above), whose action makes the walk's
+    INITIALIZE node or passes a braced initializer's values on. The walk's own
+    visits fall from 6,639 of the frozen corpus's `sqlite3.c` tokens to 2,627,
+    and 4,012 initializers are acted at by class.
+  - **The twins.** The scan test writes random batches of up to 200 nodes,
+    after up to 40 a visit made, over random token columns of up to 200 tokens,
+    each ending at a `PROT_NONE` page and the byte columns at every alignment,
+    by both paths: the two graphs must agree column for column, the gathered
+    columns must be their tokens', and the records alike. A deliberate one-node
+    difference in the scalar path made it report 1,842 of 38,098 nodes.
+    `test-checker`'s graph comparisons, `test-checker-corpus` and c-testsuite's
+    objects compare the batch's graphs with `--scalar`'s walk.
+
+  Measured on the 9700X, the frozen corpus's `sqlite3.c` (`-c`, CPU 2, under
+  the lock), against `main` at `0eca996a`; the objects are byte-identical by
+  both builds and `--scalar`, and so are `main.c`'s:
+
+  | | `main` | the batch | with INITIALIZE |
+  | --- | --- | --- | --- |
+  | the walk (`check-input.expressions`, ms) | 14.00 to 14.22 | 14.09 | 13.17 to 13.55 |
+  | its actions, ms | 8.90 to 9.01 | 7.08 | 10.20 to 10.39 |
+  | its visits, ms | 2.37 to 2.41 | 4.11 | 0.21 to 0.22 |
+  | user cycles (millions, rotated) | 846.7 to 850.3 | 844.9 to 845.9 | 842.2 to 843.8 |
+  | instructions (millions) | 2,151.6 | 2,150.8 | 2,147.1 |
+
+  The walk's rows are `measure-compile`'s medians of 11 runs, twice per build;
+  the batch's own visits still held its flushes then. The cycles are the
+  medians of 5 rotated rounds of 11 whole processes each (`ab` with
+  `time-runs`), whose rounds don't overlap: with INITIALIZE, 0.67% of the
+  compile (about 5.7 million cycles, 1.0 ms of wall time). `perf stat` of 11
+  runs agrees: 848.2 against 843.9 million cycles. Over six placements of the
+  checker's unit and three fresh copies of each executable (#509's comparison,
+  `build.sh shifts` and `time-runs --copies`, 3 rounds of 54 runs a build), the
+  branch's user cycles are 0.81%, 0.71% and 0.89% below `main`'s, every
+  placement's range below in every round, and its wall time 0.69%, 0.58% and
+  0.76%; `main`'s second set of executables, the comparison's floor, is within
+  0.14% of the first in both. Warm
+  (`benchmark-checker-bindings`, 5 passes), the class actions take 3.31 ms
+  against 3.92. The runs, their scripts, the profiles and the visits' breakdown
+  by role are in the
+  [record](https://github.com/buster14a/buster-performance/tree/aedaec4d23a58d586b88b3158051f047beb19c62/docs/measurements/check-input-1038-graph-by-passes-2026-11-05).
+
+  Not built: the numbering by counts and a prefix sum in a pass before the
+  actions, and the operands by pointer jumping and segmented scans. A class's
+  node count needs its children's values (a terminator makes one discard a
+  value, a declined token none), which the value chains give each parent at
+  once; the probe above, which finds them by consumer lists in a pass of its
+  own, takes 3.21 ms warm, three times the operators' and lists' 1.06 ms, so
+  the chains stay. The batch's numbering is the actions' own count, and what
+  the stages asked to be data-parallel, the nodes' columns, is.
 - **The graph's first node.** The walk's first node, in `sqlite3.c` a string
   at token 14, touches every graph column for the first time: each starts a
   huge page the kernel clears. That one node took 3.2 ms of the walk on the VM

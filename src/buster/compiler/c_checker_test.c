@@ -2251,8 +2251,8 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
         // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
         // identifiers, a function's name, a label's address, sizeof or alignof, and K&R calls. An initializer's
-        // assignment, a builtin's token and an intrinsic's call are the walk's class (check_input_expression_fold), and
-        // a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
+        // assignment is its own class, a builtin's token and an intrinsic's call the walk's (check_input_expression_fold),
+        // and a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
         // a child has no value or the walk refuses the token (their guard keeps the walk's refusal), and a list's takes
         // every token; DROP's tokens never reach an action.
         const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
@@ -6637,6 +6637,7 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_identifier_leaves(&test);
                 check_test_literal_values(&test);
+                check_test_expression_flush(&test);
             }
             if (check_test_takes())
             {
