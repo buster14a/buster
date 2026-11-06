@@ -19,6 +19,26 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "nondecimal literal conversion bit patterns and lossy controls",
+        .source = "#define X 0xe2\n"
+                  "signed char take(signed char x) { return x; }\n"
+                  "signed char values[8]; short s;\n"
+                  "void f(void) {\n"
+                  "values[0]=0xe2; values[1]=(0342); values[2]=0b11100010; values[3]=X;\n"
+                  "values[4]=0x100; values[5]=226; values[6]=0xe2+0; values[7]=+0xe2;\n"
+                  "s=0xffff; s=65535;\n"
+                  "take(0x80); take(0x180);\n"
+                  "}\n",
+        .warnings = 6,
+        .c23 = true,
+    },
+    {
+        .name = "nondecimal conversion with unsigned plain char",
+        .source = "char c; signed char s; short h; void f(void) { c=0xe2; s=(0Xff); h=0177777; s=0x100; s=(int)0xff; }\n",
+        .options = { "-funsigned-char" },
+        .warnings = 2,
+    },
+    {
         .name = "nonliteral integer zero pointer conversion",
         .source = "int*p=1-1;\n",
         .warnings = 1,
