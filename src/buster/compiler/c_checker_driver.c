@@ -767,7 +767,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
     return valid;
 }
 
-static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
+static void check_driver_pragma_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
     if ((record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0)
     {
@@ -792,7 +792,10 @@ static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input
         {
             const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                            severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-            pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record),
+            // The parser consumes this annotation after preprocessing the following ordinary token. Malformed
+            // retained pragmas before that lookahead publish first, even when they follow the pop in the source.
+            const uint32_t publication = check_driver_publication_position(parser, pp, record->token, pp->output.count);
+            pp_diagnose_output_phase(pp, pp_severity, check_diagnostic_pragma_source(record), publication, PP_DIAGNOSTIC_SEMANTIC,
                 "%s [%s-Wignored-pragmas]", check_diagnostic_pragma_message(record), check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
@@ -913,7 +916,7 @@ static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* p
         const uint32_t first_visibility = *visibility < count ? history->records[*visibility].source : UINT32_MAX;
         if (first_fp < first_visibility)
         {
-            check_driver_pragma_report(pp, input, input->fp_pragmas + *fp, quiet);
+            check_driver_pragma_report(parser, pp, input, input->fp_pragmas + *fp, quiet);
             *fp += 1;
         }
         else
@@ -1404,7 +1407,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 {
                     if (retained)
                     {
-                        check_driver_pragma_report(pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+                        check_driver_pragma_report(original, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
                     }
                     pragma += 1;
                 }

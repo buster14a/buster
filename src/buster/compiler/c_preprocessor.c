@@ -14766,18 +14766,28 @@ static void pp_finish_pragma(Preprocessor* pp)
     copy.flags = arena_push(scratch.arena, (uint64_t)count + names + 1, 1);
     copy.values = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
     copy.locations = arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4);
-    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0)
+    copy.origins = !pp->options.no_history ? arena_push_array(scratch.arena, (uint64_t)count + names + 1, sizeof(uint32_t), 4) : NULL;
+    if (copy.kinds != 0 && copy.flags != 0 && copy.values != 0 && copy.locations != 0 && (pp->options.no_history || copy.origins != NULL))
     {
-        // The names first, then the expanded operands.
+        // The names first, then the expanded operands. The copy outlives this capture's reset, so it must retain
+        // the tokens' origins as well as their spelling locations for later semantic diagnostics.
         for (uint32_t i = 0; i < names; i += 1)
         {
             const PPToken token = pp_stack_token(&pp->arguments, capture.directive + i);
             pp_tokens_set(&copy, i, token.kind, token.flags, token.value, token.location);
+            if (copy.origins != NULL)
+            {
+                copy.origins[i] = token.origin;
+            }
         }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const PPToken token = pp_stack_token(&pp->captures, capture.begin + i);
             pp_tokens_set(&copy, names + i, token.kind, token.flags, token.value, token.location);
+            if (copy.origins != NULL)
+            {
+                copy.origins[names + i] = token.origin;
+            }
         }
         copy.count = names + count;
         pp->captures.count = capture.begin;

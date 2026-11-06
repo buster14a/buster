@@ -93,6 +93,14 @@ static bool pp_test_semantic_pragmas(const char* directory, bool with_clang)
         }
         valid = valid && ran[0] && ran[1] && runs[0].errors == 0 && runs[1].errors == 0 &&
                 pp_same_streams(&runs[0], &runs[1], "expanded semantic pragma");
+        // Every fixture expands at least one pragma operand. Equality alone would accept two streams that both
+        // lost the capture's origins, leaving semantic warnings at macro definitions with no expansion note.
+        bool origin = false;
+        for (uint32_t token = 0; valid && token < runs[0].output.count; token += 1)
+        {
+            origin |= pp_history_at(&runs[0], token) != 0;
+        }
+        valid = valid && origin;
         PPSpellings actual = { 0 };
         PPSpellings expected = { 0 };
         valid = valid && pp_stream_spellings(&runs[0], &actual) &&

@@ -546,6 +546,8 @@ static uint32_t check_diagnostic_input_report_source(const CheckInput* input, co
     source = section != NULL ? section->source : source;
     const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
     source = optimize != NULL ? optimize->source : source;
+    const CheckInputMsPragma* layout = check_input_ms_report(input, report);
+    source = layout != NULL ? layout->source + 2 : source;
     for (uint32_t i = 0; report->pragma != 0 && i < input->fp_pragma_count; i += 1)
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
