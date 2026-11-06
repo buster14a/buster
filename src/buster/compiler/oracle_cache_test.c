@@ -17,7 +17,8 @@
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
 //     isn't set, the purpose, the time limit, the tool's path and its file's times) making a new one, and HOME not; a
-//     tool not on PATH; an entry that removes a present file runs the tool;
+//     tool not on PATH; an entry that removes a present file runs the tool; diagnostic environment variables preserve
+//     unset, empty and distinct values through use/check, and diagnostic-log side effects refuse replay;
 //   - dependencies (traced clang -fsyntax-only): taken in the same and the other directory, again after a header
 //     changes, and taken after a file it doesn't look for is added beside it; again after #embed's resource or what
 //     __has_include found changes; __has_include's header created where it looked, in a directory other files go
@@ -561,6 +562,98 @@ static void oracle_test_empty_path(OracleTest* test)
     oracle_test_expect(test, link_spelling, "runs: a changed directory preserves the selected executable's symlink spelling");
     oracle_test_expect(test, same_spelling, "runs: the same directory preserves the selected executable's relative spelling");
     oracle_test_expect(test, unset, "runs: an unset PATH uses the system default rather than the current directory");
+}
+
+// Diagnostic controls must preserve both the inherited environment and distinct stderr in use/check modes.
+static void oracle_test_diagnostic_environment(OracleTest* test)
+{
+    static const char* const names[] = {
+        "GCC_EXTRA_DIAGNOSTIC_OUTPUT",
+        "GCC_COLORS",
+        "GCC_URLS",
+        "TERM_URLS",
+        "TERM",
+        "GCC_DIAGNOSTICS_LOG",
+    };
+    static const char* const values[] = {
+        0,
+        "",
+        "fixits-v1",
+        "fixits-v2",
+    };
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "diagnostic-environment");
+    oracle_test_open(test, &check, "check", "diagnostic-environment");
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") != 0 ? getenv("PATH") : "/usr/bin:/bin");
+    for (uint32_t n = 0; n < sizeof(names) / sizeof(names[0]); n += 1)
+    {
+        char script[256];
+        snprintf(script, sizeof(script), "printf '%%s|%%s' \"${%s+x}\" \"${%s-}\" >&2", names[n], names[n]);
+        char* arguments[] = {
+            "sh",
+            "-c",
+            script,
+            0,
+        };
+        bool correct = true;
+        for (uint32_t v = 0; v < sizeof(values) / sizeof(values[0]); v += 1)
+        {
+            char value[128];
+            char expected[128];
+            snprintf(value, sizeof(value), "%s=%s", names[n], values[v] != 0 ? values[v] : "");
+            snprintf(expected, sizeof(expected), "%s|%s", values[v] != 0 ? "x" : "", values[v] != 0 ? values[v] : "");
+            char* environment[] = {
+                path,
+                "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+                values[v] != 0 ? value : 0,
+                0,
+            };
+            for (uint32_t pass = 0; pass < 3; pass += 1)
+            {
+                OracleRun run;
+                const bool ran = oracle_test_go(&run, pass == 2 ? &check : &use, "oracle test: diagnostic environment", arguments, 0, environment);
+                correct &= ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.taken == (pass == 1) &&
+                           run.errors != 0 && strcmp(run.errors, expected) == 0;
+                oracle_run_release(&run);
+            }
+        }
+        oracle_test_expect(test, correct, names[n]);
+    }
+    oracle_test_expect(test, check.counts->stale == 0, "diagnostic environment: changes do not report stale entries");
+    char* arguments[] = {
+        "sh",
+        "-c",
+        "printf 'log=%s' \"$GCC_DIAGNOSTICS_LOG\" >&2",
+        0,
+    };
+    bool refused = true;
+    for (uint32_t value = 0; value < 2; value += 1)
+    {
+        char* environment[] = {
+            path,
+            "SOURCE_DATE_EPOCH=" BUSTER_ORACLE_EPOCH,
+            value == 0 ? "GCC_DIAGNOSTICS_LOG=" : "GCC_DIAGNOSTICS_LOG=diagnostics.log",
+            0,
+        };
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            OracleRun run = {
+                .cache = pass == 0 ? &use : &check,
+                .purpose = "oracle test: diagnostic log",
+                .arguments = arguments,
+                .environment = environment,
+                .dependencies = true,
+            };
+            refused &= oracle_run(&run) && !run.keyed && !run.taken && run.status == 0 && run.errors != 0 &&
+                       strcmp(run.errors, value == 0 ? "log=" : "log=diagnostics.log") == 0;
+            oracle_run_release(&run);
+        }
+    }
+    oracle_test_expect(test, refused, "diagnostic environment: log side effects run without replay");
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
 }
 
 static void oracle_test_runs(OracleTest* test)
@@ -3520,6 +3613,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_trailing_dependencies(&test);
         oracle_test_empty_path(&test);
         oracle_test_runs(&test);
+        oracle_test_diagnostic_environment(&test);
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);
         oracle_test_tracing(&test);
@@ -3568,7 +3662,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         unlink(test.helper);
     }
     oracle_epoch_end(epoch);
-    static const char* const directories[] = { "empty-path/oracle",  "runs/oracle",         "dependencies/oracle", "identities/oracle", "tracing/oracle",
+    static const char* const directories[] = { "empty-path/oracle",  "runs/oracle", "diagnostic-environment/oracle",         "dependencies/oracle", "identities/oracle", "tracing/oracle",
                                                "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",      "replay-large/oracle",
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle",
