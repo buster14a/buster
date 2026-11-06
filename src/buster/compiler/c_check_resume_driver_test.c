@@ -9,28 +9,6 @@
 // for line, by both paths of -fsyntax-only, under gnu17 and gnu23, and for one of them under the warnings' options.
 // Include after c_check_label_attribute_driver_test.c, whose reader this takes.
 
-// The diagnostic lines of `text` into `lines`, which has room for its length, as check_test_diagnostic_lines takes them,
-// each searched within itself alone: linear in a long output (200,000 lines), where a search to the text's end for each
-// line is quadratic.
-static void check_test_resumed_lines(const char* text, char* lines)
-{
-    size_t length = 0;
-    for (const char* line = text; line != NULL && *line != 0;)
-    {
-        const char* end = strchr(line, '\n');
-        const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
-        const bool kept = memmem(line, size, ": error: ", 9) != NULL || memmem(line, size, ": warning: ", 11) != NULL || memmem(line, size, ": note: ", 8) != NULL;
-        if (kept)
-        {
-            memcpy(lines + length, line, size);
-            length += size;
-            lines[length++] = '\n';
-        }
-        line = end != NULL ? end + 1 : NULL;
-    }
-    lines[length] = 0;
-}
-
 static void check_test_driver_resumed_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
@@ -131,24 +109,18 @@ static void check_test_driver_resumed_declarations(CheckTest* test, const char* 
     char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-ferror-limit=0", source, NULL, NULL };
     char* expected = NULL;
     const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
-    char* expected_many = expected != NULL ? malloc(strlen(expected) + 1) : NULL;
-    if (expected_many != NULL)
-    {
-        check_test_resumed_lines(expected, expected_many);
-    }
-    const bool lines = expected_many != NULL && expected_many[0] != 0;
+    const size_t expected_capacity = expected != NULL ? strlen(expected) + 2 : 0;
+    char* expected_many = expected_capacity != 0 ? malloc(expected_capacity) : NULL;
+    const bool lines = expected_many != NULL && check_test_diagnostic_lines(expected, expected_many, expected_capacity) && expected_many[0] != 0;
     for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
     {
         arguments[0] = (char*)executable;
         arguments[6] = scalar != 0 ? "--scalar" : NULL;
         char* actual = NULL;
         const int status = check_test_driver_spawn(arguments, &actual);
-        char* actual_many = actual != NULL ? malloc(strlen(actual) + 1) : NULL;
-        if (actual_many != NULL)
-        {
-            check_test_resumed_lines(actual, actual_many);
-        }
-        const bool same = actual_many != NULL && strcmp(expected_many, actual_many) == 0;
+        const size_t actual_capacity = actual != NULL ? strlen(actual) + 2 : 0;
+        char* actual_many = actual_capacity != 0 ? malloc(actual_capacity) : NULL;
+        const bool same = actual_many != NULL && check_test_diagnostic_lines(actual, actual_many, actual_capacity) && strcmp(expected_many, actual_many) == 0;
         char description[256];
         snprintf(description, sizeof(description), "resumed declarations in %u bodies, %s: status %d (clang %d), the same lines", BODIES,
                  scalar != 0 ? "scalar" : "vector", status, oracle);

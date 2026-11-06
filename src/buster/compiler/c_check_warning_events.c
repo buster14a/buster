@@ -116,7 +116,9 @@ typedef enum CheckWarningEventKind
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
     // A function type's attribute on a declarator of no function type (#147, check_input_attribute_type_warnings):
-    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling.
+    // payload.name the attribute's name, payload.first_type the type there, payload.data its typedef spelling;
+    // payload.token its declarator name (an abstract declarator's position) and second_type its full type retain
+    // occurrence-specific parentheses.
     CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_NONSTRING_TYPE,
     CHECK_WARNING_EVENT_TRANSPARENT_UNION,
@@ -328,6 +330,8 @@ struct CheckWarningEvent
     uint32_t completion_kind;
     // Parser token for AT_TOKEN/AFTER_DELIMITER; NO_SOURCE for TU_END. Attached notes inherit this completion.
     uint32_t completion;
+    // Optional order inside a completed construct, independent of its source location and publication boundary.
+    uint64_t suborder;
     CheckWarningPayload payload;
     uint32_t note_first;
     uint32_t note_count;

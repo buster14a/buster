@@ -47,6 +47,88 @@ static void cc_mixed_refusal(CCCompatibilityTest* test, const char* name, const 
     cc_compat_release(&run);
 }
 
+static void cc_mixed_unsupported_sources(CCCompatibilityTest* test)
+{
+    static const char* const suffixes[] = {
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".C",
+        ".m",
+        ".mm",
+        ".cu",
+        ".hip",
+        ".sycl",
+        ".ii",
+        ".iih",
+        ".bc",
+        ".ll",
+        ".ads",
+        ".asm",
+        ".hpp",
+        ".so.cpp",
+        ".so.ll",
+        ".C++",
+        ".CC",
+        ".CPP",
+        ".CXX",
+        ".F",
+        ".F03",
+        ".F08",
+        ".F90",
+        ".F95",
+        ".FOR",
+        ".FPP",
+        ".ast",
+        ".c++m",
+        ".ccm",
+        ".cl",
+        ".cli",
+        ".clcpp",
+        ".clii",
+        ".cp",
+        ".cppm",
+        ".cui",
+        ".cxxm",
+        ".f",
+        ".f03",
+        ".f08",
+        ".f90",
+        ".f95",
+        ".for",
+        ".fpp",
+        ".gch",
+        ".hipi",
+        ".hlsl",
+        ".iim",
+        ".mi",
+        ".pch",
+        ".pcm",
+    };
+    for (uint32_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i += 1)
+    {
+        char path[64];
+        char diagnostic[128];
+        snprintf(path, sizeof(path), "unsupported%s", suffixes[i]);
+        snprintf(diagnostic, sizeof(diagnostic), "unsupported input language for '%s'", path);
+        cc_compat_expect(test, cc_compat_write(test, path, "int value;\n"), "write unsupported-language source");
+        const char* const syntax[] = { "-fsyntax-only", path, "-o", "program", NULL };
+        const char* const object[] = { "-c", path, "-o", "program", NULL };
+        const char* const link[] = { path, "-o", "program", NULL };
+        cc_mixed_refusal(test, "syntax checking refuses unsupported source suffixes", syntax, diagnostic);
+        cc_mixed_refusal(test, "object emission refuses unsupported source suffixes", object, diagnostic);
+        cc_mixed_refusal(test, "linking refuses unsupported source suffixes before opening outputs", link, diagnostic);
+        const char* const explicit_c[] = { "-x", "c", "-fsyntax-only", path, NULL };
+        cc_mixed_command(test, "explicit C language overrides an unsupported source suffix", explicit_c, NULL, false);
+    }
+    const char* const reset[] = { "-xc", "helper.c", "-xnone", "unsupported.cpp", "-fsyntax-only", "-o", "program", NULL };
+    const char* const after[] = { "unsupported.cpp", "-xc", "helper.c", "-fsyntax-only", "-o", "program", NULL };
+    const char* const end_options[] = { "-fsyntax-only", "-o", "program", "--", "unsupported.cpp", NULL };
+    cc_mixed_refusal(test, "-x none restores unsupported-source classification", reset, "unsupported input language for 'unsupported.cpp'");
+    cc_mixed_refusal(test, "a later -x cannot change an earlier unsupported source", after, "unsupported input language for 'unsupported.cpp'");
+    cc_mixed_refusal(test, "unsupported suffixes are refused after --", end_options, "unsupported input language for 'unsupported.cpp'");
+}
+
 static int driver_mixed_tests(const char* compiler, const char* clang)
 {
     CCCompatibilityTest test = { .clang = clang != NULL ? clang : "clang" };
@@ -74,8 +156,9 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         const char* const clang_object[] = { "-c", "helper.c", "-o", "clang.o", NULL };
         const char* const clang_unused[] = { "-c", "unused.c", "-o", "unused.o", NULL };
         const char* const clang_shared[] = { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libanswer.so", "-o", "libanswer.so", NULL };
-        const char* const* oracle_commands[] = { clang_object, clang_unused, clang_shared };
-        for (uint32_t i = 0; i < 3; i += 1)
+        const char* const clang_versioned[] = { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libanswer.so", "-o", "libanswer.so.1", NULL };
+        const char* const* oracle_commands[] = { clang_object, clang_unused, clang_shared, clang_versioned };
+        for (uint32_t i = 0; i < sizeof(oracle_commands) / sizeof(oracle_commands[0]); i += 1)
         {
             CCCompatibilityRun oracle = cc_compat_run(&test, test.clang, NULL, oracle_commands[i]);
             cc_compat_expect(&test, oracle.status == 0, "Clang produces an independent foreign fixture");
@@ -85,19 +168,28 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         CCCompatibilityRun archive = cc_compat_run(&test, "ar", NULL, archive_arguments);
         cc_compat_expect(&test, archive.status == 0, "archive includes an unneeded member with an unresolved reference");
         cc_compat_release(&archive);
+        const char* const lib_arguments[] = { "rcs", "libanswer.lib", "clang.o", NULL };
+        CCCompatibilityRun lib = cc_compat_run(&test, "ar", NULL, lib_arguments);
+        cc_compat_expect(&test, lib.status == 0, "archive with a .lib suffix is created");
+        cc_compat_release(&lib);
         const char* const compile_main[] = { "-c", "main.c", "-o", "main.o", NULL };
         const char* const compile_helper[] = { "-c", "helper.c", "-o", "helper.o", NULL };
         const char* const compile_unknown[] = { "-c", "helper.c", "-o", "helper.blob", NULL };
+        const char* const compile_mpp[] = { "-c", "helper.c", "-o", "helper.mpp", NULL };
+        const char* const compile_obj[] = { "-c", "helper.c", "-o", "helper.obj", NULL };
         const char* const compile_dash_name[] = { "-c", "helper.c", "-o", "-E", NULL };
         cc_mixed_command(&test, "Buster main object", compile_main, NULL, false);
         cc_mixed_command(&test, "Buster helper object", compile_helper, NULL, false);
         cc_mixed_command(&test, "Buster object with an unknown suffix", compile_unknown, NULL, false);
+        cc_mixed_command(&test, "Buster object with an unrecognized source-like suffix", compile_mpp, NULL, false);
+        cc_mixed_command(&test, "Buster object with an .obj suffix", compile_obj, NULL, false);
         cc_mixed_command(&test, "Buster object named like an option", compile_dash_name, NULL, false);
         const char* const cases[][20] = {
             { "main.c", "helper.o", "-o", "program" },
             { "main.o", "helper.o", "-o", "program" },
             { "main.c", "clang.o", "-o", "program" },
             { "main.c", "libanswer.a", "-o", "program" },
+            { "main.c", "libanswer.lib", "-o", "program" },
             { "libanswer.a", "main.c", "-o", "program" },
             { "main.c", "answer.s", "-o", "program" },
             { "main.c", "answer.S", "-DBASE=40", "-o", "program" },
@@ -111,8 +203,11 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
             { "main.c", "-xassembler-with-cpp", "preprocessed.txt", "-DBASE=40", "-o", "program" },
             { "-x", "assembler", "raw.txt", "-xnone", "main.c", "-o", "program" },
             { "main.c", "helper.blob", "-o", "program" },
+            { "main.c", "helper.mpp", "-o", "program" },
+            { "main.c", "helper.obj", "-o", "program" },
             { "-o", "program", "--", "main.o", "-E" },
             { "main.c", "./libanswer.so", "-Wl,-rpath,$ORIGIN", "-o", "program" },
+            { "main.c", "./libanswer.so.1", "-Wl,-rpath,$ORIGIN", "-o", "program" },
             { "main.o", "-L.", "-l:libanswer.a", "-o", "program" },
             { "-static", "main.c", "helper.o", "-o", "program" },
             { "-static-pie", "main.c", "helper.o", "-o", "program" },
@@ -158,6 +253,7 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         cc_mixed_refusal(&test, "-x none cancels stdin language", language_reset, "requires -x");
         cc_mixed_refusal(&test, "linker option cannot consume a source operand", missing_link_value, "missing");
         cc_mixed_refusal(&test, "mixed multiple -c -o rejected", multiple_output, "multiple output");
+        cc_mixed_unsupported_sources(&test);
         const char* const fatal_order[] = { "-c", "-Wfatal-errors", "fatal.S", "later.c", NULL };
         CCCompatibilityRun fatal = cc_compat_run(&test, test.compiler, NULL, fatal_order);
         cc_compat_expect(&test, fatal.status != 0 && fatal.errors != NULL && strstr(fatal.errors, "FIRST_ASSEMBLY_ERROR") != NULL &&

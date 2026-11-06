@@ -264,12 +264,130 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
     return promoted;
 }
 
+typedef struct CheckWarningParen CheckWarningParen;
+struct CheckWarningParen
+{
+    CheckWarningParen* next;
+    uint32_t close;
+    uint32_t pointers;
+    uint32_t depth;
+};
+
+// The parentheses of this declarator occurrence, for the shared type printer. Prefix stars and suffix chunks count
+// the levels from its name outwards; a group's level is the chunks inside it. Skip attribute arguments, array bounds
+// and parameter lists, and start again at a sibling declarator or the parameter list containing the name. This cold
+// walk allocates only for actual enclosing groups and keeps no token-wide spelling column in checked input.
+static bool check_driver_warning_parentheses(const Parser* parser, const TypeTable* types, uint32_t name, TypeId declared,
+                                             Arena* scratch, TypeNames* names)
+{
+    CheckWarningParen* groups = NULL;
+    uint32_t count = 0;
+    uint32_t pointers = 0;
+    bool valid = true;
+    const bool contextual = name < parser->tokens.count && type_is_valid(types, declared);
+    const bool named = contextual && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && parser->tree.roles[name] == PARSE_ROLE_OPERAND;
+    const uint32_t begin = contextual ? check_input_declaration_begin(parser, name) : 0;
+    for (uint32_t i = begin; contextual && valid && i < name;)
+    {
+        if (check_input_attribute_starts(parser, i, name))
+        {
+            const uint32_t after = check_input_skip_attributes(parser, i, name);
+            i = after > i ? after : i + 1;
+            continue;
+        }
+        const uint8_t kind = parser->tokens.kinds[i];
+        const uint8_t role = parser->tree.roles[i];
+        const uint32_t close = parser->tree.parents[i];
+        const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        if (open && close > i && close < name)
+        {
+            i = close + 1;
+            continue;
+        }
+        if (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_EQUAL || (open && close >= name && role != PARSE_ROLE_OPEN_GROUP))
+        {
+            groups = NULL;
+            count = 0;
+            pointers = 0;
+        }
+        else if (open && close >= name && role == PARSE_ROLE_OPEN_GROUP)
+        {
+            CheckWarningParen* group = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningParen, 1);
+            valid = group != NULL;
+            if (valid)
+            {
+                *group = (CheckWarningParen){ .next = groups, .close = close, .pointers = pointers, .depth = UINT32_MAX };
+                groups = group;
+                count += 1;
+            }
+        }
+        pointers += kind == PARSE_KIND_STAR && role == PARSE_ROLE_PREFIX;
+        i += 1;
+    }
+    CheckWarningParen* pending = groups;
+    uint32_t suffixes = 0;
+    for (uint32_t i = contextual ? name + named : parser->tokens.count; valid && i < parser->tokens.count;)
+    {
+        if (check_input_attribute_starts(parser, i, parser->tokens.count))
+        {
+            const uint32_t after = check_input_skip_attributes(parser, i, parser->tokens.count);
+            i = after > i ? after : i + 1;
+        }
+        else if (pending != NULL && i == pending->close)
+        {
+            pending->depth = pointers - pending->pointers + suffixes;
+            pending = pending->next;
+            i += 1;
+        }
+        else if ((parser->tree.roles[i] == PARSE_ROLE_OPEN_FUNCTION || parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE) &&
+                 parser->tree.parents[i] > i && parser->tree.parents[i] < parser->tokens.count)
+        {
+            suffixes += 1;
+            i = parser->tree.parents[i] + 1;
+        }
+        else
+        {
+            break;
+        }
+    }
+    TypePrintParen* parentheses = valid && pending == NULL && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypePrintParen, count) : NULL;
+    valid &= pending != NULL || count == 0 || parentheses != NULL;
+    uint32_t kept = 0;
+    uint32_t depth = 0;
+    TypeId type = contextual ? type_strip_aligned(types, declared) : 0;
+    for (CheckWarningParen* group = groups; valid && parentheses != NULL && group != NULL; group = group->next)
+    {
+        while (depth < group->depth && type_is_valid(types, type))
+        {
+            const uint8_t kind = type_kind(types, type);
+            const bool derived = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind);
+            type = derived ? type_strip_aligned(types, types->types.base[type_index(type)]) : 0;
+            depth += 1;
+        }
+        if (type_is_valid(types, type))
+        {
+            if (kept != 0 && parentheses[kept - 1].type == type)
+            {
+                parentheses[kept - 1].count += 1;
+            }
+            else
+            {
+                parentheses[kept++] = (TypePrintParen){ .type = type, .count = 1 };
+            }
+        }
+    }
+    names->parentheses = parentheses;
+    names->parenthesis_count = kept;
+    return valid;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
 // unnamed tag's typedef name or its `(unnamed at file:line:col)`.
-static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
-                                         CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling)
+static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                            CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling,
+                                            uint32_t declaration, TypeId declared)
 {
     String8 result = { 0 };
     if (type != 0 && type_is_valid(types, type))
@@ -309,7 +427,8 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                 names.alias_names = &alias_name;
                 names.alias_count = 1;
             }
-            const String8 sugared = type_print(types, scratch, type, (String8){ 0 }, &names, options);
+            const bool contextual = check_driver_warning_parentheses(parser, types, declaration, declared, scratch, &names);
+            const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
             if (names.alias_count != 0)
             {
@@ -317,6 +436,7 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                 // typedef stays, since it is that record's own name.
                 TypeNames expand = names;
                 expand.alias_count = 0;
+                expand.parenthesis_count = 0;
                 canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
             }
             // The returned text carries its own quotes: clang's `(aka '...')` sits outside the type's, so the
@@ -338,6 +458,7 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                 const uint64_t count = described ? types->types.extent[type_index(vector)] : 0;
                 TypeNames plain = names;
                 plain.alias_count = 0;
+                plain.parenthesis_count = 0;
                 const String8 element = described ? type_print(types, scratch, types->types.base[type_index(vector)], (String8){ 0 }, &plain, options) : (String8){ 0 };
                 const char* quoted = described ? check_warning_text(scratch, "'%.*s' (vector of %llu '%.*s' %s)", (int)sugared.length, sugared.pointer,
                                                                     (unsigned long long)count, (int)element.length, element.pointer, count > 1 ? "values" : "value") :
@@ -347,6 +468,12 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
         }
     }
     return result;
+}
+
+static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling)
+{
+    return check_driver_warning_type_at(parser, pp, input, types, spell, scratch, type, spelling, BUSTER_CHECK_NONE, 0);
 }
 
 // An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
@@ -591,7 +718,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE:
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
+                                                              payload->token, payload->second_type);
             result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to function types; type here is %.*s", (int)name.length, name.pointer,
                                                            (int)type.length, type.pointer) : NULL;
             break;
@@ -1104,12 +1232,17 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                 valid = valid && suffix != NULL;
                 if (valid)
                 {
+                    const PPDiagnosticRecord* previous = pp->diagnostic_last;
                     const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
                     const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? pp->output.count + 1 :
                         check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                    if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
+                    if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE)
+                    {
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
@@ -1128,6 +1261,10 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED)
+                    {
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER) &&
                              event->completion_kind != CHECK_WARNING_COMPLETE_TU_END)
                     {
@@ -1141,6 +1278,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    pp_diagnostic_suborder(pp, previous, event->suborder);
                     valid = !pp->diagnostic_collection_failed;
                 }
                 arena_pop_to(scratch, mark);

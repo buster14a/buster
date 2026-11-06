@@ -388,15 +388,18 @@ static bool check_test_unknown_attribute_lines(const char* text, char* lines, si
 {
     size_t length = 0;
     bool fits = capacity != 0;
-    lines[0] = 0;
+    if (fits)
+    {
+        lines[0] = 0;
+    }
     for (const char* line = text; fits && line != NULL && *line != 0;)
     {
         const char* end = strchr(line, '\n');
         const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
-        const char* found = strstr(line, "unknown attribute");
-        const char* macro = strstr(line, "is a predefined macro name, not an attribute scope specifier");
-        const bool kept = (found != NULL && found < line + size) || (macro != NULL && macro < line + size);
-        fits = !kept || length + size + 1 < capacity;
+        const bool kept = memmem(line, size, "unknown attribute", sizeof("unknown attribute") - 1) != NULL ||
+                          memmem(line, size, "is a predefined macro name, not an attribute scope specifier",
+                                 sizeof("is a predefined macro name, not an attribute scope specifier") - 1) != NULL;
+        fits = !kept || size + 1 < capacity - length;
         if (kept && fits)
         {
             memcpy(lines + length, line, size);
@@ -410,21 +413,22 @@ static bool check_test_unknown_attribute_lines(const char* text, char* lines, si
 }
 
 // The diagnostic lines (errors, warnings and notes) of a compiler's output `text`, in order, into `lines`; false where they
-// don't fit.
+// don't fit. Search each bounded line alone: rescanning the whole remaining output for an absent marker is quadratic
+// in the number of lines (for example, #1443's 200,000-line diagnostic fixture).
 static bool check_test_diagnostic_lines(const char* text, char* lines, size_t capacity)
 {
     size_t length = 0;
     bool fits = capacity != 0;
-    lines[0] = 0;
+    if (fits)
+    {
+        lines[0] = 0;
+    }
     for (const char* line = text; fits && line != NULL && *line != 0;)
     {
         const char* end = strchr(line, '\n');
         const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
-        const char* error = strstr(line, ": error: ");
-        const char* warning = strstr(line, ": warning: ");
-        const char* note = strstr(line, ": note: ");
-        const bool kept = (error != NULL && error < line + size) || (warning != NULL && warning < line + size) || (note != NULL && note < line + size);
-        fits = !kept || length + size + 1 < capacity;
+        const bool kept = memmem(line, size, ": error: ", 9) != NULL || memmem(line, size, ": warning: ", 11) != NULL || memmem(line, size, ": note: ", 8) != NULL;
+        fits = !kept || size + 1 < capacity - length;
         if (kept && fits)
         {
             memcpy(lines + length, line, size);
@@ -671,6 +675,73 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
     // definition (a local label's at its declaration). The whole output, line for line, by both paths.
     unlink(source);
     static const char* const statements[] = {
+        // Parser macro warnings precede semantic attribute checks; every declarator processes its shared list after
+        // its parameters. Compare notes too, including the predefined macro's exact line and explicit redefinitions.
+        "[[__clang__::x, __clang__::y]] int a;\n",
+        "[[x, __clang__]] int a;\n",
+        "[[x, __clang__::y, __clang__::z]] int a;\n",
+        "[[__clang__::noinline(1)]] void f(void);\n",
+        "[[__clang__::x]] int a [[__clang__::y]], b [[__clang__::z]];\n",
+        "[[__clang__::x]] void f(int a [[__clang__::y]]);\n",
+        "void f(int p [[__clang__::unused]]) __attribute__((stdcall));\n",
+        "#undef __clang__\n#define __clang__ 7\n[[__clang__::unused]] int a;\n",
+        "#define WRAP __clang__\n[[WRAP::unused]] int a;\n",
+        // A failed attribute-name parse consumes the first closing bracket and diagnoses the second at file scope.
+        "[[123]] int a;\n",
+        "[[, 123::unused]] int a;\n",
+        "#define WRAP __clang__\n[[WRAP(1, (2))::unused]] int a;\n",
+        "[[gnu::annotate(\"tag\", __clang__)]] int a;\nint values[] = {1, __clang__};\n",
+        "void f(int p [[gnu::cold]]) __attribute__((stdcall));\n",
+        "__attribute__((stdcall)) void f(int a __attribute__((cold)));\n",
+        "void (__attribute__((stdcall)) f)(int a __attribute__((cold)));\n",
+        "__attribute__((stdcall)) void (*f)(int a __attribute__((cold)));\n",
+        "void f(void) [[gnu::stdcall]];\n",
+        "typedef void F(void) [[gnu::stdcall]];\n",
+        "int (*f)(void) [[gnu::stdcall]];\n",
+        "void f(void) [[gnu::stdcall, gnu::cold, x]];\n",
+        "void [[gnu::stdcall]] f(void);\nvoid [[gnu::regparm(2)]] h(void);\n",
+        "void [[gnu::regparm(1)]] ordered(int x __attribute__((noinline)));\n",
+        "void [[gnu::ms_abi]] ordered(int x [[gnu::unknown]]);\n",
+        "[[gnu::unknown]] void f(int p [[gnu::unknown]]), g(int q [[gnu::unknown]]);\n",
+        "[[gnu::unknown]] int a, b; [[unknown]] int c, d; __attribute__((unknown)) int e, f;\n",
+        "[[__gnu__::unknown]] int a, b [[gnu::unknown]]; [[vendor::unknown]] int c, d;\n",
+        "typedef void F(void);\nF [[gnu::stdcall]] k;\n",
+        "void [[gnu::ms_abi]] f(void);\nvoid f(void);\n",
+        // C23's specifier attribute changes the typedef's function, before an outer declarator adds a different one.
+        "typedef int (*F)(int); typedef int (__attribute__((ms_abi)) *M)(int);\n"
+        "typedef M (*Outer)(void); typedef F (__attribute__((ms_abi)) *Wrong)(void);\n"
+        "F [[gnu::ms_abi]] x, (*y)(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(x),M),\"base\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(y),Outer),\"inner\");\n"
+        "_Static_assert(!__builtin_types_compatible_p(__typeof__(y),Wrong),\"outer\");\n",
+        "typedef int (*F)(int); typedef int (__attribute__((ms_abi)) *M)(int);\n"
+        "typedef M (__attribute__((sysv_abi)) *Outer)(void);\n"
+        "F [[gnu::ms_abi]] __attribute__((sysv_abi)) (*y)(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(y),Outer),\"mixed conventions\");\n",
+        // A pointer/array typedef permits replacing its pointee's convention; distinct conventions in the same
+        // specifier list, or a different one on a function typedef, remain conflicting.
+        "typedef int (__attribute__((sysv_abi)) *F[2])(int); typedef int (__attribute__((ms_abi)) *M[2])(int);\n"
+        "F [[gnu::ms_abi]] a; _Static_assert(__builtin_types_compatible_p(__typeof__(a),M),\"replace\");\n",
+        "typedef int (*F)(int); F [[gnu::ms_abi, gnu::sysv_abi]] x;\n",
+        "typedef int F(int) __attribute__((sysv_abi)); F [[gnu::ms_abi]] x;\n",
+        "typedef int (*F)(int); F [[gnu::ms_abi]] __attribute__((sysv_abi)) x;\n",
+        "typedef int (*F)(int); __attribute__((ms_abi)) F [[gnu::sysv_abi]] x;\n",
+        "typedef int F(int); __attribute__((reqd_work_group_size(1,1,1))) F [[gnu::ms_abi]] x;\n",
+        "typedef int F(int); __attribute__((amdgpu_num_sgpr(1))) F [[gnu::ms_abi]] x;\n",
+        // The type at an attribute retains this declarator's groups, including redundant ones and partial chunk types.
+        // Typedefs keep the groups in the sugared spelling and discard them in the canonical aka spelling.
+        "int (*p1) __attribute__((stdcall));\nint (*(p2)) __attribute__((stdcall));\nint *(p3) __attribute__((stdcall));\n"
+        "int ((p4)) __attribute__((stdcall));\nint (**p5) __attribute__((stdcall));\nint *(*p6) __attribute__((stdcall));\n"
+        "int (*p7[3]) __attribute__((stdcall));\nint (*(p8[3])) __attribute__((stdcall));\nint (*p9)[3] __attribute__((stdcall));\n"
+        "typedef int I; I (*p10) __attribute__((stdcall));\ntypedef int *P; P (p11) __attribute__((stdcall));\n"
+        "int ((*p12)) __attribute__((stdcall));\nint (* const p13) __attribute__((stdcall));\n",
+        "int (* __attribute__((stdcall)) p14);\nint (__attribute__((stdcall)) *p15);\n"
+        "int __attribute__((stdcall)) (*p16);\nint (__attribute__((stdcall)) *p17) __attribute__((fastcall));\n",
+        "void f(int (*p) __attribute__((stdcall)), int *q __attribute__((fastcall)));\n"
+        "int (*a) __attribute__((stdcall)), *b __attribute__((fastcall));\n"
+        "int s=sizeof(int (* __attribute__((stdcall))));\n",
+        "void (__attribute__((stdcall)) *p)(int q __attribute__((cold))) [[gnu::fastcall]];\n",
+        "[[__clang__::x]] void (__attribute__((stdcall)) *p)(int q [[__clang__::y]]) [[gnu::fastcall]];\n",
         "int f(int x) {\n    [[gnu::aligned(4)]] x += 1;\n    return x;\n}\n",
         "int f(int x) {\n    [[__gnu__::__fallthrough__]] x += 1;\n    return x;\n}\n",
         "int f(int x) {\n    [[__deprecated__]] x += 1;\n    return x;\n}\n",
@@ -708,6 +779,11 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "enum G { G0 __attribute__((mode(SI))) };\n",
         // Function types' attributes on other types, at each declarator a specifier's reaches; the handlers' own subjects
         // (sentinel's, transparent_union's) and nonstring's types, at the declaration's start.
+        // Grouping around qualified pointers and arrays must be balanced in the diagnostic type spelling.
+        "int * const ((x)[1])[3] __attribute__((ms_abi));\n"
+        "int (* const ((y)[4]))[2] __attribute__((ms_abi));\n"
+        "int * volatile ((z)[2])[5] __attribute__((ms_abi));\n"
+        "int (* restrict ((w)[2]))[3] __attribute__((ms_abi));\n",
         "int a __attribute__((stdcall));\nint *b __attribute__((ms_abi));\nint c __attribute__((noreturn));\nint d __attribute__((regparm(2)));\n"
         "typedef int T; T e __attribute__((sysv_abi));\nstruct S { int m __attribute__((preserve_most)); };\nvoid f(int p __attribute__((vectorcall)));\n"
         "int __attribute__((cdecl)) i;\n[[gnu::stdcall]] int j;\n[[gnu::__stdcall__]] int j2;\nint __attribute__((stdcall)) e1, e2;\n"
@@ -1262,6 +1338,26 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "static __attribute__((cold)) int (*e4);\nvoid f(void) { __attribute__((cold)) int (*e9); }\n",
         "void ([[gnu::stdcall]] *a7)(void);\n",
         "int ([[gnu::regparm(2)]] *r3);\n",
+        "__attribute__((noinline)) void ([[gnu::stdcall]] *p)(void);\n",
+        "void __attribute__((stdcall)) ([[gnu::noinline]] *p)(void);\n",
+        "void ([[gnu::x]] *p)(void) __attribute__((noinline));\n",
+        "void f(int ([[gnu::x]] *p) __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] *p __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] const p __attribute__((cold))) __attribute__((stdcall));\n",
+        "void f([[gnu::x]] Unknown *p __attribute__((cold))) __attribute__((stdcall));\n",
+        "__attribute__((noinline)) void ([[gnu::x]] ([[gnu::y]] *p))(void);\n",
+        // A handler's preliminary warning precedes its own error, after the completed type's warnings and any
+        // earlier declaration attributes. Kernel-only checks follow the entire attribute list.
+        "void __attribute__((stdcall, unknown, amdgpu_num_sgpr(0))) f(void);\n",
+        "void __attribute__((stdcall, unknown, amdgpu_num_vgpr(4294967296))) f(void);\n",
+        // A kernel attribute in the specifiers is rechecked after a function-type chunk, but one in the trailing
+        // declaration list is first applied after that chunk. Without a type attribute there is only one visit.
+        "void __attribute__((amdgpu_num_sgpr(0))) f(void);\n",
+        "void __attribute__((amdgpu_num_sgpr(0))) f(void) __attribute__((stdcall));\n",
+        "void __attribute__((stdcall)) f(void) __attribute__((amdgpu_num_sgpr(0)));\n",
+        // Availability diagnostics share the complete enclosing declarator's boundary, including every marked
+        // parameter type, and then advance to the next declarator after a comma.
+        "typedef int D __attribute__((deprecated));\n__attribute__((cold)) void (*f)(D, D), (*g)(D);\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {
@@ -1277,11 +1373,16 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
             arguments[5] = scalar != 0 ? "--scalar" : NULL;
             char* actual = NULL;
             const int status = check_test_driver_spawn(arguments, &actual);
-            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
-            char description[2048];
-            snprintf(description, sizeof(description), "attributed statement %u, %s: status %d (clang %d), lines\n%s(clang\n%s)", s,
-                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
-            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            const bool compared = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES);
+            const bool same = compared && strcmp(expected_lines, actual_lines) == 0 && (status != 0) == (oracle != 0);
+            char description[160];
+            snprintf(description, sizeof(description), "attributed statement %u, %s: status %d (clang %d), diagnostic lines agree", s,
+                     scalar != 0 ? "scalar" : "vector", status, oracle);
+            check_test_expect(test, same, description);
+            if (!same)
+            {
+                fprintf(stderr, "%s:\n%s(clang\n%s)\n", description, compared ? actual_lines : actual != NULL ? actual : "<no output>\n", expected_lines);
+            }
             free(actual);
         }
         check_test_expect(test, made && lines, "attributed statements: fixture written and clang's lines read");
