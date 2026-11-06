@@ -78,7 +78,7 @@ static void check_test_warning_render(CheckTest* test)
             {
                 const PPDiagnosticRecord* mapped = pp.diagnostic_last;
                 check_test_expect(test, mapped != NULL && mapped->severity == PP_SEVERITY_MAPPED_ERROR &&
-                                       mapped->position == ((uint64_t)(pp.output.count + 1u) << 2 | PP_DIAGNOSTIC_SEMANTIC),
+                                       mapped->position == (uint64_t)(pp.output.count + 1u) * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_SEMANTIC,
                                   "a promoted sparse warning retains its mapped class and raw completion becomes the semantic phase once");
             }
             pp_diagnostic_publish(&pp);

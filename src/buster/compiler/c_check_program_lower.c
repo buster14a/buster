@@ -419,6 +419,8 @@ struct CheckLowerTask
     bool volatile_copy;
     // An expression of a _BitInt whose own entries check_lower_bit_int_node pushed: expanded as any other now.
     bool bit_int;
+    // CLEAR and FILL: zeros past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes by a call of memset (check_lower_fill).
+    bool library;
 };
 
 // The pending stack keeps two words instead of a padded 32-byte C record. Instructions, addresses,
@@ -439,7 +441,7 @@ static inline __attribute__((always_inline)) CheckLowerTaskPacked check_lower_ta
     const bool full = task.kind == CHECK_LOWER_INSTRUCTION || task.kind == CHECK_LOWER_ADDRESS || task.kind == CHECK_LOWER_COPY || task.kind == CHECK_LOWER_COMPLEX;
     return (CheckLowerTaskPacked){
         .control = task.node | (uint64_t)task.kind << 32 | (uint64_t)task.address << 40 | (uint64_t)task.initialized << 41 | (uint64_t)task.discard << 42 |
-                   (uint64_t)task.volatile_copy << 43 | (uint64_t)task.bit_int << 44 |
+                   (uint64_t)task.volatile_copy << 43 | (uint64_t)task.bit_int << 44 | (uint64_t)task.library << 45 |
                    (task.kind == CHECK_LOWER_INSTRUCTION ? (uint64_t)task.type << 48 : 0),
         .payload = full ? task.value : task.type | task.value << 32,
     };
@@ -459,6 +461,7 @@ static inline __attribute__((always_inline)) CheckLowerTask check_lower_task_unp
         .discard = ((packed.control >> 42) & 1) != 0,
         .volatile_copy = ((packed.control >> 43) & 1) != 0,
         .bit_int = ((packed.control >> 44) & 1) != 0,
+        .library = ((packed.control >> 45) & 1) != 0,
     };
 }
 
@@ -3051,9 +3054,6 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     }
 }
 
-// Zeros past this many bytes are written by a loop of 8-byte stores rather than store by store.
-#define BUSTER_CHECK_LOWER_FILL_UNROLLED 128
-
 // The largest access of 8, 4, 2 or 1 bytes that `left` bytes take, and its class: runs of bytes are written (and a
 // bit-field's bytes read) as such pieces, largest first.
 static uint32_t check_lower_piece(uint64_t left)
@@ -3068,10 +3068,12 @@ static uint8_t check_lower_piece_class(uint32_t piece)
 
 // An initializer's zeros (CHECK_INIT_CLEAR) or bytes (CHECK_INIT_BYTES) written into frame object `object`: stores of 8
 // bytes, then 4, 2 and 1 for the rest, the bytes as constants of the stores' classes (the host's byte order is the
-// target's); past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes, the zeros' words by a loop.
+// target's); past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes, the zeros by a call of memset where `library` (an automatic
+// object's initializer that isn't volatile, whose calls check_lower_init_pools counts), as clang -O0's code clears
+// them, and otherwise their words by a loop.
 static void check_lower_initializer_copy(CheckLowerWriter* writer, uint32_t pool, uint32_t object, uint64_t offset);
 
-static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part, uint32_t object, uint32_t pool)
+static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part, uint32_t object, uint32_t pool, bool library)
 {
     const uint64_t begin = part->bit_offset / 8;
     const uint64_t size = part->byte_count;
@@ -3086,7 +3088,22 @@ static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part
     else
     {
         uint64_t offset = 0;
-        if (part->kind == CHECK_INIT_CLEAR && size > BUSTER_CHECK_LOWER_FILL_UNROLLED)
+        if (part->kind == CHECK_INIT_CLEAR && size > BUSTER_CHECK_LOWER_FILL_UNROLLED && library)
+        {
+            // Pointers and size_t share unsigned long's U64 INTEGER class, and the byte is an int, as memset's
+            // prototype has it: builtin types, which the shared ABI classifications have (check_lower_copy's). Its
+            // result, the destination, is dropped; the interpreters' bookkeeping for memset takes it as a pointer.
+            const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG };
+            const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMSET, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            check_lower_offset(writer, begin);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, size);
+            check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+            offset = size;
+        }
+        else if (part->kind == CHECK_INIT_CLEAR && size > BUSTER_CHECK_LOWER_FILL_UNROLLED)
         {
             const uint32_t index = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
             const uint32_t top = check_lower_label(writer);
@@ -11824,12 +11841,12 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind == CHECK_LOWER_FILL)
         {
             check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32),
-                             check_lower_init_pool(&writer->output->initializers, node, type));
+                             check_lower_init_pool(&writer->output->initializers, node, type), ((flags >> 5) & 1) != 0);
         }
         else if (kind == CHECK_LOWER_CLEAR)
         {
             const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .bit_offset = (uint64_t)node * 8, .byte_count = type };
-            check_lower_fill(writer, &clear, (uint32_t)(value >> 32), BUSTER_CHECK_NONE);
+            check_lower_fill(writer, &clear, (uint32_t)(value >> 32), BUSTER_CHECK_NONE, ((flags >> 5) & 1) != 0);
         }
         else if (kind == CHECK_LOWER_INITIALIZER_COPY)
         {
@@ -11926,6 +11943,23 @@ static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart
     }
 }
 
+// Whether an initializer's object has a volatile part, in its plan's type or its declared one: its stores are then the
+// ones its plan gives, each as it gives it.
+static bool check_lower_init_volatile_object(const CheckLowerWriter* writer, const CheckInitializer* plan, TypeId destination)
+{
+    const TypeTable* types = writer->program->types;
+    const uint32_t qualifiers = type_qualifiers(type_strip_aligned(types, plan->type)) | type_qualifiers(type_strip_aligned(types, destination));
+    return (qualifiers & BUSTER_TYPE_VOLATILE) != 0 ||
+           ((check_lower_facts(writer, plan->type) | check_lower_facts(writer, destination)) & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY) != 0;
+}
+
+// Whether plan `plan`'s zeros may be cleared by a call of memset (check_lower_fill): an object past the unrolled stores'
+// bytes (whose calls check_lower_init_pools counts) without a volatile part.
+static bool check_lower_init_library(const CheckLowerWriter* writer, const CheckInitializer* plan, TypeId destination)
+{
+    return plan->object_size > BUSTER_CHECK_LOWER_FILL_UNROLLED && !check_lower_init_volatile_object(writer, plan, destination);
+}
+
 // Part `index` of plan `plan` written into frame object `object`, as tasks: its zeros or bytes (check_lower_fill), or
 // its value stored at its offset, or for an aggregate copied there.
 static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uint32_t index, uint32_t object, TypeId destination)
@@ -11970,7 +12004,8 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     }
     else if (write->kind != CHECK_INIT_VALUE)
     {
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_FILL, .node = plan, .type = index, .value = object });
+        const bool library = check_lower_init_library(writer, &writer->program->initializers->plans[plan], destination);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_FILL, .node = plan, .type = index, .value = object, .library = library });
     }
     else if (write->bit_offset % 8 != 0 || (!aggregate && (class == UINT8_MAX || class == BUSTER_TYPED_CLASS_VOID)))
     {
@@ -12002,6 +12037,29 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     }
 }
 
+// The plan of the compound literal that initializes an automatic object of `size` bytes whole as plan `plan`'s one part,
+// plus one, or 0: `T x = (T){ ... };`. Its parts are then written into the object itself, as clang's code initializes
+// it in place, rather than into the literal's own object, cleared and filled, then copied. Neither may have a volatile
+// part, as COPY keeps a volatile copy's accesses.
+static uint32_t check_lower_init_literal(const CheckLowerWriter* writer, const CheckInitializer* plan, uint64_t size, TypeId destination)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckInitPart* part = plan->count == 1 ? plan->parts : NULL;
+    const bool single = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->overload_candidate == 0 &&
+                        part->node < program->stream->count && program->input->graph.ops[part->node] == CHECK_OP_VALUE && check_lower_aggregate(writer, part->type) &&
+                        type_size(types, part->type) == size && !check_lower_init_volatile_object(writer, plan, destination);
+    const CheckValue value = single ? check_stream_value(program->stream, part->node) : (CheckValue){ 0 };
+    const bool compound = single && value.object != 0 && value.object < program->object_count && (value.flags & BUSTER_CHECK_VOLATILE_PART) == 0 &&
+                          check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_COMPOUND) &&
+                          !check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC) &&
+                          check_lower_local_of(writer, value.object) != BUSTER_CHECK_NONE;
+    const uint32_t selected = compound ? check_initializers_plan_index(program->initializers, value.object - 1) : 0;
+    const CheckInitializer* literal = selected != 0 ? program->initializers->plans + selected - 1 : NULL;
+    const TypeId declared = literal != NULL ? program->input->declared_types[value.object - 1] : 0;
+    return literal != NULL && literal->object_size == size && !check_lower_init_volatile_object(writer, literal, declared) ? selected : 0;
+}
+
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -12013,11 +12071,23 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
     }
     else
     {
-        const CheckInitializer* plan = &initializers->plans[control.target];
         const uint32_t local = check_lower_local_of(writer, program->input->objects[declaration]);
         const bool object = local != BUSTER_CHECK_NONE && writer->local_sizes[local] != 0;
-        const uint32_t pool = object ? check_lower_init_pool(&writer->output->initializers, control.target, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
+        // The plan whose parts write the object: its own, or a compound literal's that initializes it whole, as many
+        // levels in as there are (each a different literal's, so at most every plan).
+        uint32_t target = control.target;
+        TypeId destination = program->input->declared_types[declaration];
+        uint32_t literal = object ? check_lower_init_literal(writer, &initializers->plans[target], writer->local_sizes[local], destination) : 0;
+        for (uint32_t level = 0; literal != 0 && level < initializers->count; level += 1)
+        {
+            target = literal - 1;
+            destination = program->input->declared_types[initializers->declaration_tokens[target]];
+            literal = check_lower_init_literal(writer, &initializers->plans[target], writer->local_sizes[local], destination);
+        }
+        const CheckInitializer* plan = &initializers->plans[target];
+        const uint32_t pool = object ? check_lower_init_pool(&writer->output->initializers, target, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
         const uint8_t class = check_lower_class(writer, plan->type);
+        const bool library = object && check_lower_init_library(writer, plan, destination);
         if (local == BUSTER_CHECK_NONE || (!object && class == UINT8_MAX))
         {
             check_lower_unsupported(writer, "initializers of this type");
@@ -12027,7 +12097,8 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             const uint32_t size = writer->output->initializers.items[pool].size;
             if (size < writer->local_sizes[local])
             {
-                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .node = size, .type = writer->local_sizes[local] - size, .value = local });
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .node = size, .type = writer->local_sizes[local] - size, .value = local,
+                                                         .library = library });
             }
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_INITIALIZER_COPY, .node = pool, .value = local });
         }
@@ -12038,7 +12109,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             check_lower_source(writer, write->token);
             if (object)
             {
-                check_lower_object_part(writer, control.target, part, local, program->input->declared_types[declaration]);
+                check_lower_object_part(writer, target, part, local, destination);
             }
             else if (write->bit_offset != 0 || write->bit_width != 0 || write->kind == CHECK_INIT_BYTES)
             {
@@ -12056,13 +12127,17 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             }
         }
         // What the parts leave out is zero (C11 6.7.9p21), which static storage has before any part: an object is
-        // cleared first, unless its first part clears it whole.
+        // cleared first, unless its first part writes it whole, zeros or an aggregate's copy (`T x = *p;`), which
+        // writes every byte, its padding's too. A volatile object keeps its clear's stores.
         const CheckInitPart* first = plan->count != 0 ? plan->parts : NULL;
         const bool cleared = first != NULL && first->kind == CHECK_INIT_CLEAR && first->bit_offset == 0 && first->bit_width == 0 &&
                              object && first->byte_count >= writer->local_sizes[local];
-        if (object && !cleared && pool == BUSTER_CHECK_NONE)
+        const bool copied = first != NULL && first->kind == CHECK_INIT_VALUE && first->bit_offset == 0 && first->bit_width == 0 && object &&
+                            first->overload_candidate == 0 && check_lower_aggregate(writer, first->type) &&
+                            type_size(program->types, first->type) >= writer->local_sizes[local] && !check_lower_init_volatile_object(writer, plan, destination);
+        if (object && !cleared && !copied && pool == BUSTER_CHECK_NONE)
         {
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = writer->local_sizes[local], .value = local });
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = writer->local_sizes[local], .value = local, .library = library });
         }
     }
 }

@@ -1325,6 +1325,9 @@ struct PPDiagnosticRecord
     PPDiagnosticRecord* next;
     Preprocessor* owner;
     uint64_t position;
+    // Nonzero orders a completed construct's diagnostics before unsequenced ones at the same publication position.
+    // Zero retains ordinary discovery order. Notes belong to the same record and follow its primary.
+    uint64_t suborder;
     uint32_t location;
     uint32_t origin;
     uint32_t note_location;
@@ -1652,7 +1655,10 @@ typedef enum PPDiagnosticPhase
     PP_DIAGNOSTIC_LEXICAL,
     PP_DIAGNOSTIC_DEFERRED,
     PP_DIAGNOSTIC_RETURN,
+    // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.
+    PP_DIAGNOSTIC_TYPE,
     PP_DIAGNOSTIC_SEMANTIC,
+    PP_DIAGNOSTIC_PHASE_COUNT,
 } PPDiagnosticPhase;
 
 typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
@@ -1747,7 +1753,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
         }
         else
         {
@@ -17372,6 +17378,9 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
 // language mode decides (pp_predefines adds those) and the ones the target and the other options decide
 // (c_predefines.c's predefines_text).
 static const char pp_predefines_base[] =
+    // Clang's first two definitions also anchor expansion notes at their real built-in source lines.
+    "#define __llvm__ 1\n"
+    "#define __clang__ 1\n"
     "#define _LP64 1\n"
     "#define __ATOMIC_ACQUIRE 2\n"
     "#define __ATOMIC_ACQ_REL 4\n"
@@ -17694,7 +17703,6 @@ static const char pp_predefines_base[] =
     "#define __WINT_WIDTH__ 32\n"
     "#define __amd64 1\n"
     "#define __amd64__ 1\n"
-    "#define __clang__ 1\n"
     "#define __clang_literal_encoding__ \"UTF-8\"\n"
     "#define __clang_major__ 23\n"
     "#define __clang_minor__ 1\n"
@@ -17703,7 +17711,6 @@ static const char pp_predefines_base[] =
     "#define __gnu_linux__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
-    "#define __llvm__ 1\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
     "#define __unix 1\n"
@@ -21572,7 +21579,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             const char* value = argument[2] != 0 ? argument + 2 : next;
             i += argument[2] == 0;
             result = value != 0;
-            if (result && argument[1] == 'I')
+            if (result && argument[1] == 'I' && strcmp(value, "-") == 0)
+            {
+                // The obsolete -I- split. Clang rejects it; a directory literally named "-" is -I./- .
+                fprintf(stderr, "error: '-I-' not supported, please use -iquote instead\n");
+                result = false;
+            }
+            else if (result && argument[1] == 'I')
             {
                 include[options->include_directory_count] = value;
                 options->include_directory_count += 1;
