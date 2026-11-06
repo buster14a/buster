@@ -4,7 +4,7 @@
 // SIMD SCCP (#1450), included after the scalar lattice publisher. Wide values are sparse: only vector-result rows
 // have a 64-byte cell, allocated on the first vector transfer. Scalar functions do not scan or allocate a wide map.
 // Integer lanes reuse the independent batched integer transfer, not ir_simd_evaluate (the test oracle). Floating
-// values have the IR's default-rounding semantics, but their original rows remain to preserve flags and traps.
+// arithmetic and comparisons remain overdefined because their results depend on the runtime floating environment.
 
 static bool ir_optimize_simd_effect(const IrFunction* f, uint32_t i)
 {
@@ -81,150 +81,6 @@ static uint8_t ir_optimize_simd_meet(uint8_t left, const IrSimdValue* a, uint8_t
     return result;
 }
 
-// Compare IEEE bit patterns without evaluating a floating operation in the compiler. Signed zeros compare equal;
-// after excluding NaNs, complementing negative encodings and biasing positive ones gives numeric order.
-static bool ir_optimize_simd_float_compare(uint64_t a, uint64_t b, uint32_t width, uint32_t predicate)
-{
-    const uint64_t sign = UINT64_C(1) << (width - 1);
-    const uint64_t mask = UINT64_MAX >> (64 - width);
-    const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-    const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
-    const bool unordered = ((a & exponent) == exponent && (a & fraction) != 0) || ((b & exponent) == exponent && (b & fraction) != 0);
-    const bool equal = a == b || ((a | b) & ~sign) == 0;
-    const uint64_t left = (a & sign) != 0 ? (~a & mask) : (a ^ sign);
-    const uint64_t right = (b & sign) != 0 ? (~b & mask) : (b ^ sign);
-    bool result = false;
-    switch (predicate)
-    {
-        case IR_EQ: result = !unordered && equal; break;
-        case IR_NE: result = unordered || !equal; break;
-        case IR_LT: result = !unordered && !equal && left < right; break;
-        case IR_LE: result = !unordered && (equal || left < right); break;
-        case IR_GT: result = !unordered && !equal && left > right; break;
-        case IR_GE: result = !unordered && (equal || left > right); break;
-        default: break;
-    }
-    return result;
-}
-
-// Both paths save MXCSR, disable FTZ/DAZ, mask exceptions and use the IR's rounding mode before restoring every bit.
-// AVX-512 also supplies explicit round-to-nearest/SAE. The
-// strict floating scope prevents arithmetic crossing those changes. Repair NaNs afterwards, so operand swapping
-// by the host compiler cannot choose a different payload from the IR's first-NaN rule.
-static void ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, const IrSimdValue* left, const IrSimdValue* right, bool scalar, IrSimdValue* output)
-{
-#pragma STDC FENV_ACCESS ON
-    (void)scalar;
-    IrSimdValue staged = { 0 };
-    const uint32_t mxcsr = _mm_getcsr();
-    _mm_setcsr(UINT32_C(0x1f80));
-#if BUSTER_HOST_VECTOR
-    if (!scalar)
-    {
-        const __m512i a = _mm512_loadu_si512(left);
-        const __m512i b = _mm512_loadu_si512(right);
-        if (width == 32)
-        {
-            const __m512 x = _mm512_castsi512_ps(a);
-            const __m512 y = _mm512_castsi512_ps(b);
-            __m512 z;
-            if (op == IR_FADD)
-            {
-                z = _mm512_add_round_ps(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            else if (op == IR_FSUB)
-            {
-                z = _mm512_sub_round_ps(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            else if (op == IR_FMUL)
-            {
-                z = _mm512_mul_round_ps(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            else
-            {
-                z = _mm512_div_round_ps(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            _mm512_storeu_si512(&staged, _mm512_castps_si512(z));
-        }
-        else
-        {
-            const __m512d x = _mm512_castsi512_pd(a);
-            const __m512d y = _mm512_castsi512_pd(b);
-            __m512d z;
-            if (op == IR_FADD)
-            {
-                z = _mm512_add_round_pd(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            else if (op == IR_FSUB)
-            {
-                z = _mm512_sub_round_pd(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            else if (op == IR_FMUL)
-            {
-                z = _mm512_mul_round_pd(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            else
-            {
-                z = _mm512_div_round_pd(x, y, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            }
-            _mm512_storeu_si512(&staged, _mm512_castpd_si512(z));
-        }
-    }
-    else
-#endif
-    {
-        for (uint32_t lane = 0; lane < bits / width; lane += 1)
-        {
-            const uint64_t a = ir_simd_lane_read(left, width, lane);
-            const uint64_t b = ir_simd_lane_read(right, width, lane);
-            uint64_t word = 0;
-            if (width == 32)
-            {
-                const uint32_t aa = (uint32_t)a;
-                const uint32_t bb = (uint32_t)b;
-                float x;
-                float y;
-                memcpy(&x, &aa, sizeof(x));
-                memcpy(&y, &bb, sizeof(y));
-                const float z = op == IR_FADD ? x + y : op == IR_FSUB ? x - y : op == IR_FMUL ? x * y : x / y;
-                uint32_t zz;
-                memcpy(&zz, &z, sizeof(zz));
-                word = zz;
-            }
-            else
-            {
-                double x;
-                double y;
-                memcpy(&x, &a, sizeof(x));
-                memcpy(&y, &b, sizeof(y));
-                const double z = op == IR_FADD ? x + y : op == IR_FSUB ? x - y : op == IR_FMUL ? x * y : x / y;
-                memcpy(&word, &z, sizeof(word));
-            }
-            ir_simd_lane_write(&staged, width, lane, word);
-        }
-    }
-    _mm_setcsr(mxcsr);
-    const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-    const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
-    const uint64_t quiet = width == 32 ? UINT64_C(0x00400000) : UINT64_C(0x0008000000000000);
-    for (uint32_t lane = 0; lane < bits / width; lane += 1)
-    {
-        const uint64_t a = ir_simd_lane_read(left, width, lane);
-        const uint64_t b = ir_simd_lane_read(right, width, lane);
-        const bool a_nan = (a & exponent) == exponent && (a & fraction) != 0;
-        const bool b_nan = (b & exponent) == exponent && (b & fraction) != 0;
-        if (a_nan || b_nan)
-        {
-            ir_simd_lane_write(&staged, width, lane, (a_nan ? a : b) | quiet);
-        }
-    }
-    for (uint32_t word = bits / 64; word < 8; word += 1)
-    {
-        staged.words[word] = 0;
-    }
-    *output = staged;
-}
-
 static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdValue operands[3], bool scalar, IrSimdValue* output)
 {
     const uint32_t op = f->op[i];
@@ -232,11 +88,7 @@ static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdV
     const uint32_t width = ir_simd_lane_bits((IrSimdLane)f->flags[i]);
     IrSimdValue staged = { 0 };
     bool folded = true;
-    if (op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV)
-    {
-        ir_optimize_simd_float(op, width, bits, operands, operands + 1, scalar, &staged);
-    }
-    else if (op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_NOT)
+    if (op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_NOT)
     {
         for (uint32_t word = 0; word < bits / 64; word += 1)
         {
@@ -251,15 +103,6 @@ static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdV
         {
             const uint32_t selected = (operands[0].words[0] & (UINT64_C(1) << lane)) != 0 ? 1 : 2;
             ir_simd_lane_write(&staged, width, lane, ir_simd_lane_read(operands + selected, width, lane));
-        }
-    }
-    else if (op == IR_VCMP && f->flags[i] >= IR_SIMD_LANE_F32)
-    {
-        for (uint32_t lane = 0; lane < bits / width; lane += 1)
-        {
-            const uint64_t a = ir_simd_lane_read(operands, width, lane);
-            const uint64_t b = ir_simd_lane_read(operands + 1, width, lane);
-            staged.words[0] |= (uint64_t)ir_optimize_simd_float_compare(a, b, width, f->c[i]) << lane;
         }
     }
     else
@@ -348,7 +191,12 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
     const uint32_t a = f->a[i];
     const uint32_t b = f->b[i];
     uint8_t result = IROPT_OVERDEFINED;
-    if (op == IR_VCONST)
+    if (ir_optimize_simd_effect(f, i))
+    {
+        // Runtime MXCSR can change rounding, denormal handling and comparison results.
+        result = IROPT_OVERDEFINED;
+    }
+    else if (op == IR_VCONST)
     {
         result = IROPT_CONSTANT;
         *value = f->vector_constants[a];

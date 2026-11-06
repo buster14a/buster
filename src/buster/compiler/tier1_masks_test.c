@@ -3021,6 +3021,93 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
 }
 
 // The interpreter's buffer after the function, from `input`: the buffer bound as memory, the pointer its address.
+// Constant SIMD operations must still use the caller's MXCSR after SCCP. Execute the actual optimized Tier 1
+// output under both default and changed controls; the integer mask compares its result bits without FP arithmetic.
+static __attribute__((no_sanitize("function"))) uint8_t tier1_masks_test_mxcsr_call(const uint8_t* code, uint32_t mxcsr)
+{
+    typedef uint8_t (*Entry)(void);
+    Entry entry;
+    memcpy(&entry, &code, sizeof(entry));
+    const uint32_t saved = _mm_getcsr();
+    _mm_setcsr(mxcsr);
+    const uint8_t result = entry();
+    _mm_setcsr(saved);
+    return result;
+}
+
+static void tier1_masks_test_mxcsr(Tier1MasksTest* test)
+{
+    if (!test->native)
+    {
+        return;
+    }
+    // Rounding upward of 1 + 2^-24; flush-to-zero of min-normal * 0.5; denormals-are-zero comparison.
+    static const uint32_t left[] = { 0x3f800000u, 0x00800000u, 1u };
+    static const uint32_t right[] = { 0x33800000u, 0x3f000000u, 0u };
+    static const uint32_t expected[] = { 0x3f800000u, 0x00400000u, 0u };
+    static const uint32_t controls[] = { 0x5f80u, 0x9f80u, 0x1fc0u };
+    for (uint32_t shape = 0; shape < 3; shape += 1)
+    {
+        const uint64_t input_mark = test->execution.length;
+        const uint64_t output_mark = test->output.length;
+        IrFunction input = { 0 };
+        const bool compare = shape == 2;
+        const IrSizes sizes = { .instruction_count = compare ? 5 : 7, .block_count = 1, .vector_constant_count = compare ? 2 : 3 };
+        bool ok = tier1_masks_test_expect(test, ir_create(&test->execution, &sizes, &input) == IR_OK, "create MXCSR optimizer fixture");
+        if (ok)
+        {
+            input.result_type = IR_I8;
+            input.block_offsets[1] = sizes.instruction_count;
+            for (uint32_t lane = 0; lane < 4; lane += 1)
+            {
+                ir_simd_lane_write(&input.vector_constants[0], 32, lane, left[shape]);
+                ir_simd_lane_write(&input.vector_constants[1], 32, lane, right[shape]);
+                if (!compare)
+                {
+                    ir_simd_lane_write(&input.vector_constants[2], 32, lane, expected[shape]);
+                }
+            }
+            ir_optimize_test_instruction(&input, 0, IR_VCONST, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&input, 1, IR_VCONST, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&input, 2, compare ? IR_VCMP : shape == 0 ? IR_FADD : IR_FMUL, compare ? IR_M8 : IR_V4I32, 0, 1, compare ? IR_EQ : BUSTER_IR_NONE);
+            input.flags[2] = IR_SIMD_LANE_F32;
+            if (!compare)
+            {
+                ir_optimize_test_instruction(&input, 3, IR_VCONST, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&input, 4, IR_VCMP, IR_M8, 2, 3, IR_EQ);
+                input.flags[4] = IR_SIMD_LANE_I32;
+            }
+            const uint32_t cast = compare ? 3 : 5;
+            ir_optimize_test_instruction(&input, cast, IR_BITCAST, IR_I8, compare ? 2 : 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&input, cast + 1, IR_RET, IR_VOID, cast, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            IrOptimizeResult optimized = { 0 };
+            const IrCheck check = ir_optimize(&input, &test->output, &test->scratch, ir_optimize_options(), &optimized);
+            ok = tier1_masks_test_expect(test, check.error == IR_OK, "optimize MXCSR fixture");
+            IrDominance dominance;
+            ok = ok && tier1_masks_test_dominance(test, &optimized.function, &dominance);
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            const Tier1SelectError selected = ok ? tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, true, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+            ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "select MXCSR fixture");
+            const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true };
+            Tier1EmitResult emitted = { 0 };
+            const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->v4, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+            ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK, "emit MXCSR fixture");
+            uint64_t mapped = 0;
+            uint8_t* code = ok ? tier1_masks_test_load(test, &emitted, &mapped) : MAP_FAILED;
+            if (code != MAP_FAILED)
+            {
+                const uint8_t standard = tier1_masks_test_mxcsr_call(code, 0x1f80u);
+                const uint8_t changed = tier1_masks_test_mxcsr_call(code, controls[shape]);
+                tier1_masks_test_expect(test, standard == (compare ? 0 : 15) && changed == (compare ? 15 : 0), "optimized native SIMD observes runtime rounding, FTZ and DAZ");
+                munmap(code, mapped);
+            }
+        }
+        arena_pop_to(&test->output, output_mark);
+        arena_pop_to(&test->execution, input_mark);
+    }
+}
+
 static bool tier1_masks_test_interpret(Tier1MasksTest* test, const IrFunction* function, const uint8_t* input, uint64_t count, uint8_t* output)
 {
     memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
@@ -4440,6 +4527,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                 tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);
             }
             test.v4_features = v4.features;
+            tier1_masks_test_mxcsr(&test);
             tier1_masks_test_typed(&test);
             tier1_masks_test_builtins(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);

@@ -45,10 +45,9 @@ postorder, with 16-instruction transfer batches; the scalar solver queues
 changed SSA users and instructions affected by newly executable edges. Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
-negation preserve exact constant bits. Scalar floating arithmetic and numeric
-floating conversions remain overdefined. SIMD lane operations use the explicit
-default-rounding contract in [the SIMD guide](ir-simd.md); their constant values
-are described below. Unknown values remaining in an executable region are
+negation preserve exact constant bits. Scalar and SIMD floating arithmetic, floating comparisons and numeric
+floating conversions remain overdefined because their results can depend on the
+runtime floating environment. Unknown values remaining in an executable region are
 promoted to overdefined and propagated before rewriting.
 
 ### Constant SIMD lanes (#1450)
@@ -63,7 +62,7 @@ moves from constant to overdefined. Allocation failure aborts publication and
 restores the public call's arenas.
 
 SCCP folds 8-, 16-, 32- and 64-bit wrapping lane arithmetic, total packed shifts,
-bitwise operations, integer and floating comparisons, lane selects, raw-bit
+bitwise operations, integer comparisons, lane selects, raw-bit
 scalar splats, copies, phis, scalar selects and 128-bit scalar/vector bitcasts.
 Integer lanes feed the existing bounded 16-item fold batches and their scalar
 twin; oversized packed shifts produce zero or the sign fill, rather than
@@ -71,16 +70,10 @@ using scalar shift refusal. Tests compare both paths against
 `ir_simd_model.c` and execute complete before/after functions through the
 shared interpreter.
 
-Floating lane arithmetic evaluates at the IR's default MXCSR, restores the
-compiler caller's original MXCSR, and preserves the first NaN operand's
-quieted payload. Comparisons implement C's predicates, including unordered
-`ne` and equal signed zeros. Learning these values does **not** remove their
-floating-environment effects: the rewrite keeps every original floating
-arithmetic/comparison row and its live operands, then emits a separate constant
-for its consumers. Thus flags and possible traps retain their original
-execution condition and order. This can grow the instruction count;
-`removed_instructions` reports zero when the output is larger. Scalar floating
-evaluation remains outside this contract.
+Floating arithmetic and floating comparisons remain overdefined even with constant
+operands. Runtime MXCSR rounding, DAZ and FTZ can affect their results; keeping
+only their effects while replacing their values with default-environment constants
+would change program behavior. The original operations and their users remain live.
 
 The fold boundary receives complete `IrSimdValue` cells with all 64 bytes
 readable, independently of logical vector width. No function column needs
@@ -93,9 +86,9 @@ claim; target-host measurement remains required.
 Dead-code removal classifies roots by a vector opcode-table lookup, skips
 empty liveness batches, and propagates dependencies backwards. A separate
 worklist implementation supplies the exact scalar result and completes a
-bounded sweep. It skips dependencies of folded values except retained floating
-effects, skips removed conditional branches, and follows only executable phi
-edges.
+bounded sweep. It skips dependencies of folded values and removed conditional
+branches, and follows only executable phi edges. Floating operations remain
+overdefined, so their dependencies stay live.
 
 CFG cleanup compacts unreachable blocks, collapses single-successor
 conditionals, and threads transparent jumps. Pointer jumping and propagated

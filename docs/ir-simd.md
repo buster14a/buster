@@ -302,7 +302,7 @@ new opcode or type:
 | --- | --- | --- |
 | `add`, `sub`, `mul` | integers | wrapping, each lane |
 | `shl`, `lshr`, `ashr` | integers | each lane by the other operand's same lane, unsigned: 0 past the lane's bits, an arithmetic shift every bit the sign (the `vpsllv` family's) |
-| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE at the default rounding, a NaN operand's quieted bits (the first's where both are NaNs, x86's rule), else the default NaN |
+| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE under runtime MXCSR rounding and denormal controls; the interpreter models the default environment and x86 NaN propagation |
 | `vcmp` | any | a mask of a bit per lane (`m8` for 8 lanes or fewer, else `m16`, `m32`, `m64`); floating lanes' predicates are C's (`eq` to `ge`: ordered but `ne`, unordered or unequal) |
 | `vselect` | any | each lane by its own mask bit |
 
@@ -334,8 +334,8 @@ against the interpreter, random NaNs, infinities and denormals among the floats.
 The passes see a pure operation where they saw a call: SSA promotion, SCCP, dead
 code and CFG cleanup take them; SCCP folds supported constant vectors, and GVN
 and LICM take pure operations with their lane metadata. Dead code and constant
-folding keep the floating operations as the scalar ones'
-effects on the floating environment: the arithmetic, and a comparison of
+folding leave floating operations overdefined, preserving their values and
+effects on the runtime floating environment: the arithmetic, and a comparison of
 floating lanes (`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises
 MXCSR's invalid flag, or traps where it is unmasked), whose mask may go unused;
 an integer comparison goes with its mask. `test-ir-optimize` checks both paths,

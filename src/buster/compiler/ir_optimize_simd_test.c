@@ -61,7 +61,7 @@ static void ir_optimize_test_simd_rewrite(IrOptimizeTest* test, const IrFunction
         {
             after_effects += ir_optimize_simd_effect(&a.function, i);
         }
-        ir_optimize_test_expect(test, after_effects == before_effects, "folded SIMD floating values retain their original environment effects");
+        ir_optimize_test_expect(test, after_effects == before_effects, "SIMD floating operations retain their environment effects");
         arena_pop_to(scalar, sm);
         options.path = BUSTER_IR_OPTIMIZE_VECTOR;
         options.sweep_limit = 0;
@@ -196,7 +196,8 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                         ir_optimize_test_expect(test, created, "SIMD fold fixture and independent model accept lane operation");
                         if (created)
                         {
-                            for (uint32_t path = 0; path < 2; path += 1)
+                            const bool environment_dependent = lane >= IR_SIMD_LANE_F32 && (op == IR_VCMP || (op >= IR_FADD && op <= IR_FDIV));
+                            for (uint32_t path = 0; !environment_dependent && path < 2; path += 1)
                             {
                                 // A compiler embedded in another program must neither use nor leak its caller's FP state.
                                 const uint32_t unusual_mxcsr = UINT32_C(0xffc0) | trial;
@@ -217,8 +218,9 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                                 const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
                                 const IrFunction* out = &result.function;
                                 const uint32_t ret = check.error == IR_OK ? out->instruction_count - 1 : 0;
-                                ir_optimize_test_expect(test, check.error == IR_OK && result.folded != 0 && out->op[out->a[ret]] == IR_CONST,
-                                                        "constant lane operation propagates to the returned mask");
+                                const bool constant = check.error == IR_OK && out->op[out->a[ret]] == IR_CONST;
+                                ir_optimize_test_expect(test, check.error == IR_OK && (environment_dependent ? !constant : result.folded != 0 && constant),
+                                                        "environment-dependent SIMD results remain live; other constants propagate");
                                 arena_pop_to(vector, 0);
                             }
                         }

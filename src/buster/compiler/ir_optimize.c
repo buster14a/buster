@@ -1121,8 +1121,8 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
 
 // 1 is an unconditional effect; 2 is a potential fault or floating-environment effect, discharged only by
 // a successful constant transfer. Loads remain roots even when nonvolatile: there is no dereferenceability proof. 3 is a
-// vector comparison (#141's element types). SIMD floating arithmetic and comparisons remain effects even when SCCP
-// learns their value: the rewrite retains the original row for MXCSR flags/traps and supplies a separate constant.
+// vector comparison (#141's element types). SIMD floating arithmetic and comparisons remain overdefined and
+// retain their effects and values under the runtime MXCSR.
 // An integer comparison has no such effect and goes where its mask is unused.
 static const uint8_t ir_optimize_roots[64] = {
         [IR_LOAD] = 1,
@@ -1240,7 +1240,7 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
                     const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + at);
                     const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), _mm512_loadu_si512(ir_optimize_roots)));
                     const __m128i states = _mm_maskz_loadu_epi8(valid, work->states + at);
-                    // SIMD floating arithmetic (kind 2) and comparisons (kind 3) keep their effects after folding.
+                    // SIMD floating arithmetic (kind 2) and comparisons (kind 3) retain their effects.
                     const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + at);
                     const __mmask16 floating = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) | _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2))) &
                                               _mm_cmpge_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
