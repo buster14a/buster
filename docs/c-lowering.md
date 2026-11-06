@@ -1699,3 +1699,49 @@ reuses those rows without a mutable cross-unit cache; derived classifications
 and dependency scheduling remain private to each unit. The historical numbers
 above predate that change and do not measure its effect.
 These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.
+
+### A small unit's fixed cost after checking (#442)
+
+A rebaseline on 2026-11-06 compiled the same harness into main before #418 (`3bfb4a72`), #418's merge (`54703dcf`) and
+main at `ec5f0f6b`, and ran them on the 9700X under its lock, pinned to CPU 2
+([the record](https://github.com/buster14a/buster-performance/tree/73009c83386222d63bc625b657c4c4a52e8c5240/docs/measurements/lowering-fixed-cost-442-2026-11-06)).
+#418's merge still cost what it did, +1.6% on c-testsuite and −0.3% under 300 tokens. But main's path after checking
+had grown to +54% over main before #418, and to +177% on its 154 programs under 300 tokens: a 9-token unit took 6.8 µs
+where main before #418 took 1.7. #418 didn't add that. Three pieces of every unit's setup did, each the same in every
+unit:
+
+- **Lane 0's writer's columns.** #531 put them in an arena of base pages, which a `CheckProgramLanes` keeps while it has
+  their room. But an emission without lanes reserved one and released it each time, and the C driver released a units'
+  lane's lanes after each unit (`check_driver_object`): an `mmap`, `mprotect`s, a `getrlimit` and an `munmap`, and a
+  fault for each page the columns' starts touch. The calling thread now keeps its own (`check_program_thread_columns`),
+  and a units' lane its lanes' first from one unit to the next (`check_program_lanes_settle`).
+- **The runtime functions' names.** The preparation looks up about 185 of them in the unit's identifiers, so that a
+  call of one takes the symbol of the unit's declaration of its name, and it measured and hashed each spelling for
+  every unit. Their lengths and hashes are baked with the backend's tables (`check_lower_runtime_names_initialize`), so a
+  unit's lookups are its table's probes.
+- **The builtin types' rows.** The 64 builtin types' classes and facts were classified by the rules for every unit.
+  The vector path copies them (`check_lower_builtin_classes` and `check_lower_builtin_facts`, a 64-byte vector each,
+  plain char's class by `TypeTable.char_unsigned`), and `test-checker` compares the copy with its twin's rules with
+  plain char signed and unsigned.
+
+c-testsuite's 220 programs, each file's least run minimum over 4 rounds of 101 passes, summed:
+
+| | Main before #418 (ns) | #418's merge | Main at `ec5f0f6b` | #442 (#1568) |
+| --- | ---: | ---: | ---: | ---: |
+| All 220 | 1,865,081 | +1.6% | +54.4% | −23.1% |
+| The 216 whose output #418 kept | 1,727,545 | +1.5% | +58.8% | −22.2% |
+| The 4 whose output #418 changed | 137,536 | +3.3% | −1.2% | −35.4% |
+| Under 300 tokens (154) | 481,282 | −0.3% | +177.3% | +7.6% |
+| 3,000 tokens or more (60) | 1,306,044 | +2.4% | +10.1% | −34.2% |
+
+Every round's sum agreed (−22.6 to −23.8%), and against main at `ec5f0f6b` the change is −50.2% in all and −61.1% under
+300 tokens, every file faster. Under 300 tokens the kept columns took −52.0% off main's time, the baked names a further
+−11.2% and the copied rows a further −10.6%. What the smallest units keep, about 240 ns a file over main before #418, is
+setup that main added since #418: in the emission (+5.6%) the names' probes and the rest of the lowering's setup, and in
+the object (+36%) the definitions' named sections (#619) among it. The synthetic units of 2,000 definitions, whose few
+tokens leave the per-unit setup little to cost, are 3.4 to 7.8% faster than main at `ec5f0f6b`; their emission is at
+most 2.6% over main before #418's, and their selection, about twice its, is per-definition work main has added since,
+not #418's. The whole compiler gains less: `-c --lanes 1` of all 220 programs at once, through the units' lanes, took 1.51%
+less than main at `ec5f0f6b` (8 of 8 paired runs), as a small unit's compile is mostly its checking. Every object, of
+c-testsuite's programs by `-c`, `-c -g`, `-funsigned-char`, `--scalar` and the units' path, and `main.c`'s, is byte for
+byte main's.
