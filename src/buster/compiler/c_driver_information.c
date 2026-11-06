@@ -194,7 +194,7 @@ static __attribute__((noinline)) bool main_information(int count, char** argumen
         {
             verbose = true;
         }
-        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 || strcmp(argument, "--worker-budget") == 0 ||
+        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 || strcmp(argument, "--lane-cpus") == 0 || strcmp(argument, "--worker-budget") == 0 ||
                   strcmp(argument, "--id-order") == 0 || strcmp(argument, "-l") == 0 || strcmp(argument, "-L") == 0 || strcmp(argument, "-Xlinker") == 0) && i + 1 < count)
         {
             i += 1;

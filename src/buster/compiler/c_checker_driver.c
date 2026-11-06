@@ -4124,6 +4124,51 @@ struct CheckDriverDeferred
     bool return_failed;
 };
 
+// A strict, ordered list of distinct CPUs already in the caller's affinity mask. A CPU list is an opt-in control
+// for a reproducible campaign, so malformed or unavailable entries must not silently select a different placement.
+static uint32_t check_driver_cpu_list(const char* text, uint32_t* cpus, uint32_t capacity)
+{
+    uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed);
+    uint32_t count = 0;
+    bool valid = text != NULL && bytes > 0;
+    const char* p = text;
+    while (valid && *p != 0)
+    {
+        uint32_t cpu = 0;
+        bool digits = false;
+        while (*p >= '0' && *p <= '9')
+        {
+            digits = true;
+            cpu = cpu * 10u + (uint32_t)(*p++ - '0');
+            if (cpu >= BUSTER_LANE_CPU_MASK_WORDS * 64u)
+            {
+                valid = false;
+                break;
+            }
+        }
+        valid = valid && digits && count < capacity && (allowed[cpu / 64] & (UINT64_C(1) << (cpu % 64))) != 0;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            valid = cpus[i] != cpu;
+        }
+        if (valid)
+        {
+            cpus[count++] = cpu;
+            if (*p == ',')
+            {
+                p += 1;
+                valid = *p != 0;
+            }
+            else
+            {
+                valid = *p == 0;
+            }
+        }
+    }
+    return valid ? count : 0;
+}
+
 // The lanes a unit's reading may give its deferred bodies: the command's (its CPUs, --lanes N and --worker-budget N), no
 // more than the reader has. Of those, its grant (check_driver_deferred_grant) takes what the session and the worker budget
 // give, once the reader has counted the bodies' tokens: a small unit's never waits for the session's lanes.
@@ -4806,6 +4851,7 @@ struct CheckDriverRun
     uint32_t input_count;
     const char* path;
     CheckProgramLanes* lanes;
+    const uint32_t* pinned_cpus;
     CheckClock* stage_clock;
     uint64_t* pp_ticks;
     Arena* arena;
@@ -4854,6 +4900,12 @@ static int check_driver_one_unit(const CheckDriverRun* run)
 static void check_driver_flow(void* argument)
 {
     CheckDriverRun* run = argument;
+    if (run->pinned_cpus != NULL && run->stage_clock != NULL)
+    {
+        unsigned cpu = UINT_MAX;
+        const long observed = syscall(SYS_getcpu, &cpu, NULL, NULL);
+        fprintf(stderr, "lane-pin\tindex=%u\texpected=%u\tobserved=%u\tstatus=%ld\n", lane_index(), run->pinned_cpus[lane_index()], cpu, observed);
+    }
     if (lane_index() == 0)
     {
         check_clock_mark(run->stage_clock, CHECK_STAGE_LANES_START);
@@ -4913,6 +4965,11 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     capacity = capacity < cpus ? capacity : cpus;
     capacity = capacity == 0 || (run->input_count <= 1 && !command->emit_object && !command->link) ? 1 : capacity;
     run->capacity = capacity;
+    if (run->pinned_cpus != NULL && (capacity != run->lanes->lanes || lane_session_current() != NULL))
+    {
+        fprintf(stderr, "error: requested pinned lanes cannot start in this command\n");
+        return 1;
+    }
     // The options are the setup's; the session's start, or the flow's dispatch, is lanes-start's (check_driver_flow).
     check_clock_mark(run->stage_clock, CHECK_STAGE_SETUP);
     if (lane_session_current() == NULL)
@@ -4926,9 +4983,19 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
         // than the cores, which it counts first: two lanes on one core's SMT siblings compiled sqlite3.c slower, in 18%
         // more user time and 44 MB more peak memory, on the 9700X.
         const uint32_t per_core = run->lanes->every_lane ? 0 : BUSTER_LANE_SESSION_PER_CORE;
-        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | per_core | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END);
-        if (session == NULL || lane_session_run(session, capacity, NULL, check_driver_flow, run, flags) == 0)
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | per_core | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END) |
+                               (run->pinned_cpus != NULL ? BUSTER_LANE_SESSION_REQUIRE_START : 0);
+        if (session == NULL || lane_session_run(session, capacity, run->pinned_cpus, check_driver_flow, run, flags) == 0)
         {
+            if (run->pinned_cpus != NULL)
+            {
+                fprintf(stderr, "error: could not start the requested pinned lanes\n");
+                if (run->release)
+                {
+                    arena_release(&memory);
+                }
+                return 1;
+            }
             // A thread already in a team's or a cold group's operation, which a session can't nest in: alone.
             const Lane group = lane_alone();
             check_driver_flow(run);
@@ -5094,6 +5161,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     lanes->slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
     lanes->slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
+    uint32_t pinned_cpus[BUSTER_CHECK_EMIT_MAX_LANES] = { 0 };
+    uint32_t pinned_cpu_count = 0;
+    bool pinned_cpus_seen = false;
     bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
@@ -5319,6 +5389,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_lifetimes = true;
         }
+        else if (strcmp(arguments[i], "--lane-cpus") == 0 || strncmp(arguments[i], "--lane-cpus=", 12) == 0)
+        {
+            const char* value = arguments[i][11] == '=' ? arguments[i] + 12 : i + 1 < count ? arguments[++i] : NULL;
+            invalid_lanes |= pinned_cpus_seen;
+            pinned_cpus_seen = true;
+            pinned_cpu_count = check_driver_cpu_list(value, pinned_cpus, BUSTER_CHECK_EMIT_MAX_LANES);
+            invalid_lanes |= pinned_cpu_count == 0;
+        }
         else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
         {
             const char* value = arguments[i][7] == '=' ? arguments[i] + 8 : i + 1 < count ? arguments[++i] : 0;
@@ -5498,6 +5576,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* output = 0;
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
+    invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
                   !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
@@ -5605,7 +5684,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
@@ -5652,6 +5731,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             .input_count = input_count,
             .path = path,
             .lanes = lanes,
+            .pinned_cpus = pinned_cpus_seen ? pinned_cpus : NULL,
             .stage_clock = stage_clock,
             .pp_ticks = pp_ticks,
             .arena = &arena,
