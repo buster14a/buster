@@ -282,11 +282,11 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
             const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
             const String8 text = type_print(types, scratch, type, (String8){ 0 }, NULL, options);
             const char* quoted = text.length != 0 ? check_warning_text(scratch, "'%.*s'", (int)text.length, text.pointer) : NULL;
-            return quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
+            result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
         }
         // Only diagnostic rendering needs these spelling arrays; clean checking retains no identifier-sized view.
         // The pass's columns live in `spell`, built on the pass's first rendered type below its marks (#992).
-        if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+        else if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
         {
             TypeNames names = {
                 .bytes = spell->bytes,
