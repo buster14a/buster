@@ -1,10 +1,12 @@
-# DWARF source lines and final addresses
+# DWARF source lines, C values and final addresses
 
 `src/buster/compiler/debug.c` supplies a bounded part of [#88](https://github.com/buster14a/buster/issues/88):
 DWARF 5 function names, ranges and source lines. It emits `.debug_info`,
 `.debug_abbrev`, `.debug_line`, `.debug_addr` and `.debug_rnglists` in DWARF32
-format for Linux x86-64. Types, variables, inline scopes and unwind instructions
-are not represented by this interface.
+format for Linux x86-64. This core interface remains independent of C types and
+storage allocation. The C producer adds types, variables and lexical scopes for
+`-g` as described below; inline scopes are not represented. Unwind instructions
+use the separate frame-event interface.
 
 `debug_write` emits the sections before final layout, with zeroes in address
 slots. `debug_finalize` later writes the function addresses into `.debug_addr`
@@ -71,10 +73,67 @@ other byte is the unit's alone, and a base that would carry a contribution past
 DWARF32 is refused before anything is written. `test-debug` compares a unit
 written at bases with the same unit alone, byte for byte but the four offsets.
 
+## C types and values (`-g`)
+
+`c_check_debug_values.c` enriches the core producer for [#1114](https://github.com/buster14a/buster/issues/1114).
+It emits a DIE for each reachable, qualified `TypeId` in the translation unit:
+base and pointer types, fixed and incomplete arrays, records and unions (with
+byte or bit offsets), enums and enumerators, function signatures, qualifiers,
+and declaration-scoped typedef names. A bounded worklist handles recursive
+records without recursion. Two passes measure and then write CU-relative
+`DW_FORM_ref4` references, including forward references; these references need
+no relocation when units are concatenated.
+
+Named parameters and locals retain their source declarations through lowering.
+Tier 0 publishes its final local homes with source-aware output only. The C
+producer describes register values with `DW_OP_regx`, and storage with
+`DW_OP_bregx` plus the actual home displacement. It does not force a frame
+pointer, spill a register value, or otherwise change generated instructions.
+Indirect homes for variable-length arrays dereference the saved array pointer;
+the variable-length bound itself is currently unspecified in the array type.
+
+`.debug_loclists` restricts a home to encoded source-entry ranges after the
+prologue and within the declaration's lexical scope. Shared epilogues and
+whole tail-call entries are omitted: those can restore registers or destroy a
+frame base. Lexical blocks use corresponding `.debug_rnglists` entries, so
+nested shadowed names stop being visible on leaving their scope. The ranges
+use the existing function address table. They are derived after branch sizing,
+not from estimated instruction lengths.
+
+Ordinary defined globals, file statics and block statics use `DW_OP_addr`,
+relocated against their actual definition's atom and symbol offset. Debug
+construction therefore follows data publication. A data-only translation unit
+also retains its variable definitions. Multi-unit linking remaps these
+references separately from reference binding, preserving replaced weak
+definitions just as it does for function debug addresses.
+
+`NativeDebugExtra` describes the additional `.debug_info` section-offset and
+definition-address fields. Its two sorted, nonoverlapping columns remain
+caller-owned through emission. Section offsets target range or location lists;
+address fields target ordinary object definitions. The native executable
+writer patches copies after layout. The object writer emits `R_X86_64_32` and
+`R_X86_64_64` relocations against section symbols, with zeroes in the relocated
+fields and their values in relocation addends. The optional sixth section is
+omitted for producers which supply only the five core sections.
+
+**Limits:** Tier 1 allocator-interval locations remain a later step of #1114.
+Its parameters and locals are named and typed but deliberately have no location;
+no Tier 0 home is reused as a guess. Thread-local, unresolved and common symbols
+without a published ordinary object definition likewise have no location.
+Values before initialization are not guaranteed meaningful. The existing
+single-source-file-per-function and no-inline-scope limits still apply.
+
+`test-check-debug --cross-check` compares GDB reads against a fixture's own
+printed values: integer and floating parameters, pointers, arrays, recursive
+records, bit fields, unions, enums, typedefs, shadowing, statics, and aligned
+and dynamic frames. It checks native executables, `-c -g` objects linked by
+GNU ld, lld and `link-foreign`, and merged data-only units, together with
+`llvm-dwarfdump --verify` and scalar/vector/lane determinism.
+
 ## Native executable attachment
 
 `ExecutableOptions.debug` accepts an `ExecutableDebug` descriptor containing
-the five section byte slices, a function `SymbolId` column in their address-table
+the five core section byte slices (and optional `.debug_loclists`), a function `SymbolId` column in their address-table
 order, and the line-address-offset column. It attaches one unit or several
 (#395): `unit_functions` and `unit_count` give each unit's function count, each
 section's slice holds the units' contributions one after another (each unit

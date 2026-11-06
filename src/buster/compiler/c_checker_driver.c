@@ -2767,15 +2767,6 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     {
         check_driver_emission_failed(parser, pp, &code);
     }
-    if (valid && debug)
-    {
-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
-        if (!valid)
-        {
-            fprintf(errors, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
-        }
-    }
-    check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
     if (valid)
     {
         valid = check_data_publish(data, types, program->stream, program->object_symbols, program->object_count,
@@ -2793,6 +2784,15 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         valid = false;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
+    if (valid && debug)
+    {
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
+        if (!valid)
+        {
+            fprintf(errors, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
+        }
+    }
+    check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
     if (valid && kept != NULL)
     {
         const LinkError checked = link_check(&code.link);
@@ -3419,16 +3419,6 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             }
         }
         check_driver_lower_report(&code, stage_clock);
-        // The units' DWARF is in the merge's (check_units_merge_debug).
-        if (valid && debug && units == NULL)
-        {
-            valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
-            if (!valid)
-            {
-                fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
-            }
-        }
-        check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
         // The units' static data is in their links already.
         if (valid && units == NULL)
         {
@@ -3448,6 +3438,16 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             valid = false;
         }
         check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
+        // The units' DWARF is in the merge's (check_units_merge_debug).
+        if (valid && debug && units == NULL)
+        {
+            valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
+            if (!valid)
+            {
+                fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
+            }
+        }
+        check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
         if (valid)
         {
             // Binding takes the libraries between bind_begin, which check_program_emit ran, and bind_end.
