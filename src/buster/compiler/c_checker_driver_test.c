@@ -4539,6 +4539,13 @@ static void check_test_driver_cpu_pinning(CheckTest* test, const char* executabl
         check_test_expect(test, status == 0 && text != NULL && strstr(text, receipt) != NULL && check_test_driver_same_files(reference, pinned),
                           "two distinct pinned lanes report their CPUs and preserve the object");
         free(text);
+        unlink(pinned);
+        char* const capped[] = { (char*)executable, "--lanes", "2", "--lane-cpus", cpu_list, "--worker-budget", "1", "-c", source, "-o", pinned, NULL };
+        text = NULL;
+        const int capped_status = check_test_driver_spawn(capped, &text);
+        check_test_expect(test, capped_status == 1 && access(pinned, F_OK) != 0,
+                          "a worker budget smaller than the pinned lane count fails before output");
+        free(text);
     }
     unlink(source);
     unlink(reference);
