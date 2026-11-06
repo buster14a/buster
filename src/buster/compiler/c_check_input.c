@@ -2165,8 +2165,6 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
     }
 }
 
-#include "c_check_redefinition.c"
-
 // check_input_report of a message that reads `detail` (CheckInputReport.detail), at an attribute's first token. It is
 // published after the token, past the warnings an attribute's handler gives before it there (#147).
 static void check_input_report_argument(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t detail)
@@ -2190,6 +2188,8 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
         reader->output->reports[count].subject = subject + 1;
     }
 }
+
+#include "c_check_redefinition.c"
 
 // Append a multiversioning message that names the attribute at `attribute` and carries `note` at `note_token`, if any,
 // to the unit's deferred reports.
