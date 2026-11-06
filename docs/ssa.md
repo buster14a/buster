@@ -13,8 +13,9 @@ intervals directly.
 
 Both paths are checked on every function of the corpora and of random C
 programs, and the programs run in each of their three forms by the shared IR's
-interpreter ("Real and generated C" below); the comparison with Tier 1's
-compiled code waits for Tier 1 (the end of this guide).
+interpreter ("Real and generated C" below). `test-ssa-source --tier1` adds
+strict native Tier 1 programs from both host paths to that comparison;
+`--typed` also runs the retained typed stream independently.
 
 ## Input and handoff
 
@@ -297,12 +298,13 @@ and lane waits were not executed there.
 functions `-c` compiles of each file, as `test-ir-source` prepares them
 (`ir_source_prepare`), lowered with every local in memory and promoted by both
 paths, and each program with a `main` run in each of its three forms by the
-shared IR's interpreter (#176).
+shared IR's interpreter (#176). With `--tier1`, both strict native Tier 1
+builds must give the same result; `--typed` adds the typed interpreter too.
 
 ```sh
-./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
-./build/compiler test-ssa-source --generate 48 --clang clang
-./build/compiler test-ssa-source --generate 24 --seed 141 --lifetimes --clang clang
+./build/compiler test-ssa-source --typed --tier1 $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-ssa-source --typed --tier1 --generate 48 --clang clang
+./build/compiler test-ssa-source --tier1 --generate 24 --seed 141 --lifetimes --clang clang
 ./build/compiler test-ssa-source [preprocessor options] sqlite3.c
 ```
 
@@ -345,16 +347,47 @@ Where `FILE.expected` exists
 (c-testsuite's convention), the program must exit with status 0 having written
 its bytes.
 
-`test-ssa-source --self-test` checks this boundary on six tiny C fixtures,
+`test-ssa-source --self-test` checks this boundary on tiny C fixtures,
 through the real preparation, promotions and three child processes, without
 expected-output sidecars: a normal nonzero return and a native `exit` must pass;
 three identical wall-timeout signals and three interpreter step limits must
 fail. The controls check every process status and retained interpreter record.
-An admitted program that closes descriptors3–4095 invalidates the child's
+An admitted program that closes descriptors 3–4095 invalidates the child's
 record descriptor while leaving captured stdout/stderr open; the resulting
 record-write failure must fail all three forms, with their empty records kept.
 A separate native `exit(255)` must still pass without an interpreter record.
 Unexpected failures retain their work directory; `--keep` retains every run.
+
+### Comparing Tier 1's compiled programs
+
+`--tier1` adds the default and scalar host paths' native programs after the
+interpreter runs. Each source is compiled with `--tier1 --tier1-strict
+--tier1-report --verify`, and again with `--scalar`. Successful compilation
+and a complete Tier 1 report are required: every emitted function must be
+compiled by Tier 1. An unsupported source or function fails this qualification;
+it cannot pass by falling back to Tier 0 or disappearing from the comparison.
+The scalar driver's path uses scalar lowering, promotion, optimization,
+selection and allocation; the other uses their production vector paths and
+their documented algorithmic cutovers. This checks the source-to-native
+pipeline, rather than emitting the test's already-promoted IR directly.
+
+The native programs run sequentially in separate directories after the
+interpreter children finish. Compilation retains the caller's working
+directory and preprocessor options, so relative source and include paths keep
+their meaning. Execution uses `argc` 1, `argv[0]` `program`, an empty environment
+and `/dev/null` input, matching the interpreter. The parent bounds each native
+run's wall time and cleans up its process group. A separate launch-status
+channel distinguishes setup or `execve` failure from a program returning 127.
+Only normal, successfully launched exits can be compared; timeouts, signals
+and unreadable captures fail before output equality is considered.
+
+Both native outputs and exit statuses must match the all-memory IR's run,
+which already matches the two SSA interpreters and any independent expected
+output. `--self-test --tier1` checks the native boundary, including legitimate
+127/255 exits, launch and compilation failures, a real timeout and an output
+mismatch. The interpreter-specific step-limit and record-write controls stay
+separate: a native program has neither an interpreter step budget nor an
+interpreter result record.
 
 The interpreter's program is the emission's link, which `ir_source_prepare`
 keeps when asked: the static data published into it as the driver publishes it
@@ -542,12 +575,17 @@ retains the complete SSA benchmark step, source hashes and qualification
 excerpts. It precedes shared-dominator adoption; the revised analysis path
 requires its own protected target result.
 
-## What remains for #134
+## Acceptance for #134
 
-The comparison of Tier 1's compiled code with the three interpreted forms, once
-Tier 1 compiles general CFGs and phis (#138, which depends on this issue): it
-refuses them today, so no promoted function with control flow reaches native
-code yet.
+The corpus verifier, interpreted-program and 9700X promotion results above
+come from the pinned records identified in each section. Tier 1 now emits
+general CFGs and phi moves. The `--tier1` comparison described above and its
+shared correctness commands cover the native execution item left open by
+#925, without treating the older Tier 0-fallback-permitting c-testsuite run as
+strict Tier 1 acceptance. [Stage 4 acceptance](type-checking-ssa.md) connects
+this consumer to #130's checker and IR evidence. Historical measurements do
+not constitute a new-head native or sanitizer pass; the change's CI run must
+establish those results on its actual tested revision.
 
 ## Algorithm references
 

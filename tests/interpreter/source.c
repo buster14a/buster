@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Keep the interpreter's 520-byte aggregate; the native variant uses 64 longs for Tier 1's 512-byte argument limit.
+#ifndef BUSTER_INTERPRETER_LARGE_WORDS
+#define BUSTER_INTERPRETER_LARGE_WORDS 65
+#endif
+
 typedef struct Pair Pair;
 struct Pair
 {
@@ -15,7 +20,7 @@ struct Pair
 typedef struct Large Large;
 struct Large
 {
-    long values[65];
+    long values[BUSTER_INTERPRETER_LARGE_WORDS];
 };
 
 typedef struct Aligned Aligned;
@@ -53,7 +58,7 @@ static Pair change_pair(Pair value)
 static Large change_large(Large value)
 {
     value.values[4] += value.values[0];
-    value.values[64] += value.values[0];
+    value.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] += value.values[0];
     return value;
 }
 
@@ -98,7 +103,7 @@ int main(void)
     Pair original = { 11, 13 };
     Pair (*indirect)(Pair) = change_pair;
     const Pair changed = indirect(original);
-    Large large = { { 2, 3, 5, 7, 11, [64] = 23 } };
+    Large large = { { 2, 3, 5, 7, 11, [BUSTER_INTERPRETER_LARGE_WORDS - 1] = 23 } };
     const Large returned = change_large(large);
     const div_t quotient = div(20, 6);
     const long sum = collect(8, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 2.5, 4.75L, original);
@@ -108,7 +113,8 @@ int main(void)
     memset(bytes, 3, sizeof(bytes));
     memmove(bytes + 1, bytes, sizeof(bytes) - 1);
     const int passed = original.first == 11 && original.second == 13 && changed.first == 18 && changed.second == 39 &&
-                       large.values[4] == 11 && returned.values[4] == 13 && large.values[64] == 23 && returned.values[64] == 25 && returned.values[32] == 0 &&
+                       large.values[4] == 11 && returned.values[4] == 13 && returned.values[32] == 0 &&
+                       large.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 23 && returned.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
                        quotient.quot == 3 && quotient.rem == 2 &&
                        sum == 66 && tail == 45 && collect_register_only(3, 5L, 7L) == 15 && collect_aligned(0, aligned) == 161 && labels(0) == 17 && labels(1) == 29 && bytes[63] == 3;
     printf("typed source: %d\n", passed);
