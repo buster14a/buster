@@ -1108,6 +1108,9 @@ struct ParseDiagnostic
     // A missing `;` after a declaration's declarator before what clang takes for a declaration specifier (#147): clang's
     // ParseDeclGroup goes on as if the `;` were there, and reads the specifier as the next declaration's first.
     bool resumed;
+    // A parameter's missing or unknown type. A diagnostic-only view may recover it as int after proving the whole
+    // enclosing declaration structurally complete, while preserving the original tokens and error.
+    bool parameter_type;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
@@ -1847,7 +1850,12 @@ static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
     if (frame->typeless_name != 0)
     {
         const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
+        const uint32_t before = parser->diagnostic_count;
         parse_scalar_note(parser, frame->typeless_name - 1, message, BUSTER_PARSE_NONE, true);
+        if (parser->diagnostic_count > before && frame->role == PARSE_ROLE_OPEN_FUNCTION)
+        {
+            parser->diagnostics[before].parameter_type = true;
+        }
         frame->typeless_name = 0;
     }
 }
@@ -3562,7 +3570,12 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
                                         parser->kinds[i + 1] == PARSE_KIND_ATTRIBUTE;
         if ((parameter && parser->language.standard >= 2023) || (!inferred_attribute && !parse_scalar_valid_after_name(parser, i + 1)))
         {
+            const uint32_t before = parser->diagnostic_count;
             parse_scalar_note(parser, i, PARSE_MESSAGE_UNKNOWN_TYPE_NAME, i, true);
+            if (parameter && parser->diagnostic_count > before)
+            {
+                parser->diagnostics[before].parameter_type = true;
+            }
             step->role = PARSE_ROLE_SPECIFIER;
             frame->flags |= BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_SPECIFIED;
         }
@@ -5557,6 +5570,48 @@ static uint32_t parse_scalar_skip(const ParseScalar* parser, uint32_t token, uin
     return result;
 }
 
+// When a file-scope C23 attribute name is missing, clang's failed first `]` expectation skips through one `]` and
+// leaves the second one for the declaration parser. Report that bracket too, without publishing any of the damaged
+// declaration's tree or bindings. Balanced argument tokens in the skipped list cannot supply its closing bracket.
+static void parse_scalar_attribute_tail(ParseScalar* parser, uint32_t token, uint32_t end)
+{
+    const bool prefix = parser->frame_count == 3 && parser->frames[1].role == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER &&
+                        (parser->frames[1].continuation == PARSE_MODE_SPECIFIERS || parser->frames[1].continuation == PARSE_MODE_DECLARATOR);
+    const bool missing = prefix && parser->frames[2].role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST &&
+                         parser->frames[2].mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME && parser->error_message == PARSE_MESSAGE_EXPECTED_R_SQUARE;
+    uint32_t depth = 0;
+    bool done = !missing;
+    for (uint32_t i = token; !done && i < end && i < parser->count; i += 1)
+    {
+        const uint8_t kind = parser->kinds[i];
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            parser->brackets[depth] = kind;
+            depth += 1;
+        }
+        else if (parse_kind_is_closer(kind))
+        {
+            const uint8_t opener = kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : kind == PARSE_KIND_R_SQUARE ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_BRACE;
+            if (depth != 0 && parser->brackets[depth - 1] == opener)
+            {
+                depth -= 1;
+            }
+            else
+            {
+                if (depth == 0 && kind == PARSE_KIND_R_SQUARE && parser->kinds[i + 1] == PARSE_KIND_R_SQUARE)
+                {
+                    parse_scalar_note(parser, i + 1, PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_NONE, true);
+                }
+                done = true;
+            }
+        }
+        else
+        {
+            done = depth == 0 && kind == PARSE_KIND_SEMI;
+        }
+    }
+}
+
 // Back to file scope, between top-level declarations.
 static void parse_scalar_reset(ParseScalar* parser)
 {
@@ -5627,6 +5682,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
     }
     parser->errors += 1;
     const uint32_t end = resumed ? stopped - 1 : parse_scalar_skip(parser, stopped, parser->brackets);
+    parse_scalar_attribute_tail(parser, stopped, end);
     for (uint32_t t = parser->item_begin; t <= end && t < parser->count; t += 1)
     {
         parser->roles[t] = PARSE_ROLE_ERROR;
@@ -5641,8 +5697,8 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 typedef struct ParseScalarResult ParseScalarResult;
 struct ParseScalarResult
 {
-    // The errors found: syntax errors (one per top-level declaration at most), and the errors clang reports without
-    // changing how it parses (a missing type specifier).
+    // The errors found: a top-level declaration's first syntax error and any malformed attribute tail it leaves,
+    // and the errors clang reports without changing how it parses (a missing type specifier).
     uint32_t errors;
     // The scratch arena couldn't hold the parser's stacks: nothing was parsed.
     bool out_of_memory;
@@ -12739,6 +12795,9 @@ struct Parser
     uint8_t* meaning_column;
     uint32_t meaning_room;
     uint32_t errors;
+    // A checked diagnostic prefix may include one complete declaration with already diagnosed parameter types.
+    // Only its parameter specifiers may recover as int; ordinary parses and emission never enable this.
+    bool recovered_parameter_types;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.
     ParseMessage fatal;
@@ -12881,31 +12940,39 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
 }
 
 // Whether token `t` is a number where a C23 attribute's identifier goes: before `::` (the two colons of one `::` token, a
-// scope's) or right after `[[` (a name's), which C has nowhere else.
+// scope's), right after `[[`, or after a comma. The last is only a candidate: the sparse history/context walk below
+// proves that it is an attribute's name, rather than an expression or an attribute argument.
 BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t)
 {
     const bool scope = tokens->kinds[t + 1] == PARSE_KIND_COLON && tokens->kinds[t + 2] == PARSE_KIND_COLON &&
                        (tokens->flags[t + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
     const bool name = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
-    return tokens->kinds[t] == PARSE_KIND_NUMBER && (scope || name);
+    const bool comma = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_COMMA;
+    return tokens->kinds[t] == PARSE_KIND_NUMBER && (tokens->flags[t] & BUSTER_PP_FROM_MACRO) != 0 && (scope || name || comma);
 }
 
 // clang's reading of `__clang__`'s expansion where a C23 attribute's identifier goes (#147, clang's
 // TryParseCXX11AttributeIdentifier): a number the macro's own expansion made, outside any other macro's and its arguments,
-// before `::` or right after `[[`, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
+// before `::`, right after `[[`, or after a comma in that list, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
 // its source, a number). The token becomes that identifier before the names' meanings are sized. The places are found 64
 // tokens at a time, as masks of the kinds around each token (the columns' padding covers the edges), and each one's
 // expansion is looked up, the history recorded first where it was deferred; the scalar path tests each token, the twin.
-static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
+static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
 {
     ParseTokens* tokens = &parser->tokens;
     const uint32_t count = tokens->count;
+    Arena* scratch = parser->options.scratch != NULL ? parser->options.scratch : &parser->scratch;
+    const uint64_t mark = scratch->length;
+    uint32_t* groups = NULL;
+    uint32_t group_count = 0;
+    uint32_t scanned = 0;
+    bool result = true;
     const IdentId clang = intern_find(pp->table, (const uint8_t*)"__clang__", 9);
     IdentId spelling = 0;
     // The history, which a deferred one replays the unit for (pp_history_ensure), is read only where a place is found.
     bool history = false;
     bool asked = false;
-    for (uint32_t first = 0; clang != 0 && first < count; first += 64)
+    for (uint32_t first = 0; result && clang != 0 && first < count; first += 64)
     {
         uint64_t places = 0;
         const uint32_t length = count - first < 64 ? count - first : 64;
@@ -12919,13 +12986,16 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const __m512i before = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 1);
             const __m512i earlier = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 2);
             const __m512i flags = _mm512_loadu_si512(tokens->flags + first + 2);
-            const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER));
+            const __m512i own_flags = _mm512_loadu_si512(tokens->flags + first);
+            const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER)) &
+                                     _mm512_test_epi8_mask(own_flags, _mm512_set1_epi8(BUSTER_PP_FROM_MACRO));
             const __mmask64 scope = _mm512_cmpeq_epi8_mask(after, _mm512_set1_epi8(PARSE_KIND_COLON)) &
                                     _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(PARSE_KIND_COLON)) &
                                     _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_PARSE_COLONCOLON_SECOND));
             const __mmask64 name = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) &
                                    _mm512_cmpeq_epi8_mask(earlier, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
-            places = live & number & (scope | name);
+            const __mmask64 comma = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_COMMA));
+            places = live & number & (scope | name | comma);
         }
         else
 #endif
@@ -12935,15 +13005,37 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
                 places |= parse_clang_scope_place(tokens, first + i) ? UINT64_C(1) << i : 0;
             }
         }
-        for (; places != 0; places &= places - 1)
+        for (; result && places != 0; places &= places - 1)
         {
             const uint32_t t = first + (uint32_t)__builtin_ctzll(places);
             history = asked ? history : pp_history_ensure(pp);
             asked = true;
             const uint32_t origin = history ? pp_history_at(pp, tokens->sources[t]) : 0;
             const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
-            const bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
-                                  pp->history[index].name == clang && pp->history[index].parent == 0;
+            bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
+                            pp->history[index].name == clang && pp->history[index].parent == 0;
+            if (expanded && t > 0 && tokens->kinds[t - 1] == PARSE_KIND_COMMA)
+            {
+                // Only a direct __clang__ expansion after a comma needs enclosing-delimiter state. Scan its prefix
+                // once, monotonically across all such uses, so long attribute lists and deeply nested arguments
+                // stay linear. The ordinary path keeps no stack or additional token-wide column.
+                groups = groups != NULL ? groups : BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
+                result = groups != NULL;
+                for (; result && scanned < t; scanned += 1)
+                {
+                    const uint8_t kind = tokens->kinds[scanned];
+                    if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+                    {
+                        groups[group_count++] = scanned;
+                    }
+                    else if (parse_kind_is_closer(kind) && group_count != 0)
+                    {
+                        group_count -= 1;
+                    }
+                }
+                const uint32_t open = result && group_count != 0 ? groups[group_count - 1] : 0;
+                expanded = open > 0 && tokens->kinds[open] == PARSE_KIND_L_SQUARE && tokens->kinds[open - 1] == PARSE_KIND_L_SQUARE;
+            }
             spelling = expanded && spelling == 0 ? intern_find_or_add(pp->table, (const uint8_t*)"_Clang", 6) : spelling;
             if (expanded && spelling != 0)
             {
@@ -12952,6 +13044,8 @@ static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             }
         }
     }
+    arena_pop_to(scratch, mark);
+    return result;
 }
 
 // The meaning of every name the unit may use, ordinary but for clang's predeclared typedef names.
@@ -12998,6 +13092,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     parser->first_children = 0;
     parser->next_siblings = 0;
     parser->errors = 0;
+    parser->recovered_parameter_types = false;
     parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_TOO_MANY_TOKENS;
     parser->statistics = (ParseStatistics){ 0 };
     parser->gnu = (GnuSyntax){ 0 };
@@ -13036,12 +13131,12 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parse_tokens_from_output(output, &parser->tokens);
         }
         parse_mark_pragma_packs(pp, &parser->tokens);
-        parse_clang_scope_numbers(parser, pp);
+        const bool normalized = parse_clang_scope_numbers(parser, pp);
         const uint32_t count = parser->tokens.count;
         parser->diagnostic_capacity = count + 16;
         parser->diagnostics = parser->diagnostic_column != 0 ? parser->diagnostic_column :
                               parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));
-        result = parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
+        result = normalized && parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
     // The parse's temporaries, each step's popped after it (ParseOptions.scratch).

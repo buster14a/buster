@@ -5421,14 +5421,18 @@ change, it refused such a declaration by name.
   `align` (a declspec's), gives no suggestion. The lists are clang's
   `AttributeSpellingList.inc` (the end of `c_check_attribute_clang.inc`).
 - **`__clang__`.** Where a C23 attribute's scope goes (before `::`), or its
-  name right after `[[`, the number the predefined `__clang__` expands to is
+  name after `[[` or a comma, the number the predefined `__clang__` expands to is
   clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
   predefined macro name, not an attribute scope specifier; did you mean
   '_Clang' instead?" (clang's `TryParseCXX11AttributeIdentifier`). The parser
   makes such a number the identifier `_Clang` before it reads the unit
   (`parse_clang_scope_numbers`, which asks the expansion history only where a
   number stands there); the checker warns at a `_Clang` whose source is a
-  number (`check_input_attribute_clang_macro`).
+  number (`check_input_attribute_clang_macro`). These parser-phase warnings
+  precede the declaration's semantic attribute diagnostics, including an
+  error at the same token. A direct expansion's definition note is at line 2
+  of `<built-in>`; wrapped and redefined macros keep their recorded expansion
+  provenance.
 - **Statements.** C23 attributes alone before a statement are the
   statement's where the next token starts no declaration, as clang's
   `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
@@ -5471,10 +5475,7 @@ change, it refused such a declaration by name.
   attribute to read a statement; after a control statement's head (`if
   (1) __attribute__((unused)) x = 1;`, where C has no declaration) and before
   a label's name they are a statement's, in the checker as in the parser
-  (`check_input_statement_attributes`). Not modelled: clang's typo
-  correction of an undeclared name (its "did you mean" and then this error),
-  a builtin's name without a call, and the "call to undeclared function"
-  error clang gives before this one in C99 and later.
+  (`check_input_statement_attributes`).
 - **Statement attributes' handlers.** As clang's SemaStmtAttr takes them
   (`check_input_statement_attribute_kinds`), each with -Wignored-attributes'
   warning at the statement's first token: GNU's `noinline` and
@@ -5515,17 +5516,11 @@ change, it refused such a declaration by name.
   no further (`check_input_asm_statement_attributes`); its GNU ones, but a
   label's, are the parser's "an attribute list cannot appear here" at the
   first (clang's `ProhibitAttributes`).
-- **Differences left.**
-  - Several `__clang__` scopes in one declaration's attributes: clang gives
-    its parser's warnings first, then its unknown-attribute ones; the
-    driver orders them by place. A `__clang__` after a comma in a list
-    (`[[x, __clang__]]`) stays a number, a parse error.
-  - The note "expanded from macro '__clang__'" is at the predefines' own
-    line of it, not clang's (line 2 of its `<built-in>`), as every note at a
-    predefined macro is.
-  - An error of an attribute at `__clang__`'s scope that the checker
-    refuses comes before clang's warning at the same token, where clang
-    gives the warning first.
+- **Differences left.** After a block item's GNU attributes, a name the
+  parser can't classify as clang's Sema does: clang's typo correction of an
+  undeclared name (its "did you mean" and then "expected identifier or
+  '('"), a builtin's name without a call, and the "call to undeclared
+  function" error clang gives before that one in C99 and later.
 - **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
   order and lookups and what each kind of name keeps
   (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
@@ -5646,10 +5641,19 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
     `int * __attribute__((regparm(1))) x;` 'int *'). The specifiers' and the
     trailing ones warn after them, of the declarator's whole type.
 
-  All of them complete at the declaration's first attribute, an unknown
-  one's too, so they come before its attributes' own checks in this order.
-  The declarator's run keeps its parts' types for this, and its
-  specifiers' attributes (`CheckDeclaratorRun.common_attributes`).
+  Parameter attributes complete before the enclosing declaration's type and
+  subject checks. A C23 list on a function's chunk is checked before the
+  surrounding group's convention. At each completion boundary, type warnings
+  precede the declaration attributes' own checks. The declarator's run keeps
+  its parts' types for this, and its specifiers' attributes
+  (`CheckDeclaratorRun.common_attributes`).
+
+  A prohibited C23 list at a group's start still rejects the source. A
+  diagnostic-only repaired view removes the list so the remaining declaration
+  can produce its attribute warnings after the placement error. The type
+  printer also retains the declarator's parentheses in diagnostics:
+  `__attribute__((regparm(1))) int (*p);` names the type 'int (*)', matching
+  clang's `ParenType` spelling without changing canonical type identity.
 - **`nonstring`.** On a variable, parameter or field whose type is no pointer
   to a character type or array of one (through arrays of arrays), clang's
   handler warns "'X' attribute only applies to fields or variables of
@@ -6585,22 +6589,6 @@ arguments against the function. The checker now gives these as clang does.
     printed.
   - `-Wduplicate-decl-specifier` (`inline inline;`) isn't made, and
     `__private_extern__` is refused by name, with or without a declarator.
-  - A function type's attribute's warnings come in clang's order
-    (`check_input_attribute_type_warnings`) but for three places. A parameter's
-    attributes' warnings, which clang gives as it reads the parameter list,
-    come after the declarator's convention's when the declaration has
-    attributes before it (`__attribute__((noinline)) void (__stdcall *p)(int x
-    __attribute__((noinline)));`). A C23 list on a function's chunk
-    (`void (__stdcall *p)(void) [[gnu::noinline]];`) warns after the group's
-    convention, where clang meets the function's chunk first. And a C23 list
-    at a group's start is clang's error, after which clang reads on and warns
-    of the declaration's attributes, where this stops at the error, as after a
-    pointer's qualifiers.
-  - "type here is 'T'" of the specifiers' or trailing attributes of a
-    declarator with a group spells its whole type without clang's parentheses
-    (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
-    clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
-    that print such a type differ the same way.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
