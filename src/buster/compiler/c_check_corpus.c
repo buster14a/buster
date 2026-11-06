@@ -2042,6 +2042,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                  a->line == b->line && a->column == b->column && a->token == b->token && a->position == b->position && a->pragma == b->pragma &&
                  x->tokens.count == y->tokens.count &&
                  x->errors == y->errors && x->fatal == y->fatal && x->diagnostic_count == y->diagnostic_count &&
+                 x->recovered_parameter_types == y->recovered_parameter_types &&
                  x->tokens.pragma_count == y->tokens.pragma_count && a->stream.status == b->stream.status &&
                  a->stream.failed_node == b->stream.failed_node && (a->prefix == 0) == (b->prefix == 0) &&
                  a->asm_diagnostic.status == b->asm_diagnostic.status && a->asm_diagnostic.token == b->asm_diagnostic.token &&
@@ -2078,7 +2079,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const ParseDiagnostic* left = x->diagnostics + report;
         const ParseDiagnostic* right = y->diagnostics + report;
         equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
-                left->place == right->place && left->error == right->error;
+                left->place == right->place && left->error == right->error && left->note == right->note &&
+                left->resumed == right->resumed && left->parameter_type == right->parameter_type;
     }
     if (equal && a->prefix != 0)
     {
@@ -2090,7 +2092,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     const bool trees = a->parsed || prefix || (resumed && a->resumed->parser.errors == 0);
     const Parser* left_parser = prefix ? &a->prefix->parser : resumed ? &a->resumed->parser : x;
     const Parser* right_parser = prefix && b->prefix != NULL ? &b->prefix->parser : other_resumed ? &b->resumed->parser : y;
-    equal = equal && left_parser->tokens.count == right_parser->tokens.count && left_parser->tokens.pragma_count == right_parser->tokens.pragma_count;
+    equal = equal && left_parser->tokens.count == right_parser->tokens.count && left_parser->tokens.pragma_count == right_parser->tokens.pragma_count &&
+            left_parser->recovered_parameter_types == right_parser->recovered_parameter_types;
     for (uint32_t token = 0; equal && trees && token < left_parser->tokens.count; token += 1)
     {
         equal = parse_test_canonical_role(left_parser->tree.roles[token]) == parse_test_canonical_role(right_parser->tree.roles[token]) &&
