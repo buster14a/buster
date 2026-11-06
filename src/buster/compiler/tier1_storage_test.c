@@ -724,6 +724,15 @@ static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
     }
 }
 
+// JIT entries have no Clang function-type metadata prefix. Only omit that probe at the call boundary;
+// all other sanitizer checks in the fixture and generated-code construction remain enabled.
+static __attribute__((noinline, no_sanitize("function"))) uint64_t tier1_storage_parameter_call(const void* code, uint64_t first, uint64_t second, uint64_t third)
+{
+    uint64_t (*function)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+    memcpy(&function, &code, sizeof(function));
+    return function(first, second, third, 0, 0, 0, third);
+}
+
 static void tier1_storage_parameter_tests(Tier1EmitTest* test)
 {
     const uint32_t samples[] = { 0, 1, 127, 65535, INT32_MAX, UINT32_C(0x80000000), UINT32_C(0x80000001), UINT32_MAX };
@@ -846,8 +855,6 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                             uint64_t bytes = 0;
                             if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                             {
-                                uint64_t (*run)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-                                memcpy(&run, &executable, sizeof(run));
                                 for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
                                 {
                                     const uint32_t x = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
@@ -857,7 +864,7 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                                     const uint64_t b = UINT64_C(0x39a17e5400000000) | y;
                                     const uint64_t c = UINT64_C(0xdeadbeef00000000) | z;
                                     const uint64_t expected = 2 * (uint64_t)(int64_t)(int32_t)x + x + 2 * (uint64_t)(int64_t)(int32_t)y + y + (uint64_t)(int64_t)(int32_t)z;
-                                    const uint64_t actual = run(a, c, b, 0, 0, 0, b);
+                                    const uint64_t actual = tier1_storage_parameter_call(executable, a, c, b);
                                     tier1_emit_test_expect(test, actual == expected, "shared entry conversion preserves signed and unsigned uses of poisoned register and stack arguments");
                                 }
                             }
