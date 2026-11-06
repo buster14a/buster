@@ -2386,6 +2386,91 @@ static bool type_test_printing(Arena* arena)
         const String8 named = type_print(table, arena, type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3)), BUSTER_S8("p"), 0, 0);
         type_test_expect(&tally, named.length == 11 && memcmp(named.pointer, "int (*p)[3]", 11) == 0, "printing", "a named pointer to an array");
         arena_pop_to(arena, length);
+        // Parentheses are one declarator occurrence's sugar. They do not change its type, expand into an aka spelling,
+        // double the precedence group of an array pointer, or leak into a function parameter of the same base type.
+        const TypeId pointer_pointer = type_pointer(table, int_pointer);
+        const TypeId array = type_array(table, BUSTER_TYPE_INT, 3);
+        const struct
+        {
+            TypeId type;
+            TypeId grouped;
+            uint32_t count;
+            const char* text;
+        } grouped[] = {
+            { int_pointer, BUSTER_TYPE_INT, 1, "int (*)" },
+            { int_pointer, int_pointer, 1, "int *" },
+            { pointer_pointer, BUSTER_TYPE_INT, 1, "int (**)" },
+            { pointer_pointer, int_pointer, 1, "int *(*)" },
+            { type_array(table, int_pointer, 3), BUSTER_TYPE_INT, 1, "int (*[3])" },
+            { type_pointer(table, array), array, 1, "int (*)[3]" },
+            { int_pointer, BUSTER_TYPE_INT, 2, "int ((*))" },
+            { int_pointer | BUSTER_TYPE_CONST, BUSTER_TYPE_INT, 1, "int (*const)" },
+            { type_pointer(table, of_int), of_int, 1, "int (*)(int)" },
+            { type_function(table, int_pointer, &int_pointer, 1, prototype), BUSTER_TYPE_INT, 1, "int (*(int *))" },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(grouped); i += 1)
+        {
+            const uint64_t mark = arena->length;
+            const TypePrintParen parentheses = { .type = grouped[i].grouped, .count = grouped[i].count };
+            const TypeNames spelling = { .parentheses = &parentheses, .parenthesis_count = 1 };
+            const String8 printed = type_print(table, arena, grouped[i].type, (String8){ 0 }, &spelling, 0);
+            type_test_expect(&tally, printed.length == strlen(grouped[i].text) && memcmp(printed.pointer, grouped[i].text, printed.length) == 0,
+                             "parenthesized printing", grouped[i].text);
+            arena_pop_to(arena, mark);
+        }
+        // Array levels outside a qualified pointer see an empty name in the AFTER pass even when qualifiers make
+        // BEFORE's placeholder nonempty. Their stored groups must not produce unmatched opening parentheses.
+        {
+            const uint64_t mark = arena->length;
+            const TypeId qualified_pointer = int_pointer | BUSTER_TYPE_CONST;
+            const TypeId inner = type_array(table, qualified_pointer, 3);
+            const TypeId outer = type_array(table, inner, 1);
+            const TypePrintParen entries[] = { { outer, 1 }, { inner, 1 } };
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = BUSTER_ARRAY_LENGTH(entries) };
+            const String8 printed = type_print(table, arena, outer, (String8){ 0 }, &spelling, 0);
+            const char* expected = "int *const[1][3]";
+            type_test_expect(&tally, printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0,
+                             "parenthesized printing", "qualified array pointer with an empty placeholder");
+            arena_pop_to(arena, mark);
+        }
+        // Exercise the indexed view with unsorted entries, repeated levels and unrelated types. Repeated entries
+        // have the same meaning as their combined count, including when the index crosses the small-view cutoff.
+        {
+            const uint64_t mark = arena->length;
+            const TypePrintParen entries[] = {
+                { BUSTER_TYPE_DOUBLE, 1 }, { BUSTER_TYPE_FLOAT, 1 }, { BUSTER_TYPE_INT, 1 }, { BUSTER_TYPE_CHAR, 1 },
+                { BUSTER_TYPE_BOOL, 1 }, { BUSTER_TYPE_LONG, 1 }, { BUSTER_TYPE_VOID, 1 }, { BUSTER_TYPE_INT, 1 },
+                { BUSTER_TYPE_UINT, 1 }, { BUSTER_TYPE_SHORT, 1 }, { BUSTER_TYPE_LONG_DOUBLE, 1 }, { BUSTER_TYPE_DOUBLE, 1 },
+            };
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = BUSTER_ARRAY_LENGTH(entries) };
+            const String8 printed = type_print(table, arena, int_pointer, (String8){ 0 }, &spelling, 0);
+            const char* expected = "int ((*))";
+            type_test_expect(&tally, printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0,
+                             "parenthesized printing", "unsorted indexed groups and repeated types");
+            arena_pop_to(arena, mark);
+        }
+        // A distinct parenthesized level for every pointer formerly rescanned all levels on every printer step.
+        {
+            const uint64_t mark = arena->length;
+            enum { LEVELS = 1024 };
+            TypePrintParen entries[LEVELS];
+            TypeId chain = BUSTER_TYPE_INT;
+            for (uint32_t i = 0; i < LEVELS; i += 1)
+            {
+                entries[LEVELS - 1 - i] = (TypePrintParen){ .type = chain, .count = 1 };
+                chain = type_pointer(table, chain);
+            }
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = LEVELS };
+            const String8 printed = type_print(table, arena, chain, (String8){ 0 }, &spelling, 0);
+            bool same = printed.length == 4 + 3 * LEVELS && memcmp(printed.pointer, "int ", 4) == 0;
+            for (uint32_t i = 0; same && i < LEVELS; i += 1)
+            {
+                same = printed.pointer[4 + 2 * i] == '(' && printed.pointer[5 + 2 * i] == '*' &&
+                       printed.pointer[4 + 2 * LEVELS + i] == ')';
+            }
+            type_test_expect(&tally, same, "parenthesized printing", "deep grouped pointer chain");
+            arena_pop_to(arena, mark);
+        }
         type_test_table_close(&test);
     }
     type_test_report("printing", tally);

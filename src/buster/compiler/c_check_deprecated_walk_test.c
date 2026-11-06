@@ -6,6 +6,11 @@
 // shifted by 0 to 66 tokens of empty declarations, so that every token, scope brace and use falls at each place in its
 // 64-token block. The scalar walk is the oracle; test-checker-driver compares both with clang.
 
+static const char check_test_deprecated_delayed[] =
+    "typedef int D __attribute__((deprecated));\n__attribute__((cold)) void (*f)(D, D), (*g)(D);\n";
+static const char check_test_unavailable_delayed[] =
+    "typedef int U __attribute__((unavailable(\"gone\")));\n__attribute__((cold)) void (*f)(U, U), (*g)(U);\n";
+
 static const char* const check_test_deprecated_walk_sources[] = {
     "void f(void) __attribute__((deprecated));\nvoid g(void) __attribute__((deprecated(\"use h\")));\n[[deprecated]] int v;\n"
     "[[deprecated(\"old\")]] int w;\ntypedef int T __attribute__((deprecated));\nstruct __attribute__((deprecated)) S { int a; };\n"
@@ -66,6 +71,10 @@ static const char* const check_test_deprecated_walk_sources[] = {
     "int f(void) { return O2 + I1 + P2 + O0 + I0 + P0 + O1; }\n",
     "enum __attribute__((unavailable(\"gone\"))) Gone { U0, U1, U2 };\n"
     "int h(void) { return U2 + U0 + U1; }\n",
+    // Availability is delayed to the end of each enclosing declarator (#1455), even when the sparse walker
+    // visits only marked identifiers and the uses cross 64-token block boundaries.
+    check_test_deprecated_delayed,
+    check_test_unavailable_delayed,
     // Nested scopes, levels and parameter lists around the uses, in blocks, records and calls, and an unmarked unit's
     // declarations around a marked one's.
     "int plain(int a, int b) { return a + b; }\nint old(int a) __attribute__((deprecated(\"new\")));\n"
@@ -130,14 +139,15 @@ static bool check_test_deprecated_walk_equal(const CheckInput* a, const CheckInp
         const CheckInputReport* x = a->reports + i;
         const CheckInputReport* y = b->reports + i;
         equal = x->token == y->token && x->message == y->message && x->note_token == y->note_token && x->note_kind == y->note_kind && x->detail == y->detail &&
-                x->value == y->value;
+                x->value == y->value && x->completion == y->completion && x->suborder == y->suborder;
         *uses += x->message == CHECK_INPUT_UNAVAILABLE_USE;
     }
     for (uint32_t i = 0; equal && i < a->warning_events.count; i += 1)
     {
         const CheckWarningEvent* x = a->warning_events.events + i;
         const CheckWarningEvent* y = b->warning_events.events + i;
-        equal = x->id == y->id && x->kind == y->kind && x->token == y->token && x->completion == y->completion && x->payload.name == y->payload.name &&
+        equal = x->id == y->id && x->kind == y->kind && x->token == y->token && x->completion_kind == y->completion_kind && x->completion == y->completion &&
+                x->suborder == y->suborder && x->payload.name == y->payload.name &&
                 x->payload.token == y->payload.token && x->payload.data == y->payload.data && x->payload.first_type == y->payload.first_type &&
                 x->note_first == y->note_first && x->note_count == y->note_count;
         *uses += x->kind == CHECK_WARNING_EVENT_DEPRECATED_USE;
@@ -174,8 +184,14 @@ static __attribute__((noinline)) void check_test_deprecated_walks(CheckTest* tes
             check_test_expect(test, walks[0].read && walks[1].read, description);
             if (walks[0].read && walks[1].read)
             {
+                const uint32_t uses_before = uses;
                 snprintf(description, sizeof(description), "deprecated walks: source %u after %u tokens, the vector walk gives the scalar walk's diagnostics", s, shift);
                 check_test_expect(test, walks[0].checked == walks[1].checked && check_test_deprecated_walk_equal(&walks[0].input, &walks[1].input, &uses), description);
+                if (check_test_deprecated_walk_sources[s] == check_test_deprecated_delayed || check_test_deprecated_walk_sources[s] == check_test_unavailable_delayed)
+                {
+                    snprintf(description, sizeof(description), "deprecated walks: delayed source %u after %u tokens emits a use", s, shift);
+                    check_test_expect(test, uses > uses_before, description);
+                }
                 compared += 1;
             }
             for (uint32_t path = 0; path < 2; path += 1)
