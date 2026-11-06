@@ -1126,11 +1126,11 @@ static bool oracle_epoch_valid(const char* epoch)
 
 // The run's key, with its roots found in its strings and its tool's path: false if its cache is off, its tool isn't on
 // PATH, its input can't be read, it has more roots than BUSTER_ORACLE_ROOTS or more files than BUSTER_ORACLE_FILES, or it
-// is a compiler's run (OracleRun.dependencies) that writes a dependency file of its own (an argument of -M's family),
-// which isn't one of its files, or whose environment doesn't set SOURCE_DATE_EPOCH: its __DATE__ and __TIME__ would be
-// when it ran, however its sources spell them (a token pasted from two halves among them), and clang's __TIMESTAMP__
-// too. With the epoch, which the key has, they are the epoch's; a tool whose __TIMESTAMP__ doesn't follow it has the
-// files' times in its entry (oracle_tool_epoch).
+// is a compiler's run (OracleRun.dependencies) that writes a dependency file of its own (-M arguments or
+// dependency-output environment variables), which isn't one of its files, or whose environment doesn't set
+// SOURCE_DATE_EPOCH: its __DATE__ and __TIME__ would be when it ran, however its sources spell them (a token pasted
+// from two halves among them), and clang's __TIMESTAMP__ too. With the epoch, which the key has, they are the epoch's;
+// a tool whose __TIMESTAMP__ doesn't follow it has the files' times in its entry (oracle_tool_epoch).
 static bool oracle_run_key(OracleRun* run)
 {
     bool result = oracle_cache_active(run->cache) && run->arguments != 0 && run->arguments[0] != 0 && run->file_count <= BUSTER_ORACLE_FILES;
@@ -1151,6 +1151,9 @@ static bool oracle_run_key(OracleRun* run)
         result = !(count != 0 && run->dependencies && strncmp(run->arguments[count], "-M", 2) == 0);
         count += 1;
     }
+    // Environment-driven dependency files are not among the outputs that the caller declares for replay.
+    result = result && (!run->dependencies || (oracle_variable(environment, "DEPENDENCIES_OUTPUT") == 0 &&
+                                               oracle_variable(environment, "SUNPRO_DEPENDENCIES") == 0));
     if (result)
     {
         oracle_roots_find(&run->roots, run->working);
