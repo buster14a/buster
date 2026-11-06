@@ -147,7 +147,7 @@ static uint32_t check_function_spelling(CheckFunctionPrinter* output, uint32_t f
             else if (kind == PARSE_KIND_L_SQUARE)
             {
                 check_function_require(output, close > i && close < end);
-                for (uint32_t j = i + 1; j < close && (parser->tokens.names[j] == C_NAME_STATIC || check_input_qualifier(parser->tokens.names[j], &qualifiers)); j += 1)
+                for (uint32_t j = i + 1; j < close && (parser->tokens.names[j] == C_NAME_STATIC || check_input_qualifier(parser, j, &qualifiers)); j += 1)
                 {
                 }
                 if (root == 0 || depth > root_depth || (depth == root_depth && root == BUSTER_TYPE_KIND_POINTER))
@@ -162,7 +162,7 @@ static uint32_t check_function_spelling(CheckFunctionPrinter* output, uint32_t f
             else if (kind == PARSE_KIND_STAR)
             {
                 uint32_t next = i + 1;
-                while (next < end && check_input_qualifier(parser->tokens.names[next], &qualifiers))
+                while (next < end && check_input_qualifier(parser, next, &qualifiers))
                 {
                     next += 1;
                 }
@@ -187,7 +187,7 @@ static uint32_t check_function_spelling(CheckFunctionPrinter* output, uint32_t f
                     check_function_require(output, depth != 0);
                     depth -= depth != 0;
                 }
-                else if (specifiers && check_input_qualifier(name, &qualifiers))
+                else if (specifiers && check_input_qualifier(parser, i, &qualifiers))
                 {
                     base_qualifiers |= qualifiers;
                 }

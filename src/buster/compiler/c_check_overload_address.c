@@ -25,7 +25,7 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
     bool valid = context != 0 && scratch != 0 && (count == 0 || candidates != 0) && (head == UINT32_MAX || head < count) &&
                  (target == 0 || type_is_valid(table, target));
     const uint32_t scope = valid && head != UINT32_MAX ? candidates[head].scope : 0;
-    const uint32_t identity = valid && head != UINT32_MAX ? candidates[head].canonical : UINT32_MAX;
+    uint32_t single = UINT32_MAX;
     uint32_t length = 0;
     bool multiple = false;
     for (uint32_t current = valid ? head : UINT32_MAX; valid && current != UINT32_MAX; current = candidates[current].previous)
@@ -34,10 +34,16 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
         valid = check_overload_candidate_valid(table, candidate) && candidate->scope == scope &&
                 (candidate->previous == UINT32_MAX || candidate->previous < current) &&
                 (context->semantic.source_position == 0 || candidate->position <= context->semantic.source_position);
-        multiple |= candidate->canonical != identity;
-        length += 1;
+        // An object-size overload has no addressable ordinary C entry point. In particular, &memcpy must
+        // keep selecting libc's ordinary declaration rather than its fortified wrapper.
+        if (valid && candidate->object_sizes == NULL)
+        {
+            multiple |= single != UINT32_MAX && candidate->canonical != candidates[single].canonical;
+            single = single == UINT32_MAX ? current : single;
+            length += 1;
+        }
     }
-    uint32_t selected = valid && length != 0 && !multiple ? head : UINT32_MAX;
+    uint32_t selected = valid && length != 0 && !multiple ? single : UINT32_MAX;
     TypeId function = 0;
     if (valid && multiple && target != 0 && check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER)
     {
@@ -70,7 +76,7 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
             {
                 bucket = (bucket + 1) & (capacity - 1);
             }
-            if (seen[bucket] == UINT32_MAX)
+            if (candidate->object_sizes == NULL && seen[bucket] == UINT32_MAX)
             {
                 seen[bucket] = candidate->canonical;
                 const TypeAnswer same = type_same_canonical(table, candidate->type, function);
@@ -85,7 +91,7 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
     }
     if (valid)
     {
-        result.status = full ? CHECK_OVERLOAD_FULL : length == 0 ? CHECK_OVERLOAD_NO_MATCH :
+        result.status = full ? CHECK_OVERLOAD_FULL : length == 0 ? (head != UINT32_MAX ? CHECK_OVERLOAD_AMBIGUOUS : CHECK_OVERLOAD_NO_MATCH) :
                         multiple && (function == 0 || matched > 1) ? CHECK_OVERLOAD_AMBIGUOUS :
                         selected == UINT32_MAX ? CHECK_OVERLOAD_NO_MATCH : CHECK_OVERLOAD_OK;
         if (result.status == CHECK_OVERLOAD_OK)

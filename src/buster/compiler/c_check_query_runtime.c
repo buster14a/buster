@@ -335,8 +335,8 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
         action.member = 0;
     }
     action.argument_conversions = conversions;
-    const bool strict = lane != 0 && action.context.fp_environment != 0;
-    action.context.fp_environment = 0;
+    const bool strict = lane != 0 && (action.context.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+    action.context.fp_environment &= ~BUSTER_CHECK_FP_ENV_ACCESS;
     if (lane != 2)
     {
         action.context.extensions |= BUSTER_CHECK_EXTENSION_GNU_CONSTANT;

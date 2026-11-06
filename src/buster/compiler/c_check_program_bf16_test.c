@@ -6,7 +6,7 @@
 // against clang -O0's code of the same source. In a znver5 unit, whose target hasn't AVX10.2, clang's bfloat16 excess
 // precision computes their arithmetic in float and rounds it back by AVX512-BF16's VCVTNEPS2BF16: this program's +, -,
 // *, /, negations, splats and compound assignments of random bits (NaNs and subnormals among them, which both codes'
-// instructions give alike) at 4, 8, 16, 32 and 64 bytes run where the host has AVX512-BF16 besides the x86 programs'
+// instructions give alike) at 4, 8, 16, 32, 64, 128 and 256 bytes run where the host has AVX512-BF16 besides the x86 programs'
 // features. AVX10.2's square roots and fused multiply-adds, whose negated operands fold into their forms, compile and
 // link in a function whose target attribute has the extension, which no host of the tests runs (test-x86-intrinsics
 // compares the headers' intrinsics of them with clang's code), and so does a unit whose target has it (x86-64-v4's and
@@ -16,7 +16,8 @@
 static const char check_test_bf16_types[] =
     "typedef __bf16 v2bf __attribute__((vector_size(4)));typedef __bf16 v4bf __attribute__((vector_size(8)));"
     "typedef __bf16 v8bf __attribute__((vector_size(16)));typedef __bf16 v16bf __attribute__((vector_size(32)));"
-    "typedef __bf16 v32bf __attribute__((vector_size(64)));typedef short v8hi __attribute__((vector_size(16)));\n";
+    "typedef __bf16 v32bf __attribute__((vector_size(64)));typedef short v8hi __attribute__((vector_size(16)));"
+    "typedef __bf16 v64bf __attribute__((vector_size(128)));typedef __bf16 v128bf __attribute__((vector_size(256)));\n";
 
 // The operators at every width, each a statement's one operator (a chain is refused): the five of two vectors and a
 // negation, a splat of an element (a scalar's operand on either side) and of a constant, and compound assignments.
@@ -27,7 +28,11 @@ static const char check_test_bf16_arithmetic[] =
     "v8bf r8[]={a8+b8,a8-b8,a8*b8,a8/b8,-a8};FOLD(r8);v16bf r16[]={a16+b16,a16-b16,a16*b16,a16/b16,-a16};FOLD(r16);"
     "v32bf r32[]={a32+b32,a32-b32,a32*b32,a32/b32,-a32};FOLD(r32);__bf16 s=b8[3];v8bf p8=a8+s,q8=s*a8;FOLD(p8);FOLD(q8);"
     "v32bf p32=a32-b32[5],q32=a32/(__bf16)2.0f;FOLD(p32);FOLD(q32);v2bf u2=a2;u2/=b2;FOLD(u2);v16bf u16=a16;u16+=b16;FOLD(u16);u16/=a16;FOLD(u16);"
-    "v32bf u32=a32;u32*=b32;FOLD(u32);u32-=a32;FOLD(u32);return (int)h;}";
+    "v32bf u32=a32;u32*=b32;FOLD(u32);u32-=a32;FOLD(u32);"
+    "v64bf a64,b64;v128bf a128,b128;fill(&a64,128,n+10);fill(&b64,128,n+11);fill(&a128,256,n+12);fill(&b128,256,n+13);"
+    "v64bf r64[]={a64+b64,a64-b64,a64*b64,a64/b64,-a64,a64+s,s*a64};FOLD(r64);"
+    "v128bf r128[]={a128+b128,a128-b128,a128*b128,a128/b128,-a128,a128/(__bf16)2};FOLD(r128);"
+    "a64+=b64;a64*=s;FOLD(a64);a128-=b128;a128/=s;FOLD(a128);return (int)h;}";
 
 // AVX10.2's square roots and fused multiply-adds, each negation of an operand folded into the form (a negation of both
 // factors into none), and one in a comma's operand, which isn't.
@@ -37,7 +42,8 @@ static const char check_test_bf16_elementwise[] =
     "FOLD(r);}\n"
     "__attribute__((target(\"avx10.2\"))) int tested(int n){unsigned h=2166136261u;v8bf a8,b8,c8;v16bf a16,b16,c16;v32bf a32,b32,c32;"
     "fill(&a8,16,n);fill(&b8,16,n+1);fill(&c8,16,n+2);fill(&a16,32,n+3);fill(&b16,32,n+4);fill(&c16,32,n+5);fill(&a32,64,n+6);fill(&b32,64,n+7);"
-    "fill(&c32,64,n+8);EW(v8bf,a8,b8,c8)EW(v16bf,a16,b16,c16)EW(v32bf,a32,b32,c32)return (int)h;}";
+    "fill(&c32,64,n+8);EW(v8bf,a8,b8,c8)EW(v16bf,a16,b16,c16)EW(v32bf,a32,b32,c32)"
+    "v64bf a64,b64,c64;fill(&a64,128,n+9);fill(&b64,128,n+10);fill(&c64,128,n+11);EW(v64bf,a64,b64,c64)return (int)h;}";
 
 static void check_test_program_bf16_source(CheckTest* test, const char* program, const char* name, const char* clang, const X86Target* target, bool run_native)
 {
@@ -69,9 +75,12 @@ static void check_test_program_bf16_refusals(CheckTest* test, const X86Target* t
         { "int tested(v8bf* p,v8bf* q){v8hi c=*p<*q;return c[0];}", "vector compares of bf16 elements", 1 },
         { "void tested(v8bf* p,v8bf* q){*p=*p*(*q)+*q;}", chained },
         { "void tested(v32bf* p,v32bf* q){*p=-(*p/(*q));}", chained },
+        { "void tested(v64bf* p,v64bf* q){*p=*p+(*q*(*q));}", chained },
+        { "void tested(v128bf* p,v128bf* q){*p-=*q*(*q);}", chained },
         { "void tested(v16bf* p,v16bf* q){*p-=*q*(*q);}", chained },
         { "void tested(v8bf* p,v8bf* q){*p=*q-(+(*p+*q));}", chained },
         { "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", elementwise },
+        { "void tested(v64bf* p){*p=__builtin_elementwise_sqrt(*p);}", elementwise },
         { "void tested(v8bf* p,v8bf* q){*p=__builtin_elementwise_fma(*p,-*q,*q);}", elementwise },
         { "__attribute__((target(\"avx10.2\"))) void tested(v8bf* p){*p=__builtin_elementwise_abs(*p);}", "elementwise vector builtins of bf16 elements" },
     };
@@ -90,7 +99,7 @@ static void check_test_program_bf16_refusals(CheckTest* test, const X86Target* t
     X86Target without = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &without);
     check_test_expect(test, parsed, "the bf16 refusals' target without AVX512-BF16, x86-64-v4");
-    char source[512];
+    char source[1024];
     snprintf(source, sizeof(source), "%s%s", check_test_bf16_types, "void tested(v8bf* p,v8bf* q){*p=*p+*q;}");
     if (parsed)
     {

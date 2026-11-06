@@ -42,6 +42,7 @@ the one `--clang` names:
   made, through both;
 - layout: clang's corner cases, then random records of every member type,
   bit-fields of every width next to every type, packed, packs, aligned,
+  Microsoft storage-unit layout (including mixed scalar/vector batches),
   nesting, anonymous members and flexible array members, with member counts
   around the vector layout's blocks of 16 and inputs past its limits, laid out
   by the scalar layout in one table and by `type_layout_records` in another:

@@ -86,6 +86,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -363,22 +364,36 @@ static void oracle_hash_identity(OracleHash* hash, const char* path)
     oracle_hash_bytes(hash, fields, sizeof(fields));
 }
 
+// An executable directory passes access(X_OK), but execve cannot run it and a PATH search must continue.
+static bool oracle_executable_file(const char* path)
+{
+    struct stat status;
+    return access(path, X_OK) == 0 && stat(path, &status) == 0 && S_ISREG(status.st_mode);
+}
+
 // The first file named `name` on PATH that may be run, into `path`, as posix_spawnp looks it up: false if there is none.
 static bool oracle_find_tool(const char* name, char* path, size_t capacity)
 {
     const char* search = getenv("PATH");
+    char default_path[BUSTER_ORACLE_PATH_BYTES];
+    if (search == 0)
+    {
+        const size_t length = confstr(_CS_PATH, default_path, sizeof(default_path));
+        search = length > 0 && length <= sizeof(default_path) ? default_path : 0;
+    }
     bool found = false;
     if (strchr(name, '/') != 0)
     {
         const int length = snprintf(path, capacity, "%s", name);
-        found = length > 0 && (size_t)length < capacity && access(path, X_OK) == 0;
+        found = length > 0 && (size_t)length < capacity && oracle_executable_file(path);
     }
-    while (!found && strchr(name, '/') == 0 && search != 0 && *search != 0)
+    while (!found && name[0] != 0 && strchr(name, '/') == 0 && search != 0)
     {
         const char* end = strchr(search, ':');
         const size_t length = end != 0 ? (size_t)(end - search) : strlen(search);
-        const int written = snprintf(path, capacity, "%.*s/%s", (int)length, length != 0 ? search : ".", name);
-        found = written > 0 && (size_t)written < capacity && access(path, X_OK) == 0;
+        const int written = length == 0 ? snprintf(path, capacity, "./%s", name) :
+                            length < capacity && length <= INT_MAX ? snprintf(path, capacity, "%.*s/%s", (int)length, search, name) : -1;
+        found = written > 0 && (size_t)written < capacity && oracle_executable_file(path);
         search = end != 0 ? end + 1 : 0;
     }
     return found;
@@ -2423,6 +2438,27 @@ static bool oracle_without_pidfd;
 static bool oracle_run_spawn(OracleRun* run, bool traced)
 {
     bool result = run->tool[0] != 0 || oracle_find_tool(run->arguments[0], run->tool, sizeof(run->tool));
+    struct stat current;
+    struct stat destination;
+    const bool same_directory = result && run->directory != 0 && run->tool[0] != '/' && stat(".", &current) == 0 && stat(run->directory, &destination) == 0 &&
+                                current.st_dev == destination.st_dev && current.st_ino == destination.st_ino;
+    if (result && run->directory != 0 && !same_directory && run->tool[0] != '/')
+    {
+        // Lookup is relative to this process, before the child changes directory. Keep the selected path's
+        // spelling after the working directory: resolving symlinks changes a script's argv[0].
+        char absolute[BUSTER_ORACLE_PATH_BYTES];
+        result = getcwd(absolute, sizeof(absolute)) != 0;
+        if (result)
+        {
+            const size_t length = strlen(absolute);
+            const int written = snprintf(absolute + length, sizeof(absolute) - length, "%s%s", length == 1 && absolute[0] == '/' ? "" : "/", run->tool);
+            result = written > 0 && (size_t)written < sizeof(absolute) - length;
+            if (result)
+            {
+                memcpy(run->tool, absolute, length + (size_t)written + 1);
+            }
+        }
+    }
     char* const* environment = run->environment != 0 ? run->environment : environ;
     struct sock_filter filter[BUSTER_ORACLE_FILTER];
     struct sock_fprog program;

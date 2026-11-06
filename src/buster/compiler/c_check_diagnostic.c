@@ -117,6 +117,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
     { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
     { "-Wassume", NULL, "assumption is ignored because it contains (potential) side-effects" },
+    { NULL, NULL, "weak identifier never declared" },
+    { "-Wpragmas", NULL, "#pragma redefine_extname is applicable to external C declarations only" },
+    { "-Wthread-safety-attributes", "-Wthread-safety", "invalid thread-safety attribute" },
+    { "-Wnoderef", NULL, "dereferencing expression marked as 'noderef'" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -128,6 +132,15 @@ static bool check_diagnostic_option(String8 option, const char* expected)
 }
 
 #include "c_check_warning_policy.c"
+
+static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, bool* quiet)
+{
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, CHECK_WARNING_ID_IGNORED_PRAGMA, false, false);
+    pp_history_ensure(pp);
+    const bool system = pp_system_level_at(pp, pp_expansion_location(pp, source, pp_history_at(pp, source))) != BUSTER_PP_USER_FILE;
+    *quiet = command.quiet || (system && !command.system_headers);
+    return (uint8_t)command.severity;
+}
 
 static uint32_t check_diagnostic_warning_index(uint32_t warning)
 {
@@ -306,8 +319,8 @@ static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t nod
 // checks that every one's message fits (check_test_x86_hard_every).
 #define BUSTER_CHECK_DIAGNOSTIC_X86_TEXT 192u
 
-// An x86 builtin's call whose hard immediate constraint failed, as clang reports it (#1066): Sema's BuiltinConstantArg
-// and SemaX86's rounding and scale checks put the error at the call's begin, the builtin's name, and name the builtin
+// An x86 builtin's call whose hard immediate or target constraint failed, as clang reports it (#1066, #1029): Sema's
+// BuiltinConstantArg and SemaX86's rounding, scale and 32-bit-only checks put the error at the call's begin, the builtin's name, and name the builtin
 // for an immediate that isn't an integer constant expression. The report keeps its own token, the call's `)`, which
 // orders it among the other diagnostics, as clang reports the call once its arguments' own diagnostics are out.
 // Returns the message, written into `text` (`capacity` bytes), with the name's token in `location`; or NULL for any
@@ -346,6 +359,7 @@ static const char* check_diagnostic_x86_hard(const CheckInput* input, const Chec
             case CHECK_BUILTIN_X86_CONSTRAINT_RC:
             case CHECK_BUILTIN_X86_CONSTRAINT_SAE: result = "invalid rounding argument"; break;
             case CHECK_BUILTIN_X86_CONSTRAINT_SCALE: result = "scale argument must be 1, 2, 4, or 8"; break;
+            case CHECK_BUILTIN_X86_CONSTRAINT_TARGET32: result = "this builtin is only available on 32-bit targets"; break;
             case CHECK_BUILTIN_X86_CONSTRAINT_NONE:
             case CHECK_BUILTIN_X86_CONSTRAINT_RANGE: break;
         }
@@ -506,9 +520,18 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
 {
     // The canonical header's '#' and 'pragma' are synthetic. The original state operand, or the setting name
     // when no state was supplied, retains _Pragma's expansion history and therefore its invocation location.
-    const uint32_t offset = record->source_end - record->source_begin > 5 ? 4 : 3;
-    const uint32_t source = record->source_begin + offset;
+    const uint32_t offset = record->error != 0 ? (record->kind == CHECK_FP_PRAGMA_FENV_ACCESS ? 3 : 2) :
+                            (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? 2 : record->source_end - record->source_begin > 5 ? 4 : 3;
+    const uint32_t source = record->error_source != 0 ? record->error_source : record->source_begin + offset;
     return source;
+}
+
+static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* record)
+{
+    const char* result = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0 ? "floating-point pragma is not permitted within an expression" :
+                         (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? "#pragma float_control(pop, ...) failed: stack empty" :
+                         check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA);
+    return result;
 }
 
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
@@ -526,6 +549,8 @@ static uint32_t check_diagnostic_input_report_source(const CheckInput* input, co
     source = section != NULL ? section->source : source;
     const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
     source = optimize != NULL ? optimize->source : source;
+    const CheckInputMsPragma* layout = check_input_ms_report(input, report);
+    source = layout != NULL ? layout->source + 2 : source;
     for (uint32_t i = 0; report->pragma != 0 && i < input->fp_pragma_count; i += 1)
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
@@ -546,12 +571,26 @@ static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, ui
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
         const bool invalid = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
-        const bool promoted = !quiet && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
-                              check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        const bool unknown = (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
+                             check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        const bool empty = (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 && !record->warning_quiet &&
+                           check_diagnostic_severity_id_from(input, record->token, record->source_begin, CHECK_WARNING_ID_IGNORED_PRAGMA,
+                                                             (CheckWarningSeverity)record->warning_severity) >= CHECK_WARNING_ERROR;
+        const bool promoted = !quiet && (unknown || empty);
         if (record->token < before_token && record->token < first && (invalid || promoted))
         {
             first = record->token;
             origin = check_diagnostic_pragma_source(record);
+        }
+    }
+    const CheckInputMsPragmas* ms = input->ms_pragmas;
+    for (uint32_t i = 0; ms != NULL && i < ms->count; i += 1)
+    {
+        const CheckInputMsPragma* record = ms->records + i;
+        if (record->error && record->token < before_token && record->token < first)
+        {
+            first = record->token;
+            origin = record->source + 2;
         }
     }
     *token = first;
@@ -602,14 +641,10 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         memset(handled, 0, count);
         valid = check_input_diagnostic_pragmas(&reader, handled);
         valid = valid && check_input_visibility_pragmas(&reader, handled, false);
-        if (valid && result->visibility_pragmas != NULL)
-        {
-            CheckInputVisibilityPragmas* history = result->visibility_pragmas;
-            while (history->count != 0 && history->records[history->count - 1].token >= before_token)
-            {
-                history->count -= 1;
-            }
-        }
+        valid = valid && check_input_symbol_pragmas(&reader, handled, false);
+        valid = valid && check_input_ms_pragmas(&reader, handled, false);
+        // Visibility retains its own recovery-aware history. A later pop must still diagnose an unmatched push
+        // when the parser skipped that push's annotation while recovering from a missing semicolon.
     }
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
@@ -643,6 +678,8 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     if (valid)
     {
         valid = check_input_ignored_pragmas(&reader, handled);
+        valid = valid && check_input_symbol_syntax_warnings(&reader);
+        valid = valid && check_input_ms_warnings(&reader);
     }
     if (valid)
     {

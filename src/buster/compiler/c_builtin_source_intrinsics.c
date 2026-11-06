@@ -123,6 +123,10 @@ static __attribute__((unused)) bool cbuiltin_source_intrinsic(const uint8_t* nam
     // These two prototype-checked generic intrinsics have dedicated source lowering, not an x86 row or leaf.
     result |= scoped && ((length == sizeof("__builtin_assume") - 1 && memcmp(name, "__builtin_assume", length) == 0) ||
                          (length == sizeof("__builtin_unpredictable") - 1 && memcmp(name, "__builtin_unpredictable", length) == 0));
+    // SemaX86.cpp:523-540 (llvmorg-23.1.1): recognition includes the 32-bit eflags names on x86-64, where every call
+    // receives a target diagnostic before lowering. __has_builtin answers recognition, including that diagnosed use.
+    result |= scoped && ((length == sizeof("__builtin_ia32_readeflags_u32") - 1 && memcmp(name, "__builtin_ia32_readeflags_u32", length) == 0) ||
+                         (length == sizeof("__builtin_ia32_writeeflags_u32") - 1 && memcmp(name, "__builtin_ia32_writeeflags_u32", length) == 0));
     return result;
 }
 
