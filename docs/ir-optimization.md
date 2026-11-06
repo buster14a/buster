@@ -45,9 +45,10 @@ postorder, with 16-instruction transfer batches; the scalar solver queues
 changed SSA users and instructions affected by newly executable edges. Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
-negation preserve exact constant bits. Scalar and SIMD floating arithmetic, floating comparisons and numeric
-floating conversions remain overdefined because their results can depend on the
-runtime floating environment. Unknown values remaining in an executable region are
+negation preserve exact constant bits. Scalar floating arithmetic, floating
+comparisons and numeric floating conversions remain overdefined because their
+results can depend on the runtime floating environment; SIMD floating lanes fold
+where they can't (below). Unknown values remaining in an executable region are
 promoted to overdefined and propagated before rewriting.
 
 ### Constant SIMD lanes (#1450)
@@ -70,10 +71,37 @@ using scalar shift refusal. Tests compare both paths against
 `ir_simd_model.c` and execute complete before/after functions through the
 shared interpreter.
 
-Floating arithmetic and floating comparisons remain overdefined even with constant
-operands. Runtime MXCSR rounding, DAZ and FTZ can affect their results; keeping
-only their effects while replacing their values with default-environment constants
-would change program behavior. The original operations and their users remain live.
+Floating lanes fold only where every floating environment gives the same bits.
+The IR carries no `FENV_ACCESS` state, and the runtime MXCSR chooses the
+rounding, may flush a subnormal result to zero (FTZ) and may read a subnormal
+operand as zero (DAZ). So `fadd`, `fsub`, `fmul` and `fdiv` fold a lane whose
+result is exact, so that every rounding agrees, with no subnormal operand and a
+result that isn't subnormal. A NaN operand decides its lane whatever the controls:
+x86's rule gives the first operand's quieted where both are NaNs, and an invalid
+operation gives the default NaN. An exact cancellation (`x - x`, `+0 + -0`) stays
+unfolded: it is -0 when rounding down. A floating `vcmp` folds C's predicates
+unless a lane without a NaN has a subnormal operand. The whole vector folds only
+where every lane does. Folding never removes the operation: its row stays, with
+its operands live, ahead of the constant its users receive, for its flags and
+traps.
+
+Neither path reads or writes the compiler's own MXCSR. The scalar twin
+(`ir_optimize_simd_float_lane`) is integer arithmetic on significands and
+exponents: a sum aligned in 128 bits, a product of significands, a quotient's
+divisibility of odd parts, each refused past the format's precision or range.
+The vector path rounds every lane down and up by AVX-512's embedded rounding,
+with exceptions suppressed, and folds the lanes where the two agree. A zero that
+no operand makes exact is refused, since the host's own FTZ would flush a tiny
+result alike in both directions. Comparisons are integer operations on ordered
+keys on both paths, because Clang drops a comparison's suppressed exceptions.
+`test-ir-optimize` checks both paths against a rule taken from the model alone:
+a lane folds exactly where `ir_simd_model.c` gives the default environment's bits
+when rounding down, up and toward zero and under FTZ with DAZ, and has no
+subnormal operand without a NaN. It runs the lane fixtures over
+every vector width, plus 4,096 random lane pairs mostly near 1.0, with the
+compiler's MXCSR set to an unusual value that must come back unchanged. A
+one-off run of 409,600 pairs also passed. Tier 1's existing native MXCSR fixture
+(`test-tier1-masks`) still sees round-upward, FTZ and DAZ results after SCCP.
 
 The fold boundary receives complete `IrSimdValue` cells with all 64 bytes
 readable, independently of logical vector width. No function column needs
@@ -87,8 +115,8 @@ Dead-code removal classifies roots by a vector opcode-table lookup, skips
 empty liveness batches, and propagates dependencies backwards. A separate
 worklist implementation supplies the exact scalar result and completes a
 bounded sweep. It skips dependencies of folded values and removed conditional
-branches, and follows only executable phi edges. Floating operations remain
-overdefined, so their dependencies stay live.
+branches, and follows only executable phi edges. Floating operations stay
+roots, folded or not, so their dependencies stay live.
 
 CFG cleanup compacts unreachable blocks, collapses single-successor
 conditionals, and threads transparent jumps. Pointer jumping and propagated

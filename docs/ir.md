@@ -623,9 +623,9 @@ These are bits, not floats, and the existing types keep them exact:
 
 - the lowering gives them no floating operation: only a row reads one, and the
   IR's own vector decoders take 16, 32 and 64 bytes alone;
-- SCCP and dead code elimination have no floating arithmetic to fold them by;
-  their constants are bit patterns, a signaling NaN's among them, and GVN numbers
-  no floating operation but `fneg`, which they never have;
+- SCCP and dead code elimination fold no scalar floating arithmetic, and these
+  carriers are scalars: their constants are bit patterns, a signaling NaN's among
+  them, and GVN numbers no floating operation but `fneg`, which they never have;
 - Tier 1's moves of `f32` and `f64` are bit moves ([the selection
   guide](tier1-selection.md)'s "Machine rows"). Each row operand is zero-extended
   into its role, as Tier 0's reloads leave it, which the rows rely on. The
@@ -659,8 +659,10 @@ floating environment and termination.
 - **Constant propagation and dead code** (`ir_optimize.c`). Loads, stores,
   calls, fences, `rmw`s, branches, returns and `unreachable` are unconditional
   roots (`ir_optimize_roots`), never dropped or folded. The floating operations
-  are roots too, and nothing folds them: the pass has no floating arithmetic, so
-  a `FENV_ACCESS` region's rounding and exception flags stay the code's.
+  are roots too. SCCP folds no scalar floating arithmetic, and folds a vector's
+  floating lanes only where every rounding, FTZ and DAZ gives the same bits
+  (#1450), keeping the operation's row for its flags. So a `FENV_ACCESS` region's
+  rounding and exception flags stay the code's.
 - **GVN and LICM** take allow-lists of pure operations (`ir_gvn_classify`'s and
   `ir_licm_classify`'s tables). Neither numbers nor moves a load, a store, a call,
   a fence, an `rmw` or a floating operation other than `fneg`, so a new operation

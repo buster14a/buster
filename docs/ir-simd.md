@@ -102,9 +102,9 @@ refuse before executing a frame: the 16-byte scalar argument/result API and nati
 bridge have no such ABI contract. Existing aggregate-by-pointer machinery is not
 replaced. A slot of a vector type, read and written whole at its type, promotes
 as a scalar's does. SCCP tracks sparse wide constants and folds supported vector
-operations without treating a vector as an `i128`; floating arithmetic and
-comparisons retain their original rows for observable floating-environment
-effects even when users receive a constant. GVN and LICM admit SIMD with lane
+operations without treating a vector as an `i128`. It folds floating lanes only
+where every floating environment gives the same bits, and keeps their original
+rows for their flags and traps ahead of the constant their users receive. GVN and LICM admit SIMD with lane
 metadata and full constant payloads in their keys, excluding floating effects;
 LICM also retains memory operations and undefined operands. SROA requires its
 `simd` option, and the inliner clones SIMD callees. See
@@ -302,7 +302,7 @@ new opcode or type:
 | --- | --- | --- |
 | `add`, `sub`, `mul` | integers | wrapping, each lane |
 | `shl`, `lshr`, `ashr` | integers | each lane by the other operand's same lane, unsigned: 0 past the lane's bits, an arithmetic shift every bit the sign (the `vpsllv` family's) |
-| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE under runtime MXCSR rounding and denormal controls; the interpreter models the default environment and x86 NaN propagation |
+| `fadd`, `fsub`, `fmul`, `fdiv` | floats, doubles | IEEE under the runtime MXCSR's rounding, FTZ and DAZ; a NaN operand's quieted bits (the first's where both are NaNs, x86's rule), else the default NaN of an invalid one. The interpreter models the default environment; SCCP folds a lane only where every environment agrees |
 | `vcmp` | any | a mask of a bit per lane (`m8` for 8 lanes or fewer, else `m16`, `m32`, `m64`); floating lanes' predicates are C's (`eq` to `ge`: ordered but `ne`, unordered or unequal) |
 | `vselect` | any | each lane by its own mask bit |
 
@@ -333,12 +333,15 @@ compares every lane kind and width with C's scalar operators lane by lane, and
 against the interpreter, random NaNs, infinities and denormals among the floats.
 The passes see a pure operation where they saw a call: SSA promotion, SCCP, dead
 code and CFG cleanup take them; SCCP folds supported constant vectors, and GVN
-and LICM take pure operations with their lane metadata. Dead code and constant
-folding leave floating operations overdefined, preserving their values and
-effects on the runtime floating environment: the arithmetic, and a comparison of
-floating lanes (`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises
-MXCSR's invalid flag, or traps where it is unmasked), whose mask may go unused;
-an integer comparison goes with its mask. `test-ir-optimize` checks both paths,
+and LICM take pure operations with their lane metadata. SCCP folds a floating
+lane only where its value is the same under every rounding, FTZ and DAZ: an exact
+result, no subnormal operand or result, or a NaN operand ([IR
+optimization](ir-optimization.md)'s "Constant SIMD lanes"). Dead code keeps every
+floating operation, folded or not, for its effects on the runtime floating
+environment: the arithmetic, and a comparison of floating lanes
+(`ir_optimize_roots`' kind 3, #1413's review: a NaN operand raises MXCSR's
+invalid flag, or traps where it is unmasked), whose mask may go unused; an
+integer comparison goes with its mask. `test-ir-optimize` checks both paths,
 and `test-checker-driver` an unused comparison of a NaN natively, by both tiers.
 
 ## Machine rows (#141)

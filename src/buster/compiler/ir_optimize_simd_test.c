@@ -115,6 +115,47 @@ static bool ir_optimize_test_simd_function(Arena* input, uint32_t type, uint32_t
     return created;
 }
 
+// The model's lanes under one MXCSR. Strict floating semantics keep its arithmetic between the two writes.
+static __attribute__((noinline)) bool ir_optimize_test_simd_model_under(uint32_t mxcsr, const IrSimdAction* action, const IrSimdValue* const arguments[3], IrSimdValue* value)
+{
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = _mm_getcsr();
+    _mm_setcsr(mxcsr);
+    const bool result = ir_simd_evaluate(action, arguments, NULL, NULL, 0, value);
+    _mm_setcsr(saved);
+    return result;
+}
+
+// The folding rule from the model alone: a floating operation's lanes fold where they give the default
+// environment's bits rounding down, up and toward zero and under FTZ with DAZ, and no lane without a NaN operand has
+// a subnormal one (whose DAZ reading may agree by chance, as a subnormal times zero's does).
+static bool ir_optimize_test_simd_environment_free(const IrSimdAction* action, const IrSimdValue* const arguments[3], const IrSimdValue* expected, uint32_t lanes, uint32_t width)
+{
+    static const uint32_t controls[] = {
+        UINT32_C(0x3f80),
+        UINT32_C(0x5f80),
+        UINT32_C(0x7f80),
+        UINT32_C(0x9fc0),
+    };
+    const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
+    bool result = true;
+    for (uint32_t control = 0; control < sizeof(controls) / sizeof(controls[0]); control += 1)
+    {
+        IrSimdValue value = { 0 };
+        result = result && ir_optimize_test_simd_model_under(controls[control], action, arguments, &value) && memcmp(&value, expected, sizeof(value)) == 0;
+    }
+    for (uint32_t lane = 0; lane < lanes; lane += 1)
+    {
+        const uint64_t a = ir_simd_lane_read(arguments[0], width, lane);
+        const uint64_t b = ir_simd_lane_read(arguments[1], width, lane);
+        const bool nan = ((a & exponent) == exponent && (a & fraction) != 0) || ((b & exponent) == exponent && (b & fraction) != 0);
+        const bool subnormal = ((a & exponent) == 0 && (a & fraction) != 0) || ((b & exponent) == 0 && (b & fraction) != 0);
+        result = result && (nan || !subnormal);
+    }
+    return result;
+}
+
 static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
 {
     static const uint8_t operations[] = {
@@ -137,6 +178,21 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
         UINT64_C(0x7ff0000000000789), 1, UINT64_C(0x000fffffffffffff), UINT64_C(0x0010000000000000),
         UINT64_C(0x7fefffffffffffff), UINT64_C(0x3fd5555555555555), UINT64_C(0x3fe0000000000000), UINT64_C(0x4008000000000000),
     };
+    // Odd trials: distinct powers of two, an infinity and NaNs, whose sums, differences, products and quotients are
+    // exact and never cancel, so that whole vectors fold; odd lanes negate the second operand.
+    static const uint32_t exact_singles[] = {
+        UINT32_C(0x3f800000), UINT32_C(0x40000000), UINT32_C(0x3f000000), UINT32_C(0x3e800000), UINT32_C(0x40800000), UINT32_C(0x41000000),
+        UINT32_C(0x41800000), UINT32_C(0x3e000000), UINT32_C(0x42000000), UINT32_C(0x42800000), UINT32_C(0x3d800000), UINT32_C(0x7f800000),
+        UINT32_C(0x7fc00123), UINT32_C(0x7f800789), UINT32_C(0x43000000), UINT32_C(0x43800000),
+    };
+    static const uint64_t exact_doubles[] = {
+        UINT64_C(0x3ff0000000000000), UINT64_C(0x4000000000000000), UINT64_C(0x3fe0000000000000), UINT64_C(0x3fd0000000000000),
+        UINT64_C(0x4010000000000000), UINT64_C(0x4020000000000000), UINT64_C(0x4030000000000000), UINT64_C(0x3fc0000000000000),
+        UINT64_C(0x4040000000000000), UINT64_C(0x4050000000000000), UINT64_C(0x3fb0000000000000), UINT64_C(0x7ff0000000000000),
+        UINT64_C(0x7ff8000000000123), UINT64_C(0x7ff0000000000789), UINT64_C(0x4060000000000000), UINT64_C(0x4070000000000000),
+    };
+    uint32_t floating_folds[5] = { 0 };
+    uint32_t floating_refusals[5] = { 0 };
     const uint32_t saved_mxcsr = _mm_getcsr();
     for (uint32_t type = IR_V4I32; type <= IR_V16I32; type += 1)
     {
@@ -169,7 +225,13 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                             const uint32_t at = (trial + element) & 15;
                             uint64_t a = ir_optimize_test_random(test);
                             uint64_t b = ir_optimize_test_random(test);
-                            if (lane >= IR_SIMD_LANE_F32)
+                            if (lane >= IR_SIMD_LANE_F32 && (trial & 1) != 0)
+                            {
+                                const uint64_t negative = (element & 1) != 0 ? UINT64_C(1) << (width - 1) : 0;
+                                a = width == 32 ? exact_singles[at] : exact_doubles[at];
+                                b = (width == 32 ? exact_singles[(at + trial) & 15] : exact_doubles[(at + trial) & 15]) ^ negative;
+                            }
+                            else if (lane >= IR_SIMD_LANE_F32)
                             {
                                 a = width == 32 ? singles[at] : doubles[at];
                                 b = width == 32 ? singles[(at + trial) & 15] : doubles[(at + trial) & 15];
@@ -196,8 +258,15 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                         ir_optimize_test_expect(test, created, "SIMD fold fixture and independent model accept lane operation");
                         if (created)
                         {
-                            const bool environment_dependent = lane >= IR_SIMD_LANE_F32 && (op == IR_VCMP || (op >= IR_FADD && op <= IR_FDIV));
-                            for (uint32_t path = 0; !environment_dependent && path < 2; path += 1)
+                            const bool floating = lane >= IR_SIMD_LANE_F32 && (op == IR_VCMP || (op >= IR_FADD && op <= IR_FDIV));
+                            const uint32_t kind = op == IR_VCMP ? 4 : op - IR_FADD;
+                            const bool foldable = !floating || ir_optimize_test_simd_environment_free(&action, arguments, &expected, bits / width, width);
+                            if (floating)
+                            {
+                                floating_folds[kind] += foldable;
+                                floating_refusals[kind] += !foldable;
+                            }
+                            for (uint32_t path = 0; path < 2; path += 1)
                             {
                                 // A compiler embedded in another program must neither use nor leak its caller's FP state.
                                 const uint32_t unusual_mxcsr = UINT32_C(0xffc0) | trial;
@@ -206,10 +275,10 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                                 const bool ok = ir_optimize_simd_fold(&f, 3, operands, path != 0, &folded);
                                 const uint32_t restored_mxcsr = _mm_getcsr();
                                 _mm_setcsr(UINT32_C(0x1f80));
-                                ir_optimize_test_expect(test, ok && memcmp(&folded, &expected, sizeof(folded)) == 0 && restored_mxcsr == unusual_mxcsr,
-                                                        "SIMD fold twin matches model, NaN payloads and caller MXCSR");
+                                ir_optimize_test_expect(test, ok == foldable && (!ok || memcmp(&folded, &expected, sizeof(folded)) == 0) && restored_mxcsr == unusual_mxcsr,
+                                                        "SIMD fold twin folds what every environment agrees on, matching model, NaN payloads and caller MXCSR");
                             }
-                            if (trial == 0 || trial == 7)
+                            if (trial == 0 || trial == 7 || trial == 8)
                             {
                                 ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
                                 IrOptimizeResult result = { 0 };
@@ -219,7 +288,7 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                                 const IrFunction* out = &result.function;
                                 const uint32_t ret = check.error == IR_OK ? out->instruction_count - 1 : 0;
                                 const bool constant = check.error == IR_OK && out->op[out->a[ret]] == IR_CONST;
-                                ir_optimize_test_expect(test, check.error == IR_OK && (environment_dependent ? !constant : result.folded != 0 && constant),
+                                ir_optimize_test_expect(test, check.error == IR_OK && (foldable ? result.folded != 0 && constant : !constant),
                                                         "environment-dependent SIMD results remain live; other constants propagate");
                                 arena_pop_to(vector, 0);
                             }
@@ -231,6 +300,130 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
         }
     }
     _mm_setcsr(saved_mxcsr);
+    for (uint32_t kind = 0; kind < 5; kind += 1)
+    {
+        ir_optimize_test_expect(test, floating_folds[kind] != 0 && floating_refusals[kind] != 0, "each floating lane operation both folds and refuses");
+    }
+}
+
+// A random floating operand, mostly near 1.0 with few significant bits, so that many sums, products and quotients are
+// exact; otherwise a special value, a subnormal or any exponent.
+static uint64_t ir_optimize_test_simd_float_operand(IrOptimizeTest* test, uint32_t width)
+{
+    static const uint64_t specials[2][10] = {
+        {
+            0,
+            UINT64_C(0x80000000),
+            UINT64_C(0x7f800000),
+            UINT64_C(0xff800000),
+            UINT64_C(0x7fc00001),
+            UINT64_C(0xff800002),
+            1,
+            UINT64_C(0x807fffff),
+            UINT64_C(0x00800000),
+            UINT64_C(0x7f7fffff),
+        },
+        {
+            0,
+            UINT64_C(0x8000000000000000),
+            UINT64_C(0x7ff0000000000000),
+            UINT64_C(0xfff0000000000000),
+            UINT64_C(0x7ff8000000000001),
+            UINT64_C(0xfff0000000000002),
+            1,
+            UINT64_C(0x800fffffffffffff),
+            UINT64_C(0x0010000000000000),
+            UINT64_C(0x7fefffffffffffff),
+        },
+    };
+    const uint32_t precision = width == 32 ? 24 : 53;
+    const uint64_t bias = width == 32 ? 127 : 1023;
+    const uint64_t sign = UINT64_C(1) << (width - 1);
+    const uint64_t random = ir_optimize_test_random(test);
+    const uint64_t choice = random & 7;
+    const uint64_t kept = (random >> 3) % precision;
+    const uint64_t fraction = (ir_optimize_test_random(test) & ((UINT64_C(1) << (precision - 1)) - 1)) >> kept << kept;
+    const uint64_t exponent = choice == 6 ? (random >> 10) % (2 * bias + 1) : choice == 5 ? 1 + (random >> 10) % 3 : bias - 6 + (random >> 10) % 13;
+    uint64_t result = ((random >> 40) & 1) != 0 ? sign : 0;
+    if (choice == 7)
+    {
+        result = specials[width == 64][(random >> 10) % 10];
+    }
+    else
+    {
+        result |= (exponent << (precision - 1)) | fraction;
+    }
+    return result;
+}
+
+// Both paths and the model on single lane pairs, each repeated across a 16-byte vector so that the whole vector's
+// verdict is the pair's.
+static void ir_optimize_test_simd_float_pairs(IrOptimizeTest* test)
+{
+    static const uint8_t operations[] = {
+        IR_FADD,
+        IR_FSUB,
+        IR_FMUL,
+        IR_FDIV,
+        IR_VCMP,
+    };
+    static const uint8_t model[] = {
+        IR_SIMD_FADD,
+        IR_SIMD_FSUB,
+        IR_SIMD_FMUL,
+        IR_SIMD_FDIV,
+        IR_SIMD_COMPARE,
+    };
+    const uint32_t saved_mxcsr = _mm_getcsr();
+    uint32_t folds = 0;
+    uint32_t refusals = 0;
+    for (uint32_t trial = 0; trial < 4096; trial += 1)
+    {
+        const uint32_t width = (trial & 1) != 0 ? 64 : 32;
+        const uint32_t kind = (trial >> 1) % 5;
+        const uint32_t op = operations[kind];
+        const uint32_t predicate = (trial / 10) % 6;
+        const uint64_t a = ir_optimize_test_simd_float_operand(test, width);
+        const uint64_t b = (trial & 2) != 0 ? a ^ (ir_optimize_test_random(test) & 3) : ir_optimize_test_simd_float_operand(test, width);
+        IrSimdValue operands[2] = { 0 };
+        for (uint32_t lane = 0; lane < 128 / width; lane += 1)
+        {
+            ir_simd_lane_write(operands, width, lane, a);
+            ir_simd_lane_write(operands + 1, width, lane, b);
+        }
+        const IrSimdAction action = {
+            .operation = (IrSimdOperation)model[kind],
+            .result = op == IR_VCMP ? IR_SIMD_M8 : IR_SIMD_V4I32,
+            .operands = {
+                IR_SIMD_V4I32,
+                IR_SIMD_V4I32,
+                IR_SIMD_NONE,
+            },
+            .predicate = op == IR_VCMP ? (IrSimdPredicate)predicate : IR_SIMD_EQ,
+            .lane = width == 32 ? IR_SIMD_LANE_F32 : IR_SIMD_LANE_F64,
+        };
+        const IrSimdValue* arguments[3] = { operands, operands + 1, NULL };
+        IrSimdValue expected = { 0 };
+        _mm_setcsr(UINT32_C(0x1f80));
+        const bool modeled = ir_simd_evaluate(&action, arguments, NULL, NULL, 0, &expected);
+        const bool foldable = modeled && ir_optimize_test_simd_environment_free(&action, arguments, &expected, 128 / width, width);
+        IrSimdValue folded[2] = { 0 };
+        bool ok[2] = { false, false };
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            _mm_setcsr(UINT32_C(0xffc0) | (trial & 0x3f));
+            ok[path] = ir_optimize_simd_float(op, width, 128, predicate, operands, operands + 1, path != 0, folded + path);
+        }
+        const uint32_t restored = _mm_getcsr();
+        _mm_setcsr(UINT32_C(0x1f80));
+        folds += foldable;
+        refusals += !foldable;
+        ir_optimize_test_expect(test, modeled && ok[0] == foldable && ok[1] == foldable && restored == (UINT32_C(0xffc0) | (trial & 0x3f)) &&
+                                (!foldable || (memcmp(folded, &expected, sizeof(expected)) == 0 && memcmp(folded + 1, &expected, sizeof(expected)) == 0)),
+                                "random floating lane pairs: both paths fold exactly what every environment agrees on");
+    }
+    _mm_setcsr(saved_mxcsr);
+    ir_optimize_test_expect(test, folds > 512 && refusals > 512, "random floating lane pairs both fold and refuse");
 }
 
 static void ir_optimize_test_simd_flow(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
@@ -410,6 +603,7 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
     if (ready)
     {
         ir_optimize_test_simd_lanes(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_simd_float_pairs(test);
         ir_optimize_test_simd_flow(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_loop(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);
