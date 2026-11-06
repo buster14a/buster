@@ -68,6 +68,42 @@ static void cc_mixed_unsupported_sources(CCCompatibilityTest* test)
         ".hpp",
         ".so.cpp",
         ".so.ll",
+        ".C++",
+        ".CC",
+        ".CPP",
+        ".CXX",
+        ".F",
+        ".F03",
+        ".F08",
+        ".F90",
+        ".F95",
+        ".FOR",
+        ".FPP",
+        ".ast",
+        ".c++m",
+        ".ccm",
+        ".cl",
+        ".cli",
+        ".clcpp",
+        ".clii",
+        ".cp",
+        ".cppm",
+        ".cui",
+        ".cxxm",
+        ".f",
+        ".f03",
+        ".f08",
+        ".f90",
+        ".f95",
+        ".for",
+        ".fpp",
+        ".gch",
+        ".hipi",
+        ".hlsl",
+        ".iim",
+        ".mi",
+        ".pch",
+        ".pcm",
     };
     for (uint32_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i += 1)
     {
@@ -132,19 +168,28 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         CCCompatibilityRun archive = cc_compat_run(&test, "ar", NULL, archive_arguments);
         cc_compat_expect(&test, archive.status == 0, "archive includes an unneeded member with an unresolved reference");
         cc_compat_release(&archive);
+        const char* const lib_arguments[] = { "rcs", "libanswer.lib", "clang.o", NULL };
+        CCCompatibilityRun lib = cc_compat_run(&test, "ar", NULL, lib_arguments);
+        cc_compat_expect(&test, lib.status == 0, "archive with a .lib suffix is created");
+        cc_compat_release(&lib);
         const char* const compile_main[] = { "-c", "main.c", "-o", "main.o", NULL };
         const char* const compile_helper[] = { "-c", "helper.c", "-o", "helper.o", NULL };
         const char* const compile_unknown[] = { "-c", "helper.c", "-o", "helper.blob", NULL };
+        const char* const compile_mpp[] = { "-c", "helper.c", "-o", "helper.mpp", NULL };
+        const char* const compile_obj[] = { "-c", "helper.c", "-o", "helper.obj", NULL };
         const char* const compile_dash_name[] = { "-c", "helper.c", "-o", "-E", NULL };
         cc_mixed_command(&test, "Buster main object", compile_main, NULL, false);
         cc_mixed_command(&test, "Buster helper object", compile_helper, NULL, false);
         cc_mixed_command(&test, "Buster object with an unknown suffix", compile_unknown, NULL, false);
+        cc_mixed_command(&test, "Buster object with an unrecognized source-like suffix", compile_mpp, NULL, false);
+        cc_mixed_command(&test, "Buster object with an .obj suffix", compile_obj, NULL, false);
         cc_mixed_command(&test, "Buster object named like an option", compile_dash_name, NULL, false);
         const char* const cases[][20] = {
             { "main.c", "helper.o", "-o", "program" },
             { "main.o", "helper.o", "-o", "program" },
             { "main.c", "clang.o", "-o", "program" },
             { "main.c", "libanswer.a", "-o", "program" },
+            { "main.c", "libanswer.lib", "-o", "program" },
             { "libanswer.a", "main.c", "-o", "program" },
             { "main.c", "answer.s", "-o", "program" },
             { "main.c", "answer.S", "-DBASE=40", "-o", "program" },
@@ -158,6 +203,8 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
             { "main.c", "-xassembler-with-cpp", "preprocessed.txt", "-DBASE=40", "-o", "program" },
             { "-x", "assembler", "raw.txt", "-xnone", "main.c", "-o", "program" },
             { "main.c", "helper.blob", "-o", "program" },
+            { "main.c", "helper.mpp", "-o", "program" },
+            { "main.c", "helper.obj", "-o", "program" },
             { "-o", "program", "--", "main.o", "-E" },
             { "main.c", "./libanswer.so", "-Wl,-rpath,$ORIGIN", "-o", "program" },
             { "main.c", "./libanswer.so.1", "-Wl,-rpath,$ORIGIN", "-o", "program" },
