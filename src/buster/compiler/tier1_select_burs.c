@@ -5,8 +5,8 @@
 // Proebsting, 1992): the vector path's cover of the plan's integer core. Included by tier1_select.c, before its plan.
 //
 // - The grammar is a C table of patterns (tier1_burs_patterns), each a nonterminal's derivation from an operator and its
-//   children's nonterminals, or from another nonterminal (a chain), with a cost: the records' structural bound that the
-//   candidates' intrinsic costs give (docs/tier1-selection.md). A pattern stands for one candidate kind of
+//   children's nonterminals, or from another nonterminal (a chain), with a cost: the candidates' structural bounds and
+//   explicit latency penalties (docs/tier1-selection.md). A pattern stands for one candidate kind of
 //   tier1_select_candidates: an inner one (an address's piece, an immediate, a truth value's link) folds into its root's.
 // - tier1_select_initialize compiles it into state tables once (burg's algorithm, as Proebsting's "BURS automata
 //   generation", 1995, describes it): a state is the cheapest rule and its normalized cost for every nonterminal; each
@@ -32,6 +32,7 @@
 //   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
 //   cheaper but a record longer as a lea of their registers than as an add from memory).
 
+#include <stdio.h>
 #include <sys/mman.h>
 
 // The nonterminals.
@@ -219,9 +220,9 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ALU, BUSTER_TIER1_BURS_ANY, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_REGISTER },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ADD, BUSTER_TIER1_BURS_ANY, { TIER1_BURS_REG, TIER1_BURS_REG }, 1, TIER1_BURS_ACTION_LEA_REGISTER, TIER1_RULE_LEA_ADD },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_IMMEDIATE, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_REG, TIER1_BURS_IMM }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
-    { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_REG, TIER1_BURS_IMM }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_REG, TIER1_BURS_IMM }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_LEFT_IMMEDIATE, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_IMM, TIER1_BURS_REG }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
-    { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_IMM, TIER1_BURS_REG }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_IMM, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_IMMEDIATE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ADD, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_REG, TIER1_BURS_IMM }, 1, TIER1_BURS_ACTION_LEA_IMMEDIATE, TIER1_RULE_LEA_ADD },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ADD, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_IMM, TIER1_BURS_REG }, 1, TIER1_BURS_ACTION_LEA_IMMEDIATE, TIER1_RULE_LEA_ADD },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_REG, TIER1_BURS_POW2 }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_MULTIPLY_SHIFT },
@@ -243,6 +244,7 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_A0, TIER1_BURS_FAMILY_ADD64, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_DISP, TIER1_BURS_A0 }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_A1, TIER1_BURS_FAMILY_ADD64, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_A1, TIER1_BURS_DISP }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_A1, TIER1_BURS_FAMILY_ADD64, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_DISP, TIER1_BURS_A1 }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
+    { TIER1_BURS_A1, TIER1_BURS_FAMILY_ADD64, BUSTER_TIER1_BURS_ANY, { TIER1_BURS_A0, TIER1_BURS_INDEX }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_INDEX, TIER1_BURS_FAMILY_ADD64, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_INDEX, TIER1_BURS_DISP }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_INDEX, TIER1_BURS_FAMILY_ADD64, BUSTER_TIER1_BURS_NOT_C, { TIER1_BURS_DISP, TIER1_BURS_INDEX }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_INDEX, TIER1_BURS_FAMILY_SUB64, BUSTER_TIER1_BURS_K(C), { TIER1_BURS_INDEX, TIER1_BURS_DISP }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
@@ -287,10 +289,8 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
 // into a register costs more for each node of it, so that a state of each chain length would be a state of its own
 // (burg's generator fails on such a grammar; Proebsting, 1995). Within one node's choice, the alternatives that read a
 // saturated cost read it at the same child, so they differ by what they fold of their other children, which the bound
-// keeps. 8 makes 582 states, at most 57 representers in an operator's position and a pool of 18,705 entries, as
-// test-tier1-select prints them; 4 makes 346 states, 23 representers and 11,418 entries; and 16 makes 1,430 states, past
-// BUSTER_TIER1_BURS_MAX_STATES, so that tier1_select_initialize fails and build.sh's bake with it (the 9700X, #1117's
-// review). The tests compare every cover's cost with munch's.
+// keeps. The generated counts depend on the grammar and test-tier1-select prints them. Going past a table's bound makes
+// tier1_select_initialize fail and build.sh's bake with it. The tests compare every cover's cost with munch's.
 #define BUSTER_TIER1_BURS_BOUND 8u
 // The tables' bounds: the generator fails past them, which tier1_select_initialize reports.
 #define BUSTER_TIER1_BURS_MAX_STATES 1024u
@@ -298,7 +298,7 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
 #define BUSTER_TIER1_BURS_MAX_RULES 512u
 // The pool of the operators' maps (state to representer) and transition tables, 16-bit entries, past its end the 16-bit
 // pad that a 32-bit gather of its last entry reads.
-#define BUSTER_TIER1_BURS_POOL 32768u
+#define BUSTER_TIER1_BURS_POOL 65536u
 #define BUSTER_TIER1_BURS_INFINITE 255u
 #define BUSTER_TIER1_BURS_SATURATED 254u
 // The state of a value the patterns don't look into: the first state the generator makes, the REG leaf's.
@@ -754,6 +754,18 @@ static bool tier1_burs_build(uint8_t* working)
         }
     }
     tier1_burs_state_count = builder.state_count;
+    if (!builder.valid)
+    {
+        uint32_t max_representers = 0;
+        for (uint32_t slot = 0; slot < 2 * TIER1_BURS_OPERATORS; slot += 1)
+        {
+            const uint32_t count = builder.representer_counts[slot];
+            max_representers = count > max_representers ? count : max_representers;
+        }
+        fprintf(stderr, "tier1 BURS table generation failed: states %u/%u, representers %u/%u, pool %u/%u, rules %u/256\n",
+            builder.state_count, BUSTER_TIER1_BURS_MAX_STATES, max_representers, BUSTER_TIER1_BURS_MAX_REPRESENTERS,
+            length, BUSTER_TIER1_BURS_POOL, tier1_burs_rule_count);
+    }
     return builder.valid;
 }
 

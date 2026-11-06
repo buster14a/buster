@@ -3618,9 +3618,25 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         {
             const bool right = tier1_select_constant(function, b, &constant);
             const bool left = !right && tier1_select_constant(function, a, &constant);
-            taken = (right || left) && !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
-            next.base = right ? a : b;
-            constant_node = right ? b : a;
+            if (right || left)
+            {
+                taken = !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
+                next.base = right ? a : b;
+                constant_node = right ? b : a;
+            }
+            else
+            {
+                // The typed stream also spells a pointer offset as inttoptr(add(ptrtoint(base), index)).
+                // Its full-width addition is the memory operand's base and index, not a separate lea. Never
+                // cross a narrow addition/extension or introduce a second index into an existing address.
+                taken = address.index == BUSTER_IR_NONE;
+                if (taken)
+                {
+                    next.base = a;
+                    next.index = tier1_select_index(forest, root, b, 1, &next.displacement, &peeled);
+                    next.scale = 0;
+                }
+            }
         }
         else if (taken && op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
         {
@@ -4443,7 +4459,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[0] = other;
             folded.values[1] = BUSTER_IR_NONE;
             folded.immediate = immediate;
-            folded.intrinsic_cost = op == IR_MUL ? 1 : 2;
+            // A three-operand imul is one record, but pricing it below a copy plus shift chose imul even for
+            // powers of two (#1217). Use a latency penalty, as division already does, so the
+            // shift and 3/5/9 lea candidates win. Keep the BURS grammar's two immediate-multiply costs equal.
+            folded.intrinsic_cost = op == IR_MUL ? 3 : 2;
             tier1_select_fold(forest, node, constant, &folded);
             tier1_select_add_candidate(forest, node, &candidates, folded);
             if (op == IR_ADD)
@@ -4878,8 +4897,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
 }
 
 // The scalar oracle is maximal munch: most covered nodes first. A switch fixes ties independently of the vector
-// minimum-cost selection. Both share legality, not the choice of cheapest cover. In particular munch chooses a
-// power-of-two multiply's shift before its three-operand immediate IMUL; the costed cover may choose the latter. A
+// minimum-cost selection. Both share legality, not the choice of cheapest cover. Both prefer a power-of-two
+// multiply's shift to its three-operand immediate IMUL (#1217's latency penalty). A
 // division by a register ranks below every rule for a constant divisor, which covers its constant even where the
 // constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
 static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)

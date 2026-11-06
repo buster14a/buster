@@ -1081,8 +1081,11 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+#include "tier1_address_arithmetic_test.c"
+
 static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 {
+    tier1_select_test_address_arithmetic(test);
     Arena input = arena_reserve(1u << 20);
     Arena output = arena_reserve(1u << 20);
     Arena scratch = arena_reserve(1u << 20);
