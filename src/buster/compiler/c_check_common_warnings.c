@@ -3516,8 +3516,8 @@ struct CheckCommonSwitchIndex
     bool built;
 };
 
-static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parser* parser, const CheckInput* input, const CheckProgram* program,
-                                      Arena* scratch)
+static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parser* parser, Preprocessor* pp, const CheckInput* input,
+                                      const CheckProgram* program, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
     index->built = true;
@@ -3527,6 +3527,11 @@ static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parse
     uint32_t* owners_out = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
     uint32_t* order_out = owners_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
     uint32_t* digits = order_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, 2049) : NULL;
+    // A failed allocation fails the unit, as every common warning's scratch does; the scans stand in until it stops.
+    if (cases != 0 && digits == NULL)
+    {
+        check_common_exhausted(pp);
+    }
     if (digits != NULL)
     {
         for (uint32_t c = 0; c < cases; c += 1)
@@ -3563,6 +3568,10 @@ static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parse
         index->case_order = order;
     }
     uint32_t* values = input->enum_values != NULL && count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    if (input->enum_values != NULL && count != 0 && values == NULL)
+    {
+        check_common_exhausted(pp);
+    }
     if (values != NULL)
     {
         memset(values, 0xff, (uint64_t)count * sizeof(uint32_t));
@@ -3620,7 +3629,7 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         }
         if (!index.built)
         {
-            check_common_switch_index(&index, parser, input, program, scratch);
+            check_common_switch_index(&index, parser, pp, input, program, scratch);
         }
         const uint32_t body = closer + 1 < count ? closer + 1 : count;
         const uint32_t body_end = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? check_common_parent(parser, body) : count;
