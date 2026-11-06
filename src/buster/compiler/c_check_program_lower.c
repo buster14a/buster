@@ -3071,14 +3071,16 @@ static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part
         if (part->kind == CHECK_INIT_CLEAR && size > BUSTER_CHECK_LOWER_FILL_UNROLLED && library)
         {
             // Pointers and size_t share unsigned long's U64 INTEGER class, and the byte is an int, as memset's
-            // prototype has it: builtin types, which the shared ABI classifications have (check_lower_copy's).
+            // prototype has it: builtin types, which the shared ABI classifications have (check_lower_copy's). Its
+            // result, the destination, is dropped; the interpreters' bookkeeping for memset takes it as a pointer.
             const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG };
-            const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMSET, BUSTER_TYPE_VOID, arguments, 3, BUSTER_CHECK_NONE);
+            const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMSET, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
             check_lower_offset(writer, begin);
             check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
             check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, size);
-            check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
+            check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
             offset = size;
         }
         else if (part->kind == CHECK_INIT_CLEAR && size > BUSTER_CHECK_LOWER_FILL_UNROLLED)
