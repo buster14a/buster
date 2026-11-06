@@ -6150,11 +6150,18 @@ arguments against the function. The checker now gives these as clang does.
   first token. The checker stops at a declaration's first attribute error,
   where clang goes on to the next declaration's.
 
-  `selectany` has an explicit rule for its arguments, subject and external
-  linkage, so `int v __attribute__((selectany));` is accepted by the checker.
-  This rule does not supply ELF COMDAT emission or duplicate-definition
-  selection; those are tracked separately in
-  [#1458](https://github.com/buster14a/buster/pull/1458).
+  `selectany` is accepted on external data. Its definitions have weak binding
+  and publish the existing `LinkGroups` representation: one COMDAT group per
+  selected variable, including its relocation sections. Explicit section names
+  remain separate when their groups differ; zero-fill, const and thread-local
+  definitions retain their own section kinds. With several source units the
+  first group's atoms are kept in command-line order before symbol resolution,
+  so references belonging only to discarded groups disappear. Ordinary strong
+  definitions still take precedence over weak definitions. `-c` objects and
+  direct links share this producer; no additional object-writer format is used.
+  An accepted `alias("name"), selectany` declaration has weak binding at its
+  base's section, value and size. It creates no group of its own, including when
+  its base belongs to a selectany group.
 
   The rest stay refused by name: `no_caller_saved_registers` (register
   preservation), and the attributes whose handlers clang has its own
