@@ -1,0 +1,35 @@
+name: Issue 1447 boolean builtin oracle
+on:
+  push:
+    branches: [codex/issue-1447-bool-oracle-02-01a1ad8e]
+permissions:
+  contents: read
+jobs:
+  boolean-builtins:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out oracle sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang 23.1.4
+        run: bash tools/ci/setup-hosted.sh
+      - name: Probe all lanes against independent boolean algebra
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          clang --version
+          for arch in x86-64 x86-64-v2 x86-64-v3 x86-64-v4 native; do
+            for opt in O0 O2; do
+              echo "BOOL ARCH=$arch OPT=$opt"
+              clang -std=gnu17 -"$opt" -march="$arch" -Wno-deprecated-builtins tools/issue1447-bool-oracle.c -o "$RUNNER_TEMP/bool-probe"
+              status=$?
+              echo "COMPILE_STATUS=$status"
+              if [ "$status" = 0 ]; then "$RUNNER_TEMP/bool-probe"; echo "RUN_STATUS=$?"; fi
+            done
+          done
+          clang -std=gnu17 -O0 -march=x86-64-v4 -Wno-deprecated-builtins -S tools/issue1447-bool-oracle.c -o "$RUNNER_TEMP/bool-probe.s"
+          sed -n '/^bits1:/,/^\.Lfunc_end/p' "$RUNNER_TEMP/bool-probe.s"
+          exit 0
