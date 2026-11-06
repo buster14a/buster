@@ -3938,6 +3938,56 @@ static uint32_t parse_test_diagnostic_places(void)
     return failures;
 }
 
+// The places of __clang__'s _Clang reading (parse_clang_scope_numbers) and the expansion history they ask for (#628): with
+// the history deferred, as the drivers have it, a unit whose macros' numbers follow commas in calls' arguments and that has
+// no `[[` keeps it deferred, by both paths, where every such unit replayed its preprocessing for it; one with a `[[` before
+// such a comma asks for it, as an attribute list's comma may be one.
+static uint32_t parse_test_clang_places_history(void)
+{
+    static const char* const sources[] =
+    {
+        "#define N 1\n#define M 2\nint f(int, int);\nint g(void) { return f(M, N) + f(2, N); }\n",
+        "#define N 1\n[[deprecated]] int a;\nint f(int, int);\nint g(void) { return f(2, N); }\n",
+    };
+    uint32_t failures = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const PPOptions options =
+            {
+                .language = { .standard = 2023, .gnu = true },
+                .scalar = scalar != 0,
+                .defer_history = true,
+                .quiet = true,
+                .no_standard_includes = true,
+            };
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            table = (InternTable){ 0 };
+            pp = (Preprocessor){ 0 };
+            parser = (Parser){ 0 };
+            const bool ready = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                               pp_run_source(&pp, "places.c", (const uint8_t*)sources[s], strlen(sources[s])) && pp.history_deferred &&
+                               parse_translation_unit(&parser, &pp);
+            const bool deferred = s == 0;
+            const bool passed = ready && pp.history_deferred == deferred && (pp.history_replay == NULL) == deferred;
+            if (!passed)
+            {
+                parse_test_report("parser: __clang__'s places, source %u%s: the history is %s, not %s\n", s, scalar != 0 ? " (scalar)" : "",
+                                  pp.history_deferred ? "deferred" : "recorded", deferred ? "deferred" : "recorded");
+            }
+            failures += !passed;
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    return failures;
+}
+
 static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
@@ -4282,6 +4332,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_check_postorder_self(&arena);
             failures += parse_test_workspace_budget();
             failures += parse_test_diagnostic_places();
+            failures += parse_test_clang_places_history();
             failures += parse_test_check_k6_tables();
             failures += parse_test_check_handoff(options.language, seed);
             failures += parse_test_check_snippets(directory, clang);
