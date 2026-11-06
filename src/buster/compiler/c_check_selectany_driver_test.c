@@ -192,6 +192,13 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
             check_units_test_expect(tally, built == 0 && check_test_driver_same_files(path, first_output),
                                     "selectany executables agree across scalar, lanes, ID order and poisoned arenas", name);
         }
+        if (mode == 5)
+        {
+            char debug_output[PATH_MAX];
+            snprintf(debug_output, sizeof(debug_output), "%s/direct-4", own);
+            check_units_test_expect(tally, built == 0 && check_test_driver_same_files(path, debug_output),
+                                    "selectany debug executables agree across scalar and parallel unit merges", name);
+        }
         free(actual);
     }
     free(expected);

@@ -475,7 +475,16 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             NativeDebugAddress address = own->extra.addresses[a];
             address.offset += (uint32_t)bases[BUSTER_OBJECT_DEBUG_INFO];
             address.symbol = described[u][own->function_count + a];
-            extra_addresses[next_address++] = address;
+            if (address.symbol != 0)
+            {
+                extra_addresses[next_address++] = address;
+            }
+            else
+            {
+                // The definition's COMDAT was discarded. Its original address bytes are a zero tombstone; never
+                // relocate this DIE to an atom that no longer exists or to an unrelated replacement definition.
+                memset(sections[BUSTER_OBJECT_DEBUG_INFO] + address.offset, 0, 8);
+            }
         }
         unit_functions[u] = own->function_count;
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
@@ -898,9 +907,11 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         {
             const SymbolId s = check_units_debug_symbol(own, f);
             const SymbolId merged = maps[u][s];
-            const bool kept = defining_unit[merged] == u && defining_symbol[merged] == s;
-            described[u][f] = kept ? merged : (SymbolId)(next + replaced);
-            replaced += !kept;
+            const AtomId atom = units[u].kept.link.symbols.atom[s];
+            const bool discarded = f >= own->function_count && atom != 0 && check_units_selected_atom(&selection, u, atom) == 0;
+            const bool kept = !discarded && merged != 0 && defining_unit[merged] == u && defining_symbol[merged] == s;
+            described[u][f] = discarded ? 0 : kept ? merged : (SymbolId)(next + replaced);
+            replaced += !discarded && !kept;
         }
     }
     // The names no unit defines, for the runtime's room in the link (bind_capacity_needed).
@@ -964,7 +975,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         {
             const SymbolId s = check_units_debug_symbol(own, f);
             const NameId own_name = unit->symbols.name[s];
-            if (described[u][f] != maps[u][s])
+            if (described[u][f] != 0 && described[u][f] != maps[u][s])
             {
                 const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
                 const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
@@ -1028,7 +1039,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         for (uint32_t f = 0; described != NULL && valid && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
         {
             const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
-            if (described[u][f] != maps[u][s])
+            if (described[u][f] != 0 && described[u][f] != maps[u][s])
             {
                 valid = link_define_symbol(link, described[u][f], placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
             }
@@ -1538,9 +1549,11 @@ static void check_units_merge_lane(void* argument)
             {
                 const SymbolId s = check_units_debug_symbol(own, f);
                 const SymbolId merged = merge->maps[u][s];
-                const bool kept = merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
-                merge->described[u][f] = kept ? merged : (SymbolId)(next + merge->replaced);
-                merge->replaced += !kept;
+                const AtomId atom = units[u].kept.link.symbols.atom[s];
+                const bool discarded = f >= own->function_count && atom != 0 && check_units_selected_atom(&merge->selection, u, atom) == 0;
+                const bool kept = !discarded && merged != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
+                merge->described[u][f] = discarded ? 0 : kept ? merged : (SymbolId)(next + merge->replaced);
+                merge->replaced += !discarded && !kept;
             }
         }
         String8* externals = merge->valid ? BUSTER_ARENA_PUSH_ARRAY(merge->scratch, String8, next) : NULL;
@@ -1678,7 +1691,7 @@ static void check_units_merge_lane(void* argument)
             {
                 const SymbolId s = check_units_debug_symbol(own, f);
                 const NameId own_name = unit->symbols.name[s];
-                if (merge->described[u][f] != merge->maps[u][s])
+                if (merge->described[u][f] != 0 && merge->described[u][f] != merge->maps[u][s])
                 {
                     const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
                     const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
@@ -1796,7 +1809,7 @@ static void check_units_merge_lane(void* argument)
             for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
             {
                 const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
-                if (merge->described[u][f] != map[s])
+                if (merge->described[u][f] != 0 && merge->described[u][f] != map[s])
                 {
                     link->symbols.atom[merge->described[u][f]] = atom_base + check_units_selected_atom(&merge->selection, (uint32_t)u, unit->symbols.atom[s]) - 1;
                     link->symbols.value[merge->described[u][f]] = unit->symbols.value[s];
