@@ -167,7 +167,8 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
                            (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
     return a->type == b->type && a->category == b->category && a->flags == b->flags &&
            a->constant_kind == b->constant_kind && a->integer == b->integer && floating && imaginary && a->object == b->object && a->overload_head == b->overload_head &&
-           a->offset == b->offset && a->bit_width == b->bit_width && a->fault == b->fault && a->fault_node == b->fault_node;
+           a->offset == b->offset && a->bit_width == b->bit_width && a->fault == b->fault && a->fault_node == b->fault_node &&
+           a->object_bit_offset == b->object_bit_offset;
 }
 
 // Whether two graphs' leaves of VALUE node `node` are the same value, whichever form each graph holds its leaves in.
