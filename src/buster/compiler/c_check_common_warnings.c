@@ -629,7 +629,8 @@ struct CheckCommonFacts
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch);
-static void check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value);
+static bool check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value,
+                                          Arena* scratch);
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, Arena* scratch);
@@ -1936,9 +1937,9 @@ static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* p
                 }
             }
         }
-        check_common_unselected_roots(graph, parser, roots, marks, 1);
+        result = check_common_unselected_roots(graph, parser, roots, marks, 1, scratch) ? marks : NULL;
         // Operands come before what reads them, as check_common_evaluated's reverse pass has it.
-        for (uint32_t node = graph->count; node-- > 0;)
+        for (uint32_t node = result != NULL ? graph->count : 0; node-- > 0;)
         {
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; marks[node] != 0 && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
@@ -3964,10 +3965,11 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
     return valid;
 }
 
-// A static selection (_Generic, __builtin_choose_expr) checks every arm but evaluates only the chosen one; its other
-// arms are otherwise unreferenced roots, and so is its controlling expression. Sets `marks` to `value` at each such
-// root, the nodes `roots` has set inside a selection's parentheses that are not the one it selects.
-static void check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value)
+// check_common_unselected_roots by its definition, a selection at a time: each walks back from its token for its keyword,
+// then visits every node. That is O(selections × (tokens + nodes)), seconds on a unit of many asserts or _Generic
+// selections (#1341, #1360). The exact path for a selection whose selected node `roots` holds, which none of the callers'
+// roots does (a selection's operand has a parent), and the oracle of check_common_unselected_roots' tests.
+static void check_common_unselected_walk(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value)
 {
     for (uint32_t node = 0; node < graph->count; node += 1)
     {
@@ -3993,6 +3995,164 @@ static void check_common_unselected_roots(const CheckGraph* graph, const Parser*
     }
 }
 
+// A static selection's range: the tokens from just past its keyword up to its closing token, which it excludes.
+typedef struct CheckCommonRange CheckCommonRange;
+struct CheckCommonRange
+{
+    uint32_t first;
+    uint32_t end;
+};
+
+// Sets the bits from `first` up to `end`, which it excludes, a word at a time.
+static void check_common_set_bits(uint64_t* bits, uint32_t first, uint32_t end)
+{
+    for (uint32_t at = first; at < end;)
+    {
+        const uint32_t word = at >> 6;
+        const uint32_t stop = end - (at & ~63u) < 64 ? end : (at & ~63u) + 64;
+        const uint32_t width = stop - at;
+        const uint64_t ones = width == 64 ? UINT64_MAX : ((UINT64_C(1) << width) - 1) << (at & 63);
+        bits[word] |= ones;
+        at = stop;
+    }
+}
+
+// A static selection (_Generic, __builtin_choose_expr) checks every arm but evaluates only the chosen one; its other
+// arms are otherwise unreferenced roots, and so is its controlling expression. Sets `marks` to `value` at each such
+// root, the nodes `roots` has set inside a selection's parentheses that are not the one it selects (marks may be roots).
+// A selection's range starts past its keyword, its token's last child before it of _Generic's kind or a type argument
+// keyword's, and ends at its token; a selection without one, an `__extension__`'s, has none. In O(nodes + tokens / 64 +
+// selections) rather than the walk's O(selections × (tokens + nodes)) (#1341, #1360): the selections' tokens, found 16
+// nodes at a time by their operator, as bits; their keywords, from one pass down the tokens below the last of them that
+// tests 64 tokens' kinds at a time, each token claimed once, by its last such child, as the walk finds it; the ranges,
+// in order and merged, as bits; and the roots in them, 16 nodes at a time by a gather of their tokens' bits. The scalar
+// path, the twin, visits every token and node and runs the same tests. A selection whose selected node `roots` holds,
+// which the bits can't exclude from the other ranges, takes the walk. False where scratch can't hold the bits, leaving
+// `marks` as it was.
+static bool check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value,
+                                          Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    const uint64_t mark = scratch->length;
+    const uint64_t words = ((uint64_t)count + 63) / 64;
+    static const CheckOp selects[] = { CHECK_OP_SELECT };
+    const CheckCommonOps set = check_common_ops(selects, BUSTER_ARRAY_LENGTH(selects));
+    uint64_t* bits = NULL;
+    bool valid = true;
+    bool walk = false;
+    uint32_t selections = 0;
+    uint32_t last = 0;
+    CheckCommonScan scan = { 0 };
+    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); valid && node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        const uint32_t close = graph->tokens[node];
+        if (graph->ops[node] == CHECK_OP_SELECT && close < count)
+        {
+            if (bits == NULL)
+            {
+                bits = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words);
+                valid = bits != NULL;
+                if (valid)
+                {
+                    memset(bits, 0, words * sizeof(uint64_t));
+                }
+            }
+            if (valid)
+            {
+                bits[close >> 6] |= UINT64_C(1) << (close & 63);
+            }
+            const uint32_t selected = graph->operand0[node];
+            walk |= selected < graph->count && roots[selected] != 0;
+            selections += 1;
+            last = close >= last ? close + 1 : last;
+        }
+    }
+    CheckCommonRange* ranges = valid && selections != 0 && !walk ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonRange, selections) : NULL;
+    valid &= selections == 0 || walk || ranges != NULL;
+    uint32_t used = 0;
+    for (uint32_t end = ranges != NULL ? last : 0; end != 0;)
+    {
+        const uint32_t first = end > 64 ? end - 64 : 0;
+        const uint32_t live = end - first;
+        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        uint64_t pending = lanes;
+        if (vector)
+        {
+            const __m512i kinds = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + first);
+            pending = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_GENERIC)) |
+                      _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_TYPE_ARGUMENT));
+        }
+        while (pending != 0)
+        {
+            const uint32_t lane = 63 - (uint32_t)__builtin_clzll(pending);
+            pending &= ~(UINT64_C(1) << lane);
+            const uint32_t at = first + lane;
+            const uint8_t kind = parser->tokens.kinds[at];
+            const uint32_t parent = parser->tree.parents[at];
+            if ((kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT) && at < parent && parent < last &&
+                (bits[parent >> 6] & (UINT64_C(1) << (parent & 63))) != 0)
+            {
+                bits[parent >> 6] &= ~(UINT64_C(1) << (parent & 63));
+                ranges[used] = (CheckCommonRange){ .first = at + 1, .end = parent };
+                used += 1;
+            }
+        }
+        end = first;
+    }
+    if (used != 0)
+    {
+        // The claims came in descending keyword order: the ranges in ascending order, each bit set once.
+        memset(bits, 0, ((uint64_t)last + 63) / 64 * sizeof(uint64_t));
+        uint32_t covered = 0;
+        for (uint32_t i = used; i-- > 0;)
+        {
+            const uint32_t from = ranges[i].first > covered ? ranges[i].first : covered;
+            if (ranges[i].end > from)
+            {
+                check_common_set_bits(bits, from, ranges[i].end);
+                covered = ranges[i].end;
+            }
+        }
+        for (uint32_t first = 0; first < graph->count; first += 16)
+        {
+            const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+            const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+            if (vector)
+            {
+                const __m512i root_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, roots + first);
+                const __m512i tokens = _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->tokens + first);
+                const __mmask16 candidates = (__mmask16)_mm512_mask_test_epi8_mask((__mmask64)lanes, root_bytes, root_bytes) &
+                                             _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, tokens, _mm512_set1_epi32((int)last));
+                if (candidates != 0)
+                {
+                    const __m512i covers = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(tokens, 5), bits, 4);
+                    const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(tokens, _mm512_set1_epi32(31)));
+                    const __mmask16 marked = _mm512_mask_test_epi32_mask(candidates, covers, bit);
+                    _mm512_mask_storeu_epi8(marks + first, (__mmask64)marked, _mm512_set1_epi8((char)value));
+                }
+            }
+            else
+            {
+                for (uint32_t node = first; node < first + live; node += 1)
+                {
+                    const uint32_t token = graph->tokens[node];
+                    if (roots[node] != 0 && token < last && (bits[token >> 6] & (UINT64_C(1) << (token & 63))) != 0)
+                    {
+                        marks[node] = value;
+                    }
+                }
+            }
+        }
+    }
+    if (valid && walk)
+    {
+        check_common_unselected_walk(graph, parser, roots, marks, value);
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch)
 {
@@ -4008,7 +4168,10 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
         {
             result = NULL;
         }
-        check_common_unselected_roots(graph, parser, evaluated, evaluated, 0);
+        if (!check_common_unselected_roots(graph, parser, evaluated, evaluated, 0, scratch))
+        {
+            result = NULL;
+        }
         for (uint32_t node = graph->count; node-- > 0;)
         {
             if (evaluated[node] == 0)
