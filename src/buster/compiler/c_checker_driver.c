@@ -5343,6 +5343,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         fprintf(stderr, "error: unsupported or missing input language '%s'\n", invalid_language);
         parsed = false;
     }
+    for (uint32_t i = 0; parsed && i < input_count; i += 1)
+    {
+        if (input_kinds[i].kind == CHECK_DRIVER_INPUT_INVALID)
+        {
+            fprintf(stderr, "error: unsupported input language for '%s'\n", inputs[i]);
+            parsed = false;
+        }
+    }
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
     if (parsed && stdin_count != 0)
     {

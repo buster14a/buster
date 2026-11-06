@@ -47,6 +47,50 @@ static void cc_mixed_refusal(CCCompatibilityTest* test, const char* name, const 
     cc_compat_release(&run);
 }
 
+static void cc_mixed_unsupported_sources(CCCompatibilityTest* test)
+{
+    static const char* const suffixes[] = {
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".C",
+        ".m",
+        ".mm",
+        ".cu",
+        ".hip",
+        ".sycl",
+        ".ii",
+        ".iih",
+        ".bc",
+        ".ll",
+        ".ads",
+        ".asm",
+        ".hpp",
+    };
+    for (uint32_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i += 1)
+    {
+        char path[64];
+        char diagnostic[128];
+        snprintf(path, sizeof(path), "unsupported%s", suffixes[i]);
+        snprintf(diagnostic, sizeof(diagnostic), "unsupported input language for '%s'", path);
+        cc_compat_expect(test, cc_compat_write(test, path, "int value;\n"), "write unsupported-language source");
+        const char* const syntax[] = { "-fsyntax-only", path, "-o", "program", NULL };
+        const char* const object[] = { "-c", path, "-o", "program", NULL };
+        const char* const link[] = { path, "-o", "program", NULL };
+        cc_mixed_refusal(test, "syntax checking refuses unsupported source suffixes", syntax, diagnostic);
+        cc_mixed_refusal(test, "object emission refuses unsupported source suffixes", object, diagnostic);
+        cc_mixed_refusal(test, "linking refuses unsupported source suffixes before opening outputs", link, diagnostic);
+        const char* const explicit_c[] = { "-x", "c", "-fsyntax-only", path, NULL };
+        cc_mixed_command(test, "explicit C language overrides an unsupported source suffix", explicit_c, NULL, false);
+    }
+    const char* const reset[] = { "-xc", "helper.c", "-xnone", "unsupported.cpp", "-fsyntax-only", "-o", "program", NULL };
+    const char* const after[] = { "unsupported.cpp", "-xc", "helper.c", "-fsyntax-only", "-o", "program", NULL };
+    const char* const end_options[] = { "-fsyntax-only", "-o", "program", "--", "unsupported.cpp", NULL };
+    cc_mixed_refusal(test, "-x none restores unsupported-source classification", reset, "unsupported input language for 'unsupported.cpp'");
+    cc_mixed_refusal(test, "a later -x cannot change an earlier unsupported source", after, "unsupported input language for 'unsupported.cpp'");
+    cc_mixed_refusal(test, "unsupported suffixes are refused after --", end_options, "unsupported input language for 'unsupported.cpp'");
+}
+
 static int driver_mixed_tests(const char* compiler, const char* clang)
 {
     CCCompatibilityTest test = { .clang = clang != NULL ? clang : "clang" };
@@ -158,6 +202,7 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         cc_mixed_refusal(&test, "-x none cancels stdin language", language_reset, "requires -x");
         cc_mixed_refusal(&test, "linker option cannot consume a source operand", missing_link_value, "missing");
         cc_mixed_refusal(&test, "mixed multiple -c -o rejected", multiple_output, "multiple output");
+        cc_mixed_unsupported_sources(&test);
         const char* const fatal_order[] = { "-c", "-Wfatal-errors", "fatal.S", "later.c", NULL };
         CCCompatibilityRun fatal = cc_compat_run(&test, test.compiler, NULL, fatal_order);
         cc_compat_expect(&test, fatal.status != 0 && fatal.errors != NULL && strstr(fatal.errors, "FIRST_ASSEMBLY_ERROR") != NULL &&

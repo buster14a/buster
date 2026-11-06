@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Input classification is positional: -x applies only to following inputs, until -x none. Only C inputs enter the
-// checker. Unknown suffixes are linker inputs, never speculative C, and the foreign reader diagnoses their format.
+// checker. Known unsupported source suffixes are refused; unknown suffixes remain linker inputs, never speculative C,
+// and the foreign reader diagnoses their format.
 
 typedef enum CheckDriverInputKind
 {
@@ -65,6 +66,43 @@ static CheckDriverInput check_driver_classify(const char* path, CheckDriverInput
             const char* shared = strstr(name, ".so.");
             result.unknown = !(suffix != NULL && (strcmp(suffix, ".o") == 0 || strcmp(suffix, ".a") == 0 || strcmp(suffix, ".so") == 0)) &&
                              !(shared != NULL && shared[4] != 0);
+            if (result.unknown && suffix != NULL)
+            {
+                static const char* const unsupported[] = {
+                    ".C",
+                    ".H",
+                    ".M",
+                    ".adb",
+                    ".ads",
+                    ".asm",
+                    ".bc",
+                    ".c++",
+                    ".cc",
+                    ".cpp",
+                    ".cu",
+                    ".cxx",
+                    ".h++",
+                    ".hh",
+                    ".hip",
+                    ".hpp",
+                    ".hxx",
+                    ".ii",
+                    ".iih",
+                    ".ll",
+                    ".m",
+                    ".mii",
+                    ".mm",
+                    ".sycl",
+                };
+                for (uint32_t i = 0; result.unknown && i < sizeof(unsupported) / sizeof(unsupported[0]); i += 1)
+                {
+                    if (strcmp(suffix, unsupported[i]) == 0)
+                    {
+                        result.kind = CHECK_DRIVER_INPUT_INVALID;
+                        result.unknown = false;
+                    }
+                }
+            }
         }
     }
     return result;
