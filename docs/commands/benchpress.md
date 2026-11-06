@@ -13,20 +13,31 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   Code's and Codex's sessions, joins the tailnet with the environment's
   `TS_AUTHKEY`, as an ephemeral `tag:llm` node named `claude-cloud-…`, in
   userspace networking (`tailscaled --tun=userspace-networking
-  --socks5-server=localhost:1055 --state=mem:`, the default socket). It replaces
-  a daemon that isn't up, one that keeps its state on disk, and one that is up
-  but can't reach benchpress while the control server lists benchpress online (a
-  stale daemon: `tailscale status` lists peers that no ping reaches). A session
-  whose checkout predates the hook, or whose hook ran before the daemon went
-  stale, runs it again by hand: `bash .claude/hooks/join-tailnet.sh`.
+  --socks5-server=localhost:1055 --socket=/var/run/tailscale/tailscaled.sock
+  --state=mem:`). It replaces a daemon on the default socket that isn't up, one
+  that keeps its state on disk, and one that is up but can't reach benchpress
+  while the control server lists benchpress online (a stale daemon: `tailscale
+  status` lists peers that no ping reaches). A session whose checkout predates
+  the hook, or whose hook ran before the daemon went stale, runs it again by
+  hand: `bash .claude/hooks/join-tailnet.sh`.
+- **Only in a disposable session:** the hook manages the daemon only in Claude
+  Code's cloud (`CLAUDE_CODE_REMOTE=true`), in a container whose process 1
+  isn't an init system (Codex's cloud), or where `BUSTER_TAILNET_DISPOSABLE=1`
+  says so. On any other machine it leaves the daemon and its state alone. A
+  daemon on another socket is never touched; one whose `--socket` names the
+  default socket, in any of the flag's forms or through `/var/run`'s link to
+  `/run`, is on the default socket. `.claude/hooks/test-join-tailnet.sh` (the
+  `DCO hook regression` job) checks which daemons it stops and that no state
+  file changes, with stand-ins for the daemon and its tools.
 - **One identity per session:** the environment's image holds the state file of
   a daemon an earlier hook started in `/var/lib/tailscale`. A daemon that reads
   it registers with that file's machine key, the same in every session, so the
   control server merges all those sessions into one node, and each
   registration replaces the others' keys. A node in that state answers no
   ping, and its own name in `tailscale status` changes every minute or so. The
-  hook's in-memory state gives each daemon a machine key of its own and removes
-  the image's file. Don't start `tailscaled` by hand without `--state=mem:`.
+  hook's in-memory state gives each daemon a machine key of its own, without
+  reading or removing the file. Don't start `tailscaled` by hand without
+  `--state=mem:`.
 - **Checking:** `tailscale status` lists `benchpress`;
   `tailscale ping -c 2 --until-direct=false benchpress` must answer `pong`
   (through a DERP relay: the cloud egress has no UDP, so no direct connection is
