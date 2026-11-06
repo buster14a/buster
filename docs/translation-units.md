@@ -581,6 +581,69 @@ backed ahead and cheap. `--time-stages` reports which (`huge-pages`).
 GitHub's hosted runners are virtual machines, so the hosted correctness
 jobs run with base pages.
 
+### Huge pages on a busy host (#672)
+
+Those measurements ran one compile at a time. With the other cores busy, the
+observations go the other way. [The
+record](https://github.com/buster14a/buster-performance/tree/bc07aad4fd01b54bf7a00c332e29b21a939551a0/docs/measurements/page-policy-672-2026-11-06)
+is exploratory: each script held the 9700X's lock around a series of runs, the
+rounds ran in a fixed order, unpaired, and their processes weren't checked one
+by one. Its medians are observations, not established differences.
+Independent `-c` compiles of the frozen `sqlite3.c`, `--lanes 1`, one process
+pinned to each physical core, at main `ec5f0f6b`, 5 rounds:
+
+| compiles at once | huge pages | base pages (`BUSTER_HUGE_PAGES=0`) |
+| ---: | ---: | ---: |
+| 1 | 67.0 MB/s | 56.4 MB/s |
+| 2 | 117.8 MB/s | 104.8 MB/s |
+| 4 | 184.0 MB/s | 184.4 MB/s |
+| 8 | 233.2 MB/s | 269.7 MB/s |
+
+Over one round of 8, `perf stat -a` counted 15% fewer user cycles and 6%
+fewer kernel cycles for base pages. These counts are the whole host's. One
+compile alone faults 11 times as often in base pages. Two explanations fit,
+and nothing measured separates or establishes them:
+- **Clearing.** A huge page's first touch clears all 2 MB at once, of which
+  the arena may use little. One compile alone peaks at 294 MB in huge pages
+  and at 225 MB in base pages.
+- **Locality.** The other cores' traffic can evict what was cleared before
+  the arena writes it. A base page is cleared as it is first written.
+
+So where the host is busy when the process starts (`arena_host_busy`), the
+process's arenas take base pages (`arena_pages_busy`). The host is busy when
+its tasks runnable then (`/proc/loadavg`), this process's among them, are two
+or more and at least a quarter of its CPUs online. That is four of the
+9700X's 15, where the two modes' observed medians were closest.
+- **Mechanism.** Each arena's mapping is advised `MADV_NOHUGEPAGE`, and no
+  commit advises it huge. Unlike the virtual machine's rule, this leaves the
+  process's other memory as it was, and the programs it starts: `time-runs`'
+  timed programs keep the huge pages its parent gave it (#1561's review).
+- **Who decides.** A compile alone, as the 9700X job's `measure-compile` runs
+  it, keeps huge pages. A process started with them off keeps them off, and
+  `BUSTER_HUGE_PAGES` decides instead where it is set.
+- **Tests.** `BUSTER_TEST_HOST_BUSY=1` or `0` decides the busy test for them.
+  `--time-stages` reports `busy` for this case.
+
+An experiment build of this policy was measured against main, 7 rounds in a
+fixed order (the record's `final/`). It is not this change's final
+executable. The record has its worktree's source and that tree's diff to
+an earlier head of this change, both captured after the runs. That build
+turned huge pages off for the whole process (`PR_SET_THP_DISABLE`) where
+this one advises the arenas alone.
+
+| compiles at once | main | the experiment build |
+| ---: | ---: | ---: |
+| 1 | 67.2 MB/s | 67.4 MB/s |
+| 2 | 118.2 MB/s | 118.0 MB/s |
+| 4 | 184.9 MB/s | 184.1 MB/s |
+| 8 | 234.0 MB/s | 270.3 MB/s |
+
+- **The decision.** In the one round of 8 that recorded it, each process
+  reported `busy`.
+- **Fixed floors.** A floor of base pages in front of every arena, 8 or
+  32 MB, had medians 6.5% to 8.7% above main's alone and 3.9% to 4.6% below
+  main's at 8.
+
 ## The link
 
 A unit that links keeps its link (`check_units_keep`): its code and data as

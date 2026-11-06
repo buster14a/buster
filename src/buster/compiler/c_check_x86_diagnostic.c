@@ -183,7 +183,7 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
     if (op == CHECK_OP_VALUE)
     {
         // Automatic compound literals execute an initializer plan, outside the value leaf's operand columns.
-        const CheckValue value = *check_graph_leaf_of(graph, node);
+        const CheckValue value = check_graph_leaf_value(graph, node);
         if (value.object != 0 && value.object < program->object_count && check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_COMPOUND) &&
             !check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC))
         {

@@ -919,7 +919,7 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
         if (record->severity == PP_SEVERITY_ERROR || record->severity == PP_SEVERITY_FATAL || record->severity == PP_SEVERITY_DEFERRED_ERROR)
         {
             const uint64_t position = record->severity == PP_SEVERITY_DEFERRED_ERROR ?
-                                      (record->position & ~UINT64_C(3)) | PP_DIAGNOSTIC_SEMANTIC : record->position;
+                                      record->position - record->position % PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_SEMANTIC : record->position;
             first_error = position < first_error ? position : first_error;
         }
     }
@@ -929,7 +929,7 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
         if (diagnostic->error)
         {
             const uint32_t source = diagnostic->token < original->tokens.count ? original->tokens.sources[diagnostic->token] : pp->output.count;
-            const uint64_t position = (uint64_t)source * 4 + PP_DIAGNOSTIC_SEMANTIC;
+            const uint64_t position = (uint64_t)source * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_SEMANTIC;
             first_error = position < first_error ? position : first_error;
         }
     }
@@ -944,7 +944,7 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
             // return warning's RETURN phase keeps it after them, before the uninit SEMANTICs.
             const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
             const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
-            if (severity != CHECK_WARNING_IGNORE && (uint64_t)publication * 4 + PP_DIAGNOSTIC_RETURN < first_error)
+            if (severity != CHECK_WARNING_IGNORE && (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN < first_error)
             {
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
@@ -1601,12 +1601,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     }
                     else if (source != BUSTER_CHECK_NONE)
                     {
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
                         // An alias or ifunc definition's error is clang's after the multiversioning error at the
                         // function's name, though its location is its earlier attribute (#839).
                         if (phase == 0 && input->reports[index].sort != 0)
                         {
-                            publication = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                            const uint32_t sorted = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
+                            publication = publication < sorted ? sorted : publication;
                         }
                         // The report's identifier supplies its spelling. Its sorted publication key can be a later
                         // expression's end, as for an attribute count diagnosed after an argument's call error.
@@ -2328,6 +2330,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
                         }
+                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder : 0);
                     }
                     else
                     {
@@ -4112,11 +4115,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         {
             // The table's columns in base pages: each has room for every type the unit could make, far apart, of which
             // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
-            // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
+            // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528). The index's first
+            // BUSTER_TYPE_INDEX_SMALL_BYTES too, which hold a unit's buckets but the largest's: sqlite3.c's take 128 KB,
+            // where the index's first huge page took 2 MB (#672).
             const uint64_t type_bytes = type_capacity_bytes(capacity);
+            const uint64_t index_bytes = type_index_capacity_bytes(capacity);
             const bool fail_types = check_driver_test_failed_types != NULL && strcmp(path, check_driver_test_failed_types) == 0;
             type_arena = !fail_types ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
-            index_arena = !fail_types ? arena_reserve(type_index_capacity_bytes(capacity)) : (Arena){ 0 };
+            index_arena = !fail_types ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
             ready = !fail_types && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
             if (!ready)
             {
@@ -4802,6 +4808,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     if (time_stages)
     {
         check_clock_start(&clock_storage);
+        clock_storage.pages_busy = arena_pages_busy;
     }
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
@@ -5342,6 +5349,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: unsupported or missing input language '%s'\n", invalid_language);
         parsed = false;
+    }
+    for (uint32_t i = 0; parsed && i < input_count; i += 1)
+    {
+        if (input_kinds[i].kind == CHECK_DRIVER_INPUT_INVALID)
+        {
+            fprintf(stderr, "error: unsupported input language for '%s'\n", inputs[i]);
+            parsed = false;
+        }
     }
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
     if (parsed && stdin_count != 0)

@@ -4991,7 +4991,7 @@ struct Tier0TestBreak
     const char* rule;
 };
 
-#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call or parameter location, or aggregate metadata"
+#define BUSTER_TIER0_TEST_METADATA "invalid incoming variadic metadata, address-only local role, call or parameter location, aggregate metadata or preserved registers"
 
 static const Tier0TestBreak tier0_test_breaks[] = {
     { "an aggregate past the most bytes", 2, false, BUSTER_TIER0_TEST_METADATA },
@@ -5064,6 +5064,13 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a split vector of 24-byte parts", 14, true, BUSTER_TIER0_TEST_METADATA },
     { "a call's split vector with HIGH", 14, false, BUSTER_TIER0_TEST_METADATA },
     { "a call's split vector object too small for its registers", 15, false, BUSTER_TIER0_TEST_METADATA },
+    // A preserving frame's registers (#147, Tier0Function.preserve_general and the rest): caller-saved general ones, whole
+    // vector registers of a width their count allows, the masks' widths, and no eh_return.
+    { "a callee-saved register preserved", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "vector registers preserved 8 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "32 vector registers preserved 32 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "mask registers preserved 4 bytes each", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "a preserving frame with __builtin_eh_return", 3, true, BUSTER_TIER0_TEST_METADATA },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -5317,6 +5324,24 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             break;
         case 66:
             caller->local_sizes[0] = 48;
+            break;
+        case 67:
+            callee->function.preserve_general = 1u << X86_REGISTER_RBX;
+            break;
+        case 68:
+            callee->function.preserve_vectors = 16;
+            callee->function.preserve_vector_bytes = 8;
+            break;
+        case 69:
+            callee->function.preserve_vectors = 32;
+            callee->function.preserve_vector_bytes = 32;
+            break;
+        case 70:
+            callee->function.preserve_mask_bytes = 4;
+            break;
+        case 71:
+            callee->function.preserve_general = 1u << X86_REGISTER_RCX;
+            callee->function.eh_return = true;
             break;
         default:
             break;

@@ -604,6 +604,38 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         cc_compat_expect(&test, files && emitted.status == 0 && make.status == 0 && make.output != NULL && strstr(make.output, "dependency-ready") != NULL, "GNU make consumes escaped rule");
         cc_compat_release(&emitted);
         cc_compat_release(&make);
+        const char* const phony[] = { "-M", "-MP", "a.c", NULL };
+        CCCompatibilityRun phony_run = cc_compat_run(&test, test.compiler, NULL, phony);
+        const bool phony_text = phony_run.status == 0 && phony_run.output != NULL && strstr(phony_run.output, "\n\n") == NULL && strstr(phony_run.output, "h.h:") != NULL;
+        cc_compat_expect(&test, phony_text, "-MP phony rules have no blank line");
+        if (!phony_text)
+        {
+            fprintf(stderr, "  phony output: %s\n", phony_run.output != NULL ? phony_run.output : "(missing)");
+            fprintf(stderr, "  phony diagnostics: %s\n", phony_run.errors != NULL ? phony_run.errors : "(missing)");
+        }
+        cc_compat_release(&phony_run);
+        const char* const split_joined[] = { "-I-", "-fsyntax-only", "a.c", NULL };
+        CCCompatibilityRun split_joined_run = cc_compat_run(&test, test.compiler, NULL, split_joined);
+        cc_compat_expect(&test, split_joined_run.status != 0 && split_joined_run.errors != NULL &&
+                               strstr(split_joined_run.errors, "'-I-' not supported, please use -iquote instead") != NULL, "joined -I- is rejected");
+        if (split_joined_run.status == 0 || split_joined_run.errors == NULL || strstr(split_joined_run.errors, "'-I-' not supported") == NULL)
+        {
+            fprintf(stderr, "  -I- diagnostics: %s\n", split_joined_run.errors != NULL ? split_joined_run.errors : "(missing)");
+        }
+        cc_compat_release(&split_joined_run);
+        const char* const split_separate[] = { "-I", "-", "-fsyntax-only", "a.c", NULL };
+        CCCompatibilityRun split_separate_run = cc_compat_run(&test, test.compiler, NULL, split_separate);
+        cc_compat_expect(&test, split_separate_run.status != 0 && split_separate_run.errors != NULL &&
+                               strstr(split_separate_run.errors, "'-I-' not supported, please use -iquote instead") != NULL, "separate -I - is rejected");
+        cc_compat_release(&split_separate_run);
+        const char* const dash_directory[] = { "-I./-", "-fsyntax-only", "a.c", NULL };
+        CCCompatibilityRun dash_directory_run = cc_compat_run(&test, test.compiler, NULL, dash_directory);
+        cc_compat_expect(&test, dash_directory_run.status == 0, "a directory spelled ./- is still an include path");
+        if (dash_directory_run.status != 0)
+        {
+            fprintf(stderr, "  ./- diagnostics: %s\n", dash_directory_run.errors != NULL ? dash_directory_run.errors : "(missing)");
+        }
+        cc_compat_release(&dash_directory_run);
         cc_compat_cleanup(&test);
     }
     printf("CC compatibility: %u checks, %u failures\n", test.checks, test.failures);

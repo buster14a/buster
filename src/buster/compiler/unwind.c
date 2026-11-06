@@ -514,6 +514,9 @@ static UnwindError unwind_rows_check(const UnwindFunction* function)
         const EmissionFrameRow row = rows[i];
         result = row.offset >= previous && row.offset < function->size && row.reserved == 0 ? UNWIND_OK : UNWIND_ERROR_INVALID;
         const bool rule = row.reg < BUSTER_EMISSION_X86_REGISTERS && row.reg != BUSTER_EMISSION_X86_RSP && row.reg != BUSTER_EMISSION_X86_RETURN;
+        // A vector or mask register's slot or caller's value (#147, a preserving frame's); DW_CFA_restore's one byte names
+        // registers below 64 alone, and no rule copies one register into another here.
+        const bool vector = emission_x86_saved_vector(row.reg);
         switch (row.kind)
         {
             case EMISSION_FRAME_CFA:
@@ -526,17 +529,20 @@ static UnwindError unwind_rows_check(const UnwindFunction* function)
             } break;
             case EMISSION_FRAME_OFFSET:
             {
-                result = rule && (row.value & 7) == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
+                result = (rule || vector) && (row.value & 7) == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
             } break;
             case EMISSION_FRAME_REGISTER:
             {
                 result = rule && row.value >= 0 && row.value < 16 ? result : UNWIND_ERROR_UNSUPPORTED;
             } break;
             case EMISSION_FRAME_RESTORE:
+            {
+                result = rule && row.value == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
+            } break;
             case EMISSION_FRAME_SAME_VALUE:
             case EMISSION_FRAME_UNDEFINED:
             {
-                result = rule && row.value == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
+                result = (rule || vector) && row.value == 0 ? result : UNWIND_ERROR_UNSUPPORTED;
             } break;
             case EMISSION_FRAME_REMEMBER_STATE:
             {

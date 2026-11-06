@@ -880,7 +880,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
+| `leaf_records`, `leaf_payloads`, `leaf_slots` | `leaf_count` 32-byte `CheckGraphLeaf` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE`. Only `VALUE` reads a record, so other nodes take none (#572). A record holds the value's type, category, flags, constant kind, object, overload set and its integer's low 64 bits; a value with more (`check_graph_leaf_rest`: a wider integer, a floating payload, an offset, a bit-field's place, a fault) also takes the next whole `CheckValue` row of `leaf_payloads`, at most one a leaf (#628). A hand-built graph may hold the leaves whole in `dense_leaves` instead. `check_graph_leaf_value`, its field accessors and `check_graph_set_leaf` read and write either form. Both validators refuse a record whose row is past the graph's rows or holds another value than the record in the fields both hold, rows past their room, and rows without their column (`check_graph_leaf_valid_at`, `check_graph_validate_lists`). |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -1077,8 +1077,9 @@ output cache line twice. When validation is required (an external producer or
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record, which since #572 lie one after
-another, as only `VALUE` nodes have one. `test-checker` compares the two
+reads, which since #572 lie one after another, as only `VALUE` nodes have one,
+and since #628 are 32 bytes each, half a cache line, where a 96-byte value took
+two. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 
@@ -1922,12 +1923,31 @@ What the lowering covers past scalars (#145's programs):
   median increases 0.79% with overlapping ranges. The report preserves these
   limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
-  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
-  128 bytes) unless its first part clears it whole, then each part's zeros,
-  bytes or value is stored, an aggregate's copied.
+  cleared first unless its first part writes it whole (zeros, or an
+  aggregate's copy of the object's size, as `T x = *p;` and `T x = f();`, which
+  writes its padding too), then each part's zeros, bytes or value is stored, an
+  aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
+  past 128 bytes (`BUSTER_CHECK_LOWER_FILL_UNROLLED`) they are one call of the
+  target C library's `memset`, as clang `-O0`'s code clears them (#1376), the
+  whole object's and each zero part's. Each such call is counted with the
+  unit's runtime calls when its pools are planned (`check_lower_init_pools`).
+  A volatile object, or one with a volatile part, keeps its stores, a loop of
+  8-byte stores past 128 bytes. A compound literal of the object's size that
+  initializes it whole (`T x = (T){ ... };`, as many literals deep as there
+  are) writes its parts into the object itself, as clang's code initializes it
+  in place, rather than into its own object, cleared, filled and then copied;
+  neither may have a volatile part. The [9700X record](https://github.com/buster14a/buster-performance/tree/c0fddb73e121b6a8a5c30d1364954be2ccc3879e/docs/measurements/zero-initializers-1376-2026-11-06)
+  compares `2dc50258` with `ba2e80ab`: `int a[256] = { 0 };` takes 26.3 → 4.3 ns
+  a call in Tier 0 and 26.8 → 3.4 ns in Tier 1 (clang `-O0`: 4.3), and
+  `struct Big b = (struct Big){ .flags = i };` 19.0 → 2.6 ns (clang `-O0`:
+  2.4). Up to 128 bytes the code is unchanged; calling memset below 64 bytes
+  would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
+  change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
+  memset calls and 1.9% less text.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
-  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  `memcpy` (#598). The call returns the destination and discards it, which is the
+  interpreter's pointer-result copy (#1550). The image ends at the last explicit value; omitted trailing
   storage is cleared separately. Images with internal holes larger than their
   payload keep the existing writes, avoiding large readonly zero gaps for sparse
   initializers. This preserves checked string truncation,
@@ -4197,7 +4217,9 @@ they do per token where little of it was per declaration or expression:
   operators, operands and calls, and the names of the builtin constants, the
   varargs, `transparent_union`, `overloadable`, `_Generic` and
   `__builtin_choose_expr`) in one pass, 64 tokens' kinds and roles and 16
-  tokens' names at a time. The same pass writes each token's syntax bits
+  tokens' names at a time. It compares 16 names with each sought name only
+  where a filter of those names in two registers (`CheckInputFilter`) passes
+  one of them, which few tokens' names do (#529). The same pass writes each token's syntax bits
   (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
@@ -4952,7 +4974,12 @@ the oracle.
   The graph run, which now copies each leaf into the stream's columns, could
   then take them as they are. It isn't done here: 46 places read leaves as
   whole `CheckValue`s through `check_graph_leaf_of`, most in the graph run and
-  the reader's later passes, outside the walk.
+  the reader's later passes, outside the walk. #628 since made the leaves
+  32-byte records with an integer's low 64 bits, so that the literals and
+  enumerators need no row either (24,071 of `sqlite3.c`'s leaves had more than
+  the columns, 80 have more than a record); the graph run writes an
+  identifier's record into the stream's columns without a value between them
+  ("The graph's leaves" in `docs/compile-time.md`).
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
@@ -5421,14 +5448,18 @@ change, it refused such a declaration by name.
   `align` (a declspec's), gives no suggestion. The lists are clang's
   `AttributeSpellingList.inc` (the end of `c_check_attribute_clang.inc`).
 - **`__clang__`.** Where a C23 attribute's scope goes (before `::`), or its
-  name right after `[[`, the number the predefined `__clang__` expands to is
+  name after `[[` or a comma, the number the predefined `__clang__` expands to is
   clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
   predefined macro name, not an attribute scope specifier; did you mean
   '_Clang' instead?" (clang's `TryParseCXX11AttributeIdentifier`). The parser
   makes such a number the identifier `_Clang` before it reads the unit
   (`parse_clang_scope_numbers`, which asks the expansion history only where a
   number stands there); the checker warns at a `_Clang` whose source is a
-  number (`check_input_attribute_clang_macro`).
+  number (`check_input_attribute_clang_macro`). These parser-phase warnings
+  precede the declaration's semantic attribute diagnostics, including an
+  error at the same token. A direct expansion's definition note is at line 2
+  of `<built-in>`; wrapped and redefined macros keep their recorded expansion
+  provenance.
 - **Statements.** C23 attributes alone before a statement are the
   statement's where the next token starts no declaration, as clang's
   `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
@@ -5493,16 +5524,6 @@ change, it refused such a declaration by name.
   label's, are the parser's "an attribute list cannot appear here" at the
   first (clang's `ProhibitAttributes`).
 - **Differences left.**
-  - Several `__clang__` scopes in one declaration's attributes: clang gives
-    its parser's warnings first, then its unknown-attribute ones; the
-    driver orders them by place. A `__clang__` after a comma in a list
-    (`[[x, __clang__]]`) stays a number, a parse error.
-  - The note "expanded from macro '__clang__'" is at the predefines' own
-    line of it, not clang's (line 2 of its `<built-in>`), as every note at a
-    predefined macro is.
-  - An error of an attribute at `__clang__`'s scope that the checker
-    refuses comes before clang's warning at the same token, where clang
-    gives the warning first.
   - An ordinary identifier the unit declares, after specifiers of
     attributes alone (`int x; ... __attribute__(()) x = 1;`), is clang's
     "expected identifier or '('" at it, which needs a lookup the parser
@@ -5624,10 +5645,19 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
     `int * __attribute__((regparm(1))) x;` 'int *'). The specifiers' and the
     trailing ones warn after them, of the declarator's whole type.
 
-  All of them complete at the declaration's first attribute, an unknown
-  one's too, so they come before its attributes' own checks in this order.
-  The declarator's run keeps its parts' types for this, and its
-  specifiers' attributes (`CheckDeclaratorRun.common_attributes`).
+  Parameter attributes complete before the enclosing declaration's type and
+  subject checks. A C23 list on a function's chunk is checked before the
+  surrounding group's convention. At each completion boundary, type warnings
+  precede the declaration attributes' own checks. The declarator's run keeps
+  its parts' types for this, and its specifiers' attributes
+  (`CheckDeclaratorRun.common_attributes`).
+
+  A prohibited C23 list at a group's start still rejects the source. A
+  diagnostic-only repaired view removes the list so the remaining declaration
+  can produce its attribute warnings after the placement error. The type
+  printer also retains the declarator's parentheses in diagnostics:
+  `__attribute__((regparm(1))) int (*p);` names the type 'int (*)', matching
+  clang's `ParenType` spelling without changing canonical type identity.
 - **`nonstring`.** On a variable, parameter or field whose type is no pointer
   to a character type or array of one (through arrays of arrays), clang's
   handler warns "'X' attribute only applies to fields or variables of
@@ -6563,22 +6593,6 @@ arguments against the function. The checker now gives these as clang does.
     printed.
   - `-Wduplicate-decl-specifier` (`inline inline;`) isn't made, and
     `__private_extern__` is refused by name, with or without a declarator.
-  - A function type's attribute's warnings come in clang's order
-    (`check_input_attribute_type_warnings`) but for three places. A parameter's
-    attributes' warnings, which clang gives as it reads the parameter list,
-    come after the declarator's convention's when the declaration has
-    attributes before it (`__attribute__((noinline)) void (__stdcall *p)(int x
-    __attribute__((noinline)));`). A C23 list on a function's chunk
-    (`void (__stdcall *p)(void) [[gnu::noinline]];`) warns after the group's
-    convention, where clang meets the function's chunk first. And a C23 list
-    at a group's start is clang's error, after which clang reads on and warns
-    of the declaration's attributes, where this stops at the error, as after a
-    pointer's qualifiers.
-  - "type here is 'T'" of the specifiers' or trailing attributes of a
-    declarator with a group spells its whole type without clang's parentheses
-    (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
-    clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
-    that print such a type differ the same way.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares

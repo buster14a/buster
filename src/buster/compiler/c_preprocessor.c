@@ -1325,6 +1325,9 @@ struct PPDiagnosticRecord
     PPDiagnosticRecord* next;
     Preprocessor* owner;
     uint64_t position;
+    // Nonzero orders a completed construct's diagnostics before unsequenced ones at the same publication position.
+    // Zero retains ordinary discovery order. Notes belong to the same record and follow its primary.
+    uint64_t suborder;
     uint32_t location;
     uint32_t origin;
     uint32_t note_location;
@@ -1652,7 +1655,10 @@ typedef enum PPDiagnosticPhase
     PP_DIAGNOSTIC_LEXICAL,
     PP_DIAGNOSTIC_DEFERRED,
     PP_DIAGNOSTIC_RETURN,
+    // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.
+    PP_DIAGNOSTIC_TYPE,
     PP_DIAGNOSTIC_SEMANTIC,
+    PP_DIAGNOSTIC_PHASE_COUNT,
 } PPDiagnosticPhase;
 
 typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
@@ -1747,7 +1753,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
         }
         else
         {
@@ -3899,6 +3905,9 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
 #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
 #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
+// The base pages that a lane's records arena and its bytes arena start with (file_cache_arenas): a unit fills a few
+// hundred kilobytes of each (sqlite3.c's 268 and 376 KB), where each one's first huge page took 2 MB (#672).
+#define BUSTER_FILE_CACHE_SMALL_BYTES (2ull << 20)
 // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
 // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
 // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
@@ -4020,9 +4029,11 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
         bool reserved = true;
         for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            // The token columns are the first three.
+            // The token columns are the first three. The records' arena and the bytes arena, the last two, start with
+            // BUSTER_FILE_CACHE_SMALL_BYTES of base pages.
             const bool small = lane != 0 && cache->lane_small_bytes != 0 && i < 3;
-            *arenas[i] = small ? arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, cache->lane_small_bytes) : arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_ARENA_SMALL_BYTES;
+            *arenas[i] = arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, base_pages);
             reserved = arenas[i]->base != 0;
         }
         for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
@@ -17372,6 +17383,9 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
 // language mode decides (pp_predefines adds those) and the ones the target and the other options decide
 // (c_predefines.c's predefines_text).
 static const char pp_predefines_base[] =
+    // Clang's first two definitions also anchor expansion notes at their real built-in source lines.
+    "#define __llvm__ 1\n"
+    "#define __clang__ 1\n"
     "#define _LP64 1\n"
     "#define __ATOMIC_ACQUIRE 2\n"
     "#define __ATOMIC_ACQ_REL 4\n"
@@ -17694,7 +17708,6 @@ static const char pp_predefines_base[] =
     "#define __WINT_WIDTH__ 32\n"
     "#define __amd64 1\n"
     "#define __amd64__ 1\n"
-    "#define __clang__ 1\n"
     "#define __clang_literal_encoding__ \"UTF-8\"\n"
     "#define __clang_major__ 23\n"
     "#define __clang_minor__ 1\n"
@@ -17703,7 +17716,6 @@ static const char pp_predefines_base[] =
     "#define __gnu_linux__ 1\n"
     "#define __linux 1\n"
     "#define __linux__ 1\n"
-    "#define __llvm__ 1\n"
     "#define __seg_fs __attribute__((address_space(257)))\n"
     "#define __seg_gs __attribute__((address_space(256)))\n"
     "#define __unix 1\n"
@@ -21572,7 +21584,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             const char* value = argument[2] != 0 ? argument + 2 : next;
             i += argument[2] == 0;
             result = value != 0;
-            if (result && argument[1] == 'I')
+            if (result && argument[1] == 'I' && strcmp(value, "-") == 0)
+            {
+                // The obsolete -I- split. Clang rejects it; a directory literally named "-" is -I./- .
+                fprintf(stderr, "error: '-I-' not supported, please use -iquote instead\n");
+                result = false;
+            }
+            else if (result && argument[1] == 'I')
             {
                 include[options->include_directory_count] = value;
                 options->include_directory_count += 1;

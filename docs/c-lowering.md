@@ -268,7 +268,8 @@ compile takes the fragments (`CheckLowerWriter.fragments`, which only their
 test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
 saved ("The vector path's fast paths" below), and none takes the leaf path
 either ("The leaf path and the runtimes' names"). The wrappers' and truth
-tests' path described here still runs.
+tests' path described here still runs. Larger fragments didn't pay either
+("Nested fragments (#868)" below).
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -332,6 +333,78 @@ missing optional workspace, addresses, VLA indirection, compound initialization
 and a neighboring body's local map. Guarded pending stacks check mixed tasks,
 labels, every entry-capacity limit, invalid classes and untouched
 output tails. Source fixtures also compare native effects with Clang.
+
+## Nested fragments (#868)
+
+#868 asked whether #624's fragments could take more than a node with adjacent
+leaf operands. On `sqlite3.c` (main at `586c2ae2`), 13,784 of 259,895
+evaluated expression occurrences (5.30%) took them. In `((a + b) + c) + d`,
+only `a + b` did: a parent's operands had to be leaves or constants next to it.
+
+#883 tried closed postorder fragments of up to 16 integer nodes. Each root
+proved its fragment's order, types, conversions and room before one bulk
+write. #624's adjacent path stayed, and the expansion was the oracle. On the
+9700X, against main at `c1c5ed02`, with the checker's code at six placements
+that all gave the same objects
+([the record](https://github.com/buster14a/buster-performance/tree/101a0b1b18f1d4eb0fb68c8c6ba92e575e56689c/docs/measurements/pr883-fragment-placement-2026-10-31)):
+
+- coverage rose from 13,784 to 14,425 occurrences (5.30% to 5.55%);
+- 11,290 roots tried a fragment and 275 closed one (2.4%); 7,978 stopped at
+  an operator outside the table and 1,268 at the order check
+  ([the inventory](https://github.com/buster14a/buster-performance/tree/101a0b1b18f1d4eb0fb68c8c6ba92e575e56689c/docs/measurements/nested-fragments-883-2026-10-30));
+- the records classified rose from 13,885 to 17,442;
+- `sqlite3.c`'s `lower` on one lane rose by 0.196 ms (95% CI +0.165 to
+  +0.233), and by 0.220 ms from fresh copies of the executables;
+- the 8-lane whole compile stayed within its A/A spread, and Lua's `lower`
+  rose by 0.0035 ms.
+
+A second version (`5aebc491`) read the values only for structurally closed
+runs; single-lane emission was still 2.7% higher. #883 was closed without
+merging.
+
+Two later results explain why:
+
+- **Too little to amortize.** #1048's inventory (below) found that a maximal
+  subtree of nodes a template table covers holds 2.83 nodes on `sqlite3.c`,
+  so a proof made root by root has almost nothing to spread its cost over.
+- **The base path stopped paying.** #624's own fragments cost more than they
+  save: #1235 measured `lower` 0.27 ms lower without them, and no compile has
+  taken them since ("The vector path's fast paths").
+
+To see where that stands now, main at `ec5f0f6b` ran on the 9700X against the
+same executable with the fragments forced on: a measurement-only toggle,
+`CheckLowerWriter.fragments` set from the environment, which main doesn't
+have. The method:
+
+- two builds, with the checker's code 2,048 bytes apart in its page
+  (`BUSTER_CHECKER_OFFSET` 0 and 2048);
+- the frozen `sqlite3.c` and Lua 5.4.8's 34 units as inputs;
+- ten rounds, each of `measure-compile --runs 11` for every input, build and
+  variant, pinned to CPU 2, with the variants' order alternating by round.
+
+Every build and variant gave the same objects. Forced on, the fragments took
+14,564 of `sqlite3.c`'s 266,735 evaluated nodes (5.46%) and 3,068 of Lua's
+67,586 (4.54%). Medians of the ten rounds, both builds; each difference pairs
+the variants of one round and build
+([the record](https://github.com/buster14a/buster-performance/tree/1ebd8a1b0dd67749c9f921787afe99c437a1a8b7/docs/measurements/lowering-fragments-868-2026-11-06)):
+
+| row | off (main) | on | on − off, median (range) | pairs above 0 |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` `lower` | 10.305 ms | 10.728 ms | +0.431 (+0.352 to +0.513) | 20 of 20 |
+| `sqlite3.c` `lower.statements` | 6.700 ms | 7.119 ms | +0.429 (+0.302 to +0.529) | 20 of 20 |
+| `sqlite3.c` default wall | 140.548 ms | 140.758 ms | +0.390 (−0.228 to +1.113) | 19 of 20 |
+| Lua's units' `lower.statements`, summed | 2.301 ms | 2.407 ms | +0.105 (+0.059 to +0.138) | 20 of 20 |
+
+The fragments added 4.05 M of the compile's 1,636 M user instructions and
+saved no cycles (perf's counters of 11 compiles of each variant). Their cost
+has grown from #1235's 0.27 ms, as the tasks' loop got cheaper per node and
+the fragments' proof didn't.
+
+So a larger fragment would extend a path that already costs more than it
+saves, by a proof that #883 measured slower again. #868 is closed with that
+answer: batching root by root doesn't pay at any fragment size measured. The
+lowering's speed is #1048's question, a pass over a body's nodes as a whole,
+which the sections below measure.
 
 ## Node templates over a body: the inventory (#1048)
 

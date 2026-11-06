@@ -112,7 +112,15 @@ int main(void)
     char bytes[64];
     memset(bytes, 3, sizeof(bytes));
     memmove(bytes + 1, bytes, sizeof(bytes) - 1);
-    const int passed = original.first == 11 && original.second == 13 && changed.first == 18 && changed.second == 39 &&
+    // Forty ints are 160 bytes, past the 128-byte unrolled-initializer limit, so this is a pooled memcpy.
+    int pooled[40] = {
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+    };
+    const int passed = pooled[0] == 1 && pooled[19] == 20 && pooled[39] == 40 &&
+                       original.first == 11 && original.second == 13 && changed.first == 18 && changed.second == 39 &&
                        large.values[4] == 11 && returned.values[4] == 13 && returned.values[32] == 0 &&
                        large.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 23 && returned.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
                        quotient.quot == 3 && quotient.rem == 2 &&
