@@ -1922,9 +1922,20 @@ What the lowering covers past scalars (#145's programs):
   median increases 0.79% with overlapping ranges. The report preserves these
   limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
-  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
-  128 bytes) unless its first part clears it whole, then each part's zeros,
-  bytes or value is stored, an aggregate's copied.
+  cleared first unless its first part writes it whole (zeros, or an
+  aggregate's copy of the object's size, as `T x = *p;` and `T x = f();`, which
+  writes its padding too), then each part's zeros, bytes or value is stored, an
+  aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
+  past 128 bytes (`BUSTER_CHECK_LOWER_FILL_UNROLLED`) they are one call of the
+  target C library's `memset`, as clang `-O0`'s code clears them (#1376), the
+  whole object's and each zero part's. Each such call is counted with the
+  unit's runtime calls when its pools are planned (`check_lower_init_pools`).
+  A volatile object, or one with a volatile part, keeps its stores, a loop of
+  8-byte stores past 128 bytes. A compound literal of the object's size that
+  initializes it whole (`T x = (T){ ... };`, as many literals deep as there
+  are) writes its parts into the object itself, as clang's code initializes it
+  in place, rather than into its own object, cleared, filled and then copied;
+  neither may have a volatile part.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The image ends at the last explicit value; omitted trailing
