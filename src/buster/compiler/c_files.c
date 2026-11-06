@@ -1809,11 +1809,19 @@ static __attribute__((unused)) bool files_list_sources(FilesSources* sources, co
             else if (entry->d_name[0] != '.')
             {
                 char child[PATH_MAX];
-                snprintf(child, sizeof(child), "%s/%s", names[depth - 1], entry->d_name);
+                const int written = snprintf(child, sizeof(child), "%s/%s", names[depth - 1], entry->d_name);
                 struct stat child_stats;
                 const uint64_t length = strlen(entry->d_name);
                 const bool source = length > 2 && entry->d_name[length - 2] == '.' && (entry->d_name[length - 1] == 'c' || entry->d_name[length - 1] == 'h');
-                if (lstat(child, &child_stats) == 0 && S_ISDIR(child_stats.st_mode) && depth < BUSTER_FILES_MAX_DEPTH)
+                // A name that does not fit is not a path we can list. lstat's failure leaves child_stats
+                // untouched: an entry removed between readdir and lstat is absent, not a regular file.
+                const bool named = written > 0 && (size_t)written < sizeof(child);
+                const bool listed = named && lstat(child, &child_stats) == 0;
+                if (!named)
+                {
+                    result = false;
+                }
+                else if (listed && S_ISDIR(child_stats.st_mode) && depth < BUSTER_FILES_MAX_DEPTH)
                 {
                     directories[depth] = opendir(child);
                     if (directories[depth] != 0)
@@ -1822,7 +1830,7 @@ static __attribute__((unused)) bool files_list_sources(FilesSources* sources, co
                         depth += 1;
                     }
                 }
-                else if (S_ISREG(child_stats.st_mode) && source)
+                else if (listed && S_ISREG(child_stats.st_mode) && source)
                 {
                     result = files_add_source(sources, child);
                 }
