@@ -79,8 +79,14 @@ wrote is taken when the object there is the one that compile left. What the
 cache leaves out (`oracle_path_rule`, by what each call does at a path,
 `OracleUse`): the package manager's files (under `/usr` but `/usr/local`, and
 `/bin`, `/sbin` and `/lib*`), the package database's identity standing for
-them. The kernel's (`/proc`, `/sys`), which describe the processes and the
-machine, change with no file changing (a process's id in `/proc/self/stat`,
+them. This exemption applies only to simple path spellings: repeated slashes
+and `.` components keep their own dependency records, so `/usr//local` and
+`/usr/./local` cannot bypass the `/usr/local` exception. The original spelling
+is retained; neither `..` nor symbolic links are collapsed. Entry version 4
+rejects older records that may have omitted these dependencies.
+
+The kernel's (`/proc`, `/sys`), which describe the processes and the machine,
+change with no file changing (a process's id in `/proc/self/stat`,
 the time in `/proc/uptime`, the inode and times `stat` gives of `/proc/self`,
 its process's): a check for one (`access`, `faccessat2` and `chdir`, which say
 whether it is there, as LLVM checks for `/proc/self/fd` and `/proc/self/exe`)

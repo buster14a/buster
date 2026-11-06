@@ -38,12 +38,14 @@
 //     BUSTER_ORACLE_VARIANTS states, the key's oldest entry removed and the others taken;
 //   - permissions (traced sh): a directory's mode, which `test -x` reads, and a script's in a root made 0644 from
 //     0755, each run again when they change; and as root, a file's owner;
-//   - the kernel's paths: the path rule's answers for 64 paths by stat, lstat, access, readlink, open and a change, for
+//   - the kernel's paths: the path rule's answers by stat, lstat, access, readlink, open and a change, for
 //     a process of the test's whose descriptors it knows (a pipe's among them), its paths by its pid and the test's,
 //     another process's, among them (and a root under /usr); a source in a root in /dev/shm ($TMPDIR there) and a
 //     header in /dev/shm in no root, each compiled again when they change; runs that follow /proc/self/cwd and
 //     /dev/fd/3 to a file, not kept; and one that reads /proc/self/fd/3's link and /dev/stdin and writes /dev/null,
 //     kept;
+//   - path spellings: package paths with repeated separators or dot components are retained; disposable paths in no
+//     root with those spellings invalidate use/check entries when their contents change;
 //   - random bytes, devices and the kernel's files (#550's fifth review): getrandom's bytes the cache's, taken, and the
 //     same in another cache's run, two programs' calls in one run each their own, another key's others, and a call for
 //     more than the cache gives never taken; /dev/urandom's, /dev/random's and a FIFO's bytes, never taken; /dev/zero,
@@ -1609,6 +1611,15 @@ static void oracle_test_path_rules(OracleTest* test)
     static const OracleTestPath fixed[] = {
         { "/usr/include/stdio.h", "LLLLLL" },
         { "/usr/local/include/x.h", "KKKKKK" },
+        { "/usr//local/include/x.h", "KKKKKK" },
+        { "/usr///local/include/x.h", "KKKKKK" },
+        { "/usr/./local/include/x.h", "KKKKKK" },
+        { "/usr/././local/include/x.h", "KKKKKK" },
+        { "/usr/locality/x.h", "LLLLLL" },
+        { "/usr//locality/x.h", "KKKKKK" },
+        { "/usr/.", "KKKKKK" },
+        { "/usr/include/./x.h", "KKKKKK" },
+        { "/lib64//ld-linux-x86-64.so.2", "KKKKKK" },
         { "/usr/../home/x.h", "KKKKKK" },
         { "/lib64/ld-linux-x86-64.so.2", "LLLLLL" },
         { "/library/x.h", "KKKKKK" },
@@ -1719,6 +1730,77 @@ static void oracle_test_path_rules(OracleTest* test)
     int status = 0;
     right &= caller > 0 && waitpid(caller, &status, 0) == caller;
     oracle_test_expect(test, right, "kernel: the path rule's answers, by stat, lstat, access, readlink, open and a change");
+}
+
+// The path table checks the system prefixes. These disposable paths separately check the retained spellings'
+// traced invalidation outside run roots, without requiring write access to /usr/local or changing system headers.
+static void oracle_test_path_spellings(OracleTest* test)
+{
+    const char* temporary = oracle_temporary_directory();
+    char directory[BUSTER_ORACLE_PATH_BYTES];
+    char local[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(directory, sizeof(directory), "%s/buster_oracle_spelling_%ld_x", temporary, (long)getpid());
+    snprintf(local, sizeof(local), "%s/local", directory);
+    const bool made = mkdir(directory, 0700) == 0;
+    const bool ready = made && mkdir(local, 0700) == 0;
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "path-spellings");
+    oracle_test_open(test, &check, "check", "path-spellings");
+    static const char* const spellings[] = {
+        "%s//local/value.h",
+        "%s/./local/value.h",
+    };
+    static const char* const values[] = {
+        "first\n",
+        "first\n",
+        "other\n",
+        "other\n",
+        "third\n",
+        "third\n",
+    };
+    for (uint32_t s = 0; s < sizeof(spellings) / sizeof(spellings[0]); s += 1)
+    {
+        char path[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(path, sizeof(path), spellings[s], directory);
+        char* arguments[] = {
+            "sh",
+            "-c",
+            "read value < \"$1\"; printf '%s\\n' \"$value\"",
+            "sh",
+            path,
+            0,
+        };
+        bool correct = ready;
+        for (uint32_t pass = 0; pass < sizeof(values) / sizeof(values[0]); pass += 1)
+        {
+            // Shell runs retain file times, so leave the file untouched for each warm replay.
+            correct &= pass % 2 == 1 || oracle_test_write_text(local, "value.h", values[pass]);
+            OracleRun run = {
+                .cache = pass == 4 ? &check : &use,
+                .purpose = "oracle test: path spellings",
+                .arguments = arguments,
+                .dependencies = true,
+            };
+            const bool ran = oracle_run(&run);
+            correct &= ran && run.status == 0 && run.taken == (pass % 2 == 1) &&
+                       !oracle_run_rooted(&run, path) && run.output != 0 && strcmp(run.output, values[pass]) == 0;
+            oracle_run_release(&run);
+        }
+        oracle_test_expect(test, correct, s == 0 ? "paths: repeated separators retain a changed input outside roots" : "paths: dot components retain a changed input outside roots");
+    }
+    oracle_test_expect(test, check.counts->stale == 0, "paths: changed inputs invalidate entries before check comparison");
+    if (ready)
+    {
+        oracle_test_unlink(local, "value.h");
+        rmdir(local);
+    }
+    if (made)
+    {
+        rmdir(directory);
+    }
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
 }
 
 // The kernel's paths and /dev's: a source in a root in /dev/shm, an ordinary tmpfs and a common $TMPDIR, which clang
@@ -3095,6 +3177,8 @@ static void oracle_test_damaged(OracleTest* test)
     oracle_run_release(&run);
     uint32_t key_word = 0;
     memcpy(&key_word, run.key.bytes + 4, sizeof(key_word));
+    uint32_t legacy_magic = 0;
+    memcpy(&legacy_magic, "ORC3", sizeof(legacy_magic));
     typedef struct OracleTestDamage OracleTestDamage;
     struct OracleTestDamage
     {
@@ -3106,6 +3190,7 @@ static void oracle_test_damaged(OracleTest* test)
     };
     const OracleTestDamage damages[] = {
         { "a changed magic", 0, 0x54535543u, -1, false },
+        { "an entry with the older package-path rules", 4, legacy_magic, -1, false },
         { "a changed key", (int64_t)offsetof(OracleEntryHeader, key) + 4, key_word ^ 1u, -1, false },
         { "a changed body length", (int64_t)offsetof(OracleEntryHeader, body), 7, -1, false },
         { "too many roots", (int64_t)offsetof(OracleEntryHeader, roots), BUSTER_ORACLE_ROOTS + 1, -1, false },
@@ -3526,6 +3611,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_variants(&test);
         oracle_test_permissions(&test);
         oracle_test_path_rules(&test);
+        oracle_test_path_spellings(&test);
         oracle_test_kernel(&test);
         oracle_test_streams(&test);
         oracle_test_numbers(&test);
@@ -3571,7 +3657,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
     static const char* const directories[] = { "empty-path/oracle",  "runs/oracle",         "dependencies/oracle", "identities/oracle", "tracing/oracle",
                                                "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",      "replay-large/oracle",
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
-                                               "streams-terminal/oracle", "numbers/oracle",
+                                               "streams-terminal/oracle", "numbers/oracle", "path-spellings/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
                                                "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
