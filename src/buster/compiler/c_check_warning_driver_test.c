@@ -22,6 +22,9 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "nondecimal literal conversion bit patterns and lossy controls",
         .source = "#define X 0xe2\n"
                   "signed char take(signed char x) { return x; }\n"
+                  "signed char small(void) { return (0xff); }\n"
+                  "signed char large(void) { return 0x100; }\n"
+                  "signed char single=0xff, overflow=0x1ff;\n"
                   "signed char values[8]; short s;\n"
                   "void f(void) {\n"
                   "values[0]=0xe2; values[1]=(0342); values[2]=0b11100010; values[3]=X;\n"
@@ -29,7 +32,7 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "s=0xffff; s=65535;\n"
                   "take(0x80); take(0x180);\n"
                   "}\n",
-        .warnings = 6,
+        .warnings = 8,
         .c23 = true,
     },
     {
