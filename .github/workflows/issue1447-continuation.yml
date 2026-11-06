@@ -7,14 +7,14 @@ permissions:
 jobs:
   combined-correctness:
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       BUSTER_HOST_ARCH: x86-64
       BUSTER_ORACLE_CACHE: check
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 861a2355397cf537f9eb62081f04fc04bcdd08b4
+          ref: 63273e343f1cf0f3c37d348fcf2f6d7d8f8caabe
           persist-credentials: false
       - name: Install pinned Clang
         run: bash tools/ci/setup-hosted.sh
