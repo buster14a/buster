@@ -3277,6 +3277,27 @@ static uint64_t lane_test_sessions(void)
         }
         failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
     }
+    // Strict startup must not execute the callback after a worker creation or caller pin failure.
+    if (handled)
+    {
+        LaneSessionTest failed = { .caller = caller, .expected = 1, .asked = 2 };
+        lane_process.fail_at = 1;
+        const uint32_t ran = lane_session_run(&session, 2, NULL, lane_test_session_main, &failed, BUSTER_LANE_SESSION_REQUIRE_START);
+        lane_process.fail_at = UINT32_MAX;
+        failures += ran != 0 || failed.calls[0] != 0 || !lane_test_threads_stopped(threads_before) ? 1 : 0;
+        const uint32_t bad_cpu[] = { BUSTER_LANE_CPU_MASK_WORDS * 64 };
+        const uint32_t bad = lane_session_run(&session, 1, bad_cpu, lane_test_session_main, &failed, BUSTER_LANE_SESSION_REQUIRE_START);
+        failures += bad != 0 || failed.calls[0] != 0 ? 1 : 0;
+        uint64_t before[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+        uint64_t after[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+        unsigned current_cpu = UINT_MAX;
+        const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(before), before) > 0 && syscall(SYS_getcpu, &current_cpu, NULL, NULL) == 0 &&
+                           current_cpu < BUSTER_LANE_CPU_MASK_WORDS * 64;
+        const uint32_t bad_worker[] = { current_cpu, BUSTER_LANE_CPU_MASK_WORDS * 64 };
+        const uint32_t worker = known ? lane_session_run(&session, 2, bad_worker, lane_test_session_main, &failed, BUSTER_LANE_SESSION_REQUIRE_START) : 1;
+        const bool restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
+        failures += worker != 0 || failed.calls[0] != 0 || failed.calls[1] != 0 || !restored || !lane_test_threads_stopped(threads_before) ? 1 : 0;
+    }
     // Sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eager, lazy and lazy with a flow begun before
     // lane 0 settles, of 2 and 8 lanes, on test topologies of this process's CPUs in pairs, in fours and all in one core:
     // as many lanes as the capacity and the cores allow, asked for as many, and a lazy session's lane 1 created even
