@@ -77,12 +77,13 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   PIE's: 1,600 damaged copies (cut short, one byte longer, a byte of the
   directory changed at sampled offsets and in every byte of the header), each
   made in place over the snapshot and repaired after its load, must be
-  invalid, and so must 12 whose header was changed and then rehashed
+  invalid, and so must 17 whose header was changed and then rehashed
   (another version or magic, a region misaligned, running or starting past
   the end or of the wrong size, counts out of range, more crt objects'
   records than a table has, the members' names placed before the crt
-  objects' end, the directory ending before its last region), which only the
-  header's own checks catch;
+  objects' end, the directory ending before its last region, a path string
+  whose offset or length leaves the strings region), which only the
+  header's own checks catch, and a probe path edited the same way;
   `runtime_open` must replace them with the kind's runtime; a directory and
   a FIFO at the snapshot's path must neither block a link (run in a child
   under an alarm) nor fail it, the FIFO replaced and the directory left with
