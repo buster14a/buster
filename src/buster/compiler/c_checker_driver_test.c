@@ -7224,6 +7224,38 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
     unlink(source);
 }
 
+// A failed -E -o must not leave the previous contents, truncated, in the output path.
+static void check_test_preprocessor_failed_output(CheckTest* test, const char* directory)
+{
+    char source[PATH_MAX];
+    char output[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/failed-e.c", directory);
+    snprintf(output, sizeof(output), "%s/failed-e.i", directory);
+    const char text[] = "#error boom\n";
+    const char previous[] = "PREVIOUS\n";
+    const bool written = parse_test_write(source, text, sizeof(text) - 1) && parse_test_write(output, previous, sizeof(previous) - 1);
+    char* arguments[] = { "-E", "-o", output, source };
+    const int saved = dup(STDERR_FILENO);
+    const int quiet = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    int status = 0;
+    if (saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO)
+    {
+        status = run_preprocessor_command(BUSTER_ARRAY_LENGTH(arguments), arguments);
+    }
+    if (saved >= 0)
+    {
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    if (quiet >= 0)
+    {
+        close(quiet);
+    }
+    check_test_expect(test, written && status != 0 && access(output, F_OK) != 0, "a failed -E -o removes the output file");
+    unlink(source);
+    unlink(output);
+}
+
 // isfpclass of a vector of long doubles (#148): clang accepts it, its result a vector of __int128 whose lanes are the
 // element's 16 bytes. The lowering's int and long long lane stores can't hold those, so it must refuse by name rather
 // than write garbage; a vector of floats still compiles, as the guard against refusing too much.
@@ -7925,6 +7957,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_reuse(&test, directory);
+            check_test_preprocessor_failed_output(&test, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
