@@ -7567,14 +7567,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
-                // A visible prototype survives a C17 empty-list redeclaration in its composite type. Its note
-                // sources survive with it; a hidden linked declaration below contributes no visible prototype.
-                if (kind == C_BINDING_FUNCTION &&
-                    (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0)
-                {
-                    check_sparse_set(reader->output->sparse_pool, reader->output->parameter_sources, token,
-                                     check_sparse_get(reader->output->parameter_sources, previous));
-                }
+                // The visible prototype survives an empty-list redeclaration in the composite type, but
+                // parameter notes still belong to the latest declaration's own written parameter list.
                 reader->declared_types[token] = composite;
             }
         }
