@@ -101,6 +101,27 @@ struct CheckBuiltinCall
 };
 
 typedef struct CheckGraph CheckGraph;
+
+// A VALUE node's leaf as check_graph_initialize's graph holds it (#628): what most leaves have, an identifier's type,
+// category, flags, object and overload set, and a literal's or an enumerator's integer up to 64 bits; and for a value
+// with more (check_graph_leaf_rest), the index plus one of its row of CheckGraph.leaf_payloads, which holds it whole,
+// else 0. Two to a cache line.
+typedef struct CheckGraphLeaf CheckGraphLeaf;
+struct CheckGraphLeaf
+{
+    TypeId type;
+    uint32_t flags;
+    uint32_t object;
+    uint32_t overload_head;
+    uint64_t integer;
+    uint32_t row;
+    uint8_t category;
+    uint8_t constant_kind;
+    uint16_t padding;
+};
+
+_Static_assert(sizeof(CheckGraphLeaf) == 32, "a graph's leaf record is half a cache line");
+
 typedef struct CheckConstWarning CheckConstWarning;
 struct CheckConstWarning
 {
@@ -243,17 +264,26 @@ struct CheckGraph
     TypeId ns_constant_string;
     uint32_t cfstring_class;
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
-    // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf_of). Other nodes use types/member as
+    // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf). Other nodes use types/member as
     // action data.
     CheckOp* ops;
     uint32_t* tokens;
     uint32_t* operand0;
     uint32_t* operand1;
     uint32_t* operand2;
-    // The VALUE nodes' values, leaf_count of them in node order: a VALUE node's is leaves[leaf_slots[node]], and every
-    // other node's slot is BUSTER_CHECK_NONE. Only a VALUE node reads a value, and in a column of every node's the 96
-    // bytes of the others' were most of the graph's memory (#572).
-    CheckValue* leaves;
+    // The VALUE nodes' values, leaf_count of them in node order: a VALUE node's is slot leaf_slots[node], and every other
+    // node's slot is BUSTER_CHECK_NONE. Only a VALUE node reads a value, and in a column of every node's the 96 bytes of the
+    // others' were most of the graph's memory (#572). A slot is a record of 32 bytes (CheckGraphLeaf, #628), and for a value
+    // with more than it holds (check_graph_leaf_rest) the whole value as a row of `leaf_payloads`, the record's `row`; on
+    // sqlite3.c, 80 of its 144,720 leaves, where 96 bytes a leaf took 14 MB. check_graph_initialize's graph has them; a
+    // hand-built one may hold each leaf's whole value in `dense_leaves` instead. Readers and writers take them through
+    // check_graph_leaf and check_graph_set_leaf, whichever the graph holds.
+    CheckGraphLeaf* leaf_records;
+    CheckValue* leaf_payloads;
+    uint32_t leaf_payload_count;
+    // The rows `leaf_payloads` has room for: the graph's capacity, or a deferred lane's part's leaves.
+    uint32_t leaf_payload_capacity;
+    CheckValue* dense_leaves;
     uint32_t* leaf_slots;
     TypeId* types;
     uint32_t* members;
@@ -894,10 +924,148 @@ static inline __attribute__((always_inline)) void check_stream_set_value(CheckSt
     check_stream_set_value_flags(stream, node, value, value->flags);
 }
 
-// A VALUE node's leaf (CheckGraph.leaves).
-static CheckValue* check_graph_leaf_of(const CheckGraph* graph, uint32_t node)
+// Whether the graph holds its leaves, as records or whole.
+static inline bool check_graph_has_leaves(const CheckGraph* graph)
 {
-    return graph->leaves + graph->leaf_slots[node];
+    return graph->leaf_records != NULL || graph->dense_leaves != NULL;
+}
+
+// Whether `value` has more than a leaf's record holds (CheckGraphLeaf): an integer past 64 bits, a floating component (by
+// its ten meaningful bytes, as check_stream_value_rest counts it), an address constant's offset, a bit-field's width or
+// place, a fault, or a category or a constant kind past a byte.
+static inline __attribute__((always_inline)) bool check_graph_leaf_rest(const CheckValue* value)
+{
+    const uint64_t rest = (uint64_t)(value->integer >> 64) | value->floating_storage[0] | (value->floating_storage[1] & 0xffff) | value->imaginary_storage[0] |
+                          (value->imaginary_storage[1] & 0xffff) | (uint64_t)value->offset | value->bit_width | value->fault | value->fault_node |
+                          value->object_bit_offset | (((uint32_t)value->category | (uint32_t)value->constant_kind) >> 8);
+    return rest != 0;
+}
+
+// The leaf in slot `slot`: its whole value, from the dense leaves, its row, or its record's fields.
+// Always inlined (#880), as profile-guided builds do; hot callers: check_graph_leaf and the scalar VALUE action.
+static inline __attribute__((always_inline)) CheckValue check_graph_leaf_at(const CheckGraph* graph, uint32_t slot)
+{
+    CheckValue result;
+    if (__builtin_expect(graph->dense_leaves != NULL, 0))
+    {
+        result = graph->dense_leaves[slot];
+    }
+    else
+    {
+        const CheckGraphLeaf* leaf = graph->leaf_records + slot;
+        const uint32_t row = leaf->row;
+        if (__builtin_expect(row != 0, 0) && row <= graph->leaf_payload_count)
+        {
+            result = graph->leaf_payloads[row - 1];
+        }
+        else
+        {
+            result = (CheckValue){
+                .type = leaf->type,
+                .category = (CheckCategory)leaf->category,
+                .flags = leaf->flags,
+                .constant_kind = (CheckConstantKind)leaf->constant_kind,
+                .integer = leaf->integer,
+                .object = leaf->object,
+                .overload_head = leaf->overload_head,
+            };
+        }
+    }
+    return result;
+}
+
+// A VALUE node's leaf (check_graph_leaf_at).
+static inline CheckValue check_graph_leaf_value(const CheckGraph* graph, uint32_t node)
+{
+    return check_graph_leaf_at(graph, graph->leaf_slots[node]);
+}
+
+// A VALUE node's leaf's type, flags, object and overload set, which its record holds whatever its row.
+static inline TypeId check_graph_leaf_type(const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t slot = graph->leaf_slots[node];
+    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].type : graph->leaf_records[slot].type;
+}
+
+static inline uint32_t check_graph_leaf_flags(const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t slot = graph->leaf_slots[node];
+    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].flags : graph->leaf_records[slot].flags;
+}
+
+static inline uint32_t check_graph_leaf_object(const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t slot = graph->leaf_slots[node];
+    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].object : graph->leaf_records[slot].object;
+}
+
+static inline uint32_t check_graph_leaf_head_at(const CheckGraph* graph, uint32_t slot)
+{
+    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].overload_head : graph->leaf_records[slot].overload_head;
+}
+
+static inline uint32_t check_graph_leaf_overload_head(const CheckGraph* graph, uint32_t node)
+{
+    return check_graph_leaf_head_at(graph, graph->leaf_slots[node]);
+}
+
+// Writes `value` as the leaf in slot `slot`: its record, and where it has more than a record holds, its whole value as a
+// row, the row the leaf has (`keep`: a leaf a write has made already) or else the graph's next. A leaf's first write
+// (check_graph_set_leaf_at) takes a row only for a value with more, so that a graph's rows are at most its leaves; the
+// leaves' writers make each leaf once, and its pages need no clearing first. A row past `leaf_payload_capacity` is none,
+// which can't happen while each leaf takes at most one.
+// Always inlined (#880), as profile-guided builds do; hot callers: the reader's leaves, once per leaf.
+static inline __attribute__((always_inline)) void check_graph_write_leaf(CheckGraph* graph, uint32_t slot, const CheckValue* value, bool keep)
+{
+    if (__builtin_expect(graph->dense_leaves != NULL, 0))
+    {
+        graph->dense_leaves[slot] = *value;
+    }
+    else
+    {
+        CheckGraphLeaf* leaf = graph->leaf_records + slot;
+        uint32_t row = keep ? leaf->row : 0;
+        row = row <= graph->leaf_payload_count ? row : 0;
+        if (__builtin_expect(check_graph_leaf_rest(value), 0))
+        {
+            row = row == 0 && graph->leaf_payload_count < graph->leaf_payload_capacity ? ++graph->leaf_payload_count : row;
+            if (row != 0)
+            {
+                graph->leaf_payloads[row - 1] = *value;
+            }
+        }
+        else if (row != 0)
+        {
+            // A rewrite to a value without more: the row stays the leaf's, and holds the value, as its record does.
+            graph->leaf_payloads[row - 1] = *value;
+        }
+        *leaf = (CheckGraphLeaf){
+            .type = value->type,
+            .flags = value->flags,
+            .object = value->object,
+            .overload_head = value->overload_head,
+            .integer = (uint64_t)value->integer,
+            .row = row,
+            .category = (uint8_t)value->category,
+            .constant_kind = (uint8_t)value->constant_kind,
+        };
+    }
+}
+
+static inline __attribute__((always_inline)) void check_graph_set_leaf_at(CheckGraph* graph, uint32_t slot, const CheckValue* value)
+{
+    check_graph_write_leaf(graph, slot, value, false);
+}
+
+// A VALUE node's leaf's first write, and a write over it (which keeps its row).
+static inline __attribute__((always_inline)) void check_graph_set_leaf(CheckGraph* graph, uint32_t node, const CheckValue* value)
+{
+    check_graph_write_leaf(graph, graph->leaf_slots[node], value, false);
+}
+
+static inline void check_graph_update_leaf(CheckGraph* graph, uint32_t node, const CheckValue* value)
+{
+    check_graph_write_leaf(graph, graph->leaf_slots[node], value, true);
 }
 
 #include "c_check_builtin_graph_metadata.c"
@@ -933,14 +1101,17 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
         graph->operand0 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->operand1 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->operand2 = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
-        graph->leaves = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckValue, capacity);
+        graph->leaf_records = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckGraphLeaf, capacity);
+        // Room for a row a leaf, of which the leaves with more than a record take the first few: only those take memory.
+        graph->leaf_payloads = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckValue, capacity);
+        graph->leaf_payload_capacity = capacity;
         graph->leaf_slots = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->types = BUSTER_CHECK_GRAPH_COLUMN(arena, TypeId, capacity);
         graph->members = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->source_positions = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->argument_offsets = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
         graph->argument_counts = BUSTER_CHECK_GRAPH_COLUMN(arena, uint32_t, capacity);
-        result = graph->ops != 0 && graph->tokens != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0 && graph->leaves != 0 && graph->leaf_slots != 0 && graph->types != 0 && graph->members != 0 && graph->contexts != 0 && graph->source_positions != 0 && graph->argument_offsets != 0 && graph->argument_counts != 0;
+        result = graph->ops != 0 && graph->tokens != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0 && graph->leaf_records != 0 && graph->leaf_payloads != 0 && graph->leaf_slots != 0 && graph->types != 0 && graph->members != 0 && graph->contexts != 0 && graph->source_positions != 0 && graph->argument_offsets != 0 && graph->argument_counts != 0;
     }
     if (result && argument_capacity != 0)
     {
@@ -980,7 +1151,7 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
         graph->leaf_slots[node] = leaf ? graph->leaf_count : BUSTER_CHECK_NONE;
         if (leaf)
         {
-            graph->leaves[graph->leaf_count] = (CheckValue){ 0 };
+            check_graph_set_leaf_at(graph, graph->leaf_count, &(const CheckValue){ 0 });
         }
         graph->leaf_count += leaf;
         graph->types[node] = 0;
@@ -1151,7 +1322,7 @@ static inline __attribute__((always_inline)) bool check_graph_pure(const CheckGr
     bool result = false;
     if (op == CHECK_OP_VALUE)
     {
-        result = graph->leaves != 0 && check_graph_leaf_of(graph, node)->overload_head == 0 && check_graph_builtin(check_graph_leaf_of(graph, node)->type);
+        result = check_graph_has_leaves(graph) && check_graph_leaf_overload_head(graph, node) == 0 && check_graph_builtin(check_graph_leaf_type(graph, node));
     }
     else if (__builtin_expect(op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF, 0))
     {
@@ -1330,10 +1501,10 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     }
     // A VALUE node's leaf is the next one, and every other node has none.
     const uint32_t slot = graph->leaf_slots != 0 ? graph->leaf_slots[node] : BUSTER_CHECK_NONE;
-    result = result && (op == CHECK_OP_VALUE ? graph->leaves != 0 && slot == state->leaves && slot < graph->leaf_count : slot == BUSTER_CHECK_NONE);
+    result = result && (op == CHECK_OP_VALUE ? check_graph_has_leaves(graph) && slot == state->leaves && slot < graph->leaf_count : slot == BUSTER_CHECK_NONE);
     if (result && op == CHECK_OP_VALUE)
     {
-        result = graph->leaves[slot].overload_head <= graph->overload_candidate_count;
+        result = check_graph_leaf_head_at(graph, slot) <= graph->overload_candidate_count;
     }
     result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
     result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
@@ -1479,9 +1650,9 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
     const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
     const __m512i ops = _mm512_loadu_si512(graph->ops + node);
     // A leaf's slot, the next one's, its overload head, and whether a region may reorder it: first, while little else is
-    // live, since each leaf is two cache lines of its record and these are most of the block's time.
+    // live, since each leaf is a load of its record and these are most of the block's time.
     const __mmask16 leaves = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VALUE));
-    const bool readable = graph->leaves != 0 && graph->leaf_slots != 0;
+    const bool readable = check_graph_has_leaves(graph) && graph->leaf_slots != 0;
     bool heads = true;
     uint32_t reorderable_leaves = 0;
     uint32_t expected = state->leaves;
@@ -1494,9 +1665,10 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
         expected += 1;
         if (next)
         {
-            const CheckValue* leaf = graph->leaves + slot;
-            heads &= leaf->overload_head <= graph->overload_candidate_count;
-            reorderable_leaves |= (uint32_t)(leaf->overload_head == 0 && check_graph_builtin(leaf->type)) << lane;
+            const uint32_t head = check_graph_leaf_head_at(graph, slot);
+            const TypeId type = graph->dense_leaves != NULL ? graph->dense_leaves[slot].type : graph->leaf_records[slot].type;
+            heads &= head <= graph->overload_candidate_count;
+            reorderable_leaves |= (uint32_t)(head == 0 && check_graph_builtin(type)) << lane;
         }
     }
     const __m512i requested = _mm512_loadu_si512(graph->types + node);
@@ -1729,7 +1901,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
     }
     if (action->op == CHECK_OP_VALUE)
     {
-        check_value_copy(&action->operands[0], check_graph_leaf_of(graph, node));
+        action->operands[0] = check_graph_leaf_value(graph, node);
     }
     if (check_graph_has_arguments(action->op) && graph->argument_counts != 0)
     {
@@ -1838,7 +2010,7 @@ static inline __attribute__((always_inline)) void check_graph_store(CheckStream*
 // as check_graph_node_action relies on), and its record isn't read for it.
 static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 {
-    return graph->ops[node] == CHECK_OP_VALUE && (graph->overload_candidate_count == 0 || check_graph_leaf_of(graph, node)->overload_head == 0);
+    return graph->ops[node] == CHECK_OP_VALUE && (graph->overload_candidate_count == 0 || check_graph_leaf_overload_head(graph, node) == 0);
 }
 
 // The end of the run of marked nodes from `node`, a region of check_graph_run's main loop: the first node from `node`
@@ -1877,14 +2049,33 @@ static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(con
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per leaf.
 static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
 {
-    const CheckValue* leaf = check_graph_leaf_of(graph, node);
-    const bool valid = type_is_valid(types, leaf->type);
-    check_stream_set_value(stream, node, valid ? leaf : &(const CheckValue){ 0 });
+    const uint32_t slot = graph->leaf_slots[node];
+    const CheckGraphLeaf* record = graph->dense_leaves == NULL ? graph->leaf_records + slot : NULL;
+    const TypeId type = record != NULL ? record->type : graph->dense_leaves[slot].type;
+    const bool valid = type_is_valid(types, type);
+    if (record != NULL && valid && record->row == 0 && record->integer == 0 && record->overload_head == 0)
+    {
+        // A leaf that is its record's columns alone, an identifier's (most leaves): the stream's columns, without a value
+        // in memory between them.
+        const CheckValue value = {
+            .type = record->type,
+            .category = (CheckCategory)record->category,
+            .flags = record->flags,
+            .constant_kind = (CheckConstantKind)record->constant_kind,
+            .object = record->object,
+        };
+        check_stream_set_value(stream, node, &value);
+    }
+    else
+    {
+        const CheckValue value = valid ? check_graph_leaf_at(graph, slot) : (CheckValue){ 0 };
+        check_stream_set_value(stream, node, &value);
+    }
     // In a fresh output (CheckStream.zero_columns) the record's other fields, the warnings, the member's offset and a
     // valid leaf's diagnostic are zero already.
     if (stream->zero_columns)
     {
-        stream->conversions[node].operands[0].type = leaf->type;
+        stream->conversions[node].operands[0].type = type;
         if (!valid)
         {
             stream->diagnostics[node] = CHECK_DIAG_INVALID_TYPE;
@@ -1892,7 +2083,7 @@ static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTab
     }
     else
     {
-        stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
+        stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = type } } };
         stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
         stream->warnings[node] = 0;
         stream->member_offsets[node] = 0;

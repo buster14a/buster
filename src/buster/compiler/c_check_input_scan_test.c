@@ -1625,7 +1625,7 @@ static __attribute__((noinline)) void check_test_expression_flush(CheckTest* tes
             graph->recorded_pure = graph_bytes[scalar][1];
             graph->warning_suppressed = suppressions ? graph_bytes[scalar][2] : NULL;
             graph->fp_environments = floating ? graph_bytes[scalar][3] : NULL;
-            graph->leaves = leaves[scalar];
+            graph->dense_leaves = leaves[scalar];
             input->fp_environments = environments;
             // The nodes before the batch: a visit's, none of them recorded yet, and the leaves before the batch's.
             for (uint32_t node = 0; node < before; node += 1)

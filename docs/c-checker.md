@@ -880,7 +880,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
+| `leaf_records`, `leaf_payloads`, `leaf_slots` | `leaf_count` 32-byte `CheckGraphLeaf` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE`. Only `VALUE` reads a record, so other nodes take none (#572). A record holds the value's type, category, flags, constant kind, object, overload set and its integer's low 64 bits; a value with more (`check_graph_leaf_rest`: a wider integer, a floating payload, an offset, a bit-field's place, a fault) also takes the next whole `CheckValue` row of `leaf_payloads`, at most one a leaf (#628). A hand-built graph may hold the leaves whole in `dense_leaves` instead. `check_graph_leaf_value`, its field accessors and `check_graph_set_leaf` read and write either form. |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -1077,8 +1077,9 @@ output cache line twice. When validation is required (an external producer or
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record, which since #572 lie one after
-another, as only `VALUE` nodes have one. `test-checker` compares the two
+reads, which since #572 lie one after another, as only `VALUE` nodes have one,
+and since #628 are 32 bytes each, half a cache line, where a 96-byte value took
+two. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 
@@ -4952,7 +4953,12 @@ the oracle.
   The graph run, which now copies each leaf into the stream's columns, could
   then take them as they are. It isn't done here: 46 places read leaves as
   whole `CheckValue`s through `check_graph_leaf_of`, most in the graph run and
-  the reader's later passes, outside the walk.
+  the reader's later passes, outside the walk. #628 since made the leaves
+  32-byte records with an integer's low 64 bits, so that the literals and
+  enumerators need no row either (24,071 of `sqlite3.c`'s leaves had more than
+  the columns, 80 have more than a record); the graph run writes an
+  identifier's record into the stream's columns without a value between them
+  ("The graph's leaves" in `docs/compile-time.md`).
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining

@@ -7,7 +7,7 @@
 
 static bool check_test_graph_cleared(const CheckGraph* graph)
 {
-    return graph->ops == 0 && graph->tokens == 0 && graph->operand0 == 0 && graph->operand1 == 0 && graph->operand2 == 0 && graph->leaves == 0 && graph->leaf_slots == 0 && graph->leaf_count == 0 && graph->types == 0 && graph->members == 0 && graph->contexts == 0 && graph->count == 0 && graph->capacity == 0 && graph->argument_offsets == 0 && graph->argument_counts == 0 && graph->argument_nodes == 0 && graph->argument_count == 0 && graph->argument_capacity == 0;
+    return graph->ops == 0 && graph->tokens == 0 && graph->operand0 == 0 && graph->operand1 == 0 && graph->operand2 == 0 && graph->leaf_records == 0 && graph->leaf_payloads == 0 && graph->dense_leaves == 0 && graph->leaf_slots == 0 && graph->leaf_count == 0 && graph->types == 0 && graph->members == 0 && graph->contexts == 0 && graph->count == 0 && graph->capacity == 0 && graph->argument_offsets == 0 && graph->argument_counts == 0 && graph->argument_nodes == 0 && graph->argument_count == 0 && graph->argument_capacity == 0;
 }
 
 static bool check_test_graph_failed_stream(const CheckStream* stream)
@@ -138,6 +138,7 @@ static void check_test_graph_argument_guards(CheckTest* test, TypeTable* table, 
     {
         graph.count = 0;
         graph.leaf_count = 0;
+        graph.leaf_payload_count = 0;
         graph.argument_count = count;
         graph.argument_capacity = count;
         graph.argument_nodes = (uint32_t*)(mapping + page - count * sizeof(uint32_t));
@@ -461,6 +462,7 @@ static void check_test_graph_validation_world(CheckTest* test, CheckGraph* graph
     };
     graph->count = 0;
     graph->leaf_count = 0;
+    graph->leaf_payload_count = 0;
     graph->argument_count = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
@@ -653,7 +655,12 @@ static void check_test_graph_break(CheckTest* test, CheckGraph* graph, uint32_t 
                 graph->argument_nodes[graph->argument_offsets[node] + graph->argument_counts[node] - 1] = node;
             }
         } break;
-        case 11: check_graph_leaf_of(graph, node)->overload_head = 1 + check_test_random(test) % 3; break;
+        case 11:
+        {
+            CheckValue leaf = check_graph_leaf_value(graph, node);
+            leaf.overload_head = 1 + check_test_random(test) % 3;
+            check_graph_update_leaf(graph, node, &leaf);
+        } break;
         case 12: graph->source_positions[node] = BUSTER_CHECK_NONE; break;
         case 13: graph->types[node] = graph->types[node] == 0 ? BUSTER_TYPE_INT : 0; break;
         case 14: graph->argument_offsets[node] = graph->argument_count + 1 + check_test_random(test) % 3; break;
@@ -735,7 +742,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                 const uint32_t slot = graph.argument_counts[node] != 0 && graph.ops[node] != CHECK_OP_VARARGS ? graph.argument_offsets[node] + graph.argument_counts[node] - 1 : 0;
                 const uint32_t saved_argument = graph.argument_count != 0 ? graph.argument_nodes[slot] : 0;
                 const uint32_t saved_slot = graph.leaf_slots[node];
-                const uint32_t saved_head = graph.ops[node] == CHECK_OP_VALUE ? check_graph_leaf_of(&graph, node)->overload_head : 0;
+                const uint32_t saved_head = graph.ops[node] == CHECK_OP_VALUE ? check_graph_leaf_overload_head(&graph, node) : 0;
                 check_test_graph_break(test, &graph, node, rule);
                 check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its exact twin on a broken rule");
                 graph.ops[node] = (CheckOp)saved_ops;
@@ -758,7 +765,9 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                 graph.leaf_slots[node] = saved_slot;
                 if (graph.ops[node] == CHECK_OP_VALUE)
                 {
-                    check_graph_leaf_of(&graph, node)->overload_head = saved_head;
+                    CheckValue leaf = check_graph_leaf_value(&graph, node);
+                    leaf.overload_head = saved_head;
+                    check_graph_update_leaf(&graph, node, &leaf);
                 }
             }
         }
@@ -814,7 +823,7 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
         guarded.argument_counts = check_test_graph_validation_page(graph.argument_counts, (uint64_t)count * sizeof(uint32_t), page, &mappings[6], &lengths[6]);
         guarded.members = check_test_graph_validation_page(graph.members, (uint64_t)count * sizeof(uint32_t), page, &mappings[7], &lengths[7]);
         guarded.contexts = check_test_graph_validation_page(graph.contexts, count, page, &mappings[8], &lengths[8]);
-        guarded.leaves = check_test_graph_validation_page(graph.leaves, (uint64_t)graph.leaf_count * sizeof(CheckValue), page, &mappings[9], &lengths[9]);
+        guarded.leaf_records = check_test_graph_validation_page(graph.leaf_records, (uint64_t)graph.leaf_count * sizeof(CheckGraphLeaf), page, &mappings[9], &lengths[9]);
         guarded.leaf_slots = check_test_graph_validation_page(graph.leaf_slots, (uint64_t)count * sizeof(uint32_t), page, &mappings[11], &lengths[11]);
         guarded.argument_nodes = check_test_graph_validation_page(graph.argument_nodes, (uint64_t)graph.argument_count * sizeof(uint32_t), page, &mappings[10], &lengths[10]);
         bool placed = true;
@@ -839,8 +848,138 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
     arena_pop_to(storage, mark);
 }
 
+// A leaf's value for check_test_leaf_records: each of a record's fields zero or not, an integer past 64 bits in some, and in
+// a few one more field, which a record doesn't hold.
+static CheckValue check_test_leaf_draw(CheckTest* test)
+{
+    const uint32_t shape = check_test_random(test);
+    CheckValue value = { 0 };
+    value.type = check_test_random(test) % 64;
+    value.category = (CheckCategory)(shape & 3);
+    value.flags = (shape & 4) != 0 ? check_test_random(test) : 0;
+    value.constant_kind = (CheckConstantKind)((shape >> 3) % 5);
+    value.object = (shape & 32) != 0 ? check_test_random(test) : 0;
+    value.overload_head = (shape & 64) != 0 ? check_test_random(test) % 8 : 0;
+    value.integer = (shape & 128) != 0 ? (unsigned __int128)check_test_random(test) << ((shape >> 8) % 4 * 32) : 0;
+    switch ((shape >> 10) % 16)
+    {
+        case 0:
+        {
+            value.floating_storage[0] = UINT64_C(1) << 63 | check_test_random(test);
+            value.floating_storage[1] = 0x3fffu;
+        } break;
+        case 1:
+        {
+            value.imaginary_storage[0] = UINT64_C(1) << 63;
+            value.imaginary_storage[1] = 0xbfffu;
+        } break;
+        case 2: value.offset = -1 - (int64_t)check_test_random(test); break;
+        case 3:
+        {
+            value.bit_width = 1 + check_test_random(test) % 64;
+            value.object_bit_offset = check_test_random(test) % 8;
+        } break;
+        case 4:
+        {
+            value.fault = CHECK_FAULT_DIVIDE_BY_ZERO;
+            value.fault_node = check_test_random(test);
+        } break;
+        case 5: value.category = (CheckCategory)(256 + (shape & 3)); break;
+        default: break;
+    }
+    return value;
+}
+
+// The graph's leaves as records and rows (#628) against dense leaves, their twin and oracle. Random values are written once,
+// as the reader writes a leaf, over storage a write left dirty, then a quarter are written again (check_graph_update_leaf),
+// and every leaf must read back the same whole and by its fields, with at most a row a leaf. Then a lane's part of leaves,
+// written in its own range of the graph's, is appended after the graph's own as the deferred reader's merge appends it
+// (check_deferred_expression_leaves), its rows renumbered after the graph's.
+static void check_test_leaf_records(CheckTest* test)
+{
+    enum
+    {
+        CAPACITY = 160,
+    };
+    static CheckGraphLeaf records[CAPACITY];
+    static CheckValue payloads[CAPACITY];
+    static CheckValue dense[CAPACITY];
+    static uint32_t slots[CAPACITY];
+    for (uint32_t slot = 0; slot < CAPACITY; slot += 1)
+    {
+        slots[slot] = slot;
+    }
+    uint32_t differences = 0;
+    uint64_t rows = 0;
+    uint64_t merged_rows = 0;
+    for (uint32_t round = 0; round < 400; round += 1)
+    {
+        memset(records, 0xa5, sizeof(records));
+        memset(payloads, 0x5a, sizeof(payloads));
+        CheckGraph compact = { .leaf_records = records, .leaf_payloads = payloads, .leaf_payload_capacity = CAPACITY, .leaf_slots = slots };
+        CheckGraph oracle = { .dense_leaves = dense, .leaf_slots = slots };
+        // The graph's own leaves, then a part's at an offset past them, which the merge moves down to follow them.
+        const uint32_t own = check_test_random(test) % (CAPACITY / 2 + 1);
+        const uint32_t offset = own + check_test_random(test) % (CAPACITY / 2 - own / 2 + 1);
+        const uint32_t room = CAPACITY - offset;
+        const uint32_t added = room != 0 ? check_test_random(test) % (room + 1) : 0;
+        for (uint32_t slot = 0; slot < own; slot += 1)
+        {
+            const CheckValue value = check_test_leaf_draw(test);
+            check_graph_set_leaf_at(&compact, slot, &value);
+            check_graph_set_leaf_at(&oracle, slot, &value);
+        }
+        compact.leaf_count = own;
+        oracle.leaf_count = own;
+        compact.count = own;
+        oracle.count = own;
+        for (uint32_t i = 0; own != 0 && i < own / 4; i += 1)
+        {
+            const uint32_t node = check_test_random(test) % own;
+            const CheckValue value = check_test_leaf_draw(test);
+            check_graph_update_leaf(&compact, node, &value);
+            check_graph_update_leaf(&oracle, node, &value);
+        }
+        CheckGraph part = {
+            .leaf_records = records + offset,
+            .leaf_payloads = payloads + offset,
+            .leaf_payload_capacity = room,
+            .leaf_count = added,
+        };
+        CheckValue appended[CAPACITY];
+        for (uint32_t slot = 0; slot < added; slot += 1)
+        {
+            appended[slot] = check_test_leaf_draw(test);
+            check_graph_set_leaf_at(&part, slot, &appended[slot]);
+        }
+        differences += compact.leaf_payload_count > own || part.leaf_payload_count > added;
+        rows += compact.leaf_payload_count + part.leaf_payload_count;
+        merged_rows += compact.leaf_payload_count != 0 && part.leaf_payload_count != 0;
+        check_deferred_expression_leaves(&compact, &part, own);
+        for (uint32_t slot = 0; slot < added; slot += 1)
+        {
+            check_graph_set_leaf_at(&oracle, own + slot, &appended[slot]);
+        }
+        compact.leaf_count = own + added;
+        compact.count = own + added;
+        oracle.leaf_count = own + added;
+        oracle.count = own + added;
+        differences += compact.leaf_payload_count > own + added;
+        for (uint32_t node = 0; node < own + added; node += 1)
+        {
+            const CheckValue a = check_graph_leaf_value(&compact, node);
+            const CheckValue b = check_graph_leaf_value(&oracle, node);
+            differences += !check_test_leaf_equal(&compact, &oracle, node) || a.category != b.category || a.object_bit_offset != b.object_bit_offset ||
+                           check_graph_leaf_type(&compact, node) != b.type || check_graph_leaf_flags(&compact, node) != b.flags ||
+                           check_graph_leaf_object(&compact, node) != b.object || check_graph_leaf_overload_head(&compact, node) != b.overload_head;
+        }
+    }
+    check_test_expect(test, differences == 0 && rows != 0 && merged_rows != 0, "graph leaf records and rows read back as their dense twin's, merged too");
+}
+
 static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
+    check_test_leaf_records(test);
     check_test_graph_partial_allocations(test, table, storage);
     check_test_graph_argument_guards(test, table, storage, output, scratch);
     check_test_graph_barriers(test, storage, output, scratch);
