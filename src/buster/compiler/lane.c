@@ -236,13 +236,15 @@ static _Thread_local ArenaPool* arena_pool;
 static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
 // The process's pages (#1109), set once at its start, before any arena is reserved: on a virtual machine (CPUID's
 // hypervisor bit), transparent huge pages off for the whole process (PR_SET_THP_DISABLE, which MADV_HUGEPAGE doesn't
-// override, and which the processes it starts inherit), so that the arenas take base pages; off too on a busy host,
-// whose tasks runnable at the start are at least a quarter of its CPUs online (#672: arena_host_busy). `setting`,
+// override, and which the processes it starts inherit), so that the arenas take base pages. `setting`,
 // BUSTER_HUGE_PAGES's value, decides instead when it is "0" (off) or "1" (on, as the arenas ask, even where the process
-// that started this one turned them off). Elsewhere the process keeps what it was started with.
+// that started this one turned them off). Elsewhere the process keeps what it was started with, but on a busy host,
+// whose tasks runnable at the start are at least a quarter of its CPUs online (#672: arena_host_busy), its own arenas
+// take base pages (arena_pages_busy). That leaves the process's other memory, and the processes it starts, as they were.
 static __attribute__((unused)) void arena_page_policy(const char* setting);
-// Whether arena_page_policy turned huge pages off because the host was busy (#672), which --time-stages reports. Set
-// once, before the process starts any thread; main.c's units share it.
+// Whether arena_page_policy found the host busy (#672): then every arena the process reserves is advised base pages
+// (MADV_NOHUGEPAGE over its mapping) and never huge ones, which --time-stages reports as `busy`. Set once, before the
+// process starts any thread; main.c's units share it. BUSTER_TEST_HOST_BUSY ("1" or "0") decides it instead, for tests.
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern bool arena_pages_busy;
 #elif defined(BUSTER_UNIT)
@@ -511,7 +513,12 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
                 offset = huge_begin - small - (uintptr_t)mapping;
             }
             const uint64_t base_pages = capacity > small ? small : mapping_bytes;
-            if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            if (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            {
+                // A busy host's arenas are base pages throughout: arena_commit advises none of them huge.
+                madvise(mapping, mapping_bytes, MADV_NOHUGEPAGE);
+            }
+            else if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
             {
                 madvise(mapping, offset + base_pages, MADV_NOHUGEPAGE);
             }
@@ -637,7 +644,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
             {
                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
             }
-            for (uint32_t i = 0; i < count; i += 1)
+            for (uint32_t i = 0; !arena_pages_busy && i < count; i += 1)
             {
                 if (ends[i] > smalls[i])
                 {
@@ -724,16 +731,17 @@ static uint64_t arena_loadavg_runnable(const char* text, uint64_t length)
 // cleared as it is first written. Reads two small files, the second only where more than this process runs.
 static bool arena_host_busy(void)
 {
-    bool result = false;
+    const char* forced = getenv("BUSTER_TEST_HOST_BUSY");
+    bool result = forced != 0 && strcmp(forced, "1") == 0;
     char text[128];
-    const int file = open("/proc/loadavg", O_RDONLY | O_CLOEXEC);
+    const int file = forced == 0 ? open("/proc/loadavg", O_RDONLY | O_CLOEXEC) : -1;
     const ssize_t length = file >= 0 ? read(file, text, sizeof(text)) : -1;
     if (file >= 0)
     {
         close(file);
     }
     const uint64_t runnable = length > 0 ? arena_loadavg_runnable(text, (uint64_t)length) : 0;
-    if (runnable >= 2)
+    if (forced == 0 && runnable >= 2)
     {
         const long online = sysconf(_SC_NPROCESSORS_ONLN);
         result = online > 0 && runnable * BUSTER_ARENA_BUSY_SHARE >= (uint64_t)online;
@@ -745,7 +753,8 @@ static bool arena_host_busy(void)
 // 4-core VM a fault took about 1 ms, and the C driver's checking of main.c ran 2 to 4 times as long as with base pages, a
 // small unit 30% longer at the median and up to 7 times at the tail. On the 9700X a huge page clears in about 40 µs, and
 // a large unit's arenas fill theirs (docs/translation-units.md, "Memory"), but not where the other cores are busy
-// (arena_host_busy). A process started with them off keeps them off.
+// (arena_host_busy): then the arenas alone take base pages (arena_pages_busy), by their own advice, which no process this
+// one starts inherits. A process started with them off keeps them off.
 static void arena_page_policy(const char* setting)
 {
     uint32_t eax = 0;
@@ -756,7 +765,7 @@ static void arena_page_policy(const char* setting)
     const bool off = setting != 0 && strcmp(setting, "0") == 0;
     const bool on = setting != 0 && strcmp(setting, "1") == 0;
     arena_pages_busy = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 0 && arena_host_busy();
-    if (off || arena_pages_busy || (virtual_machine && !on))
+    if (off || (virtual_machine && !on))
     {
         prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
     }
@@ -926,7 +935,7 @@ static bool arena_commit(Arena* arena, uint64_t end)
             // The pages past the base pages, advised huge as the first commit reaches them, before a push returns any
             // of their bytes (arena_reserve_policy).
             const uint64_t small_end = offset + arena->small;
-            if (!arena->huge && arena->capacity > arena->small && target > small_end)
+            if (!arena->huge && !arena_pages_busy && arena->capacity > arena->small && target > small_end)
             {
                 madvise(mapping + small_end, arena->mapping_bytes - small_end, MADV_HUGEPAGE);
                 arena->huge = true;

@@ -12,9 +12,10 @@ requirements. [Command index](README.md).
   `time-write` lines (#778), the release; on several lanes their run is one stage, `lanes`), with its system time,
   page faults and peak resident set added, and the process's resource use, with the lanes its session asked for and
   ran on (#905: `lanes-asked` and `lanes`), whether transparent huge pages were off for it (#1109: `huge-pages`, `off`,
-  `busy` or `system`; `lane.c`'s `arena_page_policy` turns them off on a virtual machine, on a host busy when the
-  process starts (#672, `busy`: its tasks runnable at least a quarter of its CPUs online) or by `BUSTER_HUGE_PAGES=0`,
-  and `BUSTER_HUGE_PAGES=1` leaves them as the system has them), and with `--check-transitions` the memoized transitions'
+  `busy` or `system`; `lane.c`'s `arena_page_policy` turns them off on a virtual machine or by `BUSTER_HUGE_PAGES=0`,
+  `BUSTER_HUGE_PAGES=1` leaves them as the system has them, and `busy` means the process's arenas alone took base pages
+  on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), and with
+  `--check-transitions` the memoized transitions'
   hits, misses, folds and entries (#1050: `time-check transition-*`); off by default, its laps test a null pointer.
   `measure-compile [--runs N] [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with
   and without the option and against a reference compiler (tcc), in a rotating order, with each stage's medians and

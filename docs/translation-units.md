@@ -609,19 +609,27 @@ and nothing measured separates or establishes them:
 - **Locality.** The other cores' traffic can evict what was cleared before
   the arena writes it. A base page is cleared as it is first written.
 
-So `arena_page_policy` also turns huge pages off where the host is busy when
-the process starts (`arena_host_busy`): its tasks runnable then
-(`/proc/loadavg`), this process's among them, are two or more and at least
-a quarter of its CPUs online. That is four of the 9700X's 15, where the two
-modes' observed medians were closest. A compile alone, as the 9700X job's
-`measure-compile` runs it, keeps them. A process started with them off keeps
-them off, and `BUSTER_HUGE_PAGES` decides instead where it is set.
-`--time-stages` reports `busy` for this case.
+So where the host is busy when the process starts (`arena_host_busy`), the
+process's arenas take base pages (`arena_pages_busy`). The host is busy when
+its tasks runnable then (`/proc/loadavg`), this process's among them, are two
+or more and at least a quarter of its CPUs online. That is four of the
+9700X's 15, where the two modes' observed medians were closest.
+- **Mechanism.** Each arena's mapping is advised `MADV_NOHUGEPAGE`, and no
+  commit advises it huge. Unlike the virtual machine's rule, this leaves the
+  process's other memory as it was, and the programs it starts: `time-runs`'
+  timed programs keep the huge pages its parent gave it (#1561's review).
+- **Who decides.** A compile alone, as the 9700X job's `measure-compile` runs
+  it, keeps huge pages. A process started with them off keeps them off, and
+  `BUSTER_HUGE_PAGES` decides instead where it is set.
+- **Tests.** `BUSTER_TEST_HOST_BUSY=1` or `0` decides the busy test for them.
+  `--time-stages` reports `busy` for this case.
 
 An experiment build of this policy was measured against main, 7 rounds in a
 fixed order (the record's `final/`). It is not this change's final
 executable. The record has its worktree's source and that tree's diff to
-this change, both captured after the runs.
+an earlier head of this change, both captured after the runs. That build
+turned huge pages off for the whole process (`PR_SET_THP_DISABLE`) where
+this one advises the arenas alone.
 
 | compiles at once | main | the experiment build |
 | ---: | ---: | ---: |
