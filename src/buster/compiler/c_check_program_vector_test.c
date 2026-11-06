@@ -266,10 +266,6 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             check_test_vector_logical,
         },
         {
-            "vector-boolean-builtins",
-            check_test_vector_boolean_builtins,
-        },
-        {
             // The lowering's room for an element-wise reduction (check_lower_transport_room), in a unit with nothing
             // else: a 1024-element vector of bool's maximum and minimum, its most entries an element.
             "vector-transport-reduce-room",
@@ -490,6 +486,18 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             free(source);
         }
     }
+
+    // Clang 23.1.4 -O0 for x86-64-v4 miscompiles clmul's last defined lane of a 65-element bool vector: at
+    // tested(16), lane 64 returns true for true * false. Its -O2 build and the lower target levels agree with the
+    // one-bit product, a & b. Keep every builtin in Buster's source and use that independent operation for this
+    // oracle alone; the baseline fixtures below still compare clang's clmul at SSE2/v2/v3.
+    static const char clmul_oracle[] = "#define __builtin_elementwise_clmul(a,b) ((a)&(b))\n";
+    char source[sizeof(check_test_vector_types) + sizeof(check_test_vector_boolean_builtins) - 1];
+    char oracle[sizeof(clmul_oracle) + sizeof(source) - 1];
+    snprintf(source, sizeof(source), "%s%s", check_test_vector_types, check_test_vector_boolean_builtins);
+    snprintf(oracle, sizeof(oracle), "%s%s", clmul_oracle, source);
+    check_test_program_source_native_bounds(test, source, "vector-boolean-builtins", clang, false, -1, 0, target, run_native, 0, oracle, false,
+                                            2017, true, "-std=gnu17");
 }
 
 // What the lowering refuses by name, with vectors of each kind it can't take yet.
