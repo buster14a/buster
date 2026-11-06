@@ -2339,6 +2339,24 @@ static bool check_test_source_graphs_equal(const CheckInput* a, const CheckInput
     return equal;
 }
 
+// Whether the two paths' readers listed the same enumeration constants, with their values, and the same enumerations'
+// definitions, in token order (check_input_enum_records: the vector path visits the enumerators and the `enum` keywords
+// alone, the scalar path every token).
+static bool check_test_source_enums_equal(const CheckInput* a, const CheckInput* b)
+{
+    bool equal = a->enum_value_count == b->enum_value_count && a->enum_definition_count == b->enum_definition_count;
+    for (uint32_t i = 0; equal && i < a->enum_value_count; i += 1)
+    {
+        equal = a->enum_values[i].token == b->enum_values[i].token && a->enum_values[i].value == b->enum_values[i].value;
+    }
+    for (uint32_t i = 0; equal && i < a->enum_definition_count; i += 1)
+    {
+        equal = a->enum_definitions[i].type == b->enum_definitions[i].type && a->enum_definitions[i].open == b->enum_definitions[i].open &&
+                a->enum_definitions[i].close == b->enum_definitions[i].close;
+    }
+    return equal;
+}
+
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
 {
     static InternTable identifiers;
@@ -2525,6 +2543,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             char graphs[256];
             snprintf(graphs, sizeof(graphs), "%s: the source paths build the same expression graph", fixture->name);
             check_test_expect(test, check_test_source_graphs_equal(&input[0], &input[1], input[0].token_count), graphs);
+            snprintf(graphs, sizeof(graphs), "%s: the source paths list the same enumeration constants and definitions", fixture->name);
+            check_test_expect(test, check_test_source_enums_equal(&input[0], &input[1]), graphs);
         }
         if (checked[0] && checked[1])
         {
