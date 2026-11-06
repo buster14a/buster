@@ -185,6 +185,30 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     snprintf(raw_shuffle + length, sizeof(raw_shuffle) - length, ")))]]; _Static_assert(_Alignof(T)==2048, \"raw long shuffle operand slice\");\n");
     const CheckSourceFixture fixtures[] =
     {
+        {
+            .name = "half arithmetic in required constant expressions",
+            .source = "_Float16 h=(_Float16)1+(_Float16)2; __bf16 b=(__bf16)1+(__bf16)2;"
+                      "_Static_assert((_Float16)1+(_Float16)2==3,\"half sum\");"
+                      "_Static_assert((__bf16)1+(__bf16)2==3,\"bf16 sum\");"
+                      "_Static_assert((_Float16)7-(_Float16)2==5,\"half difference\");"
+                      "_Static_assert((__bf16)7-(__bf16)2==5,\"bf16 difference\");"
+                      "_Static_assert((_Float16)3*(_Float16)2==6,\"half product\");"
+                      "_Static_assert((__bf16)3*(__bf16)2==6,\"bf16 product\");"
+                      "_Static_assert((_Float16)1/(_Float16)3==(_Float16)0x1.554p-2,\"half quotient\");"
+                      "_Static_assert((__bf16)1/(__bf16)3==(__bf16)0x1.56p-2,\"bf16 quotient\");\n",
+        },
+        {
+            .name = "half constants round each operation before the next",
+            .source = "_Static_assert(((_Float16)2048+(_Float16)1)-(_Float16)2048==0,\"half midpoint\");"
+                      "_Static_assert(((__bf16)256+(__bf16)1)-(__bf16)256==0,\"bf16 midpoint\");"
+                      "_Static_assert((_Float16)0x1p-24+(_Float16)0x1p-24==(_Float16)0x1p-23,\"half subnormal\");"
+                      "_Static_assert((__bf16)0x1p-133+(__bf16)0x1p-133==(__bf16)0x1p-132,\"bf16 subnormal\");\n",
+        },
+        {
+            .name = "half invalid constant arithmetic stores Clang NaN bits",
+            .source = "_Static_assert(__builtin_bit_cast(unsigned short,(_Float16)__builtin_inf()+(_Float16)-__builtin_inf())==0x7e00,\"half NaN\");"
+                      "_Static_assert(__builtin_bit_cast(unsigned short,(__bf16)__builtin_inf()+(__bf16)-__builtin_inf())==0x7fc0,\"bf16 NaN\");\n",
+        },
         { .name = "deep selected choose expressions", .source = nested_selections[0] },
         { .name = "deep unselected choose expressions", .source = nested_selections[1] },
         { .name = "deep selected generic expressions", .source = nested_selections[2] },
