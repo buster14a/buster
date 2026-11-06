@@ -1454,6 +1454,12 @@ struct CheckInputReader
     // The constexpr values the initializers' finishes have read, newest first.
     CheckConstexprValue* constexpr_values;
     uint32_t constexpr_count;
+    // check_input_constexpr_find's index (#1381): each declaration token's newest value among the list's nodes from
+    // constexpr_indexed on. Only constexpr_index_owner writes it: a lane's or a part's copy of the reader reads it and
+    // walks the nodes it prepended itself.
+    const CheckConstexprValue** constexpr_index;
+    const CheckConstexprValue* constexpr_indexed;
+    const CheckInputReader* constexpr_index_owner;
     uint32_t implicit_function_capacity;
     // The fallthrough null statements whose placement clang's analysis of the function's CFG checks, which the controls'
     // walk records (check_input_fallthrough_record) and check_input_fallthrough_placements checks once the bindings'
@@ -4267,16 +4273,56 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
 static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use);
 
 // A constexpr object's value (#793), if its initializer's finish has read it: an integer, floating or null pointer
-// constant, which the constant evaluator and the expression walk use in place of the object's read. The list is short:
-// one entry per constexpr declaration of the unit.
+// constant, which the constant evaluator and the expression walk use in place of the object's read. The nodes newer
+// than the index's are walked (all of them while the unit has few), and the index answers for the rest (#1381).
 static const CheckConstexprValue* check_input_constexpr_find(const CheckInputReader* reader, uint32_t declaration)
 {
     const CheckConstexprValue* result = 0;
-    for (const CheckConstexprValue* value = reader->constexpr_values; value != 0 && result == 0; value = value->next)
+    const CheckConstexprValue* value = reader->constexpr_values;
+    for (; value != 0 && value != reader->constexpr_indexed && result == 0; value = value->next)
     {
         result = value->declaration == declaration ? value : 0;
     }
+    const bool indexed = result == 0 && value != 0 && reader->constexpr_index != 0 && declaration < reader->parser->tokens.count;
+    result = indexed ? reader->constexpr_index[declaration] : result;
     return result;
+}
+
+// Prepends `node` to the reader's constexpr values and keeps check_input_constexpr_find's index (#1381). Once the unit
+// has a few values, a reader that isn't a lane's indexes every value by declaration token; a copy of it (a lane's, an
+// expression part's) leaves the shared index as it is and keeps its own values in the list's newer nodes.
+static void check_input_constexpr_add(CheckInputReader* reader, CheckConstexprValue* node)
+{
+    const uint32_t count = reader->parser->tokens.count;
+    node->next = reader->constexpr_values;
+    reader->constexpr_values = node;
+    reader->constexpr_count += 1;
+    if (reader->constexpr_index != 0 && reader->constexpr_index_owner == reader)
+    {
+        if (node->declaration < count)
+        {
+            reader->constexpr_index[node->declaration] = node;
+        }
+        reader->constexpr_indexed = node;
+    }
+    else if (reader->constexpr_index == 0 && !reader->lane && reader->constexpr_count >= 8)
+    {
+        const CheckConstexprValue** index = arena_push(reader->arena, (uint64_t)count * sizeof(*index), _Alignof(const CheckConstexprValue*));
+        if (index != 0)
+        {
+            memset(index, 0, (uint64_t)count * sizeof(*index));
+            for (const CheckConstexprValue* value = reader->constexpr_values; value != 0; value = value->next)
+            {
+                if (value->declaration < count && index[value->declaration] == 0)
+                {
+                    index[value->declaration] = value;
+                }
+            }
+            reader->constexpr_index = index;
+            reader->constexpr_indexed = node;
+            reader->constexpr_index_owner = reader;
+        }
+    }
 }
 
 // A weak attribute's name and the declaration token it was applied at.
@@ -9310,7 +9356,7 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
             const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (proven != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(graph, proven) = value;
+                check_graph_set_leaf(graph, proven, &value);
                 argument = proven;
             }
         }
@@ -9692,7 +9738,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             region->result = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (region->result != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(graph, region->result) = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+                check_graph_set_leaf(graph, region->result, &(const CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE });
             }
         }
         if (region->result != BUSTER_CHECK_NONE)
@@ -9710,7 +9756,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
-            *check_graph_leaf_of(graph, node) = reader->cached_constants[reader->constant_present[token] - 1];
+            check_graph_set_leaf(graph, node, &reader->cached_constants[reader->constant_present[token] - 1]);
         }
     }
     else if (sparse && reader->selected_tokens[token] < parser->tokens.count)
@@ -9732,7 +9778,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
-            *check_graph_leaf_of(graph, node) = (CheckValue)
+            const CheckValue leaf =
             {
                 .type = BUSTER_TYPE_ULONG,
                 .category = CHECK_RVALUE,
@@ -9740,6 +9786,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 .constant_kind = CHECK_CONSTANT_INTEGER,
                 .integer = reader->designator_indices[opener],
             };
+            check_graph_set_leaf(graph, node, &leaf);
         }
     }
     else if (sparse && reader->vla_ends[token] != 0)
@@ -9773,7 +9820,6 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
                 const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
                     check_input_constexpr_find(reader, declaration) : 0;
-                CheckValue* const leaf = check_graph_leaf_of(graph, node);
                 if (constant != 0)
                 {
                     CheckValue value =
@@ -9786,11 +9832,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                         .object = reader->objects[declaration],
                     };
                     check_value_copy_floating(&value, &constant->value);
-                    *leaf = value;
+                    check_graph_set_leaf(graph, node, &value);
                 }
                 else
                 {
-                    *leaf = (CheckValue)
+                    const CheckValue leaf =
                     {
                         .type = type,
                         .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
@@ -9800,6 +9846,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                         .object = reader->objects[declaration],
                         .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                     };
+                    check_graph_set_leaf(graph, node, &leaf);
                 }
             }
         }
@@ -9817,7 +9864,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(graph, node) = check_input_literal_value(reader, token, literal);
+                const CheckValue leaf = check_input_literal_value(reader, token, literal);
+                check_graph_set_leaf(graph, node, &leaf);
             }
         }
     }
@@ -9829,7 +9877,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(graph, node) = (CheckValue)
+                const CheckValue leaf =
                 {
                     .type = string->type,
                     .category = CHECK_LVALUE,
@@ -9837,6 +9885,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };
+                check_graph_set_leaf(graph, node, &leaf);
             }
         }
     }
@@ -9864,7 +9913,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    *check_graph_leaf_of(graph, node) = (CheckValue)
+                    const CheckValue leaf =
                     {
                         .type = pointer,
                         .category = CHECK_RVALUE,
@@ -9872,6 +9921,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                         .constant_kind = CHECK_CONSTANT_ADDRESS,
                         .object = label + 1,
                     };
+                    check_graph_set_leaf(graph, node, &leaf);
                 }
                 break;
             }
@@ -10066,7 +10116,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                *check_graph_leaf_of(graph, node) = (CheckValue)
+                const CheckValue leaf =
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
@@ -10074,6 +10124,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };
+                check_graph_set_leaf(graph, node, &leaf);
             }
             // A file-scope compound literal's elements are constant expressions, like a static
             // initializer's: their constant evaluation supplies no context report of its own.
@@ -10381,7 +10432,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             const CheckOp actual = (CheckOp)graph->ops[node];
             const uint32_t child = graph->operand0[node];
             const uint32_t child_token = child != BUSTER_CHECK_NONE ? graph->tokens[child] : parser->tokens.count;
-            reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? check_graph_leaf_of(graph, node)->overload_head :
+            reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? check_graph_leaf_overload_head(graph, node) :
                 (actual == CHECK_OP_ADDRESS || actual == CHECK_OP_SELECT) && child_token < parser->tokens.count ? reader->output->overload_heads[child_token] : 0;
         }
         if (reader->constant_contexts[token] && graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_EXPECT)
@@ -10396,7 +10447,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (proven != BUSTER_CHECK_NONE)
                 {
-                    *check_graph_leaf_of(graph, proven) = constant;
+                    check_graph_set_leaf(graph, proven, &constant);
                     node = proven;
                 }
             }

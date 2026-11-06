@@ -533,7 +533,7 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
     else if (plan->operation == BUSTER_CHECK_ATOMIC_UPDATE)
     {
         const CheckInitPart clear = {.kind = CHECK_INIT_CLEAR, .byte_count = plan->size};
-        check_lower_fill(writer, &clear, plan->desired, BUSTER_CHECK_NONE);
+        check_lower_fill(writer, &clear, plan->desired, BUSTER_CHECK_NONE, false);
         CheckLowerAtomic initial = *plan;
         initial.result = plan->expected;
         initial.builtin = false;
@@ -548,7 +548,7 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
     else if (plan->operation == BUSTER_CHECK_ATOMIC_COMPARE)
     {
         const CheckInitPart clear = {.kind = CHECK_INIT_CLEAR, .byte_count = plan->size};
-        check_lower_fill(writer, &clear, plan->expected, BUSTER_CHECK_NONE);
+        check_lower_fill(writer, &clear, plan->expected, BUSTER_CHECK_NONE, false);
         if (plan->by_pointer)
         {
             // A generic compare-exchange's desired value is where its third argument points.

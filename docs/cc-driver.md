@@ -16,7 +16,7 @@ source basename with `.o` is used, including for a default executable link.
 `-MM` / `-MMD` exclude system-header observations and their system-context
 children. `-MT TARGET` inserts a raw Make target, `-MQ TARGET` quotes a filename,
 and repeated targets retain their command-line order. `-MP` adds empty rules for
-selected headers, not the source. Joined `-MFfile`, `-MTtarget` and `-MQtarget`
+selected headers, not the source, each on the next line with no blank line before it. Joined `-MFfile`, `-MTtarget` and `-MQtarget`
 operands work too. `-MF -` explicitly sends dependencies to stdout.
 
 ```sh

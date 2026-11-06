@@ -139,7 +139,9 @@ there at a time, so everything takes one lock:
   - the checker's functions' samples;
   - the forwarding failures by function.
 
-  The objects must be the same bytes. It takes about 90 s
+  Where the tree changes what `-c` writes (the lowering's code), the step says
+  so and gives both objects' sizes, and the comparison includes that work
+  (#1376). It takes about 90 s
   (`docs/c-checker.md`, "The per-node machinery").
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it

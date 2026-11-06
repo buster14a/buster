@@ -880,7 +880,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
+| `leaf_records`, `leaf_payloads`, `leaf_slots` | `leaf_count` 32-byte `CheckGraphLeaf` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE`. Only `VALUE` reads a record, so other nodes take none (#572). A record holds the value's type, category, flags, constant kind, object, overload set and its integer's low 64 bits; a value with more (`check_graph_leaf_rest`: a wider integer, a floating payload, an offset, a bit-field's place, a fault) also takes the next whole `CheckValue` row of `leaf_payloads`, at most one a leaf (#628). A hand-built graph may hold the leaves whole in `dense_leaves` instead. `check_graph_leaf_value`, its field accessors and `check_graph_set_leaf` read and write either form. Both validators refuse a record whose row is past the graph's rows or holds another value than the record in the fields both hold, rows past their room, and rows without their column (`check_graph_leaf_valid_at`, `check_graph_validate_lists`). |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -1077,8 +1077,9 @@ output cache line twice. When validation is required (an external producer or
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record, which since #572 lie one after
-another, as only `VALUE` nodes have one. `test-checker` compares the two
+reads, which since #572 lie one after another, as only `VALUE` nodes have one,
+and since #628 are 32 bytes each, half a cache line, where a 96-byte value took
+two. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 
@@ -1922,12 +1923,31 @@ What the lowering covers past scalars (#145's programs):
   median increases 0.79% with overlapping ranges. The report preserves these
   limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
-  cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
-  128 bytes) unless its first part clears it whole, then each part's zeros,
-  bytes or value is stored, an aggregate's copied.
+  cleared first unless its first part writes it whole (zeros, or an
+  aggregate's copy of the object's size, as `T x = *p;` and `T x = f();`, which
+  writes its padding too), then each part's zeros, bytes or value is stored, an
+  aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
+  past 128 bytes (`BUSTER_CHECK_LOWER_FILL_UNROLLED`) they are one call of the
+  target C library's `memset`, as clang `-O0`'s code clears them (#1376), the
+  whole object's and each zero part's. Each such call is counted with the
+  unit's runtime calls when its pools are planned (`check_lower_init_pools`).
+  A volatile object, or one with a volatile part, keeps its stores, a loop of
+  8-byte stores past 128 bytes. A compound literal of the object's size that
+  initializes it whole (`T x = (T){ ... };`, as many literals deep as there
+  are) writes its parts into the object itself, as clang's code initializes it
+  in place, rather than into its own object, cleared, filled and then copied;
+  neither may have a volatile part. The [9700X record](https://github.com/buster14a/buster-performance/tree/c0fddb73e121b6a8a5c30d1364954be2ccc3879e/docs/measurements/zero-initializers-1376-2026-11-06)
+  compares `2dc50258` with `ba2e80ab`: `int a[256] = { 0 };` takes 26.3 → 4.3 ns
+  a call in Tier 0 and 26.8 → 3.4 ns in Tier 1 (clang `-O0`: 4.3), and
+  `struct Big b = (struct Big){ .flags = i };` 19.0 → 2.6 ns (clang `-O0`:
+  2.4). Up to 128 bytes the code is unchanged; calling memset below 64 bytes
+  would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
+  change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
+  memset calls and 1.9% less text.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
-  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  `memcpy` (#598). The call returns the destination and discards it, which is the
+  interpreter's pointer-result copy (#1550). The image ends at the last explicit value; omitted trailing
   storage is cleared separately. Images with internal holes larger than their
   payload keep the existing writes, avoiding large readonly zero gaps for sparse
   initializers. This preserves checked string truncation,
@@ -4952,7 +4972,12 @@ the oracle.
   The graph run, which now copies each leaf into the stream's columns, could
   then take them as they are. It isn't done here: 46 places read leaves as
   whole `CheckValue`s through `check_graph_leaf_of`, most in the graph run and
-  the reader's later passes, outside the walk.
+  the reader's later passes, outside the walk. #628 since made the leaves
+  32-byte records with an integer's low 64 bits, so that the literals and
+  enumerators need no row either (24,071 of `sqlite3.c`'s leaves had more than
+  the columns, 80 have more than a record); the graph run writes an
+  identifier's record into the stream's columns without a value between them
+  ("The graph's leaves" in `docs/compile-time.md`).
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining

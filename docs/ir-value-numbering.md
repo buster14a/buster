@@ -9,14 +9,62 @@ transactional rollback and explicit entry-phi refusal follow the
 [optimization contract](ir-optimization.md). Each stage rebuilds dominance
 after rewriting; no stale CFG or use list is published.
 
-The vector path starts with opcode, type, flags and semantic metadata classes,
-then repeatedly partitions each class by the classes of its operands. An old
-class is part of the next key, so refinement only splits. Phis compare their
-incoming values in CFG predecessor order, regardless of the side-table order.
-They may establish equivalent cyclic recurrences. Refinement ends when no
-class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
+The vector path computes the coarsest congruence partition: two values are
+congruent when their opcode, type, flags and semantic metadata match and their
+operands are congruent position by position. Phis compare their incoming
+values in CFG predecessor order, regardless of the side-table order, and may
+establish equivalent cyclic recurrences. Values that reach no cycle of operand
+dependences are numbered once each in dependency order ("Acyclic numbering"
+below). The values that reach a cycle start from opcode, type, flags and
+metadata classes and are repeatedly partitioned by the classes of their
+operands. An old class is part of the next key, so refinement only splits.
+Refinement ends when no class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
 complete the same fixed point; a limit never authorizes an unfinished
-optimistic substitution.
+optimistic substitution. `IrGvnOptions.complete` refines every instruction in
+those rounds instead, as the pass did before the acyclic numbering: it is that
+numbering's exact oracle.
+
+## Acyclic numbering (#866)
+
+Refinement needs as many rounds as the longest dependency chain whose links
+the static keys can't tell apart, and each round rekeyed, hashed and grouped
+every instruction. Two identical chains of `L` additions take `L + 1` rounds
+over their `2L + 4` instructions (one link splits off per round), and the frozen
+`sqlite3.c`'s lowered IR took 15,002 rounds over its 2,602 functions. A value from which no cycle of operand dependences is
+reachable is congruent to exactly the values with its static key and congruent
+operands, by induction on its depth. It is never congruent to a value that
+reaches a cycle: matching operands position by position from both would have
+to follow that cycle forever, and the acyclic side ends at leaves.
+
+So `ir_gvn_acyclic` numbers those values once each, in dependency order, by
+hashing the static key and the operand classes into a table of
+representatives. It is Kahn's algorithm. Instructions are visited in reverse
+postorder (unreachable blocks last), and an instruction whose operands all
+have classes is numbered at once; otherwise it waits, counting its unnumbered
+operands. When a value that something waits for is numbered, the use lists
+wake its users, and the users of every copy that resolves to it. The
+instructions still waiting at the end are exactly those that reach a cycle.
+Only they are refined in rounds, their numbered operands' classes held fixed,
+and their classes are numbered after the acyclic ones so the two never
+collide. In reachable SSA code every operand except a phi's input along a back
+edge dominates its use, so it is numbered first. The use lists are walked only
+from the few values such a phi waits for. Impure and undef-tainted
+instructions are unique leaves and never wait.
+
+Numbering one value is a dependent chain: its key needs its operands' classes,
+which the instructions just before it usually publish. So this numbering is
+scalar, one hash, a chain walk and at most one four-word key comparison per
+instruction. The refinement rounds keep the eight-lane key hashing. A
+representative's key (payload, meta word and operand classes) occupies four of
+the eight field words of its own index; the existing hash, link and bucket
+columns hold the rest, so the table needs no scratch of its own. The waiting
+counts, the awaited flags and the list of members to refine add nine bytes per
+instruction, allocated on every path so that `scratch_bytes` doesn't depend on
+which one ran. Its probes share
+the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
+(8). If the budget runs out, the numbering is abandoned and every instruction
+is refined in rounds instead, which counts as a collision-budget completion.
+The partition is the same either way; only class labels differ.
 
 Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
 16-instruction batch. Every column has its exact logical length, partial
@@ -39,7 +87,8 @@ create a long chain. The existing eight-lane key hashing is retained; table
 probes are scalar indexed loads rather than AVX-512 gathers. No host-specific
 crossover threshold is introduced.
 
-Each round permits at most `8 * n` representative comparisons. If another probe
+Each round permits at most `8 * n` representative comparisons over its `n`
+members. If another probe
 would be needed, it abandons the partial grouping and runs the original stable
 comparison sort on the same keys. The sort initializes its own index order and
 overwrites every tentative class. This bounds hostile collisions by a linear
@@ -54,14 +103,16 @@ phi relations and parent-class splits remain the same. By induction the entire
 refinement sequence is unchanged up to renaming, including cyclic recurrences
 and the number of rounds. The subsequent dominance walk chooses representatives
 by instruction traversal and class equality, not by the numeric class order.
-Thus this is not an acyclic-only dispatch to the weaker available-expression
-oracle, nor does it eliminate whole-function refinement rounds.
+Neither the grouping nor the acyclic numbering dispatches anything to the weaker
+available-expression oracle: both compute the same congruence classes.
 
-`IrGvnResult.partition_probes` counts the bounded lookup comparisons across
-rounds. `partition_sort_fallbacks` counts collision-budget completions, separately
-from the existing sweep-limit `fallback` flag. A forced sorted round is not a
-collision fallback. These counters describe work, not elapsed time or generated
-program performance.
+`IrGvnResult.acyclic` counts the instructions the acyclic numbering classed and
+`rounds` the refinement rounds of the rest, their static round included (zero
+when nothing reaches a cycle). `partition_probes` counts the bounded lookup
+comparisons of both. `partition_sort_fallbacks` counts collision-budget
+completions, separately from the existing sweep-limit `fallback` flag. A forced
+sorted round is not a collision fallback. These counters describe work, not
+elapsed time or generated program performance.
 
 A dominator-tree walk chooses a previously executed representative from each
 class. Bucket insertions are undone when leaving a dominator subtree. Equal
@@ -112,11 +163,34 @@ partitions against the independent full-key relation and the sorted oracle at
 empty, tiny, vector and power-of-two boundaries through 257 instructions.
 The table, links, output classes and hashes end at protected pages. Distinct
 full-hash collisions exercise the exact probe-budget boundary and sort restart;
-a single duplicate class must not trigger it. A 4,100-instruction DAG keeps
-1,024 planted eliminations, verifies interpreted behavior, and checks that no
-sort fallback is needed. Forced sorted completion must preserve the rewritten
-function, class count, round count and scratch usage. This is focused local correctness evidence; target-host
-compile-time, emitted-code and complete pipeline measurements remain pending.
+a single duplicate class must not trigger it. Odd sizes group the members in
+reverse order after a nonzero class base. A 4,100-instruction DAG keeps 1,024
+planted eliminations, verifies interpreted behavior, is numbered in no round
+within one linear probe budget, and needs no sort fallback either way.
+
+Every fixture runs the vector path three more times. Complete refinement must
+give the same class count, rewritten function and scratch usage as the acyclic
+numbering. Forced sorted completion of complete refinement must preserve its
+rewritten function, class count, round count and scratch usage. A zero probe
+budget, which abandons the numbering at its first occupied bucket and sorts
+every grouping, must give the same classes and function. Acyclic fixtures must
+take no refinement round; recurrent ones must refine something. The acyclic
+numbering's own fixtures are:
+
+- a header phi whose back-edge input is computed in the latch, through a copy,
+  from loop-invariant values. It must be woken through the copy's users and
+  merged with the phi whose matching input is computed before the loop, leaving
+  only the counter's three values to refinement;
+- two identical chains of 1 to 256 additions, all of whose links merge, where
+  complete refinement takes more rounds than links;
+- two congruent cycles of additions across two unreachable blocks, which only
+  refinement can number and must merge;
+- 160 random chains of loops, of 1 to 4 headers with 2 to 5 phis and bodies of
+  0 to 9 random operations. Phi back-edge inputs come from anything the body
+  sees (recurrences, loop-invariant values computed before or inside the loop,
+  copies), and operations and phis repeat on purpose.
+
+This is focused local correctness evidence.
 
 The implementation is original. The algorithmic reference is Alpern, Wegman
 and Zadeck, [Detecting Equality of Variables in Programs (1988)](

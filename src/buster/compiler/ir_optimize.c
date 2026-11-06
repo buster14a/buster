@@ -25,10 +25,11 @@ struct IrOptimizeOptions
 {
     uint32_t passes;
     uint32_t sweep_limit;
-    // The caller's requested path. AUTO picks a twin by the function's size (#860): the vector passes' per-call
-    // set-up (verification, the dominator rows and the CFG's pointer jumping, in prepare and again in result
-    // verification) doesn't pay on small functions, so below the measured bound the scalar passes run. VECTOR and
-    // SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
+    // The caller's requested path. AUTO picks the passes' twin by the function's size (#860): the vector passes'
+    // per-call set-up (the dominator rows and the CFG's pointer jumping, in prepare and again in result verification)
+    // doesn't pay on small functions, so below the measured bound the scalar passes run; the verifier runs its vector
+    // twin at every size, which since #786 is the faster everywhere, unless `scalar` asks for the scalar twins. VECTOR
+    // and SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
     uint32_t path;
     // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
     // the internal pieces without ir_optimize set it directly (ir_optimize_licm.c, ir_optimize_sroa.c).
@@ -1298,14 +1299,17 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
 
 // `simd`: admission for callers that model vectors and masks. SCCP, GVN and LICM set it; SROA's default does not.
 // The first SIMD SCCP transfer allocates its sparse wide lattice, so this common preparation stays scalar-sized.
-static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool simd)
+// `scalar` picks the passes' twin, and `verify_scalar` the verifier's (ir_optimize's AUTO verifies with the vector
+// twin whatever the passes' size bound picks, #786).
+static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool verify_scalar, bool simd)
 {
     (void)scalar;
+    (void)verify_scalar;
 
     work->function = function;
     work->scratch = scratch;
     work->scalar = scalar;
-    IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
+    IrCheck check = BUSTER_SCALAR_PATH(verify_scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
     if (check.error == IR_OK && !simd && ir_function_has_simd_path(function, !scalar))
     {
         check.error = IR_ERROR_UNSUPPORTED;
@@ -1316,13 +1320,15 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     {
         check = ir_check(IR_ERROR_PHI, 0, 0);
     }
+    // Verified above, the graph and the use lists are built without checking the function again, as ir_build_cfg and
+    // ir_build_uses would, which checked its shape and rows three times and its graph twice in each preparation (#786).
     if (check.error == IR_OK)
     {
-        check.error = ir_build_cfg(function, scratch, output, &work->cfg);
+        check.error = ir_cfg_validated(function, scratch, output, &work->cfg);
     }
     if (check.error == IR_OK)
     {
-        check.error = ir_build_uses(function, scratch, output, &work->uses);
+        check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
     if (check.error == IR_OK)
     {
@@ -1371,6 +1377,11 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
         }
     }
     return check;
+}
+
+static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool simd)
+{
+    return ir_optimize_prepare_twins(work, function, output, scratch, scalar, scalar, simd);
 }
 
 static uint32_t ir_optimize_phi_inputs(const IrOptimizeWork* work, uint32_t instruction)
@@ -1699,13 +1710,14 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     return error;
 }
 
-static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
+static IrCheck ir_optimize_verify_twins(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool verify_scalar)
 {
     (void)scalar;
+    (void)verify_scalar;
 
     const uint64_t mark = scratch->length;
     IrOptimizeWork verification = { 0 };
-    IrCheck check = ir_optimize_prepare(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar), true);
+    IrCheck check = ir_optimize_prepare_twins(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
     if (check.error == IR_OK)
     {
         const IrDominance dominance = {
@@ -1713,10 +1725,15 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
             .leave = verification.dominators.subtree_end,
             .block_count = function->block_count,
         };
-        check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, &dominance) : ir_verify(function, scratch, &dominance);
+        check = BUSTER_SCALAR_PATH(verify_scalar) ? ir_verify_scalar(function, scratch, &dominance) : ir_verify(function, scratch, &dominance);
     }
     arena_pop_to(scratch, mark);
     return check;
+}
+
+static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
+{
+    return ir_optimize_verify_twins(function, output, scratch, scalar, scalar);
 }
 
 // #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's shapes and
@@ -1741,11 +1758,15 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
+    // The verifier's twin is the caller's: AUTO's size bound picks the passes' alone, since the vector verifier is the
+    // faster at every size (#786).
+    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
+    (void)verify_scalar;
     if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare_twins(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
     }
     if (check.error == IR_OK)
     {
@@ -1795,7 +1816,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     // verify instead (tier1_select_plan).
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check = ir_optimize_verify_twins(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar));
     }
     if (check.error == IR_OK)
     {
