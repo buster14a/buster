@@ -39,5 +39,7 @@ requirements. [Command index](README.md).
   suite and random-program CI commands enable it, including the subprocess
   failure controls in `--self-test`. `--self-test --tier1` also checks the native
   comparison's launch, compilation, timeout and output failure boundaries.
+  Failed hosted comparisons retain generated C, compiler logs and captured
+  output in the shard's `ssa-source-*` artifact; executable binaries are omitted.
   [Stage 4 acceptance](../type-checking-ssa.md) maps #130's requirements to
   these commands and the existing corpus and 9700X records.
