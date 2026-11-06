@@ -1974,3 +1974,73 @@ both linked by wild 0.10.0:
   cache cost its encoding no more than the huge pages did.
 - **The file.** The executable grows by the section, 5.1 MB, which the page
   cache shares between processes.
+
+### The issue's checks at `ec5f0f6b` (#590)
+
+#590 is done when an empty file's `backend-setup` is near zero with transparent
+huge pages `madvise` and `always`, with the same objects, and a small file's
+compile has been measured against tcc. These are those checks at `main`
+`ec5f0f6b`. Each machine compares two executables, both made by `build.sh` from
+one link:
+- the baked executable;
+- the same link with `BUSTER_BAKE=0`, which builds the tables when it runs, as
+  every compile did before #1078 ("built" below).
+
+The inputs:
+- `empty.c`, an empty file;
+- `tiny.c`, `int main(void) { return 0; }`;
+- `hello.c`, `<stdio.h>` and a `puts`;
+- c-testsuite's 220-program subset.
+
+Each small-file row is `measure-compile --runs 41 --reference tcc -- -c FILE`,
+pinned to CPU 2, in two rounds with the executables' order swapped. Each figure
+is the mean of the two rounds' medians. c-testsuite's rows are each program's
+best of 3 runs, averaged.
+
+**Objects are the same bytes, baked or built,** on both machines: c-testsuite's
+220 programs, `empty.c`, `tiny.c` and `hello.c`, each compiled with `-c` by
+both executables and compared.
+
+On a 2.1 GHz Xeon VM (4 vCPUs, kernel 6.18, linked by lld), with tcc 0.9.27
+(Ubuntu's). The kernel's setting was switched between `madvise` and `always`.
+On a VM the compiler turns huge pages off for itself (`lane.c`'s
+`arena_page_policy`), so these runs set `BUSTER_HUGE_PAGES=1`, which leaves
+the kernel's setting in force:
+
+| input | THP | `backend-setup`, baked | built | wall, baked | built | tcc |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `empty.c` | `madvise` | 0.008 ms | 0.009 ms | 1.99 ms | 2.05 ms | 1.65 ms |
+| `empty.c` | `always` | 0.009 ms | 0.010 ms | 2.11 ms | 2.41 ms | 1.79 ms |
+| `tiny.c` | `madvise` | 0.008 ms | 2.25 ms | 2.22 ms | 4.90 ms | 1.73 ms |
+| `tiny.c` | `always` | 0.009 ms | 2.19 ms | 2.45 ms | 4.87 ms | 1.83 ms |
+| `hello.c` | `madvise` | 0.009 ms | 2.25 ms | 5.46 ms | 8.01 ms | 2.83 ms |
+| `hello.c` | `always` | 0.008 ms | 2.24 ms | 4.88 ms | 7.55 ms | 2.66 ms |
+| c-testsuite's 220, mean | `madvise` | | | 3.06 ms | 5.42 ms | 1.66 ms |
+| c-testsuite's 220, mean | `always` | | | 3.20 ms | 5.63 ms | 1.71 ms |
+
+- **Empty file.** `backend-setup` is the stage clock's boundary alone, 0.01 ms
+  under every page policy. A unit without a selected body
+  initializes nothing (#689), and the baked executable has nothing to
+  initialize.
+- **With a function.** The baked executable's `backend-setup` is 0.01 ms and
+  one or two faults. Building the tables when the process runs costs 2.2 ms
+  and about 1,135 faults on the VM, under `madvise` and `always` alike.
+- **Under the VM's own default** (huge pages off), the baked executable's
+  `backend-setup` is the same, 0.007 to 0.009 ms. c-testsuite's programs take
+  3.21 and 3.34 ms there, against 5.55 and 5.74 ms built.
+- **Against tcc.** On the VM, c-testsuite's programs
+  take 1.84 to 1.87 times tcc's time, against 3.3 times built. Before #1027
+  they took 3.5 to 4.3 times.
+- **What remains of a small file isn't the backend.** On the VM, `hello.c`'s
+  baked stage span is 3.8 to 4.5 ms:
+  - preprocessing `<stdio.h>`, 1.3 to 1.5 ms;
+  - the checker's reader (`check-input`), 1.0 to 1.2 ms;
+  - `setup`, 0.45 to 0.55 ms.
+
+  The process outside the span (exec, `main`'s dispatch and exit) takes 1.2 to
+  1.6 ms for any input. tcc's whole compile of `empty.c` takes 1.65 to 1.79 ms.
+  - `setup`'s faults come from first touching the executable's pages. From
+    `check_driver_command`'s entry to `check_driver_flow`'s (`setup` and
+    `lanes-start`), gdb and `/proc/PID/smaps` show about 1.4 MB of code,
+    1.3 MB of read-only data and 0.4 MB of RELRO becoming resident.
+  - Baking doesn't change `setup`: the built executable faults there as often.

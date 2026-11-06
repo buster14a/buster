@@ -760,3 +760,6 @@ This does not change the tables or their hot lookup paths. The encoder's
 fixup-copy layout retains the measured choice documented in
 [x86-64-encoder.md](x86-64-encoder.md#fixups); lazy/subset tables would also have
 to cover validation, arbitrary asm forms and helpers before the workers start.
+Since #1078, `build.sh` bakes the tables into the executable, so a unit with
+selected bodies starts with them built too. The initializers run only where the
+executable isn't baked ([compile-time](compile-time.md), "Baked tables").
