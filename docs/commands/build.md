@@ -86,6 +86,10 @@ own; switching between them builds nothing that is up to date.
   `BUSTER_BUILD_DEFINES`. CMake's own defaults take no part: no `-DNDEBUG`
   (`assert` stays), no other optimization, no PIE, and `CFLAGS` and `LDFLAGS`,
   which CMake would read once and keep, are ignored as before.
+  The policy applies before CMake enables C, including its compiler probes,
+  for `build.sh`, direct CMake and presets. Cached or `-D` overrides of
+  `CMAKE_C_FLAGS*` and `CMAKE_EXE_LINKER_FLAGS*` are also cleared; select the
+  flags through the `BUSTER_*` settings below.
 - **Debug** is the same flags with `-O0 -g` in place of the debug information
   and optimization: the same language and aliasing contracts, host ISA,
   sanitizers and definitions, with every variable readable in a debugger.
@@ -331,9 +335,15 @@ that holds the checker's own code. To place that code, build with
 checks a fresh, an unchanged, an edited, a failed, an interrupted, a
 terminated and a switched build, an invalid setting, a configuration's clean,
 a clean and a `clean --all` during a build,
-the settings that change one step, the presets, the print commands, shifts and
-a lexer variant: what runs, what is published and what is left behind, not how
+the settings that change one step, hostile inherited/cached flags, the presets,
+the print commands, shifts and a lexer variant: what runs, what is published and what is left behind, not how
 long it takes. Its `clean --all` check removes every tree under `build/cmake`
-first. The build's clean, unchanged and edited timings come from the
+first. `build-regression --flags-only` runs just the fresh-tree flag checks:
+independent hostile `CFLAGS` and `LDFLAGS` through `build.sh`, direct CMake and
+a preset, plus hostile global and Debug/Release cache flags. It checks compiler
+probe logs, the generated compile/link commands and real unit compiles in both
+configurations; the full harness also builds the executable with both hostile
+environment variables. The focused mode cleans the selected `build.sh` tree.
+The build's clean, unchanged and edited timings come from the
 9700X under its lock, with their raw records in
 [buster-performance](https://github.com/buster14a/buster-performance).
