@@ -330,6 +330,8 @@ struct CheckResumed
     CheckPrefixStatus status;
     // The synthetic `;`s put in, in all.
     uint32_t inserted;
+    // Tokens removed from malformed K&R parameter declaration tails.
+    uint32_t discarded;
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
 };
@@ -377,8 +379,26 @@ static bool check_prefix_pragma_between(const Parser* view, uint32_t token)
 // pragma between (check_prefix_pragma_between).
 static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diagnostic, uint32_t limit)
 {
-    return diagnostic->error && diagnostic->resumed && diagnostic->token < limit && diagnostic->token != 0 &&
-           (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, diagnostic->token));
+    bool valid = diagnostic->error && diagnostic->resumed && diagnostic->token < limit && diagnostic->token != 0 &&
+                 (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, diagnostic->token));
+    if (valid && diagnostic->resume_end != 0)
+    {
+        valid = diagnostic->resume_end >= diagnostic->token && diagnostic->resume_end <= view->tokens.count;
+        valid &= !diagnostic->resume_delete || diagnostic->resume_end > diagnostic->token;
+        // Do not move an annotation out of a discarded K&R tail. Those pragmas need their own parser recovery.
+        uint32_t low = 0;
+        uint32_t high = view->tokens.pragma_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = view->tokens.pragma_positions[middle] < diagnostic->token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        valid &= low == view->tokens.pragma_count || view->tokens.pragma_positions[low] >= diagnostic->resume_end;
+    }
+    valid &= !diagnostic->resume_delete || diagnostic->resume_end != 0;
+    return valid;
 }
 
 // `diagnostic` at the original's tokens, from a view's whose tokens' originals `origin` has (a synthetic `;`'s, the
@@ -390,6 +410,8 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
     result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
     result.resumed = false;
+    result.resume_delete = false;
+    result.resume_end = 0;
     return result;
 }
 
@@ -488,8 +510,16 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             const ParseDiagnostic* diagnostic = current->diagnostics + d;
             const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count);
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
+            // The original parser abandoned this K&R header. Later diagnostics may have treated its remaining
+            // parameter declarations as file scope, so re-establish the header before considering those repairs.
+            if (!other && diagnostic->error && diagnostic->resume_end != 0 && diagnostic->token < limit)
+            {
+                limit = diagnostic->token + 1;
+            }
         }
         uint32_t insert = 0;
+        uint32_t discard = 0;
+        uint32_t repairs = 0;
         uint32_t last = 0;
         bool ordered = true;
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
@@ -497,12 +527,14 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             const ParseDiagnostic* diagnostic = current->diagnostics + d;
             const bool taken = check_prefix_resumes(current, diagnostic, limit);
             ordered &= !taken || diagnostic->token > last;
-            last = taken ? diagnostic->token : last;
-            insert += taken;
+            last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
+            insert += taken && !diagnostic->resume_delete;
+            repairs += taken;
+            discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - diagnostic->token : 0;
         }
-        const uint32_t total = count + insert;
+        const uint32_t total = count + insert - discard;
         work += total;
-        more = ordered && insert != 0 && total <= capacity && pending_count + insert <= original_count && work <= budget;
+        more = ordered && repairs != 0 && total <= capacity && pending_count + repairs <= original_count && work <= budget;
         Parser* view = views + (round & 1);
         uint32_t* next_origin = origins[round & 1];
         if (more)
@@ -533,25 +565,36 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     }
                     for (; pragma < view->tokens.pragma_count && current->tokens.pragma_positions[pragma] < to + (diagnostic == 0); pragma += 1)
                     {
-                        view->tokens.pragma_positions[pragma] = current->tokens.pragma_positions[pragma] + written - from;
+                        view->tokens.pragma_positions[pragma] = written + (current->tokens.pragma_positions[pragma] - from);
                     }
                     written += length;
                     if (diagnostic != 0)
                     {
-                        view->tokens.kinds[written] = PARSE_KIND_SEMI;
-                        view->tokens.names[written] = 0;
-                        view->tokens.sources[written] = current->tokens.sources[to];
-                        view->tokens.flags[written] = 0;
-                        next_origin[written] = origin != 0 ? origin[to] : to;
-                        written += 1;
+                        if (!diagnostic->resume_delete)
+                        {
+                            view->tokens.kinds[written] = PARSE_KIND_SEMI;
+                            view->tokens.names[written] = 0;
+                            view->tokens.sources[written] = current->tokens.sources[to];
+                            view->tokens.flags[written] = 0;
+                            next_origin[written] = origin != 0 ? origin[to] : to;
+                            written += 1;
+                        }
                         // (The first round's tokens are the original's.)
                         pending[pending_count] = origin != 0 ? check_prefix_original_diagnostic(diagnostic, origin, count, original_count) : *diagnostic;
                         pending[pending_count].resumed = false;
+                        pending[pending_count].resume_delete = false;
+                        pending[pending_count].resume_end = 0;
                         pending_count += 1;
                     }
-                    from = to;
+                    from = diagnostic != NULL && diagnostic->resume_end != 0 ? diagnostic->resume_end : to;
                 }
             }
+            // A discarded tail can make this alternating view shorter than its previous round. Restore its padded
+            // end tokens instead of letting the scalar parser see stale kinds from that older, longer view.
+            memset(view->tokens.kinds + total, 0, BUSTER_PARSE_TOKEN_PADDING);
+            memset(view->tokens.names + total, 0, (uint64_t)BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
+            memset(view->tokens.sources + total, 0, (uint64_t)BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
+            memset(view->tokens.flags + total, 0, BUSTER_PARSE_TOKEN_PADDING);
             // (Every pragma position is at most the count: the last segment took them all.)
             origin = next_origin;
             memset(meanings, PARSE_MEANING_ORDINARY, original->meanings.capacity);
@@ -564,6 +607,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             view->errors = parsed.errors;
             view->fatal = PARSE_MESSAGE_NONE;
             resumed->inserted += insert;
+            resumed->discarded += discard;
             resumed->status = parsed.out_of_memory ? CHECK_PREFIX_RESOURCE : CHECK_PREFIX_READY;
             more = !parsed.out_of_memory && parsed.errors != 0;
             current = view;

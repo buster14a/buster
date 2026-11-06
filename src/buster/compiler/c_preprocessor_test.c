@@ -8463,6 +8463,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_offsets());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_spellings());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_unspliced());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_splice_possible());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_batches(directory));
     passed &= PP_TEST_SECTION(deal, 3, pp_test_print_spelling_paths(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_lines(directory));

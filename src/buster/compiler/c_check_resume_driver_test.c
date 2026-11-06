@@ -38,6 +38,9 @@ static void check_test_driver_resumed_declarations(CheckTest* test, const char* 
         "int x\n#pragma pack(1)\nconst;\n",
         "int x _Static_assert(1, \"\");\n",
         "int x\n#pragma clang diagnostic ignored \"-Wunused\"\nconst;\n",
+        "int x\n#pragma GCC visibility push(hidden)\nconst;\n#pragma GCC visibility pop\n",
+        "#pragma GCC visibility push(default)\nint x\n#pragma GCC visibility push(hidden)\nconst;\n#pragma GCC visibility pop\n#pragma GCC visibility pop\n",
+        "int x\n#pragma GCC visibility pop\nconst;\n",
         // Declarations of no declarator as written: no type specifier, a function specifier, restrict.
         "const;\n_Alignas(8);\nstatic;\n__stdcall;\n_Nonnull;\ntypedef const;\n_Atomic const;\n",
         "inline restrict _Noreturn int;\n",

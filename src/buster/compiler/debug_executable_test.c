@@ -264,7 +264,7 @@ static bool debug_native_image(const Link* link, const DebugUnit* unit, const Sy
 
 static bool debug_test_native_write(const char* object_path, const char* executable_path, const DebugUnit* unit, const DebugOutput* output)
 {
-    _Static_assert(BUSTER_EXECUTABLE_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS, "the writer and emitter carry the same sections");
+    _Static_assert(BUSTER_EXECUTABLE_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS + 1, "the writer and emitter carry the same sections");
     ExecutableTestTally tally = { .check = "debug native executable" };
     Arena arena = arena_reserve(64ull << 20);
     const String8 object = object_test_read_file(&arena, object_path);

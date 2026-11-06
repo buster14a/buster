@@ -123,6 +123,18 @@ static const char asm_test_segmented_movq[] =
     "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
     "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
 
+static const char asm_test_rep_scans[] =
+    ".text\nscans:\n"
+    "rep bsfw %cx,%ax\nrepz bsfl %ecx,%eax\nrep; bsfq %r9,%r8\n"
+    "rep bsrw %cx,%ax\nrepe bsrl %ecx,%eax\nrep; bsrq %r9,%r8\n"
+    "rep bsfl %fs:8(%rax),%ecx\nrep bsrq target(%rip),%rax\n"
+    ".intel_syntax noprefix\nrep bsf ax,cx\nrep bsf eax,ecx\nrep bsf r8,r9\n"
+    "rep bsr ax,cx\nrep bsr eax,ecx\nrep bsr r8,r9\n.att_syntax prefix\n"
+    "jmp 1f\n.zero 123\nrep bsfl %ecx,%eax\n1:\n"
+    "jmp 2f\n.zero 124\nrep bsfl %ecx,%eax\n2:\n"
+    "3:\n.zero 122\nrep bsfl %ecx,%eax\njmp 3b\n"
+    "4:\n.zero 123\nrep bsfl %ecx,%eax\njmp 4b\n";
+
 // Every mask move's five operand forms, in both syntaxes. Include k0, k7, extended GPRs, SIB addresses and the
 // exact displacement main.c's naked semantics harness uses. GNU as supplies the independent encoding oracle.
 static const char asm_test_kmov[] =
@@ -763,6 +775,15 @@ static void asm_test_targets(AsmTest* test)
         const bool rdtscp = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(RDTSCP)) != 0 : architecture >= X86_ARCH_ZNVER5;
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov rax,200\naddps xmm0,xmm1\nret\n"), 1, architecture);
         asm_test_pair(test, BUSTER_S8("pause\nlfence\nmfence\nsfence\nrdtsc\n"), 1, architecture);
+        asm_test_pair(test, (String8){.pointer = (char*)asm_test_rep_scans, .length = sizeof(asm_test_rep_scans) - 1}, 1, architecture);
+        if (architecture == X86_ARCH_BASELINE)
+        {
+            asm_test_pair(test, BUSTER_S8("tzcntl %ecx,%eax\n"), 0, architecture);
+            asm_test_pair(test, BUSTER_S8("lzcntl %ecx,%eax\n"), 0, architecture);
+            asm_test_pair(test, BUSTER_S8("bsfl %ecx,%eax\nbsrq %rcx,%rax\n"), 1, architecture);
+            asm_test_pair(test, BUSTER_S8("rep bsfw %ecx,%eax\n"), 0, architecture);
+            asm_test_pair(test, BUSTER_S8("repne bsfl %ecx,%eax\n"), 0, architecture);
+        }
         asm_test_pair(test, BUSTER_S8("rdtscp\n"), rdtscp, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n"), avx2, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvaddps zmm0,zmm1,zmm2\n"), avx512, architecture);
@@ -868,6 +889,19 @@ static AsmCode asm_test_code_pair(AsmTest* test, const char* source, int64_t exp
 
 static void asm_test_code(AsmTest* test)
 {
+    X86Target baseline;
+    const bool parsed = x86_target_parse("x86-64", 6, &baseline);
+    asm_test_check(test, parsed, "inline code: baseline target", 0);
+    if (parsed)
+    {
+        x86_match_initialize(test->index, &baseline);
+        test->architecture = X86_ARCH_BASELINE;
+        const AsmCode scans = asm_test_code_pair(test, "rep bsfl %ecx,%eax\nrep bsrq %rcx,%rax\n", 2, "inline code: baseline rep scans");
+        uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(2)];
+        static const uint8_t expected[] = { 0xf3, 0x0f, 0xbc, 0xc1, 0xf3, 0x48, 0x0f, 0xbd, 0xc1 };
+        const int64_t length = scans.error == 0 ? x86_encode_scalar(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
+        asm_test_check(test, length == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0, "inline code: baseline rep scan bytes", 0);
+    }
     // Every feature, as the C lowering's index has them: a template's instructions are its author's to choose.
     const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
     x86_match_initialize(test->index, &everything);
@@ -1600,6 +1634,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: pause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n.intel_syntax noprefix\npause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".text\nf: rep nop\nrep; nop\n.intel_syntax noprefix\nrep nop\nrep; nop\n", directory, 0);
+                asm_test_oracle(&test, asm_test_rep_scans, directory, X86_ARCH_BASELINE);
                 asm_test_oracle(&test, ".text\nf: rep ret\nrepz ret\nrep; ret\nrepz; ret\nrep retq\nrepz; retq\nrepne ret\nrepnz; ret\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
                 // The processor-state instructions C's inline assembly reaches (#147).

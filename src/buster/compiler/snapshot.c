@@ -29,7 +29,9 @@
 //     non-deferred path the import probed must be as it was (runtime_probes_current). Binding checks libgcc_s's search
 //     only when a strong reference or a version need can depend on it, or before reporting an undefined name. It also
 //     checks permitted strong undefined names in shared libraries, which a newly installed library could define.
-//     A piece's records are checked by binding,
+//     String offsets in the directory (header paths, probe paths, version names and member names) must fall
+//     inside the strings region: the hash covers those bytes but does not bound them, and loading turns them
+//     into pointers before it stats a probe. A piece's records are checked by binding,
 //     when it first reads them: their hash must be the one the directory holds (runtime_piece_current). So the layouts
 //     it holds are this executable's own, a link reads only what it wrote, and checks only what it reads: a static
 //     hello world reads 442 of the static runtime's 2,622 pieces, and hashing all 8.6 MB took three quarters of the
@@ -610,13 +612,58 @@ static void snapshot_hash(const uint8_t* file, uint64_t bytes, uint8_t* hash)
     executable_hash_end(&state, hash);
 }
 
-// A string of the strings, from its offset plus 1.
+// A string of the strings, from its offset plus 1. The offset and length have already been checked against the
+// strings region (snapshot_strings_inside): a matching directory hash does not by itself keep them inside the mapping.
 static String8 snapshot_string(uint8_t* strings, SnapshotString string)
 {
     String8 result = {
         .pointer = string.offset != 0 ? (char*)strings + string.offset - 1 : 0,
         .length = string.length,
     };
+    return result;
+}
+
+// Whether `offset` (plus 1, 0 for none) and `length` name bytes inside a strings region of `bytes`, including the
+// trailing NUL snapshot_add_string writes. An empty offset forms no pointer, whatever its length is.
+static bool snapshot_string_inside(uint64_t bytes, uint64_t offset, uint64_t length)
+{
+    const bool none = offset == 0;
+    const bool placed = offset != 0 && offset <= bytes && length <= bytes - offset;
+    return none || placed;
+}
+
+// The string stored in a record at `field` (a String8 whose pointer holds the offset), for each of `count` records.
+static bool snapshot_region_strings(const uint8_t* file, SnapshotPlace place, uint64_t element, uint64_t field, uint64_t count, uint64_t strings_bytes)
+{
+    const bool sized = element >= field + sizeof(uint64_t) * 2 && (count == 0 || element <= UINT64_MAX / count);
+    bool result = sized;
+    for (uint64_t i = 0; result && i < count; i += 1)
+    {
+        const uint8_t* record = file + place.offset + i * element;
+        uint64_t offset = 0;
+        uint64_t length = 0;
+        memcpy(&offset, record + field, sizeof(offset));
+        memcpy(&length, record + field + sizeof(offset), sizeof(length));
+        result = snapshot_string_inside(strings_bytes, offset, length);
+    }
+    return result;
+}
+
+// Header paths, probe paths, version names and member names are offsets into the strings. They are rebased into
+// pointers before anything stats or reads them, so a file whose hash matches can still point outside the mapping.
+static bool snapshot_strings_inside(const SnapshotHeader* header, const uint8_t* file)
+{
+    const uint64_t bytes = header->regions[SNAPSHOT_REGION_STRINGS].bytes;
+    bool result = true;
+    for (uint32_t i = 0; result && i < SNAPSHOT_PATHS; i += 1)
+    {
+        result = snapshot_string_inside(bytes, header->paths[i].offset, header->paths[i].length);
+    }
+    result = result && snapshot_region_strings(file, header->regions[SNAPSHOT_REGION_PROBES], sizeof(RuntimeProbe), offsetof(RuntimeProbe, path), header->counts.probes, bytes);
+    result = result && snapshot_region_strings(file, header->regions[SNAPSHOT_REGION_VERSIONS], sizeof(ImportVersion), offsetof(ImportVersion, name), header->counts.versions, bytes);
+    result = result && snapshot_region_strings(file, header->regions[SNAPSHOT_REGION_LOADER_VERSIONS], sizeof(ImportVersion), offsetof(ImportVersion, name), header->counts.loader_versions, bytes);
+    result = result && snapshot_region_strings(file, header->regions[SNAPSHOT_REGION_GCC_S_VERSIONS], sizeof(ImportVersion), offsetof(ImportVersion, name), header->counts.gcc_s_versions, bytes);
+    result = result && snapshot_region_strings(file, header->regions[SNAPSHOT_REGION_MEMBERS], sizeof(ImportMember), offsetof(ImportMember, name), header->counts.members, bytes);
     return result;
 }
 
@@ -1303,7 +1350,8 @@ static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, 
     const uint64_t member_name_bytes = counts->names_run_bytes - counts->object_name_bytes;
     result = result && counts->object_name_bytes <= counts->names_run_bytes && counts->names_run <= data.bytes && counts->object_name_bytes <= data.bytes - counts->names_run &&
              counts->member_names_run >= counts->object_name_bytes && counts->member_names_run <= data.bytes && member_name_bytes <= data.bytes - counts->member_names_run &&
-             counts->global_strings_bytes <= strings.bytes && counts->global_strings <= strings.bytes - counts->global_strings_bytes;
+             counts->global_strings_bytes <= strings.bytes && counts->global_strings <= strings.bytes - counts->global_strings_bytes &&
+             snapshot_strings_inside(header, (const uint8_t*)header);
     return result;
 }
 

@@ -698,6 +698,40 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 12,
                       "static pointer arithmetic retains byte addend");
     const CheckValue address = result.value;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 62);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 0,
+                      "a 2^62 int index wraps the byte addend to zero");
+    CheckValue bytes = address;
+    bytes.offset = 0;
+    bytes.type = type_pointer(table, BUSTER_TYPE_CHAR);
+    action.operands[0] = bytes;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 63);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 &&
+                           result.value.offset == (int64_t)((uint64_t)1 << 63),
+                      "a 2^63 byte index is the signed relocation addend");
+    action = (CheckAction){
+        .op = CHECK_OP_CAST,
+        .type = BUSTER_TYPE_BOOL,
+        .operands = {
+            {
+                .type = type_pointer(table, BUSTER_TYPE_CHAR),
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_NONNULL_ADDRESS,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = 11,
+                .offset = (int64_t)((uint64_t)1 << 63),
+            }
+        }
+    };
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == 1,
+                      "a non-weak address is true as _Bool, including a wrapped displacement");
+    action.operands[0].flags = BUSTER_CHECK_STATIC_OBJECT;
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_NONE,
+                      "a weak address is not a constant _Bool");
     action = (CheckAction){
         .op = CHECK_OP_SUBTRACT,
         .operands = {
@@ -2251,8 +2285,8 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
         // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
         // identifiers, a function's name, a label's address, sizeof or alignof, and K&R calls. An initializer's
-        // assignment, a builtin's token and an intrinsic's call are the walk's class (check_input_expression_fold), and
-        // a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
+        // assignment is its own class, a builtin's token and an intrinsic's call the walk's (check_input_expression_fold),
+        // and a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
         // a child has no value or the walk refuses the token (their guard keeps the walk's refusal), and a list's takes
         // every token; DROP's tokens never reach an action.
         const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
@@ -2592,6 +2626,54 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "global address initializer",
             "int g; int *p = &g;\n",
             false,
+            false
+        },
+        {
+            "bool of a defined object's address",
+            "int s; _Bool b = (_Bool)&s;\n",
+            false,
+            false
+        },
+        {
+            "bool of a strong external address",
+            "extern int e; _Bool b = (_Bool)&e;\n",
+            false,
+            false
+        },
+        {
+            "bool of a wrapped address",
+            "int s; _Bool b = (_Bool)((char *)&s + (1ul << 63));\n",
+            false,
+            false
+        },
+        {
+            "bool of an automatic address in a static initializer",
+            "void f(void) { int x; static _Bool b = (_Bool)&x; }\n",
+            false,
+            false
+        },
+        {
+            "bool of a weak address",
+            "extern int w __attribute__((weak)); _Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "bool of a weak definition's address",
+            "int w __attribute__((weak)); _Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "pointer index that wraps in 64 bits",
+            "int a[4]; int *r = a + (1ul << 62); char s; char *p = &s + (1ul << 63);\n",
+            false,
+            false
+        },
+        {
+            "bool of an address named by pragma weak",
+            "#pragma weak w\nextern int w;\n_Bool b = (_Bool)&w;\n",
+            true,
             false
         },
         {
@@ -6098,6 +6180,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_direct_initializer_test.c"
 #include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
@@ -6193,6 +6276,7 @@ static int run_checker_tests(int argc, char** argv)
         .random = 133
     };
     const char* clang = "clang";
+    bool direct_initializers = false;
     bool program_initializers = false;
     bool program_selection = false;
     bool const_values = false;
@@ -6219,6 +6303,10 @@ static int run_checker_tests(int argc, char** argv)
             const char* value = argv[++i];
             test.random = strtoull(value, &end, 10);
             options = errno == 0 && value != end && *end == 0 && *value != '-';
+        }
+        else if (strcmp(argv[i], "--direct-initializers") == 0)
+        {
+            direct_initializers = true;
         }
         else if (strcmp(argv[i], "--program-initializers") == 0)
         {
@@ -6307,18 +6395,22 @@ static int run_checker_tests(int argc, char** argv)
     check_test_part.seed = test.random;
     check_test_part.test = &test;
     // The selections run their own checks whole: --part deals the default run's.
-    options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
+    options = options && (check_test_part.count == 1 || !(direct_initializers || program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
                                                            program_library || embed_initializers || requests || sizeof_only || transitions_only || semantic_diagnostics || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && semantic_diagnostics)
+        if (initialized && direct_initializers)
+        {
+            check_test_direct_initializers(&test, clang);
+        }
+        else if (initialized && semantic_diagnostics)
         {
             check_test_semantic_diagnostics(&test, clang);
         }
@@ -6637,6 +6729,7 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_identifier_leaves(&test);
                 check_test_literal_values(&test);
+                check_test_expression_flush(&test);
             }
             if (check_test_takes())
             {
@@ -6769,6 +6862,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_initializers(&test, clang);
+                check_test_direct_initializers(&test, clang);
             }
             if (check_test_takes())
             {

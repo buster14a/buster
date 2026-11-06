@@ -69,7 +69,10 @@ aside before the next compiler runs; missing or empty outputs cannot reuse the
 previous stage's file. The entire output directory must be new. The
 environment fixes locale, timezone and `SOURCE_DATE_EPOCH`. Each command runs
 in a process group under a monotonic deadline owned by the gate, with a
-10-second termination grace; `wait4` therefore reports the command's own peak
+10-second termination grace. Timeout cleanup kills the remaining group members
+even if the leader exits during the grace period. The leader is observed with
+`waitid(WNOWAIT)` and reaped only after the final group signal, keeping its PID
+reserved throughout cleanup; `wait4` still reports the command's own peak
 RSS rather than a `timeout(1)` wrapper's. This checks **probe-output
 equivalence**, not a rebuild and comparison of complete stage-2/stage-3
 compiler binaries, and not a proof of correctness for every compiler path.
@@ -110,7 +113,11 @@ The standalone harness tests require only a C compiler (`cc`), not a built
 Buster or AVX-512. They use subprocess stand-ins to test failures, signals, timeouts,
 missing/empty outputs, failed smoke/execution, object/executable byte
 differences, invalid lists, duplicate/missing sources, stale directories,
-inventory drift and argv containing spaces/quotes. The five generated probes
+inventory drift and argv containing spaces/quotes. Two timeout cases fork a
+SIGTERM-ignoring descendant: one parent exits on SIGTERM and the other ignores
+it. A test-only child subreaper verifies that both descendants die from SIGKILL
+and reaps them, cleaning up even if the runner regresses; both timing rows must
+retain status 124. The five generated probes
 also compile and execute independently with the host's `cc`. The hosted job runs
 these checks with fatal AddressSanitizer, UndefinedBehaviorSanitizer and leak
 detection:

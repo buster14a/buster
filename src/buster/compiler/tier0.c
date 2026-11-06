@@ -683,6 +683,17 @@ typedef enum Tier0Error
     TIER0_ERROR_RETURNS_TWICE,
 } Tier0Error;
 
+// A local's final home, in the hole block's layout: a register, or a slot relative to its frame base.
+typedef struct Tier0Home Tier0Home;
+struct Tier0Home
+{
+    int32_t displacement;
+    uint8_t reg;
+    uint8_t mode;
+    uint8_t is_register;
+    uint8_t padding;
+};
+
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
 // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
 // end), and a LinkReference per symbolic field, its instruction a record index. With Tier0Function.entry_records,
@@ -720,6 +731,9 @@ struct Tier0Code
     uint32_t reference_count;
     uint32_t* entry_records;
     uint32_t entry_count;
+    // Stable body homes, retained only with source metadata. A zero mode and is_register mean unavailable.
+    const Tier0Home* local_homes;
+    uint32_t local_count;
     X86Instruction* choice_records;
     uint16_t* choice_rows;
     int64_t* choice_values;
@@ -3987,16 +4001,6 @@ static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0E
 // ---------------------------------------------------------------------------------------------------------------------
 // Homes and the frame
 
-// A local's home, in the hole block's layout: a register (mode 0) or a frame slot ([rsp + displacement]).
-typedef struct Tier0Home Tier0Home;
-struct Tier0Home
-{
-    int32_t displacement;
-    uint8_t reg;
-    uint8_t mode;
-    uint8_t is_register;
-    uint8_t padding;
-};
 _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 
 // The frame below the saved registers, from rsp up: the outgoing stack arguments, the call save area (the depths below
@@ -10346,6 +10350,20 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
                 tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
             }
         }
+        if (function->entry_records)
+        {
+            Tier0Home* kept = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
+            if (kept != NULL)
+            {
+                memcpy(kept, homes, (uint64_t)locals * sizeof(Tier0Home));
+                code->local_homes = kept;
+                code->local_count = locals;
+            }
+            else
+            {
+                error = TIER0_ERROR_MEMORY;
+            }
+        }
         code->frame_saved = frame.saved;
         code->frame_size = frame.size;
         code->frame_pointer = frame.pointer;
@@ -10619,7 +10637,8 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_FXSAVE_M, X86_FORM_FXSAVE64_M, X86_FORM_RDSSPD_R32, X86_FORM_RDSSPQ_R64, X86_FORM_INCSSPD_R32, X86_FORM_INCSSPQ_R64, X86_FORM_WRSSD_M32_R32,
     X86_FORM_WRSSQ_M64_R64, X86_FORM_WRUSSD_M32_R32, X86_FORM_WRUSSQ_M64_R64, X86_FORM_RSTORSSP_M64, X86_FORM_CLRSSBSY_M64, X86_FORM_SAVEPREVSSP,
     X86_FORM_SETSSBSY, X86_FORM_SHA1MSG1_X_XM128, X86_FORM_SHA1MSG2_X_XM128, X86_FORM_SHA1NEXTE_X_XM128, X86_FORM_SHA1RNDS4_X_XM128_IMM8, X86_FORM_SHA256MSG1_X_XM128,
-    X86_FORM_SHA256MSG2_X_XM128, X86_FORM_EXTRQ_X_X, X86_FORM_INSERTQ_X_X, X86_FORM_MOVNTSD_M64_X, X86_FORM_MOVNTSS_M32_X, X86_FORM_EMMS, X86_FORM_WBINVD,
+    X86_FORM_SHA256MSG2_X_XM128, X86_FORM_EXTRQ_X_X, X86_FORM_INSERTQ_X_X, X86_FORM_EXTRQ_X_IMM8_IMM8, X86_FORM_INSERTQ_X_X_IMM8_IMM8,
+    X86_FORM_MOVNTSD_M64_X, X86_FORM_MOVNTSS_M32_X, X86_FORM_EMMS, X86_FORM_WBINVD,
     X86_FORM_WBNOINVD, X86_FORM_INVPCID_R64_M128, X86_FORM_AADD_M32_R32, X86_FORM_AADD_M64_R64, X86_FORM_AAND_M32_R32, X86_FORM_AAND_M64_R64,
     X86_FORM_AOR_M32_R32, X86_FORM_AOR_M64_R64, X86_FORM_AXOR_M32_R32, X86_FORM_AXOR_M64_R64, X86_FORM_CLDEMOTE_M8, X86_FORM_SERIALIZE, X86_FORM_CLUI,
     X86_FORM_STUI, X86_FORM_TESTUI, X86_FORM_SENDUIPI_R64, X86_FORM_PTWRITE_RM32, X86_FORM_PTWRITE_RM64, X86_FORM_UMONITOR_R64, X86_FORM_MOVRS_R8_M8,

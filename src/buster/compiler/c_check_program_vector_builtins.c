@@ -17,7 +17,7 @@
 // roundings, canonicalize, copysign, the maximum and minimum functions; check_vector_ldexp_row) and the floating
 // reductions (check_vector_reduce_floating_rows); the C library's functions (sin, pow and the rest) are the lowering's
 // calls (check_lower_vector_calls). What the rows don't take is refused by name: the other floating functions of
-// half-precision and bf16 elements, leading zero counts of 8- and 16-bit elements, 8-bit funnel shifts, saturating
+// half-precision and bf16 elements, 8-bit funnel shifts, saturating
 // arithmetic of 32- and 64-bit elements and carry-less products. Included by c_check_program_lower.c after
 // c_check_program_x86.c, whose record helpers it takes.
 
@@ -851,11 +851,56 @@ static const char* check_vector_masked_row(const TypeTable* types, const X86Targ
 // Whether __builtin_elementwise_clmul of `vector`, a vector of integers, is check_vector_elementwise_row's: its elements
 // zero-extended to 64 bits take 64 bytes at most, and the target has VPCLMULQDQ and AVX-512VL (EVEX's forms at every
 // width). Else the lowering takes its elements one by one (check_lower_vector_lanes).
-static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* target, TypeId vector)
+static bool check_vector_clmul_packed_shape(const X86Target* target, CheckVectorShape shape)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(VPCLMULQDQ);
     return shape.integer && shape.element != 0 && shape.bytes * (8 / shape.element) <= 64 && (target->features & needed) == needed;
+}
+
+static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* target, TypeId vector)
+{
+    return check_vector_clmul_packed_shape(target, check_vector_builtin_shape(types, vector));
+}
+
+// Reverse each element's bits in VECTOR(0), appending the constants to the row's existing arguments. Each element's
+// bytes are reversed within its 16-byte chunk, then GFNI reverses each byte's bits. AVX512-BMM has a byte form of its
+// own. The constants have at least 16 bytes so the matrix's whole quadword is present for tiny and narrow vectors.
+// Narrow leading-zero counts reuse this row before the trailing-zero algorithm below.
+static const char* check_vector_bitreverse_shape_row(const X86Target* target, CheckVectorShape shape, Tier0Operation* row, CheckVectorConstants* constants)
+{
+    const uint32_t width = check_vector_builtin_width(shape.bytes);
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const char* reason = NULL;
+    if (shape.element == 1 && (target->extensions & BUSTER_X86_EXTENSION(AVX512BMM)) != 0)
+    {
+        row->records[0] = check_vector_lower_record(BUSTER_CHECK_VECTOR_UNARY_PACKED(VBITREVB).forms[width], v0, 0, v0);
+        row->record_count = 1;
+    }
+    else
+    {
+        const uint32_t constant_bytes = shape.bytes < 16 ? 16 : shape.bytes;
+        uint32_t r = 0;
+        if (shape.element > 1)
+        {
+            uint8_t places[16];
+            for (uint32_t b = 0; b < 16; b += 1)
+            {
+                places[b] = (uint8_t)(b / shape.element * shape.element + (shape.element - 1 - b % shape.element));
+            }
+            static const CheckVectorForms shuffles = BUSTER_CHECK_VECTOR_EVEX(VPSHUFB);
+            check_vector_constant_bytes(row, constants, places, 16, BUSTER_TYPED_CLASS_VECTOR, constant_bytes);
+            row->records[r++] = check_vector_lower_record(shuffles.forms[width], v0, v0, BUSTER_TIER0_ROLE_VECTOR(row->operand_count - 1));
+        }
+        static const CheckVectorForms affines = BUSTER_CHECK_VECTOR_FORMS(VGF2P8AFFINEQB_X_X_XM128_IMM8_EVEX, VGF2P8AFFINEQB_Y_Y_YM256_IMM8_EVEX,
+                                                                          VGF2P8AFFINEQB_Z_Z_ZM512_IMM8);
+        check_vector_constant(row, constants, UINT64_C(0x8040201008040201), 8, BUSTER_TYPED_CLASS_VECTOR, constant_bytes);
+        row->records[r++] = check_vector_lower_record(affines.forms[width], v0, v0, BUSTER_TIER0_ROLE_VECTOR(row->operand_count - 1));
+        row->record_count = (uint8_t)r;
+        reason = (target->features & BUSTER_X86_FEATURE(GFNI)) == 0 ? "vector bit reversal without GFNI" :
+                 shape.element > 1 && (target->features & BUSTER_X86_FEATURE(AVX512BW)) == 0 ? "vector bit reversal of elements wider than a byte without AVX-512BW" :
+                                                                                            NULL;
+    }
+    return reason;
 }
 
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
@@ -868,10 +913,9 @@ static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* t
 // takes their negations' operands: check_lower_brain_negations) negate the product (a's or b's alone) or the sum (c's) as
 // the form does, as clang's instruction selection folds the negations: VFMADD213BF16, VFMSUB213BF16, VFNMADD213BF16 or
 // VFNMSUB213BF16. `constants` gets any extra constant operands.
-static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, uint32_t negated,
-                                                Tier0Operation* row, CheckVectorConstants* constants)
+static const char* check_vector_elementwise_shape_row(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape, uint32_t arguments, uint32_t negated,
+                                                      Tier0Operation* row, CheckVectorConstants* constants)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
@@ -933,39 +977,9 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     {
         reason = "elementwise vector builtins of elements of this size";
     }
-    else if (builtin == CBUILTIN_ELEMENTWISE_BITREVERSE && shape.element == 1 && (target->extensions & BUSTER_X86_EXTENSION(AVX512BMM)) != 0)
-    {
-        row->records[0] = check_vector_lower_record(BUSTER_CHECK_VECTOR_UNARY_PACKED(VBITREVB).forms[width], v0, 0, v0);
-        row->record_count = 1;
-    }
     else if (builtin == CBUILTIN_ELEMENTWISE_BITREVERSE)
     {
-        // Each element's bytes reversed (VPSHUFB by a constant of their places, within each 16 bytes), then each byte's
-        // bits (VGF2P8AFFINEQB by the matrix that reverses them, 0x8040201008040201 in every quadword), as clang's code
-        // on a target with GFNI computes llvm.bitreverse. The constants are of 16 bytes at least: the matrix is a
-        // quadword's whole, which a vector of 4 bytes is less than.
-        const uint32_t constant_bytes = shape.bytes < 16 ? 16 : shape.bytes;
-        uint32_t r = 0;
-        if (shape.element > 1)
-        {
-            uint8_t places[16];
-            for (uint32_t b = 0; b < 16; b += 1)
-            {
-                places[b] = (uint8_t)(b / shape.element * shape.element + (shape.element - 1 - b % shape.element));
-            }
-            static const CheckVectorForms shuffles = BUSTER_CHECK_VECTOR_EVEX(VPSHUFB);
-            check_vector_constant_bytes(row, constants, places, 16, BUSTER_TYPED_CLASS_VECTOR, constant_bytes);
-            row->records[r++] = check_vector_lower_record(shuffles.forms[width], v0, v0, BUSTER_TIER0_ROLE_VECTOR(row->operand_count - 1));
-            needed = BUSTER_X86_FEATURE(AVX512BW);
-        }
-        static const CheckVectorForms affines = BUSTER_CHECK_VECTOR_FORMS(VGF2P8AFFINEQB_X_X_XM128_IMM8_EVEX, VGF2P8AFFINEQB_Y_Y_YM256_IMM8_EVEX,
-                                                                          VGF2P8AFFINEQB_Z_Z_ZM512_IMM8);
-        check_vector_constant(row, constants, UINT64_C(0x8040201008040201), 8, BUSTER_TYPED_CLASS_VECTOR, constant_bytes);
-        row->records[r++] = check_vector_lower_record(affines.forms[width], v0, v0, BUSTER_TIER0_ROLE_VECTOR(row->operand_count - 1));
-        row->record_count = (uint8_t)r;
-        reason = (target->features & BUSTER_X86_FEATURE(GFNI)) == 0 ? "vector bit reversal without GFNI" :
-                 (target->features & needed) != needed ? "vector bit reversal of elements wider than a byte without AVX-512BW" :
-                                                         NULL;
+        reason = check_vector_bitreverse_shape_row(target, shape, row, constants);
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
     {
@@ -1003,14 +1017,21 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
             row->records[r++] = check_vector_lower_record(truncate[e].forms[wide], v0, 0, v0);
         }
         row->record_count = (uint8_t)r;
-        reason = check_vector_clmul_packed(types, target, vector) ? NULL : "vector carry-less multiplication without AVX-512VL and VPCLMULQDQ";
+        reason = check_vector_clmul_packed_shape(target, shape) ? NULL : "vector carry-less multiplication without AVX-512VL and VPCLMULQDQ";
     }
-    else if (builtin == CBUILTIN_ELEMENTWISE_CTZG)
+    else if (builtin == CBUILTIN_ELEMENTWISE_CTZG || (builtin == CBUILTIN_ELEMENTWISE_CLZG && shape.element <= 2))
     {
         // popcount(~x & (x - 1)), as clang's code computes llvm.cttz: each element's trailing zeros, its width for a zero
         // one; with a second operand, its element where the first's is zero (k1, from VPTESTNM, before the count overwrites
         // the first operand), as clzg's select is.
+        const bool leading = builtin == CBUILTIN_ELEMENTWISE_CLZG;
         const uint32_t e = check_vector_builtin_element(shape.element);
+        // A leading count adds up to three constants past the optional fallback, so its scratch is VECTOR(5).
+        const uint8_t temporary = leading ? BUSTER_TIER0_ROLE_VECTOR(5) : v2;
+        if (leading)
+        {
+            reason = check_vector_bitreverse_shape_row(target, shape, row, constants);
+        }
         static const CheckVectorForms adds[4] = { BUSTER_CHECK_VECTOR_EVEX(VPADDB), BUSTER_CHECK_VECTOR_EVEX(VPADDW), BUSTER_CHECK_VECTOR_EVEX(VPADDD),
                                                   BUSTER_CHECK_VECTOR_EVEX(VPADDQ) };
         static const CheckVectorForms counts[4] = { BUSTER_CHECK_VECTOR_UNARY_PACKED(VPOPCNTB), BUSTER_CHECK_VECTOR_UNARY_PACKED(VPOPCNTW),
@@ -1027,24 +1048,31 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
                                                     BUSTER_CHECK_VECTOR_PACKED(VPBLENDMD), BUSTER_CHECK_VECTOR_PACKED(VPBLENDMQ) };
         static const CheckVectorForms ternary = BUSTER_CHECK_VECTOR_FORMS(VPTERNLOGD_X_X_XM128_IMM8, VPTERNLOGD_Y_Y_YM256_IMM8, VPTERNLOGD_Z_Z_ZM512_IMM8);
         static const CheckVectorForms zeros = BUSTER_CHECK_VECTOR_PACKED(VPXORD);
-        uint32_t r = 0;
-        if (arguments == 2 && shape.element <= 2)
+        uint32_t r = row->record_count;
+        if (arguments == 2 && shape.element <= 2 && !leading)
         {
-            row->records[r++] = check_vector_lower_record(zeros.forms[width], v2, v2, v2);
-            row->records[r++] = check_vector_lower_record(tests[e].forms[width], 1, v0, v2);
+            row->records[r++] = check_vector_lower_record(zeros.forms[width], temporary, temporary, temporary);
+            row->records[r++] = check_vector_lower_record(tests[e].forms[width], 1, v0, temporary);
         }
-        else if (arguments == 2)
+        else if (arguments == 2 && !leading)
         {
             row->records[r++] = check_vector_lower_record(tests[e].forms[width], 1, v0, v0);
         }
         // All ones (any inputs' every truth table entry 1), then x - 1, then that and not x (A & ~B, A the destination
         // and B x: 0x30), then its count into v0.
-        row->records[r] = check_vector_lower_record(ternary.forms[width], v2, v2, v2);
+        row->records[r] = check_vector_lower_record(ternary.forms[width], temporary, temporary, temporary);
         row->records[r++].immediate = 0xff;
-        row->records[r++] = check_vector_lower_record(adds[e].forms[width], v2, v0, v2);
-        row->records[r] = check_vector_lower_record(ternary.forms[width], v2, v0, v0);
+        row->records[r++] = check_vector_lower_record(adds[e].forms[width], temporary, v0, temporary);
+        row->records[r] = check_vector_lower_record(ternary.forms[width], temporary, v0, v0);
         row->records[r++].immediate = 0x30;
-        row->records[r++] = check_vector_lower_record(counts[e].forms[width], v0, 0, v2);
+        row->records[r++] = check_vector_lower_record(counts[e].forms[width], v0, 0, temporary);
+        if (arguments == 2 && leading)
+        {
+            // The count equals the element's width only for a zero input. Comparing it with a constant saves the
+            // separate zeroing instruction before the count, keeping a word's reversal and fallback in eight records.
+            check_vector_constant(row, constants, shape.element * 8, shape.element, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+            row->records[r++] = check_vector_lower_record(tests[e].forms[width], 1, v0, BUSTER_TIER0_ROLE_VECTOR(row->operand_count - 1));
+        }
         if (arguments == 2)
         {
             // VMOVDQU8's and VMOVDQU16's source is in rm, VPBLENDM's second in rm too (k1's elements from it).
@@ -1054,9 +1082,12 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
         }
         row->record_count = (uint8_t)r;
         needed = shape.element <= 2 ? BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512BITALG) : BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
-        reason = (target->features & needed) == needed ? NULL :
-                 shape.element <= 2 ? "vector trailing zero counts of 8- and 16-bit elements without AVX-512 BITALG" :
-                                      "vector trailing zero counts of 32- and 64-bit elements without AVX-512 VPOPCNTDQ";
+        if (reason == NULL && (target->features & needed) != needed)
+        {
+            reason = leading ? "vector leading zero counts of 8- and 16-bit elements without AVX-512 BITALG" :
+                     shape.element <= 2 ? "vector trailing zero counts of 8- and 16-bit elements without AVX-512 BITALG" :
+                                          "vector trailing zero counts of 32- and 64-bit elements without AVX-512 VPOPCNTDQ";
+        }
     }
     else if (shape.element == 1 && (builtin == CBUILTIN_ELEMENTWISE_FSHL || builtin == CBUILTIN_ELEMENTWISE_FSHR))
     {
@@ -1177,6 +1208,12 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     return reason;
 }
 
+static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, uint32_t negated,
+                                                Tier0Operation* row, CheckVectorConstants* constants)
+{
+    return check_vector_elementwise_shape_row(target, builtin, check_vector_builtin_shape(types, vector), arguments, negated, row, constants);
+}
+
 // The row of __builtin_elementwise_sqrt or _fma of float or double scalars (`class`, F32 or F64), of `arguments`
 // operands of the class: VSQRTSS/SD of the operand, or VFMADD213SS/SD of a, b and c (a = b * a + c), into the first
 // operand's register at the current rounding, as llvm.sqrt and llvm.fma compute them. Their EVEX forms are AVX-512F's,
@@ -1282,9 +1319,8 @@ static uint64_t check_vector_floating_one(bool d)
 // where x's is clear (maximum's VPTERNLOGD 224 with the magnitude mask) or set where x's is (minimum's VPTERNLOGD 248
 // with the sign mask), and x where x is a NaN (the ordered compare's mask moving the rest); maximumnum and minimumnum,
 // the same, but y where x is a NaN and x where y is. The constants are operands past the arguments (`constants`).
-static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId builtin, TypeId vector, Tier0Operation* row, CheckVectorConstants* constants)
+static const char* check_vector_floating_shape_row(CBuiltinId builtin, CheckVectorShape shape, Tier0Operation* row, CheckVectorConstants* constants)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
@@ -1387,6 +1423,11 @@ static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId 
         row->record_count = (uint8_t)r;
     }
     return reason;
+}
+
+static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId builtin, TypeId vector, Tier0Operation* row, CheckVectorConstants* constants)
+{
+    return check_vector_floating_shape_row(builtin, check_vector_builtin_shape(types, vector), row, constants);
 }
 
 // The same builtins (and __builtin_elementwise_ldexp) of float or double scalars (`class`, F32 or F64), its scalar
@@ -1504,10 +1545,8 @@ static const char* check_vector_floating_scalar_row(const X86Target* target, CBu
 // values, as llvm.ldexp takes them (VPMOVSXBD or VPMOVSXWD first for 8- and 16-bit ones, then VCVTDQ2PS or VCVTDQ2PD,
 // or VCVTQQ2PS or VCVTQQ2PD with AVX-512DQ), then x times 2 to the floor of each (VSCALEFPS or VSCALEFPD), as clang -O0's
 // code computes it. Its operands are x and e, of `vector`'s and `exponent`'s types.
-static const char* check_vector_ldexp_row(const TypeTable* types, const X86Target* target, TypeId vector, TypeId exponent, Tier0Operation* row)
+static const char* check_vector_ldexp_shape_row(const X86Target* target, CheckVectorShape in, CheckVectorShape ex, Tier0Operation* row)
 {
-    const CheckVectorShape in = check_vector_builtin_shape(types, vector);
-    const CheckVectorShape ex = check_vector_builtin_shape(types, exponent);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
     const char* reason = NULL;
@@ -1559,6 +1598,11 @@ static const char* check_vector_ldexp_row(const TypeTable* types, const X86Targe
     return reason;
 }
 
+static const char* check_vector_ldexp_row(const TypeTable* types, const X86Target* target, TypeId vector, TypeId exponent, Tier0Operation* row)
+{
+    return check_vector_ldexp_shape_row(target, check_vector_builtin_shape(types, vector), check_vector_builtin_shape(types, exponent), row);
+}
+
 // The most rows a floating reduction takes: a maximum's or minimum's halvings of 16 floats, a row each.
 #define BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS 4u
 
@@ -1570,10 +1614,9 @@ static const char* check_vector_ldexp_row(const TypeTable* types, const X86Targe
 // many as its records hold. The last row's result is the element (FLOATING_RESULT); a sum's adds the tree's to the start
 // value (VADDSS or VADDSD, the start's first, as clang adds them), its last operand (FLOATING), which the lowering gives
 // -0.0 without one. `count` gets the rows' number.
-static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBuiltinId builtin, TypeId vector,
-                                                     Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
+static const char* check_vector_reduce_floating_shape_rows(CBuiltinId builtin, CheckVectorShape shape,
+                                                           Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
     const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
@@ -1698,6 +1741,12 @@ static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBu
         }
     }
     return reason;
+}
+
+static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBuiltinId builtin, TypeId vector,
+                                                    Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
+{
+    return check_vector_reduce_floating_shape_rows(builtin, check_vector_builtin_shape(types, vector), rows, count);
 }
 
 // The row of __builtin_nontemporal_store(value, p) or __builtin_nontemporal_load(p) of a vector of `vector`'s type at

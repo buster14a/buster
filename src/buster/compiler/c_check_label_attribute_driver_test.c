@@ -700,8 +700,31 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "int (*f)(void) [[gnu::stdcall]];\n",
         "void f(void) [[gnu::stdcall, gnu::cold, x]];\n",
         "void [[gnu::stdcall]] f(void);\nvoid [[gnu::regparm(2)]] h(void);\n",
+        "void [[gnu::regparm(1)]] ordered(int x __attribute__((noinline)));\n",
+        "void [[gnu::ms_abi]] ordered(int x [[gnu::unknown]]);\n",
         "typedef void F(void);\nF [[gnu::stdcall]] k;\n",
         "void [[gnu::ms_abi]] f(void);\nvoid f(void);\n",
+        // C23's specifier attribute changes the typedef's function, before an outer declarator adds a different one.
+        "typedef int (*F)(int); typedef int (__attribute__((ms_abi)) *M)(int);\n"
+        "typedef M (*Outer)(void); typedef F (__attribute__((ms_abi)) *Wrong)(void);\n"
+        "F [[gnu::ms_abi]] x, (*y)(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(x),M),\"base\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(y),Outer),\"inner\");\n"
+        "_Static_assert(!__builtin_types_compatible_p(__typeof__(y),Wrong),\"outer\");\n",
+        "typedef int (*F)(int); typedef int (__attribute__((ms_abi)) *M)(int);\n"
+        "typedef M (__attribute__((sysv_abi)) *Outer)(void);\n"
+        "F [[gnu::ms_abi]] __attribute__((sysv_abi)) (*y)(void);\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(y),Outer),\"mixed conventions\");\n",
+        // A pointer/array typedef permits replacing its pointee's convention; distinct conventions in the same
+        // specifier list, or a different one on a function typedef, remain conflicting.
+        "typedef int (__attribute__((sysv_abi)) *F[2])(int); typedef int (__attribute__((ms_abi)) *M[2])(int);\n"
+        "F [[gnu::ms_abi]] a; _Static_assert(__builtin_types_compatible_p(__typeof__(a),M),\"replace\");\n",
+        "typedef int (*F)(int); F [[gnu::ms_abi, gnu::sysv_abi]] x;\n",
+        "typedef int F(int) __attribute__((sysv_abi)); F [[gnu::ms_abi]] x;\n",
+        "typedef int (*F)(int); F [[gnu::ms_abi]] __attribute__((sysv_abi)) x;\n",
+        "typedef int (*F)(int); __attribute__((ms_abi)) F [[gnu::sysv_abi]] x;\n",
+        "typedef int F(int); __attribute__((reqd_work_group_size(1,1,1))) F [[gnu::ms_abi]] x;\n",
+        "typedef int F(int); __attribute__((amdgpu_num_sgpr(1))) F [[gnu::ms_abi]] x;\n",
         // The type at an attribute retains this declarator's groups, including redundant ones and partial chunk types.
         // Typedefs keep the groups in the sugared spelling and discard them in the canonical aka spelling.
         "int (*p1) __attribute__((stdcall));\nint (*(p2)) __attribute__((stdcall));\nint *(p3) __attribute__((stdcall));\n"

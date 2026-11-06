@@ -1,5 +1,28 @@
 # Many translation units in one process
 
+## Selectany group selection
+
+The C emitter publishes external `selectany` definitions in the shared
+`LinkGroups` format, after their atoms and symbols are complete. The object
+writer consumes it directly. `check_units_keep` copies each member atom's
+signature into the unit's immutable kept records for direct linking.
+
+Before resolving names, `check_units_merge_lanes` reuses the stable hash
+partitions of its global-name exchange to select each signature's first group
+in command-line order. Each unit independently marks retained atoms and
+references, then compacts its atom ordinals. The ordinary name-resolution pass
+therefore sees no definition or reference contributed solely by a discarded
+group. The serial twin uses the same selection rule with its existing name
+table. A reference from a retained atom to a discarded local is diagnosed;
+references to nonlocal symbols resolve through the surviving name.
+
+Selection arrays are absent when no unit has groups. Grouped commands allocate
+one atom map and symbol mask per unit, with no borrowed scratch pointers in the
+kept representation. Once selection is complete, the final executable's link
+needs no group table. Runtime binding may add atoms after that point.
+
+## Driver
+
 [#152](https://github.com/buster14a/buster/issues/152): the C driver compiles
 every source file of its command line in one process.
 

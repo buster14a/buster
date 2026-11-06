@@ -128,7 +128,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
-            valid = check_input_constant_read(reader, first, end, false, cached, &value, &unused, &failed);
+            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;

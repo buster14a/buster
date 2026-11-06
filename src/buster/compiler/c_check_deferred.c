@@ -714,6 +714,8 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     bindings->point = bindings->declaration != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
     bindings->end = bindings->point != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
     bindings->previous = bindings->end != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    // A lane's proxies copy the file scope's previous handles, so its stream keeps no first column (#1351).
+    bindings->first = 0;
     bindings->depth = bindings->previous != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
     bindings->operation = bindings->depth != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
     bindings->kind = bindings->operation != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
@@ -1044,6 +1046,9 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->specifier_abi_origin = 0;
     reader->declarator_abi_origin = 0;
     reader->constant_abi_origin = 0;
+    reader->specifier_noderef = NULL;
+    reader->declarator_noderef = NULL;
+    reader->constant_noderef = NULL;
     reader->specifier_thread_local = false;
     reader->declarator_overloadable = false;
     reader->lane_unsupported = false;
@@ -2345,6 +2350,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         bindings->point = point;
         bindings->end = end;
         bindings->previous = previous;
+        // The merged stream's previous handles are remapped; it keeps no first column (#1351).
+        bindings->first = 0;
         bindings->depth = depth;
         bindings->operation = operation;
         bindings->kind = kind;

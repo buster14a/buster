@@ -17,6 +17,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <elf.h>
@@ -210,6 +212,106 @@ static void cc_compat_failure(CCCompatibilityTest* test, const char* name, const
     cc_compat_release(&run);
 }
 
+// A temporary sibling must not add characters to a destination basename. Exercise both sides of the old 11-byte
+// suffix boundary and the directory's actual limit, then a default .d derived from a maximum-length object name.
+static void cc_compat_long_depfiles(CCCompatibilityTest* test)
+{
+    const long limit = pathconf(test->directory, _PC_NAME_MAX);
+    const bool supported = limit >= 12 && limit < PATH_MAX - 16;
+    cc_compat_expect(test, supported, "query a usable directory component limit");
+    if (supported)
+    {
+        const size_t lengths[] = { (size_t)limit - 11, (size_t)limit - 10, (size_t)limit };
+        char name[PATH_MAX];
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            const size_t prefix = i == 0 ? 0 : 4;
+            memcpy(name, "out/", prefix);
+            memset(name + prefix, 'a' + (int)i, lengths[i]);
+            name[prefix + lengths[i]] = 0;
+            const char* const args[] = { "-M", "-MF", name, "a.c", NULL };
+            cc_compat_oracle(test, "long explicit -MF matches Clang", NULL, args, name);
+            const bool prepared = cc_compat_write(test, name, "old dependency\n");
+            const char* const failure[] = { "-M", "-MF", name, "missing.c", NULL };
+            CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, failure);
+            char* old = cc_compat_read(test, name);
+            cc_compat_expect(test, prepared && run.status != 0 && old != NULL && strcmp(old, "old dependency\n") == 0,
+                             "failure preserves a long existing depfile");
+            free(old);
+            cc_compat_release(&run);
+        }
+        char object[PATH_MAX];
+        char depfile[PATH_MAX];
+        memcpy(object, "out/", 4);
+        memset(object + 4, 'z', (size_t)limit - 2);
+        memcpy(object + 4 + (size_t)limit - 2, ".o", 3);
+        memcpy(depfile, object, 4 + (size_t)limit + 1);
+        depfile[4 + (size_t)limit - 1] = 'd';
+        // Keep the rule target short so Clang's long-line wrapping is not part of this filename test.
+        const char* const args[] = { "-c", "-MMD", "-MT", "unit.o", "a.c", "-o", object, NULL };
+        cc_compat_oracle(test, "maximum-length default .d matches Clang", NULL, args, depfile);
+    }
+}
+
+#if !defined(BUSTER_DRIVER_COMPAT_STANDALONE) && !defined(BUSTER_DRIVER_MIXED_STANDALONE)
+// Force the exact random suffix ABCDEF in the name comparison: neither destination may equal its chosen temporary,
+// regardless of what mkstemp draws. Then force a real close/write failure after creation with RLIMIT_FSIZE.
+static void cc_compat_publication_failure(CCCompatibilityTest* test)
+{
+    const char* const names[] = { ".tmp.ABCDEF", ".tmq.ABCDEF" };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        char candidate[12];
+        memcpy(candidate, dependency_temporary_template(names[i]), sizeof(candidate));
+        memcpy(candidate + 5, "ABCDEF", 6);
+        cc_compat_expect(test, strcmp(candidate, names[i]) != 0, "temporary and destination cannot collide for a chosen suffix");
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/out/rollback.d", test->directory);
+    const bool prepared = cc_compat_write(test, "out/rollback.d", "previous dependency output\n");
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        struct rlimit limit = { .rlim_cur = 0, .rlim_max = 0 };
+        const bool ready = signal(SIGXFSZ, SIG_IGN) != SIG_ERR && setrlimit(RLIMIT_FSIZE, &limit) == 0;
+        char data[8192] = { 0 };
+        const DependencyOutput output = { .path = path, .bytes = { .pointer = data, .length = sizeof(data) } };
+        FILE* errors = fopen("/dev/null", "w");
+        const bool failed = ready && errors != NULL && !dependency_publish(&output, errors);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+        _exit(failed ? 0 : 1);
+    }
+    int status = 0;
+    pid_t waited;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    }
+    while (waited < 0 && child > 0 && errno == EINTR);
+    char* old = cc_compat_read(test, "out/rollback.d");
+    char directory[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/out", test->directory);
+    DIR* dir = opendir(directory);
+    bool clean = dir != NULL;
+    struct dirent* entry;
+    while (dir != NULL && (entry = readdir(dir)) != NULL)
+    {
+        clean &= strncmp(entry->d_name, ".tmp.", 5) != 0 && strncmp(entry->d_name, ".tmq.", 5) != 0;
+    }
+    if (dir != NULL)
+    {
+        closedir(dir);
+    }
+    cc_compat_expect(test, prepared && waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+                           old != NULL && strcmp(old, "previous dependency output\n") == 0 && clean,
+                     "write or close failure preserves the old depfile and removes its temporary");
+    free(old);
+}
+#endif
+
 static bool cc_compat_elf(CCCompatibilityTest* test, const char* name, uint16_t type, bool interpreter)
 {
     char path[PATH_MAX];
@@ -343,6 +445,10 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         unlink(mode_depfile);
         const char* const mmd[] = { "-MMD", "-MFjoined.d", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MMD with joined -MF", NULL, mmd, "joined.d");
+        cc_compat_long_depfiles(&test);
+#if !defined(BUSTER_DRIVER_COMPAT_STANDALONE) && !defined(BUSTER_DRIVER_MIXED_STANDALONE)
+        cc_compat_publication_failure(&test);
+#endif
         const char* const ep[] = { "-E", "-MD", "-P", "a.c", "-o", "out/a.i", NULL };
         cc_compat_oracle(&test, "-E -MD -o produces primary and side dependency", NULL, ep, "out/a.d");
         const char* const mixed[] = { "-MD", "-M", "a.c", NULL };
