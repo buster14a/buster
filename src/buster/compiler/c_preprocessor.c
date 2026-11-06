@@ -1903,62 +1903,111 @@ static bool pp_raw_string_start(const uint8_t* bytes, uint32_t length)
     return length >= prefix + 2 && bytes[prefix] == 'R' && bytes[prefix + 1] == '"';
 }
 
+// `length` bytes of source cleaned of their line splices (and trigraphs, with `trigraphs`) into `buffer`, which needs
+// room for `length` bytes, through the scalar lexer's characters; with `string`, a raw string literal's characters
+// after its opening quote as written. Returns the length.
+static uint32_t pp_clean_splices(const uint8_t* bytes, uint32_t length, bool trigraphs, bool string, uint8_t* buffer)
+{
+    const ScalarLexer lexer = {
+        .source = bytes,
+        .length = length,
+        .trigraphs = trigraphs,
+        .cplusplus = false,
+    };
+    uint64_t p = 0;
+    uint32_t result = 0;
+    bool opened = false;
+    while (p < length)
+    {
+        uint64_t size;
+        uint64_t char_start;
+        const int32_t c = get_char(&lexer, p, &size, &char_start);
+        if (c != BUSTER_LEX_END_OF_FILE)
+        {
+            buffer[result] = (uint8_t)c;
+            result += 1;
+        }
+        p += size != 0 ? size : 1;
+        // A string literal's first quote is its opening one, right after its R if it is a raw string literal.
+        if (string && !opened && c == '"')
+        {
+            opened = true;
+            const bool raw = result >= 2 && buffer[result - 2] == 'R';
+            const uint64_t rest = raw ? length - p : 0;
+            memcpy(buffer + result, bytes + p, rest);
+            result += (uint32_t)rest;
+            p += rest;
+        }
+    }
+    return result;
+}
+
+// Whether `length` bytes may hold a line splice or, with `trigraphs`, a trigraph, so that pp_remove_splices_by cleans
+// them. A splice is a backslash, whitespace and a line break (get_char), so a backslash may start one only when a byte
+// up to ' ' follows it or it ends the bytes; a backslash before anything else, as an escape sequence's, may not, and
+// cleaning such bytes gives back the same bytes. The scalar twin of pp_splice_possible_vector, and its oracle.
+static bool pp_splice_possible_scalar(const uint8_t* bytes, uint32_t length, bool trigraphs)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < length; i += 1)
+    {
+        result = (bytes[i] == '\\' && (i + 1 == length || bytes[i + 1] <= ' ')) || (trigraphs && bytes[i] == '?');
+    }
+    return result;
+}
+
+// pp_splice_possible_scalar 64 bytes at a time, in masked loads that read no byte past `length`: a backslash's lane
+// shifted up one against the blanks (every byte up to ' '; the zeros past the bytes count, so a final backslash does),
+// a block's backslash in its last lane carried to the next block's first, or past the last block to its end.
+static bool pp_splice_possible_vector(const uint8_t* bytes, uint32_t length, bool trigraphs)
+{
+#if !BUSTER_HOST_VECTOR
+    return pp_splice_possible_scalar(bytes, length, trigraphs);
+#else
+    const __mmask64 questions = trigraphs ? ~0ull : 0;
+    uint64_t carry = 0;
+    uint64_t possible = 0;
+    for (uint32_t b = 0; possible == 0 && b < length; b += 64)
+    {
+        const __mmask64 lanes = _bzhi_u64(~0ull, length - b < 64 ? length - b : 64);
+        const __m512i block = _mm512_maskz_loadu_epi8(lanes, bytes + b);
+        const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(lanes, block, _mm512_set1_epi8('\\'));
+        const uint64_t blanks = _mm512_cmple_epu8_mask(block, _mm512_set1_epi8(' '));
+        possible = (((backslashes << 1) | carry) & blanks) | _mm512_mask_cmpeq_epi8_mask(questions & lanes, block, _mm512_set1_epi8('?'));
+        carry = backslashes >> 63;
+    }
+    return possible != 0 || carry != 0;
+#endif
+}
+
 // `length` bytes of source of a token of kind `kind`, without the line splices in them (and trigraphs, with
 // C_TOKENIZER_TRIGRAPHS in `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which
-// needs room for `length` bytes. A raw string literal's characters undo translation phases 1 and 2, as clang's
-// getSpelling keeps them: a raw string literal keeps what follows its opening quote as written, and so does an unknown
-// token the lexer read as one (its delimiter invalid, or unterminated) whose prefix and quote are as written, which
-// clang reads byte by byte (a token that needs cleaning anywhere, as one with a line splice in its prefix, clang cleans
-// whole). Returns the length.
-static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
+// needs room for `length` bytes. Bytes have none to remove when no backslash in them may start a splice nor, with
+// trigraphs, a '?' a trigraph (pp_splice_possible_vector, or its scalar twin with `scalar`). A raw string literal's
+// characters undo translation phases 1 and 2, as clang's getSpelling keeps them: a raw string literal keeps what
+// follows its opening quote as written, and so does an unknown token the lexer read as one (its delimiter invalid, or
+// unterminated) whose prefix and quote are as written, which clang reads byte by byte (a token that needs cleaning
+// anywhere, as one with a line splice in its prefix, clang cleans whole). Returns the length.
+static uint32_t pp_remove_splices_by(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, bool scalar, uint8_t* buffer, const uint8_t** spelling)
 {
     const bool trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     const bool string = pp_is_string_literal(kind);
-    bool cleaned = false;
-    for (uint32_t i = 0; !cleaned && i < length; i += 1)
-    {
-        cleaned = bytes[i] == '\\' || (bytes[i] == '?' && trigraphs);
-    }
+    bool cleaned = BUSTER_SCALAR_PATH(scalar) ? pp_splice_possible_scalar(bytes, length, trigraphs) : pp_splice_possible_vector(bytes, length, trigraphs);
     cleaned = cleaned && !(kind == C_TOKEN_UNKNOWN && pp_raw_string_start(bytes, length));
     uint32_t result = length;
     *spelling = bytes;
     if (cleaned)
     {
-        // Through the scalar lexer's characters, which skip the splices.
-        const ScalarLexer lexer = {
-            .source = bytes,
-            .length = length,
-            .trigraphs = trigraphs,
-            .cplusplus = false,
-        };
-        uint64_t p = 0;
-        result = 0;
-        bool opened = false;
-        while (p < length)
-        {
-            uint64_t size;
-            uint64_t char_start;
-            const int32_t c = get_char(&lexer, p, &size, &char_start);
-            if (c != BUSTER_LEX_END_OF_FILE)
-            {
-                buffer[result] = (uint8_t)c;
-                result += 1;
-            }
-            p += size != 0 ? size : 1;
-            // A string literal's first quote is its opening one, right after its R if it is a raw string literal.
-            if (string && !opened && c == '"')
-            {
-                opened = true;
-                const bool raw = result >= 2 && buffer[result - 2] == 'R';
-                const uint64_t rest = raw ? length - p : 0;
-                memcpy(buffer + result, bytes + p, rest);
-                result += (uint32_t)rest;
-                p += rest;
-            }
-        }
+        result = pp_clean_splices(bytes, length, trigraphs, string, buffer);
         *spelling = buffer;
     }
     return result;
+}
+
+// pp_remove_splices_by with the vectorized check.
+static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
+{
+    return pp_remove_splices_by(bytes, length, refine_flags, kind, false, buffer, spelling);
 }
 
 // `length` bytes of a token of kind `kind` without the line splices in them (pp_remove_splices), unless they are a
@@ -1971,7 +2020,7 @@ static uint32_t pp_without_splices(const Preprocessor* pp, uint8_t kind, const u
     *spelling = bytes;
     if (!final)
     {
-        result = pp_remove_splices(bytes, length, pp->refine_flags, kind, buffer, spelling);
+        result = pp_remove_splices_by(bytes, length, pp->refine_flags, kind, pp->options.scalar, buffer, spelling);
     }
     return result;
 }
@@ -12766,7 +12815,7 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
     if (buffer != 0)
     {
         const uint8_t* text;
-        const uint32_t length = pp_remove_splices(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, buffer, &text);
+        const uint32_t length = pp_remove_splices_by(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, pp->options.scalar, buffer, &text);
         uint32_t first = 0;
         while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
         {

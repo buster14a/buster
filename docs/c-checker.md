@@ -1640,6 +1640,32 @@ campaign measures the default production path. Scalar/vector semantic checks
 establish equality, while the scalar reference's separate value-chain walks
 remain outside this string-specific scaling claim.
 
+### String literal blocks (#1388)
+
+`check_literal_strings` decodes an ordinary or UTF-8 string literal's body 64
+source bytes at a time (`check_literal_string_blocks`) on a host with the
+vector ISA, and through `check_literal_string_part_scalar`, its twin and
+oracle, with `--scalar` or on any other host. Each block is one masked load
+that reads no byte past its part. Escapes start where simdjson finds them, at
+the backslashes ending an odd run (the run's carry crossing blocks), and
+`vpermi2b` tables give each byte its digit value and flags and a simple
+escape's value, with `vpermb` moving each class one lane down so that a byte
+sees what follows it. Masks of plain bytes, simple escapes, `\x` with one or
+two digits and octal escapes of one to three digits leave each unit's value in
+its first byte; `vpcompressb` packs them and a masked store writes their count.
+The blocks leave to the scalar step, stopping before it, a universal character
+name or `\N{}`, `\x` with no digit or more than two, an octal escape past 255,
+a quote, line break or NUL, and the unit holding the first byte UTF-8
+validation (Keiser and Lemire's, run only on a block with a byte past 127)
+rejects. A block takes at most 60 bytes unless it is the part's last, so every
+unit it decodes (four bytes at most) ends in it. Wide, UTF-16 and UTF-32
+literals and raw ones take the scalar step. `test-checker` decodes 30,000
+random groups of one to three parts both ways, each part ending at a
+`PROT_NONE` page, half of them 60 to 68 or 124 to 132 bytes long
+(`check_test_string_literal_blocks`), and both must agree on every field and
+byte. On #1388's megabyte of `\xhh` escapes in 32-character pieces the
+checker's input stage went from 53.7 ms to 11.0 ms (Ice Lake server, 11 runs).
+
 ### Large integer literal tables (#658)
 
 `c_check_literal_table_input.c` recognizes file-scope integer arrays with at least
