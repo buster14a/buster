@@ -72,7 +72,12 @@ requirements. [Command index](README.md).
   they started, `lane_session_settle`), and kept parked until the process exits;
   the jobserver's slots are taken per wide region, never at the start, an
   emission short of its lanes taking more as other recipes give theirs back
-  (#673), and lanes that can't start leave the command on one. The checker reads
+  (#673), and lanes that can't start leave the command on one. For a reproducible experiment,
+  `--lanes N --lane-cpus C0,C1,...` pins lane i to CPU Ci using exactly N distinct CPUs in the current affinity mask.
+  It rejects malformed lists, unavailable CPUs, nested sessions, reduced capacity, and failed pin or thread start.
+  Pinned sessions start eagerly, unlike the default lazy path. With `--time-stages`, each lane prints `lane-pin` with its
+  index, expected CPU and observed CPU; those diagnostic system calls and output are not uninstrumented timing samples.
+  The checker reads
   a unit in source order; `--deferred-bodies` reads its function bodies apart on
   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
   its bodies' tokens pay for four lanes or more (two with `--lanes N`), with

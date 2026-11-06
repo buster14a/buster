@@ -84,12 +84,13 @@ static int run_check_units_benchmark(int argc, char** argv)
     for (uint32_t o = 0; parsed && owned && o < option_count; o += 1)
     {
         const char* option = options[o];
-        owned = strcmp(option, "--lanes") != 0 && strncmp(option, "--lanes=", 8) != 0 && strcmp(option, "--worker-budget") != 0 &&
+        owned = strcmp(option, "--lanes") != 0 && strncmp(option, "--lanes=", 8) != 0 && strcmp(option, "--lane-cpus") != 0 &&
+                strncmp(option, "--lane-cpus=", 12) != 0 && strcmp(option, "--worker-budget") != 0 &&
                 strncmp(option, "--worker-budget=", 16) != 0;
     }
     if (!owned)
     {
-        fprintf(stderr, "benchmark-check-units: the options after -- can't set the lanes (--lanes, --worker-budget), which --lanes' counts decide\n");
+        fprintf(stderr, "benchmark-check-units: the options after -- can't set the lanes (--lanes, --lane-cpus, --worker-budget), which --lanes' counts decide\n");
     }
     parsed = parsed && owned;
     if (!parsed && owned)

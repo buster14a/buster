@@ -83,6 +83,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include "buster/compiler/runtime_paths.h"
 
 // CPU architecture dependent includes
 #include "host_isa.h"
@@ -694,16 +695,6 @@ static const char* const runtime_triples[] = {
     "x86_64-redhat-linux",
     "x86_64-suse-linux",
     "x86_64-unknown-linux-gnu",
-};
-
-// glibc's directories, in the order GCC's driver searches them on these systems.
-static const char* const runtime_library_directories[] = {
-    "/usr/lib/x86_64-linux-gnu",
-    "/lib/x86_64-linux-gnu",
-    "/usr/lib64",
-    "/lib64",
-    "/usr/lib",
-    "/lib",
 };
 
 // Whether version `a` (dotted decimal numbers, "16" or "12.2.0") is greater than `b`: compared number by number, a

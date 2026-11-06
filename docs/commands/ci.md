@@ -200,6 +200,14 @@ the policy. In short:
   `tools/ci/nightly.c`); earlier ones predate the worker and are reported as
   out of scope. A state whose branch GitHub refuses to create is skipped for
   the rest of the job and reported (docs/ci.md, "Refused branches").
+- The coordinator reads each state's immutable `nightly.c` window declarations
+  with `nightly worker-window`, cached by source blob and rebuilt for every
+  job. Historical 04:00-07:00 workers run only in that interval; later
+  02:00-08:00 workers can use the added hours. The planner skips temporarily
+  ineligible workers, waits for future openings when needed, and reserves a
+  waiting snapshot's own deadline. Unknown declarations are reported and stay
+  pending. Every admission must fit both the worker and current windows; the
+  worker's own lock-time check still applies.
 - The planner's optional `--pending FILE` is the coordinator's ephemeral
   dispatch handoff, not a dispatch history. After validating every input and
   option, `plan` atomically compacts it to requests not yet visible in the run
