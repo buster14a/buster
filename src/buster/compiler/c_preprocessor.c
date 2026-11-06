@@ -3945,13 +3945,14 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_READ_LIMIT (16u << 10)
 // The failed probes of paths in a directory after which the cache first looks at its names (FileCacheDirectory), the
 // buffer of that look (about 25 names: a directory with more is put off), the factor of failed probes after which a
-// larger directory is read whole, and the getdents64 buffer that reads it (about 200 names a call). On the 9700X
-// (Btrfs), a failed probe took 0.4 us; reading /usr/local/include's 2 names 3.1 us and clang's resource directory's
-// 263 13.5 us, alone, and about 20 us in the compiler. A unit with only <stdio.h> fails 26 probes in each: listing
-// clang's directory at 16 made its include searches 15 us slower, and sqlite3.c's (155 there) 60 us faster.
+// larger directory is read whole, the largest getdents64 record (its 19 bytes and a name of NAME_MAX bytes and its NUL,
+// aligned to 8), and the buffer a whole read reads with (about 200 names a call). A unit with only <stdio.h> fails 26
+// probes in each of clang's resource directory and /usr/local/include: on the 9700X, listing the former at 16 made its
+// include searches 15 us slower (62 to 77 us), and sqlite3.c's (155 there) 60 us faster (file_cache_list_directory).
 #define BUSTER_FILE_CACHE_LISTING_MISSES 16u
 #define BUSTER_FILE_CACHE_SMALL_LISTING 1024u
-#define BUSTER_FILE_CACHE_LARGE_LISTING 8u
+#define BUSTER_FILE_CACHE_LARGE_LISTING 16u
+#define BUSTER_FILE_CACHE_RECORD_MAX 280u
 #define BUSTER_FILE_CACHE_LISTING_BUFFER (8u << 10)
 // The longest name a directory entry has (NAME_MAX on every file system file_cache_exact_names takes).
 #define BUSTER_FILE_CACHE_NAME_MAX 255u
@@ -4432,72 +4433,85 @@ static uint32_t* file_cache_grow_names(FileCache* cache, uint32_t* names, uint32
     return result;
 }
 
+// Adds the names of `got` bytes of getdents64's records to a listing's table (file_cache_grow_names), `*count` of them
+// so far in `*slots`. False if a name has a byte past ASCII, which the listing can't answer for, or the table can't grow.
+static bool file_cache_list_names(FileCache* cache, const uint8_t* buffer, long got, uint32_t** names, uint32_t* slots, uint32_t* count)
+{
+    bool result = true;
+    // Each record (struct linux_dirent64): an 8-byte inode, an 8-byte offset, its 2-byte length, a type byte, and the
+    // NUL-terminated name.
+    for (long offset = 0; result && offset < got;)
+    {
+        uint16_t record;
+        memcpy(&record, buffer + offset + 16, sizeof(record));
+        const bool whole = record > 19 && offset + record <= got;
+        const uint8_t* name = buffer + offset + 19;
+        const uint32_t length = whole ? (uint32_t)strnlen((const char*)name, (uint64_t)record - 19) : 0;
+        result = length != 0 && length <= BUSTER_FILE_CACHE_NAME_MAX;
+        for (uint32_t i = 0; result && i < length; i += 1)
+        {
+            result = name[i] < 0x80;
+        }
+        *names = result && 2 * ((uint64_t)*count + 1) > *slots ? file_cache_grow_names(cache, *names, *count, slots) : *names;
+        result = result && *names != 0;
+        if (result)
+        {
+            uint32_t* table = *names;
+            const uint32_t key = file_cache_name_key(name, length);
+            uint32_t slot = key & (*slots - 1);
+            while (table[slot] != 0 && table[slot] != key)
+            {
+                slot = (slot + 1) & (*slots - 1);
+            }
+            *count += table[slot] == 0;
+            table[slot] = key;
+        }
+        offset += record;
+    }
+    return result;
+}
+
 // Reads a directory's names into its listing: their keys (file_cache_name_key) in a table at least twice as large. The
 // directory is then `unlisted` instead if a listing can't answer for it exactly: its file system's lookups don't match
-// its listings (file_cache_exact_names), it has a name with a byte past ASCII, or it can't be read whole. A directory's
-// first look reads one small buffer (BUSTER_FILE_CACHE_SMALL_LISTING): one with more names than it holds (another call
-// gives more) is `deferred`, and read whole at BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes. A listing
-// costs a fixed few system calls and then about a tenth of a failed probe a name, so a directory of a few names pays
-// for itself within the probes it saves next, and one of hundreds (clang's resource directory) only after many more.
+// its listings (file_cache_exact_names), it has a name with a byte past ASCII, or it can't be read whole.
+//
+// A directory's first look reads one small buffer (BUSTER_FILE_CACHE_SMALL_LISTING, about 25 names) and, unless that is
+// filled to within a record of its end, finds the directory's end with one more call. A directory with more names is
+// `deferred`, unread, and read whole at BUSTER_FILE_CACHE_LARGE_LISTING times the failed probes. On the 9700X (Btrfs) a
+// failed probe took 0.24 to 0.31 us, and the calls of a small directory's listing (open, two getdents64, fstatfs, close)
+// about 1.2 us, which the probes it saves next repay; a first look at clang's resource directory or /usr/include took
+// 2.3 to 3.5 us in its getdents64 alone, and reading the 263 names of the former whole about 20 us in the compiler.
 // One lane at a time. The names are read once; a directory that changes during the run is no concern, as files that
 // change aren't (the cache keeps every path's answer for the whole run).
 static void file_cache_list_directory(FileCache* cache, FileCacheDirectory* directory, FileCacheCounts* counts)
 {
     const int fd = open(directory->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     counts->listings += 1;
-    struct statfs system;
-    const bool exact = fd >= 0 && fstatfs(fd, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
-    const bool first = !directory->deferred;
     // On the stack, whose pages a lookup's callers have touched, rather than in an arena's fresh ones.
     uint8_t buffer[BUSTER_FILE_CACHE_LISTING_BUFFER] __attribute__((aligned(8)));
-    const uint32_t capacity = first ? BUSTER_FILE_CACHE_SMALL_LISTING : BUSTER_FILE_CACHE_LISTING_BUFFER;
+    const bool first = !directory->deferred;
+    long got = fd >= 0 ? syscall(SYS_getdents64, fd, buffer, first ? BUSTER_FILE_CACHE_SMALL_LISTING : BUSTER_FILE_CACHE_LISTING_BUFFER) : -1;
+    const bool full = first && got > (long)(BUSTER_FILE_CACHE_SMALL_LISTING - BUSTER_FILE_CACHE_RECORD_MAX);
+    const long end = first && got > 0 && !full ? syscall(SYS_getdents64, fd, buffer + BUSTER_FILE_CACHE_SMALL_LISTING, BUSTER_FILE_CACHE_SMALL_LISTING) : 0;
+    const bool more = full || end > 0;
+    struct statfs system;
+    const bool exact = !more && got >= 0 && end == 0 && fstatfs(fd, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
     uint32_t* names = 0;
     uint32_t slots = 0;
     uint32_t count = 0;
-    uint32_t calls = 0;
-    bool more = false;
-    long got = exact ? 1 : -1;
-    while (got > 0 && !more)
+    // A first look's one buffer is the whole directory; a whole read goes on to getdents64's end.
+    long chunk = exact ? got : -1;
+    while (chunk > 0)
     {
-        got = syscall(SYS_getdents64, fd, buffer, capacity);
-        more = first && calls != 0 && got > 0;
-        calls += 1;
-        // Each record (struct linux_dirent64): an 8-byte inode, an 8-byte offset, its 2-byte length, a type byte, and
-        // the NUL-terminated name.
-        for (long offset = 0; !more && got > 0 && offset < got;)
-        {
-            uint16_t record;
-            memcpy(&record, buffer + offset + 16, sizeof(record));
-            const bool whole = record > 19 && offset + record <= got;
-            const uint8_t* name = buffer + offset + 19;
-            const uint32_t length = whole ? (uint32_t)strnlen((const char*)name, (uint64_t)record - 19) : 0;
-            bool ascii = length != 0 && length <= BUSTER_FILE_CACHE_NAME_MAX;
-            for (uint32_t i = 0; ascii && i < length; i += 1)
-            {
-                ascii = name[i] < 0x80;
-            }
-            names = ascii && 2 * ((uint64_t)count + 1) > slots ? file_cache_grow_names(cache, names, count, &slots) : names;
-            if (ascii && names != 0)
-            {
-                const uint32_t key = file_cache_name_key(name, length);
-                uint32_t slot = key & (slots - 1);
-                while (names[slot] != 0 && names[slot] != key)
-                {
-                    slot = (slot + 1) & (slots - 1);
-                }
-                count += names[slot] == 0;
-                names[slot] = key;
-            }
-            got = ascii && names != 0 ? got : -1;
-            offset += record;
-        }
+        const bool added = file_cache_list_names(cache, buffer, chunk, &names, &slots, &count);
+        chunk = !added ? -1 : first ? 0 : syscall(SYS_getdents64, fd, buffer, BUSTER_FILE_CACHE_LISTING_BUFFER);
     }
     if (fd >= 0)
     {
         close(fd);
     }
     // A listing read to its end (getdents64 returned 0) with no name it can't answer for, or a large directory put off.
-    const bool listed = exact && got == 0 && names != 0;
+    const bool listed = exact && chunk == 0 && names != 0;
     directory->deferred = directory->deferred || more;
     directory->names = listed ? names : 0;
     directory->name_mask = listed ? slots - 1 : 0;
