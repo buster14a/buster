@@ -4792,6 +4792,52 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     }
     paged = paged && child_status == 0 && inherited_right;
     unlink(thp_path);
+    // So does a program interpret-c runs in the compiler's own process (#1561's review): it reads its THP_enabled as a
+    // program its parent started would, but where BUSTER_HUGE_PAGES or the virtual machine's rule decides.
+    static const char thp_program[] = "#include <stdio.h>\n"
+                                      "#include <string.h>\n"
+                                      "int main(void)\n"
+                                      "{\n"
+                                      "    FILE* file = fopen(\"/proc/self/status\", \"r\");\n"
+                                      "    char line[256];\n"
+                                      "    int found = 0;\n"
+                                      "    while (file != 0 && fgets(line, sizeof(line), file) != 0)\n"
+                                      "    {\n"
+                                      "        if (strncmp(line, \"THP_enabled:\", 12) == 0)\n"
+                                      "        {\n"
+                                      "            fputs(line, stdout);\n"
+                                      "            found = 1;\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "    if (file != 0)\n"
+                                      "    {\n"
+                                      "        fclose(file);\n"
+                                      "    }\n"
+                                      "    return found ? 0 : 1;\n"
+                                      "}\n";
+    char thp_source[256];
+    snprintf(thp_source, sizeof(thp_source), "%s/time_stages_thp.c", directory);
+    char* const interpreted[] = { compiler, "interpret-c", thp_source, NULL };
+    const bool thp_written = parse_test_write(thp_source, thp_program, sizeof(thp_program) - 1);
+    // The variable unset, then "1", with the busy test forced and the parent's huge pages on.
+    const char* interpreted_settings[] = { NULL, "1" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(interpreted_settings); i += 1)
+    {
+        paged = paged && thp_written &&
+                (interpreted_settings[i] != NULL ? setenv("BUSTER_HUGE_PAGES", interpreted_settings[i], 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
+        const int interpreted_status = paged ? check_test_driver_spawn_stream(interpreted, &text, true) : -1;
+        const char* interpreted_expected = virtual_machine && interpreted_settings[i] == NULL ? "THP_enabled:\t0\n" : "THP_enabled:\t1\n";
+        const bool interpreted_right = interpreted_status == 0 && text != NULL && strstr(text, interpreted_expected) != NULL;
+        if (!interpreted_right)
+        {
+            printf("  huge pages: interpret-c's program, BUSTER_HUGE_PAGES %s (status %d), printed \"%s\", where %s was expected\n",
+                   interpreted_settings[i] != NULL ? interpreted_settings[i] : "unset", interpreted_status, text != NULL ? text : "", interpreted_expected);
+        }
+        paged = paged && interpreted_right;
+        free(text);
+        text = NULL;
+    }
+    unlink(thp_source);
     paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
     paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
     paged = (busy_copy != NULL ? setenv("BUSTER_TEST_HOST_BUSY", busy_copy, 1) == 0 : unsetenv("BUSTER_TEST_HOST_BUSY") == 0) && paged;
@@ -4800,10 +4846,10 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
                                                    "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES, the arenas' alone off on a busy host");
     check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
-                                                     "on this virtual machine they are off without it, for the programs it starts too" :
+                                                     "on this virtual machine they are off without it, for the programs it starts or interprets too" :
                                                      "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
                                                      "on this machine, not virtual, they are as the process's parent had them without it; a busy host turns "
-                                                     "them off for the arenas alone, not for the programs the compiler starts");
+                                                     "them off for the arenas alone, not for the programs the compiler starts or interprets");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
