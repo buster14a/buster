@@ -644,16 +644,16 @@ static void emitted_test_counterexamples(EmittedTest* test)
 static void emitted_test_labels(EmittedTest* test)
 {
     X86Instruction records[] = {
-        { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_RBX },
+        { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_RBP },
         { .form = X86_FORM_JMP_RM64, .rm = X86_REGISTER_RAX },
-        { .form = X86_FORM_POP_R64, .rm = X86_REGISTER_RBX },
+        { .form = X86_FORM_POP_R64, .rm = X86_REGISTER_RBP },
         { .form = X86_FORM_RET },
     };
     EmissionFrameEvent frames[] = {
         { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
-        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_OFFSET, .reg = BUSTER_EMISSION_X86_RBX, .value = -16 },
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_OFFSET, .reg = BUSTER_EMISSION_X86_RBP, .value = -16 },
         { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 },
-        { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_RESTORE, .reg = BUSTER_EMISSION_X86_RBX },
+        { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_RESTORE, .reg = BUSTER_EMISSION_X86_RBP },
     };
     uint32_t labels[] = { UINT32_MAX, 2 };
     const EmittedCode code = {
