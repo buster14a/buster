@@ -755,6 +755,34 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char enum_scope[] =
         "enum E { A, B };\n"
         "int f(void) { enum E e = A; { enum E { A, B, C }; } switch (e) { case A: return 1; case B: return 2; } return 0; }\n";
+    // Nested enum switches whose cases interleave in the program's case list, case ranges, values outside the enum and
+    // a larger unrelated enum: the switches' per-unit case and enumerator-value indexes (#1348).
+    static const char switch_nested[] =
+        "enum Big { B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11 };\n"
+        "enum Color { RED, GREEN = 4, BLUE };\n"
+        "enum Small { S0 = -1, S1, S2 };\n"
+        "int f(enum Color c, enum Small s) {\n"
+        "    switch (c) {\n"
+        "    case RED:\n"
+        "        switch (s) { case S0: return 1; case S2: return 2; }\n"
+        "        return 3;\n"
+        "    case BLUE:\n"
+        "        switch (s) { case S1: return 4; default: return 5; }\n"
+        "    case 7: return 6;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n"
+        "int g(enum Big b, enum Color c) {\n"
+        "    switch (b) {\n"
+        "    case B11: case B0 ... B3: return 1;\n"
+        "    case B5: switch (c) { case GREEN: return 2; case 2: return 9; } return 0;\n"
+        "    case B7 ... B9: return 7;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n"
+        "enum Dup { D3 = 3, D1 = 1, DA = 3, D5 = 5, D2 = 2, DB = 1, D0 = 0, D4 = 4 };\n"
+        "int h(enum Dup d) { switch (d) { case D2: return 1; case D5: return 2; } return 0; }\n"
+        "int k(enum Dup d) { switch (d) { case DB: return 1; } return 0; }\n";
     static const char switch_many[] =
         "enum E { E0, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, E12, E13, E14, E15, E16, E17, E18, E19, E20, E21, E22, E23, E24, E25, E26, E27, E28, E29, E30, E31, E32, E33, E34, E35, E36, E37, E38, E39, E40, E41, E42, E43, E44, E45, E46, E47, E48, E49, E50, E51, E52, E53, E54, E55, E56, E57, E58, E59, E60, E61, E62, E63, E64 };\n"
         "int f(enum E e) { switch (e) { case E0: return 0; case E1: return 0; case E2: return 0; case E3: return 0; case E4: return 0; case E5: return 0; case E6: return 0; case E7: return 0; case E8: return 0; case E9: return 0; case E10: return 0; case E11: return 0; case E12: return 0; case E13: return 0; case E14: return 0; case E15: return 0; case E16: return 0; case E17: return 0; case E18: return 0; case E19: return 0; case E20: return 0; case E21: return 0; case E22: return 0; case E23: return 0; case E24: return 0; case E25: return 0; case E26: return 0; case E27: return 0; case E28: return 0; case E29: return 0; case E30: return 0; case E31: return 0; case E32: return 0; case E33: return 0; case E34: return 0; case E35: return 0; case E36: return 0; case E37: return 0; case E38: return 0; case E39: return 0; case E40: return 0; case E41: return 0; case E42: return 0; case E43: return 0; case E44: return 0; case E45: return 0; case E46: return 0; case E47: return 0; case E48: return 0; case E49: return 0; case E50: return 0; case E51: return 0; case E52: return 0; case E53: return 0; case E54: return 0; case E55: return 0; case E56: return 0; case E57: return 0; case E58: return 0; case E59: return 0; case E60: return 0; case E61: return 0; case E62: return 0; case E63: return 0; } return 0; }\n"
@@ -1066,6 +1094,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { vla_bounds, { "-Wall", NULL, NULL, NULL } },
         { enum_scope, { "-Wall", NULL, NULL, NULL } },
         { switch_many, { "-Wall", NULL, NULL, NULL } },
+        { switch_nested, { "-Wall", NULL, NULL, NULL } },
         { comma_effects, { "-Wall", "-Wextra", NULL, NULL } },
         { typedef_void, { "-Wall", NULL, NULL, NULL } },
         { format_positional, { "-Wall", NULL, NULL, NULL } },
