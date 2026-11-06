@@ -1935,7 +1935,14 @@ What the lowering covers past scalars (#145's programs):
   initializes it whole (`T x = (T){ ... };`, as many literals deep as there
   are) writes its parts into the object itself, as clang's code initializes it
   in place, rather than into its own object, cleared, filled and then copied;
-  neither may have a volatile part.
+  neither may have a volatile part. The [9700X record](https://github.com/buster14a/buster-performance/tree/c0fddb73e121b6a8a5c30d1364954be2ccc3879e/docs/measurements/zero-initializers-1376-2026-11-06)
+  compares `2dc50258` with `ba2e80ab`: `int a[256] = { 0 };` takes 26.3 → 4.3 ns
+  a call in Tier 0 and 26.8 → 3.4 ns in Tier 1 (clang `-O0`: 4.3), and
+  `struct Big b = (struct Big){ .flags = i };` 19.0 → 2.6 ns (clang `-O0`:
+  2.4). Up to 128 bytes the code is unchanged; calling memset below 64 bytes
+  would cost 2 to 4.5 times the stores. `sqlite3.c`'s compile time doesn't
+  change (+0.0007% instructions); the compiler's own `main.c` makes 171 more
+  memset calls and 1.9% less text.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The image ends at the last explicit value; omitted trailing
