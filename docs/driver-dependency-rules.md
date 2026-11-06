@@ -38,7 +38,8 @@ serializer skips a record spelling the root source, so it is not repeated and
 never receives a phony rule.
 
 `include_system` selects all consumed headers or only non-system headers. `phony`
-adds an empty rule for each selected header, but never for the main source.
+adds an empty rule for each selected header, immediately after the main rule and
+with no blank line between rules, but never for the main source.
 Unused and filtered system records are not dereferenced through their path.
 The fixtures exercise these contracts using supplied records; they do not prove
 that the existing preprocessor produces them.
