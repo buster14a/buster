@@ -66,7 +66,8 @@ static CheckDriverInput check_driver_classify(const char* path, CheckDriverInput
             const char* shared = strstr(name, ".so.");
             result.unknown = !(suffix != NULL && (strcmp(suffix, ".o") == 0 || strcmp(suffix, ".a") == 0 || strcmp(suffix, ".so") == 0)) &&
                              !(shared != NULL && shared[4] != 0);
-            if (result.unknown && suffix != NULL)
+            // A known source suffix takes precedence over the versioned shared-library heuristic.
+            if (suffix != NULL)
             {
                 static const char* const unsupported[] = {
                     ".C",
@@ -94,7 +95,7 @@ static CheckDriverInput check_driver_classify(const char* path, CheckDriverInput
                     ".mm",
                     ".sycl",
                 };
-                for (uint32_t i = 0; result.unknown && i < sizeof(unsupported) / sizeof(unsupported[0]); i += 1)
+                for (uint32_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i += 1)
                 {
                     if (strcmp(suffix, unsupported[i]) == 0)
                     {

@@ -66,6 +66,8 @@ static void cc_mixed_unsupported_sources(CCCompatibilityTest* test)
         ".ads",
         ".asm",
         ".hpp",
+        ".so.cpp",
+        ".so.ll",
     };
     for (uint32_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i += 1)
     {
@@ -118,8 +120,9 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         const char* const clang_object[] = { "-c", "helper.c", "-o", "clang.o", NULL };
         const char* const clang_unused[] = { "-c", "unused.c", "-o", "unused.o", NULL };
         const char* const clang_shared[] = { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libanswer.so", "-o", "libanswer.so", NULL };
-        const char* const* oracle_commands[] = { clang_object, clang_unused, clang_shared };
-        for (uint32_t i = 0; i < 3; i += 1)
+        const char* const clang_versioned[] = { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libanswer.so", "-o", "libanswer.so.1", NULL };
+        const char* const* oracle_commands[] = { clang_object, clang_unused, clang_shared, clang_versioned };
+        for (uint32_t i = 0; i < sizeof(oracle_commands) / sizeof(oracle_commands[0]); i += 1)
         {
             CCCompatibilityRun oracle = cc_compat_run(&test, test.clang, NULL, oracle_commands[i]);
             cc_compat_expect(&test, oracle.status == 0, "Clang produces an independent foreign fixture");
@@ -157,6 +160,7 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
             { "main.c", "helper.blob", "-o", "program" },
             { "-o", "program", "--", "main.o", "-E" },
             { "main.c", "./libanswer.so", "-Wl,-rpath,$ORIGIN", "-o", "program" },
+            { "main.c", "./libanswer.so.1", "-Wl,-rpath,$ORIGIN", "-o", "program" },
             { "main.o", "-L.", "-l:libanswer.a", "-o", "program" },
             { "-static", "main.c", "helper.o", "-o", "program" },
             { "-static-pie", "main.c", "helper.o", "-o", "program" },
