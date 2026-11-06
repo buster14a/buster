@@ -996,6 +996,40 @@ On the VM, main `67cd05ca` against the change, `-c sqlite3.c` with huge pages
 | peak RSS, with `-w` | 297,664 KiB | 279,552 KiB |
 | peak RSS, with the warning | 297,732 KiB | 279,620 KiB |
 
+### Huge pages held for under a megabyte (#672)
+
+Each mapping's resident memory at the compile's peak, on this repository's VM
+with the arenas' huge pages (`BUSTER_HUGE_PAGES=1`) and without them
+(`BUSTER_HUGE_PAGES=0`), at main `ec5f0f6b`: 297.0 MB against 228.0 MB. Every
+arena's mapping was logged with its call stack and matched to
+`/proc/self/smaps` at each `--time-stages` mark ([the
+record](https://github.com/buster14a/buster-performance/tree/bc07aad4fd01b54bf7a00c332e29b21a939551a0/docs/measurements/page-policy-672-2026-11-06),
+`diag/`). The checker's three arenas hold 38 MB of the 69 MB difference (the
+driver's arena 27 MB, its output arena 7.8 MB, its scratch 3.5 MB), which
+#628 follows. Four arenas outside the checker each took a huge page or two for
+under a megabyte:
+
+| arena | huge pages | base pages |
+| --- | ---: | ---: |
+| the type table's index (`check_driver_unit`) | 2,112 KB | 128 KB |
+| the file cache's records arena (`file_cache_arenas`) | 2,112 KB | 268 KB |
+| the file cache's bytes arena | 2,112 KB | 376 KB |
+| the thread's scratch (`scratch_begin`) | 4,160 KB | 1,048 KB |
+
+The thread's scratch took two: a large file's windowed preparation
+(`pp_prepare_windows`) pushes three arrays of a word for every 64 of its
+bytes, 3.5 MB for `sqlite3.c`, and touches each one's start. These now start
+with base pages: the index's first 4 MB (`BUSTER_TYPE_INDEX_SMALL_BYTES`,
+65,536 buckets), the two file cache arenas' first 2 MB
+(`BUSTER_FILE_CACHE_SMALL_BYTES`) and the scratch's first 4 MB
+(`BUSTER_SCRATCH_ARENA_SMALL_BYTES`). On the VM the peak falls from 296.8 to
+288.3 MB, for 386 more faults, with the object the same bytes. On the 9700X an
+experiment build of the change, whose worktree's source the record keeps as
+captured after the runs, peaked
+alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
+medians were 138.7 against 139.9 ms, from three unpaired runs each, which
+establish no difference in time.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
@@ -1150,6 +1184,66 @@ The same PR's #628 changes also shorten `check-input` itself: the reader no
 longer writes zeros over its fresh output columns, and the binding table's
 pages are base pages, of which it clears a fifth of what it did ("The binding
 table, the fresh output and the stream's columns", above).
+
+### The per-token passes outside the walks (#529, 6 November)
+
+**Where the stage went.** `perf record` of five `-c` compiles on the 9700X
+(CPU 2, 20 kHz), at main `ec5f0f6b`. The samples were mapped to their inlined
+frames with `llvm-symbolizer`.
+- **The stage.** `check-input` took 59.5 ms of the 138.8 ms span.
+  - #1489's #1530, not yet merged, takes it to 50.5 ms by itself. Most of that
+    is `check_input_deprecated_uses`, 5.7% of the compile's samples.
+- **The rest of `check_input_run`.** Its own 7.5% was its inlined passes over
+  every token.
+- **Walks and steps.** These are flat: `check_input_resolve_range` takes 4.8%,
+  with no line above 0.35%, and the declaration steps 4.4%.
+
+This change takes the per-token passes outside the two walks. Each pass's
+scalar path stays its vector path's exact twin:
+
+| pass | share of `-c`'s samples | now |
+| --- | ---: | --- |
+| `check_input_declaration_starts` | 0.83% | one pass over the roles, 64 tokens at a time, where it wrote the column three times and kept the struct and enum stack a token at a time |
+| `check_input_asm_labels`' two kernels | 0.45% | each 16 tokens' objects or declarations tested against a filter of the labelled set in two registers (`CheckInputFilter`); only those that pass gather their bits |
+| `check_input_count_tokens` | 0.33% | the names compared only where the same kind of filter of the sought names passes |
+| `check_input_system_tokens` | 0.31% | 16 tokens' levels gathered at once |
+| the enumeration lists (`check_input_enum_records`) | about 0.27% | the enumerators and the `enum` keywords visited alone |
+
+**The enumeration lists' pages.** Four passes read every token's kind and every
+token's tag. `tag_types` is a column of the rare columns' arena that only a
+tag's keyword writes, so reading all of it mapped each of its base pages. The
+other passes touch the same pages as before: the declaration-start column is
+still written whole, and the filters are registers. So the stage's 526 fewer
+faults below are this column's: its 700 base pages, less those its tags write.
+
+**Measured on the 9700X.** The PR's 9700X job (run 42281737894, job
+128118533298) compared main `ec5f0f6b` with the change merged into it
+(`3f3fe0ac`). [The record](https://github.com/buster14a/buster-performance/tree/4d5a27b8e8285e4c4eeb857ec42c93cb2419f4c3/docs/measurements/check-input-529-passes-2026-11-06)
+keeps the job's log, the profiles' samples and their breakdowns, and an A/B of
+its own, each run under its own hold of the lock:
+- **Rounds.** 5 runs each, over four placements of the checker's unit and two
+  copies of each executable.
+- **The control.** A second copy of main ran in the same rounds.
+- **The objects.** Both builds' objects are the same bytes (`cmp`).
+
+| measure | main | change | difference |
+| --- | ---: | ---: | ---: |
+| wall time, 40 runs | 140.452 ms | 137.472 ms | −2.12% (−2.37% to −2.05% by placement) |
+| user cycles | 679.854 M | 663.132 M | −2.46% |
+| user instructions | 1,636.44 M | 1,606.84 M | −1.81% |
+| minor faults | 6,619 | 6,093 | −526 |
+| `check-input`, 11 stage runs | 59.862 ms | 57.201 ms | −2.66 ms |
+| `check-input`'s minor faults | 3,905 | 3,379 | −526 |
+
+The control's wall time was within 0.09% of main's, and its cycles within 0.15%.
+
+**What is left in the stage**, at 57.2 ms:
+- the expressions' coded walk, 13.5 ms (#1038, closed by #1478);
+- the walk in source order, about 6.5 ms;
+- the declaration steps, about 6 ms;
+- the binding answers, about 2.4 ms;
+- the reader's fills of its scratch columns (#628);
+- what #1530 removes.
 
 ## The passes after checking (#592)
 
@@ -1306,6 +1400,8 @@ Every change keeps both paths' objects and diagnostics byte for byte.
   - **The uses.** Before the pass over the uses reads an identifier's object and state, it tests whether the
     identifier's declaration is one of a labelled object's: a bitset over the tokens
     (`check_input_asm_labelled_tokens`), which a gather of 16 tokens' words reads (`check_input_asm_labelled_uses`).
+    Since #529, both kernels gather only for the 16 tokens whose values pass a filter of the labelled set
+    (`CheckInputFilter`; "The per-token passes outside the walks").
   - **Twins.** Each kernel's scalar path tests every token.
   - The emission's own sweep of `attributes` and the column itself (#628) are unchanged. Both are sparse since #1167
     ("The attributes column", below).

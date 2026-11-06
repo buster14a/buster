@@ -5,7 +5,7 @@
 // with its position checks apart, beside the parser's time on the same unit.
 //
 //   ./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold]
-//                                               [--base-page-tokens N] [preprocessor options] file...
+//                                               [--base-page-tokens N] [--raw] [--rss] [preprocessor options] file...
 //
 // Each file is preprocessed once. Each pass then parses it (parse_translation_unit, the vector path), and checks it with
 // check_input, and with check_input_deferred on one lane and on up to --lanes (8), each time into the same arenas taken
@@ -33,6 +33,16 @@
 // --base-page-tokens N tokens on, which for the measurements of #847 takes the place of
 // BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS (0, the default, keeps it). A unit the deferred reader leaves to source order is
 // said so. This measures the reader (check_input) alone, not the graph's checking after it.
+//
+// Then the readings' absolute times (#447): the medians of the parse, source order's reading and each deferred one, in
+// whole nanoseconds. With --raw, every pass's samples follow, unrounded: its order of the three readings, each one's
+// nanoseconds, and the lanes the last deferred reading ran on and copied the reader on. With --rss, each reading also
+// takes its resident memory (CheckDeferredResident), outside its time: the process's resident set as it starts, its
+// arenas taken back or reserved again, and the peak through it, from which `growth`, the pages it faulted in beyond
+// those it found resident. Without --cold, the caller's arenas keep the pages earlier readings touched, so a reading's
+// growth is what it took beyond them (the deferred state's own memory is released after every reading but with
+// --warm); with --cold, every reading starts from fresh caller arenas and its growth is all it touched. Both are the
+// kernel's counts, /proc/self/status's VmRSS and VmHWM.
 //
 // With --cpus (a comma-separated list of at least --lanes CPUs), the command pins itself to the first, where the parse,
 // source order and the top level run, and its lanes to the list in order, in a team of its own that every run reuses.
@@ -73,8 +83,72 @@ struct CheckDeferredSample
     uint64_t wake[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t arenas[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t claimed[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    // With --rss, the peak resident set through the reading and its growth over the reading's start, in bytes.
+    uint64_t peak[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint64_t growth[BUSTER_CHECK_SOURCE_MAX_PASSES];
     // The passes in which the first lane read the largest body (the first of the largest in source order).
     uint32_t largest_first;
+};
+
+// The room check_deferred_benchmark_status reads /proc/self/status into: the whole file, about 1.5 KB.
+#define BUSTER_CHECK_DEFERRED_STATUS_BYTES 8192u
+
+// A field of /proc/self/status in bytes: "VmRSS:", the resident set, or "VmHWM:", its peak. 0 if it can't be read.
+static uint64_t check_deferred_benchmark_status(const char* field)
+{
+    char text[BUSTER_CHECK_DEFERRED_STATUS_BYTES];
+    const int file = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+    uint64_t length = 0;
+    ssize_t got = file >= 0 ? 1 : -1;
+    while (got > 0 && length < sizeof(text) - 1)
+    {
+        got = read(file, text + length, sizeof(text) - 1 - length);
+        length += got > 0 ? (uint64_t)got : 0;
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    text[length] = 0;
+    const char* line = strstr(text, field);
+    // The value is in kB, after blanks.
+    const uint64_t kilobytes = line != 0 ? strtoull(line + strlen(field), 0, 10) : 0;
+    return kilobytes * 1024;
+}
+
+// A reading's resident memory starts (--rss): its peak, reset to the resident set by writing 5 to /proc/self/clear_refs.
+// The resident set in bytes, or 0 if the peak couldn't be reset or the resident set read.
+static uint64_t check_deferred_benchmark_resident_begin(void)
+{
+    const int file = open("/proc/self/clear_refs", O_WRONLY | O_CLOEXEC);
+    const bool reset = file >= 0 && write(file, "5", 1) == 1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    return reset ? check_deferred_benchmark_status("VmRSS:") : 0;
+}
+
+// The peak resident set since check_deferred_benchmark_resident_begin, in bytes, or 0 if it can't be read.
+static uint64_t check_deferred_benchmark_resident_peak(void)
+{
+    return check_deferred_benchmark_status("VmHWM:");
+}
+
+// The pages a reading faulted in beyond those resident as it started: its peak over its start.
+static uint64_t check_deferred_benchmark_growth(uint64_t start, uint64_t peak)
+{
+    return peak > start ? peak - start : 0;
+}
+
+// A reading's resident memory (--rss), in bytes: the process's resident set as the reading starts and its peak through
+// the reading. Not `known` where either couldn't be taken.
+typedef struct CheckDeferredResident CheckDeferredResident;
+struct CheckDeferredResident
+{
+    uint64_t start;
+    uint64_t peak;
+    bool known;
 };
 
 // The caller arenas' capacities, as check_deferred_benchmark_file reserves them: with `cold`, every reading releases
@@ -83,8 +157,9 @@ static const uint64_t check_deferred_benchmark_capacities[4] = { UINT64_C(1) << 
 
 // One check of the parsed unit: source order's (lanes 0) or the deferred reader's, into `arenas` (types, its index,
 // the input and scratch), taken back first, or with `cold` released and reserved again. Whether it ran, with the deferred reader's state in `deferred`.
+// With `resident`, its resident memory too, taken outside its time.
 static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp, Arena* arenas, uint32_t lanes, const uint32_t* cpus, bool every_lane,
-                                         uint32_t base_page_tokens, CheckDeferred* deferred, uint64_t* nanoseconds, bool cold)
+                                         uint32_t base_page_tokens, CheckDeferred* deferred, uint64_t* nanoseconds, bool cold, CheckDeferredResident* resident)
 {
     for (uint32_t i = 0; i < 4; i += 1)
     {
@@ -108,6 +183,10 @@ static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp,
     TypeTable types;
     CheckInput input;
     bool valid = type_initialize(&types, arenas + 0, arenas + 1, capacity);
+    if (resident != 0)
+    {
+        resident->start = check_deferred_benchmark_resident_begin();
+    }
     const uint64_t begin = check_source_time();
     if (valid && lanes == 0)
     {
@@ -122,11 +201,16 @@ static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp,
         check_input_deferred(deferred, &input, parser, pp, &types, arenas + 2, arenas + 3, lanes, CHECK_INPUT_BINDINGS_DEFAULT);
     }
     *nanoseconds = check_source_time() - begin;
+    if (resident != 0)
+    {
+        resident->peak = resident->start != 0 ? check_deferred_benchmark_resident_peak() : 0;
+        resident->known = resident->start != 0 && resident->peak != 0;
+    }
     return valid;
 }
 
 static bool check_deferred_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, uint32_t lanes, const uint32_t* cpus,
-                                          bool every_lane, bool warm, uint32_t base_page_tokens, bool cold)
+                                          bool every_lane, bool warm, uint32_t base_page_tokens, bool cold, bool raw, bool rss)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -147,10 +231,14 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     Arena arenas[4] = { arena_reserve(UINT64_C(1) << 36), arena_reserve(UINT64_C(1) << 34), arena_reserve(UINT64_C(1) << 36), arena_reserve(UINT64_C(1) << 36) };
     static uint64_t parses[BUSTER_CHECK_SOURCE_MAX_PASSES];
     static uint64_t sequential[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    static uint64_t sequential_peak[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    static uint64_t sequential_growth[BUSTER_CHECK_SOURCE_MAX_PASSES];
     static CheckDeferredSample samples[2];
     static CheckDeferred deferred;
     samples[0].largest_first = 0;
     samples[1].largest_first = 0;
+    // Whether every reading's resident memory was taken (--rss).
+    bool resident_known = rss;
     uint64_t bodies = 0;
     uint64_t body_tokens = 0;
     uint32_t largest_body = 0;
@@ -172,16 +260,22 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
         {
             const uint32_t way = check_deferred_benchmark_orders[pass % BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS][step];
             uint64_t time = 0;
+            CheckDeferredResident resident = { 0 };
             const uint32_t run_lanes = way == 0 ? 0 : way == 1 ? 1 : lanes;
-            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, base_page_tokens, &deferred, &time, cold);
+            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, base_page_tokens, &deferred, &time, cold, rss ? &resident : 0);
+            resident_known &= resident.known;
             if (way == 0)
             {
                 sequential[pass] = time;
+                sequential_peak[pass] = resident.peak;
+                sequential_growth[pass] = check_deferred_benchmark_growth(resident.start, resident.peak);
             }
             else
             {
                 CheckDeferredSample* sample = samples + (way - 1);
                 sample->whole[pass] = time;
+                sample->peak[pass] = resident.peak;
+                sample->growth[pass] = check_deferred_benchmark_growth(resident.start, resident.peak);
                 sample->top[pass] = deferred.top_ns;
                 sample->environment[pass] = deferred.environment_ns;
                 sample->walks[pass] = deferred.walk_ns;
@@ -253,6 +347,38 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                    (double)check_source_median(sample->merge_parts[3], count) / tokens, (double)check_source_median(sample->merge_parts[4], count) / tokens,
                    (double)check_source_median(sample->merge_parts[5], count) / tokens);
         }
+        printf("checker-deferred:   absolute: parse=%" PRIu64 " source_order=%" PRIu64 " deferred_1=%" PRIu64 " deferred_%u=%" PRIu64 " ns, medians of %u passes\n",
+               check_source_median(parses, count), check_source_median(sequential, count), check_source_median(samples[0].whole, count), lanes,
+               check_source_median(samples[1].whole, count), count);
+        if (rss && resident_known)
+        {
+            printf("checker-deferred:   resident: source_order peak=%" PRIu64 " growth=%" PRIu64 ", deferred_1 peak=%" PRIu64 " growth=%" PRIu64 ", deferred_%u peak=%" PRIu64
+                   " growth=%" PRIu64 " KiB, medians of %u passes\n",
+                   check_source_median(sequential_peak, count) / 1024, check_source_median(sequential_growth, count) / 1024,
+                   check_source_median(samples[0].peak, count) / 1024, check_source_median(samples[0].growth, count) / 1024, lanes,
+                   check_source_median(samples[1].peak, count) / 1024, check_source_median(samples[1].growth, count) / 1024, count);
+        }
+        else if (rss)
+        {
+            printf("checker-deferred:   resident: unknown, /proc/self/clear_refs or /proc/self/status couldn't be used\n");
+        }
+        // Every pass's samples: its readings' order (s source order, 1 the deferred reader on one lane, n on --lanes).
+        for (uint32_t pass = 0; raw && pass < count; pass += 1)
+        {
+            const uint8_t* order = check_deferred_benchmark_orders[pass % BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS];
+            const char names[3] = { 's', '1', 'n' };
+            printf("checker-deferred:   pass=%u order=%c%c%c parse=%" PRIu64 " source_order=%" PRIu64 " deferred_1=%" PRIu64 " deferred_%u=%" PRIu64 " ns active=%" PRIu64
+                   " copies=%" PRIu64, pass, names[order[0]], names[order[1]], names[order[2]], parses[pass], sequential[pass], samples[0].whole[pass], lanes,
+                   samples[1].whole[pass], samples[1].active[pass], samples[1].copies[pass]);
+            if (rss && resident_known)
+            {
+                printf(" source_order_peak=%" PRIu64 " source_order_growth=%" PRIu64 " deferred_1_peak=%" PRIu64 " deferred_1_growth=%" PRIu64 " deferred_%u_peak=%" PRIu64
+                       " deferred_%u_growth=%" PRIu64 " KiB",
+                       sequential_peak[pass] / 1024, sequential_growth[pass] / 1024, samples[0].peak[pass] / 1024, samples[0].growth[pass] / 1024, lanes,
+                       samples[1].peak[pass] / 1024, lanes, samples[1].growth[pass] / 1024);
+            }
+            printf("\n");
+        }
     }
     else
     {
@@ -303,6 +429,8 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     bool every_lane = false;
     bool cold = false;
     bool warm = false;
+    bool raw = false;
+    bool rss = false;
     uint32_t cpus[BUSTER_CHECK_DEFERRED_MAX_LANES];
     uint32_t cpu_count = 0;
     bool cpus_given = false;
@@ -334,6 +462,14 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
         else if (strcmp(arguments[i], "--cold") == 0)
         {
             cold = true;
+        }
+        else if (strcmp(arguments[i], "--raw") == 0)
+        {
+            raw = true;
+        }
+        else if (strcmp(arguments[i], "--rss") == 0)
+        {
+            rss = true;
         }
         else if (strcmp(arguments[i], "--cpus") == 0)
         {
@@ -370,7 +506,8 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     bool measured = valid && (!cpus_given || pinned);
     for (uint32_t i = 0; measured && i < file_count; i += 1)
     {
-        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0, every_lane, warm, (uint32_t)base_page_tokens, cold);
+        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0, every_lane, warm, (uint32_t)base_page_tokens, cold,
+                                                  raw, rss);
         fflush(stdout);
     }
     if (pinned)
@@ -380,7 +517,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     if (!valid)
     {
         fprintf(stderr, "usage: compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold] [--base-page-tokens N]"
-                        " [preprocessor options] file...\n"
+                        " [--raw] [--rss] [preprocessor options] file...\n"
                         "  --passes: a multiple of %u, the readings' orders, up to %u (24 by default)\n",
                         BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS, BUSTER_CHECK_SOURCE_MAX_PASSES / BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS * BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS);
     }
