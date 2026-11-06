@@ -5,6 +5,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)\"/.claude/hooks/join-tailnet.sh",
+            "timeout": 120
+          },
+          {
+            "type": "command",
             "command": "\"$(git rev-parse --show-toplevel)\"/.githooks/enable-sign-off.sh",
             "timeout": 10
           }

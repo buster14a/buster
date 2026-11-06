@@ -24,8 +24,8 @@
 //   the loop): proved, lowered to a row program, the fixed reader refusing it, and the same mutations refuted, the loop's
 //   exit rule anchored inside the loop and a single allocation's rule after it (what a fixed writer would say) among
 //   them;
-// - limits (emitted_test_limits): a fixed frame at the events' 32-bit edge, unsupported by name (#1149), beside one
-//   16 bytes smaller; and emitted_unwind_same's same, different and resource answers;
+// - limits (emitted_test_limits): every save mask at and beyond the old signed 32-bit CFA edge (#1149), wide row
+//   encoding and verifier arithmetic, Tier 1 probes and compile-only -c/--verify, and emitted_unwind_same's answers;
 // - uncovered forms (emitted_test_uncovered): code through monitorx, whose conservative record may write rsp, unproven
 //   where a rule fails on a path through it and refuted where one fails off its paths, though after an unproven one;
 //   and the driver's --verify -c -march=znver5 of monitorx's and mwaitx's leaves, by both paths;
@@ -44,6 +44,8 @@ struct EmittedTest
     uint64_t tier1_frames;
     uint64_t probe_frames;
     uint64_t row_programs;
+    // Tier 0's functions that probe (#177, emitted_test_tier0_probes and every other round's programs).
+    uint64_t tier0_probed;
     uint64_t mutants;
     uint64_t refuted;
     Arena arena;
@@ -130,12 +132,6 @@ static void emitted_test_rows(EmittedTest* test)
     for (uint32_t f = 0; f < count; f += 1)
     {
         const UnwindFunction* function = &functions[f];
-        // A CFA past int32's offsets is the fixed descriptor's alone: rows' values are signed 32-bit (emitted_cfa_fits).
-        if (!emitted_cfa_fits(function->saved, function->frame_size))
-        {
-            programs[f] = *function;
-            continue;
-        }
         const uint32_t row_count = unwind_function_rows(function, rows[f], BUSTER_EMITTED_TEST_ROWS);
         emitted_test_expect(test, row_count <= BUSTER_EMITTED_TEST_ROWS, "a descriptor's rows fit", f);
         programs[f] = (UnwindFunction){ .size = function->size, .open = BUSTER_UNWIND_ROWS, .rows = rows[f], .row_count = row_count };
@@ -314,12 +310,22 @@ static void emitted_test_mutants(EmittedTest* test, const EmittedCode* code, uin
 }
 
 // A Tier 0 function: its frame events (emitted_from_tier0) resolved after sizing are the fixed reader's descriptor,
-// byte for byte; they are its records' (emitted_verify_frames); and their mutants aren't.
+// byte for byte; they are its records' (emitted_verify_frames); and their mutants aren't. A probed reservation's loop
+// without a frame pointer (#177) has its CFA in r11 through the loop, which no fixed descriptor says: its events resolve
+// into a row program, which the verifier proves and whose mutants it refutes. Both paths compile the same code.
 static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* function, uint64_t id)
 {
     Arena* arena = &test->arena;
     const uint64_t mark = arena->length;
     const Tier0Code code = tier0_validate(function).error == TIER0_OK ? tier0_compile(function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+    const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+    emitted_test_expect(test, code.error != TIER0_OK || (twin.error == TIER0_OK && twin.count == code.count && twin.branch_count == code.branch_count &&
+                                                         memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0 &&
+                                                         (code.branch_count == 0 || (memcmp(twin.branches, code.branches, code.branch_count * sizeof(uint32_t)) == 0 &&
+                                                                                     memcmp(twin.targets, code.targets, code.branch_count * sizeof(uint32_t)) == 0))),
+                        "Tier 0's paths compile the same code", id);
+    const bool r11 = code.error == TIER0_OK && !code.frame_pointer && (code.frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1)) != 0 &&
+                     tier0_probes_reservation(code.frame_probe, code.frame_size, code.frame_alignment_log2, false);
     EmittedTestLayout layout;
     bool valid = emitted_test_expect(test, code.error == TIER0_OK, "Tier 0 compiles the generated function", id) &&
                  emitted_test_expect(test, emitted_test_layout(code.records, code.count, code.branches, code.targets, code.branch_count, code.reference_count, arena, &layout),
@@ -336,8 +342,8 @@ static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* 
     for (uint32_t scalar = 0; valid && scalar < 2; scalar += 1)
     {
         const bool lowered = emitted_unwind(&emitted, layout.offsets, layout.length, scalar != 0, rows, &resolved) == UNWIND_OK;
-        emitted_test_expect(test, lowered && emitted_unwind_same(&previous, &resolved, arena) == EMITTED_SAME && emitted_test_same_bytes(&previous, &resolved, true),
-                            "the resolved frame events are the fixed reader's descriptor", id);
+        const bool same = r11 ? resolved.open == BUSTER_UNWIND_ROWS : emitted_unwind_same(&previous, &resolved, arena) == EMITTED_SAME && emitted_test_same_bytes(&previous, &resolved, true);
+        emitted_test_expect(test, lowered && same, r11 ? "a probed frame's loop without a frame pointer resolves into a row program" : "the resolved frame events are the fixed reader's descriptor", id);
     }
     if (valid)
     {
@@ -350,8 +356,49 @@ static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* 
         emitted_test_mutants(test, &emitted, 6, id);
         test->tier0_functions += 1;
         test->row_programs += resolved.open == BUSTER_UNWIND_ROWS;
+        test->tier0_probed += code.frame_probe;
     }
     arena_pop_to(arena, mark);
+}
+
+// Tier 0's probed frames (#177, -fstack-clash-protection): a function of one address-taken object of each size (a page's
+// multiple, past a page, below one) and alignment (16, 64, two pages), with a frame pointer and without, its prologue a
+// probed reservation and realignment (tier0_emit_probed_reservation, tier0_emit_realignment), through
+// emitted_test_tier0_function: its events proved, the loop's without a frame pointer a row program's.
+static void emitted_test_tier0_probes(EmittedTest* test)
+{
+    static const uint32_t sizes[] = { 3 * BUSTER_TIER0_PAGE_BYTES, BUSTER_TIER0_PAGE_BYTES + 904, 100 };
+    static const uint8_t alignments[] = { 4, 6, 13 };
+    static const uint8_t kinds[3] = { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_DISCARD, BUSTER_TYPED_RETURN };
+    static const uint8_t classes[3] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID };
+    static const uint64_t values[3] = { 0, 0, 0 };
+    static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_VOID };
+    static const uint8_t local_flags[1] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+    {
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(alignments); a += 1)
+        {
+            for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+            {
+                const uint32_t local_sizes[1] = { sizes[s] };
+                const uint8_t local_alignments[1] = { alignments[a] };
+                Tier0Function function;
+                memset(&function, 0, sizeof(function));
+                function.kinds = kinds;
+                function.classes = classes;
+                function.values = values;
+                function.count = 3;
+                function.local_classes = local_classes;
+                function.local_flags = local_flags;
+                function.local_sizes = local_sizes;
+                function.local_alignments = local_alignments;
+                function.local_count = 1;
+                function.frame_pointer = pointer != 0 ? BUSTER_TIER0_FRAME_POINTER_ALL : BUSTER_TIER0_FRAME_POINTER_NONE;
+                function.probe_stack = true;
+                emitted_test_tier0_function(test, &function, 0x50000 + s * 16 + a * 2 + pointer);
+            }
+        }
+    }
 }
 
 static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds)
@@ -382,6 +429,8 @@ static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds
             emitted_test_expect(test, generated, "typed program generation", id);
             for (uint32_t f = 0; generated && f < functions->count; f += 1)
             {
+                // Every other round's programs probe their frames and allocations (#177, -fstack-clash-protection).
+                functions->functions[f].probe_stack = round % 2 == 1;
                 emitted_test_tier0_function(test, &functions->functions[f], id * 64 + f);
             }
             test->programs += generated;
@@ -389,6 +438,7 @@ static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds
         }
     }
     tier0_tables_close(&tables);
+    emitted_test_tier0_probes(test);
 }
 
 // A Tier 1 frame's function: its prologue (with its events), a body that clobbers the saved registers, moves rsp with
@@ -481,47 +531,16 @@ static bool emitted_test_directory(char* directory, uint64_t size, const char* n
     return written > 0 && (uint64_t)written < size && mkdtemp(directory) != 0;
 }
 
-// A fixed frame at the edge of the events' signed 32-bit offsets (#1149): `sub rsp, 0x7ffffff8`, whose CFA offset is
-// 2^31, is EMITTED_FRAME_LIMIT, which the emission reports as unsupported (not as an internal error), and one 16 bytes
-// smaller is described, and emitted (with --verify) as the fixed descriptor of its size. Then emitted_unwind_same's three answers: the same CFI, different CFI, and a scratch arena
-// without room for a fixed shape's rows, which says neither (a resource failure, which the lanes retry on one).
+#include "emitted_code_limits_test.c"
+
+// The widened frame range and emitted_unwind_same's three answers: same CFI, different CFI and insufficient scratch.
 static void emitted_test_limits(EmittedTest* test)
 {
-    const uint32_t sizes[2] = { 0x7ffffff8u, 0x7fffffe8u };
-    for (uint32_t k = 0; k < 2; k += 1)
-    {
-        X86Instruction records[3] = {
-            tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, (int32_t)sizes[k]),
-            tier1_frame_emit_immediate(X86_FORM_ADD_RM64_IMM32, X86_REGISTER_RSP, (int32_t)sizes[k]),
-            { .form = X86_FORM_RET },
-        };
-        const Tier0Code code = {
-            .records = records,
-            .count = 3,
-            .frame_size = sizes[k],
-            .error = TIER0_OK,
-        };
-        const uint64_t mark = test->arena.length;
-        const EmittedCode emitted = emitted_from_tier0(&code, true, false, false, &test->arena);
-        emitted_test_expect(test, emitted.frame_status == (k == 0 ? EMITTED_FRAME_LIMIT : EMITTED_FRAME_DESCRIBED),
-                            k == 0 ? "a frame whose CFA offset is 2^31 is past the events' offsets" : "a frame 16 bytes smaller is described", k);
-        // Each record's start (sub and add of rsp by an imm32 are 7 bytes, ret 1), and room for the events' rows: the
-        // smaller frame's emission, with --verify's proof and Tier 0's analyzer, must give the fixed frame of its size.
-        uint32_t offsets[4] = { 0, 7, 14, 15 };
-        EmissionFrameRow rows[8];
-        UnwindFunction frame = { 0 };
-        const char* reason = 0;
-        const bool room = emitted.frame_count <= BUSTER_ARRAY_LENGTH(rows);
-        const CheckProgramStatus status = room ? check_program_emit_frame(&emitted, offsets, 15, true, false, rows, &test->scratch, &frame, &reason) :
-                                                 CHECK_PROGRAM_RESOURCE;
-        emitted_test_expect(test, k == 0 ? status == CHECK_PROGRAM_UNSUPPORTED && reason != 0 && strstr(reason, "#1149") != 0 && strstr(reason, "internal") == 0 :
-                                           status == CHECK_PROGRAM_OK && reason == 0 && frame.open != BUSTER_UNWIND_ROWS && frame.size == 15 &&
-                                               frame.saved == 0 && frame.frame_size == sizes[k],
-                            k == 0 ? "the emission reports the 2 GB edge as unsupported, naming its follow-up" :
-                                     "the emission writes the frame 16 bytes smaller as its fixed descriptor, verified",
-                            k);
-        arena_pop_to(&test->arena, mark);
-    }
+    emitted_test_large_fixed(test);
+    emitted_test_wide_rows(test);
+    emitted_test_wide_tracking(test);
+    emitted_test_large_tier1(test);
+    emitted_test_large_driver(test);
     const UnwindFunction pushed = { .size = 16, .saved = 1 };
     const UnwindFunction other = { .size = 16, .saved = 2 };
     Arena full = test->scratch;
@@ -996,12 +1015,14 @@ static int emitted_test_run(bool cross, bool keep, uint64_t seed, uint32_t round
             emitted_test_native(&test, keep);
         }
     }
-    emitted_test_expect(&test, test.tier0_functions != 0 && test.tier1_frames != 0 && test.probe_frames != 0 && test.mutants != 0 && test.refuted == test.mutants,
-                        "coverage: Tier 0 functions, Tier 1 frames, probe frames and refuted mutants", 0);
-    printf("emitted code: %" PRIu64 " fixed descriptors as row programs, %" PRIu64 " Tier 0 programs' %" PRIu64 " functions, %" PRIu64 " Tier 1 frames (%" PRIu64
-           " probe loops without a frame pointer), %" PRIu64 " row programs, %" PRIu64 " of %" PRIu64 " mutants refuted; %" PRIu64 " checks, %" PRIu64 " failed\n",
-           test.descriptors, test.programs, test.tier0_functions, test.tier1_frames, test.probe_frames, test.row_programs, test.refuted, test.mutants, test.checks,
-           test.failures);
+    emitted_test_expect(&test, test.tier0_functions != 0 && test.tier0_probed != 0 && test.tier1_frames != 0 && test.probe_frames != 0 && test.mutants != 0 &&
+                                   test.refuted == test.mutants,
+                        "coverage: Tier 0 functions, probed ones, Tier 1 frames, probe frames and refuted mutants", 0);
+    printf("emitted code: %" PRIu64 " fixed descriptors as row programs, %" PRIu64 " Tier 0 programs' %" PRIu64 " functions (%" PRIu64 " probed), %" PRIu64
+           " Tier 1 frames (%" PRIu64 " probe loops without a frame pointer), %" PRIu64 " row programs, %" PRIu64 " of %" PRIu64 " mutants refuted; %" PRIu64
+           " checks, %" PRIu64 " failed\n",
+           test.descriptors, test.programs, test.tier0_functions, test.tier0_probed, test.tier1_frames, test.probe_frames, test.row_programs, test.refuted,
+           test.mutants, test.checks, test.failures);
     arena_release(&test.arena);
     arena_release(&test.scratch);
     return test.failures == 0 ? 0 : 1;

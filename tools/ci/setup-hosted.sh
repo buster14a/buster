@@ -16,7 +16,7 @@ sudo apt-get install --yes --no-install-recommends gcc g++ binutils libc6-dev \
 version=23.1.4
 archive=LLVM-${version}-Linux-X64
 llvm="$RUNNER_TEMP/llvm-$version"
-curl --fail --location --retry 3 \
+curl --fail --location --retry 8 --retry-max-time 240 \
     "https://github.com/llvm/llvm-project/releases/download/llvmorg-${version}/${archive}.tar.zst" \
     --output "$RUNNER_TEMP/llvm.tar.zst"
 printf '%s  %s\n' efdd1dbd089b99bfcfcde7b8eb1236163f2e88df5a981cca4f783ec9cb5e0378 \
@@ -34,7 +34,7 @@ tar -I 'zstd -d --long=30' --extract --file "$RUNNER_TEMP/llvm.tar.zst" \
 rm "$RUNNER_TEMP/llvm.tar.zst"
 # The binary archive omits the project license; retain the one from its exact
 # source revision, verified independently.
-curl --fail --location --retry 3 \
+curl --fail --location --retry 8 --retry-max-time 240 \
     https://raw.githubusercontent.com/llvm/llvm-project/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/llvm/LICENSE.TXT \
     --output "$llvm/LICENSE.TXT"
 printf '%s  %s\n' 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee \
@@ -58,7 +58,7 @@ printf 'LD_LIBRARY_PATH=%s%s\n' "$llvm/lib" "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PAT
 perf --version
 # Keep the external mold oracle at the qualified release rather than the
 # runner distribution's older package. Its archive retains its MIT license.
-curl --fail --location --retry 3 \
+curl --fail --location --retry 8 --retry-max-time 240 \
     https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-x86_64-linux.tar.gz \
     --output "$RUNNER_TEMP/mold.tar.gz"
 printf '%s  %s\n' 6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189 \
@@ -70,7 +70,7 @@ test "$("$mold/bin/mold" --version)" = 'mold 3.0.0 (8de38c35a2df16a25f7ff87ac3ad
 ln -s "$mold/bin/mold" "$toolbin/mold"
 ln -s "$mold/bin/mold" "$toolbin/ld.mold"
 # Match the existing external-linker oracle rather than silently omitting it.
-curl --fail --location --retry 3 \
+curl --fail --location --retry 8 --retry-max-time 240 \
     https://github.com/wild-linker/wild/releases/download/0.10.0/wild-linker-0.10.0-x86_64-unknown-linux-gnu.tar.gz \
     --output "$RUNNER_TEMP/wild.tar.gz"
 printf '%s  %s\n' 641265506a7c06cfb03181b8916ab663ec8407855db6d4db7f8450667d105283 "$RUNNER_TEMP/wild.tar.gz" | sha256sum --check --status

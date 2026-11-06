@@ -1,0 +1,5 @@
+function () -> i32 {
+b0:
+  %0 = call.i32 @100() fixed=() variadic=0
+  %1 = ret.void %0
+}

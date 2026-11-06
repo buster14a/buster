@@ -13,7 +13,7 @@ requirements. [Command index](README.md).
   diagnostics as clang does, with exit status 0 for a unit without errors and
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
   Tier 0 ([the checker guide](../../docs/c-checker.md)); and with neither option it
-  links an executable (`-o`, `a.out` by default) by the direct path, bound
+  links an executable (`-o`, `a.out` by default), for pure-C inputs by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
   checking every function's records with `x86_validate`, `--check-transitions`
@@ -31,18 +31,32 @@ requirements. [Command index](README.md).
   `--tier1-report` and `--tier1-refusals` say which step refused the others
   (and with `--verify`, how many functions' code its certificate proved,
   `code_certified`, or left for a shape it doesn't decode, `code_uncertified`),
-  and `--tier1-no-rematerialize` compiles them without rematerialization and
-  `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
-  guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure
+  and `--tier1-no-rematerialize` compiles them without rematerialization,
+  `--tier1-no-lifetimes` without their objects' lifetimes and
+  `--tier1-no-inline` without expanding the unit's always_inline functions'
+  calls, which the report's `inlined` counts (#1282): [the Tier 1
+  guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
   optimization macros, not the tier; Tier 0 is the default), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
-  option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
+  option, `check_driver_id_order`, for each unit of a multi-file command too), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or
   `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
-  [unwind guide](../../docs/unwind.md)'s "The C driver's unwind tables"). Either
+  [unwind guide](../../docs/unwind.md)'s "The C driver's unwind tables").
+  `-fno-omit-frame-pointer`, the last of it and `-fomit-frame-pointer`, keeps a
+  frame pointer in every function by both tiers (`push rbp; mov rbp, rsp`
+  first, rbp no value's register), and with `-momit-leaf-frame-pointer`, the
+  last of it and `-mno-omit-leaf-frame-pointer`, in every function that calls
+  (`predefines_frame_pointer`, #177: [the frame guide](../../docs/tier1-frame.md)'s
+  "The frame pointer on request"); without it neither tier keeps one where its
+  frame doesn't need one, at every `-O` (clang keeps it at `-O0`).
+  `-fstack-clash-protection`, the last of it and `-fno-stack-clash-protection`,
+  makes both tiers' frames of a page or more and their dynamic allocations
+  touch each page below rsp before rsp passes it (`predefines_stack_clash`,
+  #177: the frame guide's "Stack-clash protection on request"); without it
+  neither probes, as clang's default. Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](../../docs/function-lanes.md)): by default as many as the bodies'
   tokens pay for, up to one per core of the CPUs the process may run on, and
@@ -58,7 +72,13 @@ requirements. [Command index](README.md).
   they started, `lane_session_settle`), and kept parked until the process exits;
   the jobserver's slots are taken per wide region, never at the start, an
   emission short of its lanes taking more as other recipes give theirs back
-  (#673), and lanes that can't start leave the command on one. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
+  (#673), and lanes that can't start leave the command on one. The checker reads
+  a unit in source order; `--deferred-bodies` reads its function bodies apart on
+  those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
+  its bodies' tokens pay for four lanes or more (two with `--lanes N`), with
+  source order's result, and `--no-deferred-bodies` undoes it: the [lanes
+  guide](../../docs/function-lanes.md)'s "The checker's bodies on lanes" has why
+  it is off by default. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
   `-g`, its DWARF units' functions'). With several source files (#152,
   `c_checker_units.c`, the [translation units guide](../../docs/translation-units.md))
   the units compile on lanes instead, one unit a lane at a time, with lanes
@@ -144,3 +164,44 @@ with the preprocessor. The [CC driver guide](../../docs/cc-driver.md) records
 the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
+
+## Mixed inputs
+
+The implicit compile/link driver classifies each positional input before opening
+it (#1120). `.c`, `.h` and `.i` are C; `.s` is assembly; `.S` is preprocessed
+assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Other suffixes
+are also linker inputs, with a warning; the foreign reader diagnoses their
+actual format. `-x c`, `-x assembler` and `-x assembler-with-cpp` override the
+suffix for following inputs only; `-x none` restores suffix inference. Joined
+`-xLANG` works too. Stdin requires an explicit language at that operand.
+
+C-only commands retain the existing direct path. Mixed commands compile C and
+assembly on the unit scheduler's lanes, retain their ELF objects in memory,
+and use the built-in foreign resolver and writer with the discovered C runtime.
+No host compiler/linker or temporary object files are used. Input order, `-l`
+state, archive extraction, named sections, C DWARF and unwind records survive
+this boundary. Each `.S` unit owns its preprocessing state on its lane, including
+`-D`, `-U`, include paths and dependency output; it does not share the standalone
+assembler command's static preprocessor. Dependencies publish only after all
+units and the final link succeed. The foreign link reuses the command's worker
+session and leases its active lanes from the same worker budget.
+
+`-c` writes each C/assembly source's object and warns about unused linker inputs.
+An explicit `-o` requires at most one source, not at most one input. Assembly
+syntax checking does not write an object. The explicit `assemble` command keeps
+its standalone options; preprocessing-only commands retain their own driver.
+Existing unsupported C code-generation and linker options remain refusals.
+
+```sh
+./build/compiler main.c helper.o answer.s -o program
+./build/compiler main.o libhelper.a -o program
+./build/compiler -DBASE=40 main.c answer.S -o program
+./build/compiler -x c unusual.s -x none helper.o -o program
+./build/compiler -c main.c answer.s
+clang -std=c17 -O2 -Wall -Wextra -Wno-unused-function -DBUSTER_DRIVER_MIXED_STANDALONE src/buster/compiler/c_driver_mixed_test.c -o /tmp/buster-mixed-test && /tmp/buster-mixed-test ./build/compiler clang
+```
+
+The last command runs the focused original argv-level fixtures, also included
+in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
+shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
+`.S`, positional languages, stdin, compile-only output and failure preservation.

@@ -3495,22 +3495,58 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // What clang deduces as C++ deduces a declarator's type, and GCC refuses: refused by name.
-            "__auto_type: a pointer declarator",
+            // What clang deduces as C++ deduces a declarator's type, and GCC refuses (#147): pointer and function
+            // declarators, qualifiers through them, and a declaration's later declarators, each the same deduction.
+            "__auto_type: pointer declarators",
+            "int g(void);\n"
             "void f(void) {\n"
             "    int y = 0;\n"
+            "    double d = 1;\n"
             "    __auto_type *p = &y;\n"
+            "    __auto_type **pp = &p;\n"
+            "    __auto_type const *q = &d;\n"
+            "    __auto_type (*fp)(void) = g;\n"
+            "    _Static_assert(_Generic(p, int *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(pp, int **: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(q, const double *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(fp, int (*)(void): 1, default: 0), \"\");\n"
             "}\n",
-            true,
-            true
+            false,
+            false
         },
         {
-            "__auto_type: a second declarator",
+            "__auto_type: later declarators",
+            "int a[3];\n"
             "void f(void) {\n"
             "    __auto_type x = 1, y = 2;\n"
+            "    const __auto_type c = 3, e = 4;\n"
+            "    __auto_type r = a, s = &a[1];\n"
+            "    _Static_assert(_Generic(y, int: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(&e, const int *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(s, int *: 1, default: 0), \"\");\n"
+            "    (void)x; (void)c; (void)r;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // Declarators that deduce differently, clang's error at the keyword.
+            "__auto_type: later declarators' different deductions",
+            "int a[3];\n"
+            "void f(void) {\n"
+            "    __auto_type r = a, *s = &a[1];\n"
             "}\n",
             true,
-            true
+            false
+        },
+        {
+            "__auto_type: a pointer declarator of no pointer",
+            "int x;\n"
+            "void f(void) {\n"
+            "    __auto_type *p = x;\n"
+            "}\n",
+            true,
+            false
         },
         {
             // A name with linkage declared before: its types would bind before the deduction.
@@ -6145,6 +6181,7 @@ static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
+static void check_test_semantic_diagnostics(CheckTest* test, const char* clang);
 static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang);
 static void check_test_undeclared(CheckTest* test, const char* clang);
 
@@ -6173,6 +6210,7 @@ static int run_checker_tests(int argc, char** argv)
     bool requests = false;
     bool sizeof_only = false;
     bool transitions_only = false;
+    bool semantic_diagnostics = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6244,6 +6282,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             requests = true;
         }
+        else if (strcmp(argv[i], "--semantic-diagnostics") == 0)
+        {
+            semantic_diagnostics = true;
+        }
         else if (strcmp(argv[i], "--transitions") == 0)
         {
             transitions_only = true;
@@ -6273,9 +6315,9 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(direct_initializers || program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || semantic_diagnostics || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -6285,6 +6327,10 @@ static int run_checker_tests(int argc, char** argv)
         if (initialized && direct_initializers)
         {
             check_test_direct_initializers(&test, clang);
+        }
+        else if (initialized && semantic_diagnostics)
+        {
+            check_test_semantic_diagnostics(&test, clang);
         }
         else if (initialized && transitions_only)
         {

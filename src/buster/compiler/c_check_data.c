@@ -52,6 +52,9 @@ struct CheckDataObject
     const uint8_t* literal_bytes;
     uint64_t literal_size;
     bool string_pool;
+    // An object the compiler makes, published only where it has a symbol, as a string literal's (a constant CFString's,
+    // #148, check_data_cfstring_keys).
+    bool optional;
     // Declaration alignment is separate from the ordinary compatible type. Zero keeps its natural alignment.
     uint8_t alignment_log2;
 };

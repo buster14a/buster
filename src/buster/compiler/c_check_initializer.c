@@ -268,6 +268,71 @@ static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarn
     }
 }
 
+// clang's diagnostic at an initializer's use of a member that a deprecated or unavailable attribute marks (#147,
+// SemaInit's DiagnoseUseOfDecl): at a designator's member name, or at the first token of the value a member takes by its
+// position, "'x' is deprecated" (-Wdeprecated-declarations) with its message and the note at the attribute, or the error
+// "'x' is unavailable" with its note at the member's name, as a member access's (check_input_member_uses), where the
+// token's context doesn't drop it (CheckGraph.availability_contexts). The error is staged with the warnings, which the
+// driver gives it with (CHECK_WARNING_EVENT_UNAVAILABLE_USE), under `-w` too, which the driver's walk stages them for
+// all the same; a walk with a sink but no event buffer has no place for it, and fails at it instead, as an invalid
+// initializer.
+static void check_init_member_use(CheckInitWalker* walker, uint32_t member, uint32_t token)
+{
+    const CheckGraph* graph = walker->graph;
+    const CheckInputMarkedMember* marked = graph != NULL && graph->marked_member_count != 0 ?
+                                           check_marked_member(graph->marked_members, graph->marked_member_count, member) : NULL;
+    const uint8_t context = marked != NULL && graph->availability_contexts != NULL ? graph->availability_contexts[token] : 0;
+    const CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
+    if (marked != NULL && marked->unavailable && !check_marked_dropped(marked, context))
+    {
+        const Parser* parser = walker->parser;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_UNAVAILABLE_USE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .name = parser->tokens.names[marked->name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_UNAVAILABLE_HERE,
+            .token = marked->name,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        if (sink != NULL && sink->events == NULL)
+        {
+            check_init_fail(walker, CHECK_INIT_INVALID, token);
+        }
+        check_init_semantic_warning(walker, &event, &note, 1);
+    }
+    else if (marked != NULL && !check_marked_dropped(marked, context))
+    {
+        const Parser* parser = walker->parser;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+            .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .name = parser->tokens.names[marked->name], .token = marked->message },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+            .token = marked->attribute,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = parser->tokens.names[marked->name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_init_semantic_warning(walker, &event, &note, 1);
+    }
+}
+
 static bool check_init_semantic_publish(CheckInitWalker* walker)
 {
     CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
@@ -1034,6 +1099,10 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                             member = begin + i;
                             found = true;
                         }
+                    }
+                    if (found)
+                    {
+                        check_init_member_use(walker, member, token + 1);
                     }
                     for (uint32_t i = 0; i < count && member == 0; i += 1)
                     {
@@ -2338,6 +2407,15 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
             }
             if (!excess && walker->result->status == CHECK_INIT_OK)
             {
+                // A member a value takes by its position, at each level of its elided braces, at the value's first
+                // token (#147, check_init_member_use).
+                const TypeId record = type_strip_aligned(walker->types, frame->type);
+                const uint8_t record_kind = type_kind(walker->types, record);
+                if (!designated && !frame->wrapper && (record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION))
+                {
+                    const uint32_t tag = walker->types->types.index[type_index(record)];
+                    check_init_member_use(walker, walker->types->tags.member_begin[tag] + (uint32_t)frame->next, token);
+                }
                 check_init_used(walker, frame, token, true);
                 if (walker->parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
                 {

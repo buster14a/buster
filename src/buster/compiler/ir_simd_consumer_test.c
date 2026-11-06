@@ -112,8 +112,9 @@ static void ir_simd_scan_test(IrTestTally* tally)
 }
 
 // A function whose only SIMD values are masks (#179): its masks loaded, complemented and stored. SSA promotion and SCCP,
-// dead code and CFG cleanup take it (ir_function_has_vectors), by both paths, into a function that verifies; GVN, LICM,
-// SROA and the inliner, which don't model masks, still refuse it transactionally.
+// dead code and CFG cleanup take it (ir_function_has_vectors), by both paths, into a function that verifies; GVN, LICM
+// and SROA (without #1282's `simd`), which don't model masks, still refuse it transactionally. The inliner takes it
+// (#1282): it clones a callee's values whatever their types.
 static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* output, Arena* scratch)
 {
     static const uint8_t masks[4] = { IR_M8, IR_M16, IR_M32, IR_M64 };
@@ -175,7 +176,9 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 IrInlineOptions inline_options = ir_inline_options();
                 inline_options.scalar = scalar != 0;
                 checked = ir_optimize_inline(&unit, output, scratch, inline_options, &inlined, NULL);
-                ir_test_expect(tally, checked.error == IR_ERROR_UNSUPPORTED && inlined.function_count == 123 && output->length == 0 && scratch->length == 0, "the inliner refuses masks");
+                ir_test_expect(tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].instruction_count == function.instruction_count && scratch->length == 0,
+                               "the inliner takes masks (#1282)");
+                arena_pop_to(output, 0);
                 ir_test_expect(tally, scalar != 0 ? ir_scan_vector_paths == scans : !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans,
                                "the passes' scans for SIMD values take the requested path: none the vector path on a scalar run");
                 function.symbol_count = 0;
@@ -339,8 +342,11 @@ static int run_ir_simd_tests(int argc, char** argv)
             IrInlineOptions inline_options = ir_inline_options();
             inline_options.scalar = scalar != 0;
             checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
-            ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && inlined.function_count == 123 && output.length == 0 && scratch.length == 0,
-                           "inlining refuses unsupported SIMD metadata before cloning a unit");
+            ir_test_expect(&tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].vector_constant_count == 1 &&
+                                       memcmp(inlined.functions[0].vector_constants, function.vector_constants, sizeof(IrSimdValue)) == 0 && scratch.length == 0,
+                           "inlining clones a unit with vectors, its constants' payloads kept (#1282)");
+            arena_pop_to(&output, 0);
+            inlined = (IrInlineResult){ .function_count = 123 };
             IrSimdValue* original_payload = function.vector_constants;
             IrSimdValue* borrowed = (IrSimdValue*)output.base;
             *borrowed = (IrSimdValue){ .words = { UINT64_C(0xfedcba9876543210) } };

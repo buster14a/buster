@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fenv.h>
+#include "host_math.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -284,26 +285,28 @@ static long double check_literal_half(const char* spelling, char** end)
     if (isfinite(nearest) && nearest != 0)
     {
         // Steps of _Float16's precision at this magnitude: 2^-10 of its binade, and 2^-24 below the normals.
-        const int binade = ilogb(nearest) > -14 ? ilogb(nearest) : -14;
-        const double scaled = ldexp(nearest, 10 - binade);
+        const int binade = host_ilogb(nearest) > -14 ? host_ilogb(nearest) : -14;
+        const double scaled = host_ldexp(nearest, 10 - binade);
         const uint64_t steps = (uint64_t)scaled;
         const double fraction = scaled - (double)steps;
         bool up = fraction > 0.5 || (fraction == 0.5 && (steps & 1) != 0);
         if (fraction == 0.5)
         {
-            const int mode = fegetround();
-            fesetround(FE_DOWNWARD);
+            const int mode = host_fegetround();
+            host_fesetround(FE_DOWNWARD);
             const double below = strtod(spelling, 0);
-            fesetround(FE_UPWARD);
+            host_fesetround(FE_UPWARD);
             const double above = strtod(spelling, 0);
-            fesetround(mode);
+            host_fesetround(mode);
             up = below != nearest ? false : above != nearest ? true : up;
         }
-        result = ldexp((double)(steps + up), binade - 10);
+        result = host_ldexp((double)(steps + up), binade - 10);
         result = result > 65504.0 ? INFINITY : result;
     }
     return result;
 }
+
+#include "c_check_literal_quad.c"
 
 // A number without an imaginary suffix, into `result`, which the caller zeroed.
 static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
@@ -358,10 +361,16 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
                 type = BUSTER_TYPE_LONG_DOUBLE;
                 written -= 1;
             }
+            else if (written != 0 && (spelling[written - 1] == 'q' || spelling[written - 1] == 'Q'))
+            {
+                type = BUSTER_TYPE_FLOAT128;
+                written -= 1;
+            }
             spelling[written] = 0;
             char* end = spelling;
             errno = 0;
-            long double value;
+            long double value = 0;
+            bool represented = true;
             if (type == BUSTER_TYPE_FLOAT16)
             {
                 value = check_literal_half(spelling, &end);
@@ -374,6 +383,10 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             {
                 value = strtod(spelling, &end);
             }
+            else if (type == BUSTER_TYPE_FLOAT128)
+            {
+                represented = check_literal_quad(spelling, &end, &value);
+            }
             else
             {
                 value = strtold(spelling, &end);
@@ -382,7 +395,7 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             result->type = type;
             result->floating = value;
             result->real = true;
-            result->valid = separators && end != spelling && end == spelling + written;
+            result->valid = represented && separators && end != spelling && end == spelling + written;
             if (result->valid && isinf(value))
             {
                 result->range = CHECK_LITERAL_RANGE_OVERFLOW;
@@ -428,7 +441,7 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             suffix -= 1;
             break;
         }
-        if (c != 'f' && c != 'l' && c != 'u')
+        if (c != 'f' && c != 'l' && c != 'u' && c != 'q')
         {
             break;
         }
