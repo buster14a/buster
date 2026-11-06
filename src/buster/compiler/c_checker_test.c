@@ -2681,6 +2681,18 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            "bool of an address an ignored pragma weak names",
+            "#pragma weak w extra\nextern int w;\n_Bool b = (_Bool)&w;\n",
+            false,
+            false
+        },
+        {
+            "bool of an address a pragma weak after it names",
+            "extern int w;\n_Bool b = (_Bool)&w;\n#pragma weak w\n",
+            false,
+            false
+        },
+        {
             "global array initializer",
             "int a[3]; int *p = a;\n",
             false,
