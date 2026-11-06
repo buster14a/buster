@@ -7297,8 +7297,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_sparse_wide_present(reader->output->attributes) && previous_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, previous_declaration) : 0;
             // clang's multiversioning check uses the canonical (first) declaration's attributes, not the immediate
             // previous one (#839's re-review).
-            uint32_t first_handle = previous_handle;
-            while (first_handle != 0)
+            // The stream's first column has the walk's answer where it's kept (#1351): the walk is O(redeclarations).
+            const bool first_kept = previous_handle != 0 && reader->bindings.first != 0;
+            uint32_t first_handle = first_kept ? reader->bindings.first[previous_handle - 1] : previous_handle;
+            while (!first_kept && first_handle != 0)
             {
                 const uint32_t earlier = reader->bindings.previous[first_handle - 1];
                 if (earlier == 0)
