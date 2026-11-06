@@ -1861,8 +1861,10 @@ one of them. It also runs both paths' calls of clang's `preserve_most` and
 `preserve_all` callees against clang's build, with values live across the
 calls. And `check_test_driver_preserving_frames` runs both paths' definitions
 from a harness clang builds, which sets every general register and vector
-register, calls the function and reads them all back: on x86-64, with probes,
-frame pointers and `-g`, and on x86-64-v3 where the host has AVX2.
+register, calls the function and reads them all back. It also recovers the
+caller's general registers through the frame's unwind rules. It runs on
+x86-64, with probes, frame pointers and `-g`, and on x86-64-v3 where the host
+has AVX2.
 
 clang 23's own -O0 frames differ from these contracts in two places this
 work found, so the harness checks the contract rather than clang's code. In

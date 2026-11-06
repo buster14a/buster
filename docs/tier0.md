@@ -952,13 +952,16 @@ Tier 0 leaves out the result's registers (`tier0_result_set`): rax for a hidden 
 part's. The frame (`tier0_kept_pointer` keeps a frame pointer for it):
 
 1. **The prologue** pushes rbp and points it at the push, then the callee-saved registers, then the kept general registers
-   in their numbers' order (`Tier0Frame.preserved`, counted in `pushes`). After the reservation and any realignment, and
-   before the variadic save area's stores and the parameters' moves, it stores each kept vector register whole into the
-   frame's preserve area (`Tier0Frame.preserve_area`, after the variadic save area: register r at r times the bytes,
-   the masks past them), at the frame's base (`tier0_emit_preserve`). The moves are movups, vmovdqu or vmovdqu64, and
-   kmovw or kmovq, which take any address, so the frame keeps its 16 bytes' alignment.
-2. **The epilogue** loads the result's registers, then the kept vector and mask registers back. The teardown then pops the
-   kept general registers first, then the callee-saved ones and rbp.
+   in their numbers' order (`Tier0Frame.preserved`, counted in `pushes`). Right below the pushes it reserves the
+   preserve block (`Tier0Frame.preserve_bytes`, `tier0_preserve_block_bytes`). It then stores each kept vector register
+   whole, in their numbers' order, then k0 to k7, 8 bytes each, from rbp (`tier0_emit_preserve`). This happens before
+   the frame's own reservation, any realignment and the parameters' moves. Every slot is a stored register's, and the
+   block is at most 2,112 bytes, so a probed frame's stores touch all of it, under a page.
+   The moves are movups, vmovdqu or vmovdqu64, and kmovw or kmovq, which take any address. The block counts with the
+   pushes in the frame's alignment, its bias and its incoming area (`above` in `tier0_layout_frame`). Each slot is at a
+   fixed offset from the CFA in every frame shape, a realigned one's and one whose body moves rsp included.
+2. **The epilogue** loads the result's registers, then the kept vector and mask registers back from rbp. The teardown's
+   release steps over the block. It then pops the kept general registers first, then the callee-saved ones and rbp.
 
 The set is the convention's whole set, not the registers the body touches. Tier 0's register set covers the general
 registers and xmm0 to xmm15 alone, and nothing has checked a template's scratch caller-saved registers against
@@ -970,23 +973,40 @@ teardowns and saves know nothing of the kept registers, and the producer refuses
 "aggregate errors" break each rule once, and both compile paths must refuse the metadata. Tier 1 leaves the function to
 Tier 0 (`ir_lower_typed_target_path`).
 
-**The unwind tables.** With the frame pointer, the kept registers' pushes and pops are no transitions
-(`unwind_tier0_frame_tails` checks them in place, `Tier0Code.frame_preserved`). Each one's save is a row at the boundary
-after its push, at its slot's offset from the CFA, and its rule is restored after its pop
-(`emitted_tier0_preserve_rows`), as LLVM's CFI has them. The vector and mask registers' moves are the body's to the
-tables. Debuggers and unwinders don't read them.
+**The unwind tables.** With the frame pointer, none of the kept registers' moves is a transition.
+`unwind_tier0_frame_tails` checks the pushes, the block's sub and stores and the pops in place, from
+`Tier0Code.frame_preserved`, `frame_preserve_vectors`, `frame_preserve_vector_bytes` and `frame_preserve_mask_bytes`.
+The emission describes every kept register at every boundary (`emitted_tier0_preserve_rows`), since the CIE's
+`same_value` rules cover the callee-saved registers alone:
 
-`test-checker-driver`'s `check_test_driver_preserving_frames` runs both paths' code from a harness clang builds: every
-register the convention keeps but the result's must come back, and so must rsp. The runs cover:
+- its caller's value (`DW_CFA_same_value`) from the entry;
+- its slot (`DW_CFA_offset`) from the end of its push or store; a vector register's names its low 128 bits by DWARF's XMM
+  numbers (17 to 32, 67 to 82), and a mask register's is 118 to 125;
+- its own value again from the end of its reload.
 
-- results in a register, in two, in xmm0 and none;
-- calls;
-- a variable-length array, which moves rsp, so the epilogue's loads are from the frame base;
-- an object aligned to 64 (a realigned frame);
-- variadic arguments;
-- a backtrace from a callee.
+LLVM describes its spills the same way. libgcc's unwinder and GDB read no vector register's rule. The general registers'
+rules are proved by the frame verifier's fixpoint (`--verify`, `emitted_verify_frames`), and the vector and mask
+registers' by `emitted_verify_saved_vectors`: each slot's rule right after the store of that register into that slot
+from rbp, with the CFA at rbp plus 16, and each caller's value at the entry or right after the load back.
 
-They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
+**Tests.**
+
+- `test-emitted-code`:
+  - every register set (`preserve_most`'s, `preserve_all`'s with 16 and 32 bytes, and every register with 64 bytes and
+    the masks) in frames of each size, alignment (a realigned frame's) and probing;
+  - the rules' completeness at every boundary, the verifier's proof, and the mutants it refutes;
+  - a hand-written frame whose wrong vector rules are refuted.
+- `test-checker-driver`'s `check_test_driver_preserving_frames` runs both paths' code, built with `--verify`, from a
+  harness clang builds. Every register the convention keeps but the result's must come back, and so must rsp. A callee's
+  `_Unwind_Backtrace` must recover the caller's general registers through the frame with `_Unwind_GetGR`. The runs cover:
+  - results in a register, in two, in xmm0 and none;
+  - calls;
+  - a variable-length array, which moves rsp;
+  - an object aligned to 64 (a realigned frame);
+  - variadic arguments;
+  - a backtrace from a callee.
+
+  They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
 
 ## Symbols outside the image
 

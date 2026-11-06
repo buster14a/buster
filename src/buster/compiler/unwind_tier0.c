@@ -430,14 +430,19 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     const bool eh = code != 0 && code->frame_eh_return;
     const uint32_t eh_pushes = eh ? 2 : 0;
     // A preserving function's (#147, Tier0Code.frame_preserved): its general registers pushed after the others, in their
-    // numbers' order, and popped first, after the release; with a frame pointer, none of them a transition (their saves'
-    // rows are emitted_tier0_preserve_rows').
+    // numbers' order, and popped first, after the release; then its block of vector and mask registers reserved below
+    // them (`block` bytes) and each stored (`stores`), before the frame's reservation; with a frame pointer, none of them a
+    // transition (their saves' rows are emitted_tier0_preserve_rows'). The block's loads come before the epilogue's
+    // release, the body's to the CFA.
     const uint32_t preserved = code != 0 ? code->frame_preserved : 0;
     const uint32_t kept = (uint32_t)__builtin_popcount(preserved);
+    const uint32_t block = code != 0 ? tier0_preserve_block_bytes(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes) : 0;
+    const uint32_t stores = code != 0 ? tier0_preserve_moves(code->frame_preserve_vectors, code->frame_preserve_mask_bytes) : 0;
+    const uint32_t blocked = block != 0 ? 1 + stores : 0;
     // The prologue's records, and the epilogue's: its teardown, from its release (a frame pointer's lea or mov, which is
     // no transition), and its ret.
     const uint32_t realignment = tier0_realignment_records(probe, alignment_log2) + (base ? 1 : 0);
-    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + kept + reservation + realignment : pushes + (reserved ? reservation : 0));
+    const uint32_t prologue = (pointer ? 2 + pushes + eh_pushes + kept + blocked + reservation + realignment : pushes + (reserved ? reservation : 0));
     const uint32_t teardown = pointer ? 1 + kept + pushes + 1 : pushes + (reserved ? 1 : 0);
     const uint32_t epilogue = open ? 0 : teardown + 1;
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
@@ -446,7 +451,7 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     // Without final offsets, each transition's position is its record boundary (the record after it's index), as
     // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
     if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 || (eh && (!pointer || open)) ||
-        (preserved != 0 && (!pointer || open || eh || code->tail_count != 0 || (preserved & ~UNWIND_TIER0_PRESERVABLE) != 0)) ||
+        ((preserved != 0 || block != 0) && (!pointer || open || eh || code->tail_count != 0 || (preserved & ~UNWIND_TIER0_PRESERVABLE) != 0)) ||
         (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
         (final_offsets == 0 && size != code->count))
     {
@@ -498,6 +503,18 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
             error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, (uint8_t)r) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
             at += 1;
         }
+    }
+    if (records != 0 && error == UNWIND_OK && block != 0)
+    {
+        // The block's sub, then its stores, each from rbp.
+        uint32_t amount = 0;
+        error = unwind_tier0_adjustment(&records[at], true, &amount) && amount == block ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        for (uint32_t k = 0; error == UNWIND_OK && k < stores; k += 1)
+        {
+            const X86Instruction* store = &records[at + 1 + k];
+            error = store->rm == X86_REGISTER_RBP && store->mode == BUSTER_X86_MEMORY_BASE ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        }
+        at += blocked;
     }
     uint32_t amount = 0;
     if (records != 0 && error == UNWIND_OK && code->frame_size != 0)

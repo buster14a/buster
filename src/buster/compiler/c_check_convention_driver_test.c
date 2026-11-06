@@ -131,6 +131,7 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "#include <stdint.h>\n"
         "#include <stdio.h>\n"
         "#include <string.h>\n"
+        "#include <unwind.h>\n"
         "// probe(state): every general register but rsp from state->in (rbp's too), ymm0 to ymm15 (xmm0 to xmm15 without AVX)\n"
         "// from state->vin, a call of state->fn through r11, then every register into state->out and state->vout.\n"
         "typedef struct State { uint64_t in[16]; uint64_t out[16]; uint8_t vin[16][32]; uint8_t vout[16][32]; void* fn; uint64_t sp; } State;\n"
@@ -153,7 +154,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "#else\n"
         "        \".irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\\nmovdqu %xmm\\\\n, 768+32*\\\\n(%rax)\\n.endr\\n\"\n"
         "#endif\n"
-        "        \"add $8, %rsp\\npop %r15\\npop %r14\\npop %r13\\npop %r12\\npop %rbp\\npop %rbx\\nret\\n\");\n"
+        "        \"add $8, %rsp\\npop %r15\\npop %r14\\npop %r13\\npop %r12\\npop %rbp\\npop %rbx\\nret\\n.globl probe_end\\nprobe_end:\\n\");\n"
+        "static State last;\n"
         "static const char* names[16] = { \"rax\", \"rcx\", \"rdx\", \"rbx\", \"rsp\", \"rbp\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"r12\", \"r13\", \"r14\", \"r15\" };\n"
         "// A call of `fn` with a and b in rdi and rsi: the general registers `kept` and the vector ones `vkept` must come back.\n"
         "static int check(const char* what, void* fn, uint32_t kept, uint32_t vkept, long a, long b, long* result)\n"
@@ -166,6 +168,7 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    for (uint32_t v = 0; v < 16; v += 1) { for (uint32_t k = 0; k < 32; k += 1) { s.vin[v][k] = (uint8_t)(v * 37 + k * 11 + 5); } }\n"
         "    s.fn = fn;\n"
         "    probe(&s);\n"
+        "    last = s;\n"
         "#ifdef __AVX__\n"
         "    const size_t width = 32;\n"
         "#else\n"
@@ -183,6 +186,37 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    *result = (long)s.out[0];\n"
         "    return bad;\n"
         "}\n"
+        "// A backtrace from a callee of the preserving frame (observe): each general register of `unwound_kept` (but rsp, the CFA)\n"
+        "// libgcc's unwinder recovers in the frame of its call from probe, which the frame's rules give, into `unwound`. libgcc has\n"
+        "// no place of a register no frame on the way saves, so the others aren't read.\n"
+        "extern char probe_end[];\n"
+        "static uint64_t unwound[16];\n"
+        "static uint32_t unwound_kept;\n"
+        "static int unwound_found;\n"
+        "static _Unwind_Reason_Code unwound_frame(struct _Unwind_Context* context, void* argument)\n"
+        "{\n"
+        "    static const int dwarf[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };\n"
+        "    const uintptr_t ip = _Unwind_GetIP(context);\n"
+        "    (void)argument;\n"
+        "    if (ip > (uintptr_t)probe && ip <= (uintptr_t)probe_end && !unwound_found)\n"
+        "    {\n"
+        "        for (int r = 0; r < 16; r += 1) { unwound[r] = r == 4 || (unwound_kept >> r & 1) == 0 ? 0 : _Unwind_GetGR(context, dwarf[r]); }\n"
+        "        unwound_found = 1;\n"
+        "    }\n"
+        "    return _URC_NO_REASON;\n"
+        "}\n"
+        "void observe(void) { _Unwind_Backtrace(unwound_frame, 0); }\n"
+        "// The registers `kept` an unwinder recovers in probe's frame are those probe called with.\n"
+        "static int recovered(const char* what, uint32_t kept)\n"
+        "{\n"
+        "    int bad = !unwound_found;\n"
+        "    for (uint32_t r = 0; unwound_found && r < 16; r += 1)\n"
+        "    {\n"
+        "        if ((kept >> r & 1) && r != 4 && unwound[r] != last.in[r]) { printf(\"%s: %s unwound as %llx\\n\", what, names[r], (unsigned long long)unwound[r]); bad = 1; }\n"
+        "    }\n"
+        "    unwound_found = 0;\n"
+        "    return bad;\n"
+        "}\n"
         "typedef struct Pair { long a, b; } Pair;\n"
         "long most(long a, long b);\n"
         "long most_calls(long a, long b);\n"
@@ -195,6 +229,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "long all_vla(long a, long b);\n"
         "long all_aligned(long a, long b);\n"
         "long all_trace(long a, long b);\n"
+        "void all_observe(long a, long b);\n"
+        "long most_observe(long a, long b);\n"
         "extern int depth_seen;\n"
         "int main(void)\n"
         "{\n"
@@ -215,6 +251,11 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    bad |= check(\"all_trace\", (void*)all_trace, most_set & ~1u, 0xffff, 40, 2, &r) || r != 42 || depth_seen != 3;\n"
         "    depth_seen = 0;\n"
         "    bad |= all_trace(1, 2) != 3 || depth_seen < 5;\n"
+        "    // The caller's registers through the frame's rules, every one the convention keeps.\n"
+        "    unwound_kept = most_set;\n"
+        "    bad |= check(\"all_observe\", (void*)all_observe, most_set, 0xffff, 40, 2, &r) || recovered(\"all_observe\", most_set);\n"
+        "    unwound_kept = most_set & ~1u;\n"
+        "    bad |= check(\"most_observe\", (void*)most_observe, most_set & ~1u, 0, 40, 2, &r) || r != 42 || recovered(\"most_observe\", most_set & ~1u);\n"
         "    bad |= most_var(3, 10L, 20L, 12L) != 42;\n"
         "    Pair p = most_pair(5, 3);\n"
         "    bad |= p.a != 8 || p.b != 2 || all_double(2.0, 3.0) != 7.0;\n"
@@ -239,7 +280,10 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "__attribute__((preserve_all)) double all_double(double a, double b) { return a * b + 1.0; }\n"
         "__attribute__((preserve_all)) long all_vla(long a, long b) { char buf[a]; __builtin_memset(buf, 1, a); return buf[a - 1] + b + 39; }\n"
         "__attribute__((preserve_all)) long all_aligned(long a, long b) { _Alignas(64) char x[64]; __builtin_memset(x, (int)a, 64); printf(\"\"); return x[63] + b; }\n"
-        "__attribute__((preserve_all)) long all_trace(long a, long b) { trace(); return a + b; }\n";
+        "__attribute__((preserve_all)) long all_trace(long a, long b) { trace(); return a + b; }\n"
+        "void observe(void);\n"
+        "__attribute__((preserve_all)) void all_observe(long a, long b) { (void)a; (void)b; observe(); }\n"
+        "__attribute__((preserve_most)) long most_observe(long a, long b) { observe(); return a + b; }\n";
     static const struct
     {
         const char* name;
@@ -275,8 +319,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         for (uint32_t p = 0; runs && p < 2; p += 1)
         {
             char* text = NULL;
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-w", (char*)configurations[c][0], "-c", callee_path, "-o", object, NULL, NULL, NULL, NULL, NULL };
-            uint32_t at = 8;
+            char* arguments[] = { (char*)executable, "--verify", "-std=gnu17", "-w", (char*)configurations[c][0], "-c", callee_path, "-o", object, NULL, NULL, NULL, NULL, NULL };
+            uint32_t at = 9;
             for (uint32_t k = 1; k < 4 && configurations[c][k] != NULL; k += 1)
             {
                 arguments[at++] = (char*)configurations[c][k];
