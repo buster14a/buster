@@ -1428,11 +1428,11 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     // Each argument's conversion precedes its nested calls; the last argument is visited first.
                     const uint8_t argument_kind = check_common_call_prototype(emission, node) ?
                                                   BUSTER_CHECK_EMIT_ARGUMENT : BUSTER_CHECK_EMIT_PROMOTED_ARGUMENT;
-                    check_common_emit_push(emission, graph->operand0[node], BUSTER_CHECK_EMIT_CONVERSIONS);
+                    check_common_emit_reach(emission, graph->operand0[node], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
                     const uint32_t offset = graph->argument_offsets[node];
                     for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                     {
-                        check_common_emit_push(emission, graph->argument_nodes[offset + i], BUSTER_CHECK_EMIT_CONVERSIONS);
+                        check_common_emit_reach(emission, graph->argument_nodes[offset + i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
                         check_common_emit_push(emission, offset + i, argument_kind);
                     }
                 }
@@ -1446,13 +1446,13 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
                     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
                     {
-                        check_common_emit_push(emission, operands[i], BUSTER_CHECK_EMIT_CONVERSIONS);
+                        check_common_emit_reach(emission, operands[i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
                     }
                     if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
                     {
                         for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                         {
-                            check_common_emit_push(emission, graph->argument_nodes[graph->argument_offsets[node] + i], BUSTER_CHECK_EMIT_CONVERSIONS);
+                            check_common_emit_reach(emission, graph->argument_nodes[graph->argument_offsets[node] + i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
                         }
                     }
                 }
