@@ -1030,7 +1030,9 @@ faults below are this column's: its 700 base pages, less those its tags write.
 
 **Measured on the 9700X.** The PR's 9700X job (run 42281737894, job
 128118533298) compared main `ec5f0f6b` with the change merged into it
-(`3f3fe0ac`):
+(`3f3fe0ac`). [The record](https://github.com/buster14a/buster-performance/tree/4d5a27b8e8285e4c4eeb857ec42c93cb2419f4c3/docs/measurements/check-input-529-passes-2026-11-06)
+keeps the job's log, the profiles' samples and their breakdowns, and an A/B of
+its own, each run under its own hold of the lock:
 - **Rounds.** 5 runs each, over four placements of the checker's unit and two
   copies of each executable.
 - **The control.** A second copy of main ran in the same rounds.
