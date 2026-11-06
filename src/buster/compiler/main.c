@@ -739,7 +739,7 @@ static bool main_preprocessing(int count, char** arguments)
             break;
         }
         result = strcmp(arguments[i], "-E") == 0 || strcmp(arguments[i], "-M") == 0 || strcmp(arguments[i], "-MM") == 0;
-        if ((pp_option_takes_value(arguments[i]) || strcmp(arguments[i], "--lanes") == 0 || strcmp(arguments[i], "--worker-budget") == 0 ||
+        if ((pp_option_takes_value(arguments[i]) || strcmp(arguments[i], "--lanes") == 0 || strcmp(arguments[i], "--lane-cpus") == 0 || strcmp(arguments[i], "--worker-budget") == 0 ||
              strcmp(arguments[i], "--id-order") == 0 || strcmp(arguments[i], "-l") == 0 || strcmp(arguments[i], "-L") == 0 || strcmp(arguments[i], "-Xlinker") == 0) && i + 1 < count)
         {
             i += 1;
