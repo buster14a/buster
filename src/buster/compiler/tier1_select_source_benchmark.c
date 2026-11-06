@@ -126,7 +126,7 @@ static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, con
         }
         if (selected)
         {
-            tier1_burs_check_function(&corpus->burs, &optimized.function, scratch);
+            tier1_burs_check_function(&corpus->burs, &optimized.function, &dominance, scratch);
         }
         corpus->seen += 1;
         corpus->unprepared += !prepared;

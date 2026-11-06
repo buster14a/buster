@@ -820,6 +820,83 @@ GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$he
 expect_match "$fixtures/calls.log" "^workflow run .*-f purpose=snapshot -f hardware=defer " 'a valid empty list plans: the hidden dispatch, not handed over, is made again'
 mv "$fixtures/artifact-9701.zip.away" "$fixtures/artifact-9701.zip"
 rm -f "$fixtures/artifacts-9700.json"
+
+# Historical requests do not consume the 64 active pending slots. Retain unseen admissions and preparations across
+# the window-to-continuation handoff, including a timestamp ahead of this job's clock. The 600-second grace is exact.
+pending_now=$(madrid '2026-11-04 04:06')
+: > "$work/pending-history.tsv"
+for i in $(seq 1 70); do
+    printf 'pending\t20261104.9720.%s.admit\tbacklog\tadmit\t%s\t%s\n' "$i" "$epoch" "$((pending_now - 600))" >> "$work/pending-history.tsv"
+done
+{
+    printf 'pending\t20261104.9720.101.defer\tsnapshot\tdefer\t%s\t%s\n' "$head" "$pending_now"
+    printf 'pending\t20261104.9720.102.admit\tbacklog\tadmit\t%s\t%s\n' "$epoch" "$((pending_now - 599))"
+    printf 'pending\t20261104.9720.103.defer\tbacklog\tdefer\t%s\t%s\n' "$merge" "$((pending_now + 60))"
+} > "$work/pending-active.tsv"
+cat "$work/pending-history.tsv" "$work/pending-active.tsv" > "$work/pending-long.tsv"
+long_handoff="buster-nightly-pending-1 73$(awk -F '\t' '{ printf " %s,%s,%s,%s,%s", $2, $3, $4, $5, $6 }' "$work/pending-long.tsv")"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9720 NIGHTLY_NOW=$pending_now NIGHTLY_STARTED=$((pending_now - 20700)) NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$long_handoff run_coordinator "$work/handoff-compacted" window run
+expect_no_match "$fixtures/calls.log" '^workflow run' 'historical pending rows cannot hide a still-unseen dispatch'
+cmp "$work/pending-active.tsv" "$work/handoff-compacted/pending.tsv" || fail 'the handoff keeps exactly the three unseen active requests'
+expect_match "$GITHUB_OUTPUT" '^pending=buster-nightly-pending-1 3 ' 'the continuation receives the compacted handoff'
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'the compacted window job can hand over normally'
+
+# Recent requests visible in the facts also leave the pending file. A queued admission must still block the planner
+# after compaction, through its run facts rather than its pending row. Exercise this with both instrumentations.
+: > "$work/pending-visible.tsv"
+: > "$work/pending-facts.tsv"
+for i in $(seq 1 70); do
+    flavor=defer status=completed conclusion=success
+    if [ "$i" -eq 70 ]; then flavor=admit status=queued conclusion=-; fi
+    request="20261104.9730.$i.$flavor"
+    printf 'pending\t%s\tbacklog\t%s\t%s\t%s\n' "$request" "$flavor" "$epoch" "$pending_now" >> "$work/pending-visible.tsv"
+    printf 'run\t%s\t1\tworkflow_dispatch\t%s\t%s\t%s\t.github/workflows/9700x.yml\tnightly/%s\t%s\t%s\t1421805693\tNightly backlog (%s) of %s [%s]\n' \
+        "$i" "$status" "$conclusion" "$epoch" "$epoch" "$pending_now" "$pending_now" "$flavor" "$epoch" "$request" >> "$work/pending-facts.tsv"
+done
+grep -v $'\tadmit\t' "$work/pending-active.tsv" > "$work/pending-unseen.tsv"
+plan_pending()
+{
+    local binary=$1 facts=$2 pending=$3
+    shift 3
+    "$binary" plan --states "$work/handoff-window/states.tsv" --ledger "$work/handoff-window/ledger.tsv" \
+        --facts "$facts" --now "$pending_now" --main "$head" --mode run --coordinator 9740 \
+        --pending "$pending" --report "$work/pending-report.md" "$@"
+}
+for binary in "$work/nightly" "$work/nightly-sanitize"; do
+    cat "$work/pending-visible.tsv" "$work/pending-unseen.tsv" > "$work/pending-input.tsv"
+    ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 plan_pending "$binary" "$work/pending-facts.tsv" "$work/pending-input.tsv" > "$work/pending-plan.tsv"
+    cmp "$work/pending-unseen.tsv" "$work/pending-input.tsv" || fail 'visible requests leave only the unseen preparations pending'
+    expect_no_match "$work/pending-plan.tsv" $'^dispatch\t[^\t]+\tadmit\t' 'a visible queued admission still prevents a second hardware dispatch'
+    expect_line "$work/pending-plan.tsv" $'wait\ta hardware run is in flight' 'the visible queued facts retain the hardware guard'
+done
+
+# Invalid historical data, another invalid input, an invalid option, or more than 64 still-active requests rejects
+# the whole plan without replacing the original handoff. Stale rows must not hide an active overflow.
+: > "$work/pending-empty-facts.tsv"
+printf 'not-a-commit\n' > "$work/pending-bad-refs.tsv"
+for broken in malformed refs option overflow; do
+    cat "$work/pending-history.tsv" "$work/pending-active.tsv" > "$work/pending-input.tsv"
+    arguments=()
+    case "$broken" in
+        malformed)
+            printf 'pending\t20261104.9740.1.admit\tbacklog\tadmit\tnot-a-sha\t%s\n' "$((pending_now - 600))" >> "$work/pending-input.tsv" ;;
+        refs) arguments=(--refs "$work/pending-bad-refs.tsv") ;;
+        option) arguments=(--attempts invalid) ;;
+        overflow)
+            cat "$work/pending-history.tsv" > "$work/pending-input.tsv"
+            for i in $(seq 1 65); do
+                printf 'pending\t20261104.9740.%s.admit\tbacklog\tadmit\t%s\t%s\n' "$i" "$epoch" "$pending_now" >> "$work/pending-input.tsv"
+            done ;;
+    esac
+    cp "$work/pending-input.tsv" "$work/pending-before.tsv"
+    if plan_pending "$work/nightly" "$work/pending-empty-facts.tsv" "$work/pending-input.tsv" "${arguments[@]}" > "$work/pending-plan.tsv" 2> "$work/pending-error.log"; then
+        fail "invalid pending plan ($broken) succeeded"
+    fi
+    cmp "$work/pending-before.tsv" "$work/pending-input.tsv" || fail "invalid pending plan ($broken) changed the handoff"
+    test ! -s "$work/pending-plan.tsv" || fail "invalid pending plan ($broken) emitted actions"
+done
+
 # Main moves on between the prepare job and the window job: the window job's dispatches still name the cycle's pinned
 # snapshot, which the worker checks ancestry against and records, not main's new head.
 rm -f "$fixtures"/count-*
@@ -835,4 +912,4 @@ git -C "$history" -c push.negotiate=false push -q "$remote" main
 GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/moved" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
 expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, the prepare-to-window handoff and a pin that main moved past checked\n'
+printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, pending compaction, the prepare-to-window handoff and a pin that main moved past checked\n'

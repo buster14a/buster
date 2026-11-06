@@ -411,7 +411,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         for (uint32_t node = 0; node < count; node += 1)
         {
             prepared.value_intervals[node] = BUSTER_IR_NONE;
-            widths[node] = (uint8_t)tier1_select_width(plan->function->type[node]);
+            widths[node] = (uint8_t)tier1_select_storage_width(plan, node);
             if (options->rematerialize && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_CONSTANT)
             {
                 operations[node] = BUSTER_TIER1_REMAT_INTEGER;
