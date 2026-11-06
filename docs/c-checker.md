@@ -3971,7 +3971,7 @@ function specifiers carry `-Wduplicate-decl-specifier` at the repeated token,
 including pointer and parameter qualifiers. These warnings use the common
 command-line and source pragma policy.
 
-Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. A comma inside a conditional arm does not inherit the outer conversion. The logical operators' implicit float-to-bool conversions are not yet covered.
+Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. Literal conversion warnings do not descend through a comma inside a conditional arm, or through a nested comma or conditional inside a comma's value. The logical operators' implicit float-to-bool conversions are not yet covered.
 
 The graph's passes share one pass in graph order, `check_common_facts`, which
 gives each node its parent, whether another node uses its value, whether it is

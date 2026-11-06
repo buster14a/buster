@@ -2198,7 +2198,10 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
                                                       (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
                                                       original, changed);
-            check_common_report_phase_at(parser, pp, input, input->graph.tokens[source], completion, PP_DIAGNOSTIC_DEFERRED,
+            const CheckGraph* graph = &input->graph;
+            const uint32_t condition = graph->ops[source] == CHECK_OP_CONDITIONAL ? graph->operand0[source] : BUSTER_CHECK_NONE;
+            const uint32_t token = condition < graph->count ? graph->tokens[condition] : graph->tokens[source];
+            check_common_report_phase_at(parser, pp, input, token, completion, PP_DIAGNOSTIC_DEFERRED,
                                         CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
         }
     }
@@ -2265,15 +2268,12 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
         uint64_t* work = local;
         uint32_t capacity = BUSTER_ARRAY_LENGTH(local);
         uint32_t count = 1;
-        // Clang descends through a comma at the conversion root, but not through a comma that is
-        // itself an arm of a conditional expression.
-        work[0] = UINT64_C(1) << 33 | (uint64_t)evaluated << 32 | source;
+        work[0] = (uint64_t)evaluated << 32 | source;
         while (count != 0 && !pp->fatal)
         {
             const uint64_t item = work[--count];
             const uint32_t node = (uint32_t)item;
-            const bool reached = ((item >> 32) & 1u) != 0;
-            const bool follow_comma = (item >> 33) != 0;
+            const bool reached = (item >> 32) != 0;
             const CheckOp op = graph->ops[node];
             uint32_t children[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
             bool selected[2] = { reached, reached };
@@ -2288,16 +2288,18 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
                 selected[0] &= !known || !truth;
                 selected[1] &= !known || truth;
             }
-            else if (op == CHECK_OP_COMMA)
-            {
-                children[0] = follow_comma ? graph->operand1[node] : BUSTER_CHECK_NONE;
-            }
             else
             {
-                const CheckValue leaf = check_stream_value(stream, node);
-                if (reached || leaf.constant_kind == CHECK_CONSTANT_FLOATING)
+                // Clang checks a root comma's result as one expression. A comma in a conditional arm is
+                // itself that arm's expression. Neither case recursively distributes its outer conversion.
+                const uint32_t leaf_node = op == CHECK_OP_COMMA && node == source ? graph->operand1[node] : node;
+                if (leaf_node < graph_count)
                 {
-                    check_common_conversion_leaf(parser, pp, input, stream, types, spell, node, &leaf, target, completion, scratch);
+                    const CheckValue leaf = check_stream_value(stream, leaf_node);
+                    if (reached || leaf.constant_kind == CHECK_CONSTANT_FLOATING)
+                    {
+                        check_common_conversion_leaf(parser, pp, input, stream, types, spell, leaf_node, &leaf, target, completion, scratch);
+                    }
                 }
             }
             for (uint32_t child = 0; child < BUSTER_ARRAY_LENGTH(children) && !pp->fatal; child += 1)
@@ -2321,8 +2323,7 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
                     }
                     if (!pp->fatal)
                     {
-                        work[count++] = (uint64_t)(follow_comma && op == CHECK_OP_COMMA) << 33 |
-                                        (uint64_t)selected[child] << 32 | children[child];
+                        work[count++] = (uint64_t)selected[child] << 32 | children[child];
                     }
                 }
             }
@@ -2501,6 +2502,35 @@ static bool check_common_own_candidate(const Parser* parser, const CheckGraph* g
     return result;
 }
 
+// The conversion walk can report only assignment conversions whose source is constant or branches into arms.
+// Calls hold those conversions on argument edges rather than on their node.
+static bool check_common_conversion_candidate(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    bool result = false;
+    if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
+    {
+        const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
+        const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
+        result = source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+                 (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
+                 (check_stream_constant_kind(stream, source) != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source));
+    }
+    else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        for (uint32_t i = 0; !result && i < graph->argument_counts[node]; i += 1)
+        {
+            const uint32_t source = graph->argument_nodes[offset + i];
+            const uint32_t flags = stream->argument_conversions[offset + i].flags;
+            result = source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+                     (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
+                     (check_stream_constant_kind(stream, source) != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source));
+        }
+    }
+    return result;
+}
+
 // A node's own bits of its reach (BUSTER_CHECK_REACH_*): its own frame's candidate, a division by a constant, a comparison.
 // A plain `x = y` is a candidate for -Wself-assign alone, and a comparison's bit is -Wsign-compare's: each counts only where
 // its warning may report.
@@ -2510,9 +2540,7 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const CheckOp op = graph->ops[node];
     const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, graph->operand1[node]);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    // Conservatively retain conversions and calls: floating and conditional-source conversions are not
-    // covered by the integer-warning candidate used by the ordinary expression walk.
-    const bool conversion = op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL;
+    const bool conversion = check_common_conversion_candidate(graph, stream, node);
     const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
                                      (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
                                      (conversion ? BUSTER_CHECK_REACH_CONVERSION : 0u));

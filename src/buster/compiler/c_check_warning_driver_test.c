@@ -138,6 +138,17 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        .name = "nested comma and conditional comma results do not inherit literal conversion",
+        .source = "int side(void);int f(int c){return (side(),(side(),2.5));}int g(int c){return (side(),(c?2.5:2.5));}\n",
+        .options = { "-Werror=literal-conversion" },
+        .c23 = true,
+    },
+    {
+        .name = "integer conversion of comma results uses the whole result expression",
+        .source = "int side(void);short f(int c){return (side(),(c?65536:65537));}short g(void){return (side(),(1?65536:65537));}short h(void){return (side(),(side(),65536));}short i(int c){return c?(side(),65536):65537;}\n",
+        .warnings = 4,
+    },
+    {
         .name = "top level comma still receives outer conversion",
         .source = "int side(void);int f(void){return (side(),2.5);}\n",
         .warnings = 1,
