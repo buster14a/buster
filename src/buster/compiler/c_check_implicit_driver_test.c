@@ -317,7 +317,7 @@ static bool check_test_driver_common_output(const char* text, char* filtered, si
 // Each of the common warnings' scratch allocations, failed in turn (BUSTER_TEST_COMMON_WARNING_FAIL_AT), fails the unit
 // with the capacity's fatal error instead of exiting cleanly with fewer warnings; once the index passes every
 // allocation the unit checks as it does unconstrained. The source reaches each pass: switches, the expression
-// walk, dangling else, -Wuninitialized and a conditional format's growing leaf worklist.
+// walk, dangling else, -Wuninitialized, a conditional format's growing leaf worklist and the selections' ranges (#1360).
 static void check_test_driver_common_exhaustion(CheckTest* test, const char* executable, const char* directory)
 {
     static const char source[] =
@@ -327,7 +327,8 @@ static void check_test_driver_common_exhaustion(CheckTest* test, const char* exe
         "    printf(c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? (c ? (d ? \"%d\""
         " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\")"
         " : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\") : \"%s\", 1);\n"
-        "    return c == 0 ? 1 / 0 : (c = c); }\n";
+        "    return c == 0 ? 1 / 0 : (c = c); }\n"
+        "int s(int c) { return _Generic(c, int: 1, default: 0) + __extension__ c; }\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/common-warnings-exhaustion.c", directory);
     const bool written = parse_test_write(path, source, strlen(source));
@@ -665,12 +666,24 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int *ab(int *p) { int x; return _Generic(0, int: (p, &x)); }\n"
         "int *ac(int *p) { int x; return __builtin_choose_expr(1, &x, p); }\n"
         "int *ad(int *p) { int x; return __builtin_choose_expr(0, &x, p); }\n"
-        "int *ae(int *p) { int x; return _Generic(0, int: p, default: _Generic(0, int: &x)); }\n";
+        "int *ae(int *p) { int x; return _Generic(0, int: p, default: _Generic(0, int: &x)); }\n"
+        // An __extension__ selects its operand, which it returns; a selection inside one or around one selects as alone.
+        "int *af(int *p) { int x; return __extension__ &x; }\n"
+        "int *ag(int *p) { int x; return _Generic(0, int: __extension__ p, default: __extension__ &x); }\n"
+        "int *ah(int *p) { int x; return __extension__ _Generic(0, int: &x, default: p); }\n"
+        "int *ai(int *p) { int x; return __builtin_choose_expr(1, _Generic(0, long: &x, default: p), &x); }\n";
     static const char generic_selection[] =
         "int a(void) { int x; return _Generic(1, int: x, default: 0); }\n"
         "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"
         "int c(void) { int x; return __builtin_choose_expr(1, 0, x); }\n"
-        "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n";
+        "int d(void) { int x; return __builtin_choose_expr(0, x, 0); }\n"
+        // An __extension__ evaluates its operand (#1360); nested selections evaluate the arms they select alone.
+        "int e(void) { int x; return __extension__ (x + 1); }\n"
+        "int f(void) { int x; return _Generic(1, int: __extension__ 0, default: __extension__ x); }\n"
+        "int g(void) { int x; return _Generic(1, int: _Generic(1L, long: 0, default: x), default: x); }\n"
+        "int h(void) { int x; return __builtin_choose_expr(1, _Generic(1, int: x), x); }\n"
+        "int i(void) { int x, y; return __extension__ _Generic(1, int: y, default: x); }\n"
+        "int j(void) { int x; return __builtin_choose_expr(0, x, _Generic(x, int: 0)); }\n";
     // A marked K&R definition's parameter declarations take its mark as their context (#147,
     // check_input_availability_contexts); an unmarked one's keep their uses' warnings.
     static const char kr_deprecated[] =

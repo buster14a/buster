@@ -3910,6 +3910,24 @@ and kinds 64 tokens at a time, the node passes their operators 16 nodes at a
 time through an operator bitset, and `-Wuninitialized`'s declaration loops a
 sparse column's next entry by its directory (`check_sparse_next`). Each scalar
 path, the twin, visits every item and runs the same tests.
+A static selection's unselected arms and controlling expression
+(`check_common_unselected_roots`, which `check_common_evaluated` and the
+returned-address check use) are the roots inside its range, from past its
+keyword to its closing token, other than the arm it selects. One pass finds
+them for every selection (#1341, #1360): the `SELECT` nodes 16 at a time by
+operator, their closing tokens as bits; their keywords from one pass down the
+tokens below the last of them, 64 kinds at a time, each closing token claimed
+by its last `_Generic` or type-argument child before it, as the definition
+finds it; the ranges in order, merged into bits; and the roots in them, 16
+nodes at a time by a gather of their tokens' bits. An `__extension__`, which
+the reader also makes a `SELECT` and which has no keyword, costs a bit. It
+was a walk to the keyword and a pass over every node per selection, which
+made a unit quadratic in its selections: every glibc `assert` in a GNU mode
+is an `__extension__`, so `sqlite3.c -DSQLITE_DEBUG` spent 12.1 s there. The
+walk (`check_common_unselected_walk`) remains for a selection whose selected
+node is among the roots, which none of the callers' roots is, and as the
+tests' oracle; `test-checker-driver` compares both paths with it on fixtures
+and random trees and graphs whose columns end at `PROT_NONE` pages.
 
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
