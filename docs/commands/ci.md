@@ -200,6 +200,14 @@ the policy. In short:
   `tools/ci/nightly.c`); earlier ones predate the worker and are reported as
   out of scope. A state whose branch GitHub refuses to create is skipped for
   the rest of the job and reported (docs/ci.md, "Refused branches").
+- The planner's optional `--pending FILE` is the coordinator's ephemeral
+  dispatch handoff, not a dispatch history. After validating every input and
+  option, `plan` atomically compacts it to requests not yet visible in the run
+  facts and still within the 600-second API visibility grace. The 64-request
+  limit applies to that active set; expired or observed requests do not end
+  a long night's work. Malformed input or too many active requests fails
+  without replacing the file. This local housekeeping also occurs in dry-run
+  mode; it never dispatches anything.
 - `vars.BUSTER_NIGHTLY` set to `on` is the switch. Before it, the coordinator
   only harvests, plans and reports, and pushes work as before. With it, pushes
   run hosted rows alone and keep off the 9700X, and the coordinator measures
