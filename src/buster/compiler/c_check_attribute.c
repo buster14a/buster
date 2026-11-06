@@ -6099,7 +6099,8 @@ static uint32_t check_input_deprecated_enum_depth(uint8_t kind, uint32_t depth)
 // The tag key (check_input_deprecated_key) of the enum whose body declares the enumerator at `enumerator`: its `{`'s, back
 // past the earlier enumerators, and its keyword's before that; `count` for none. `enums` keeps each answer plus one by
 // enumerator token (#1354): a walk stops at the nearest earlier enumerator of its body already answered and answers
-// every one it passed, so a pass's walks step over each token about once in all, not once per use.
+// every one it passed. Repeated uses of a flat enum share that walk; nested enum bodies can be traversed again by an
+// enclosing enum's walk.
 static uint32_t check_input_deprecated_enum(const CheckInputReader* reader, uint32_t enumerator, uint32_t* enums)
 {
     const Parser* parser = reader->parser;

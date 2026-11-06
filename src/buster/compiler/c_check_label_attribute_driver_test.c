@@ -898,6 +898,13 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "    (void)t; (void)s;\n    void (*p)(void) = f;\n    (void)p;\n    return sizeof(v);\n}\nvoid d(void) __attribute__((deprecated));\n"
         "void d(void) { f(); }\nvoid e(void);\nvoid e(void) __attribute__((deprecated));\nvoid e(void);\nT x __attribute__((deprecated));\n"
         "struct S;\nstruct S *ps;\nenum __attribute__((deprecated)) F { F0 };\nenum F ef;\nint k(void) { e(); return F0; }\n",
+        // Memoized enumerator-to-enum answers (#1354): an enclosing walk crosses the nested body, but each enum's
+        // diagnostics must retain its own mark when their enumerators are used out of source order.
+        "enum __attribute__((deprecated(\"outer\"))) Outer { O0, O1 = sizeof(enum __attribute__((deprecated(\"inner\"))) Inner { I0, I1 }), O2 };\n"
+        "enum __attribute__((deprecated(\"other\"))) Other { P0, P1, P2 };\n"
+        "int f(void) { return O2 + I1 + P2 + O0 + I0 + P0 + O1; }\n",
+        "enum __attribute__((unavailable(\"gone\"))) Gone { U0, U1, U2 };\n"
+        "int h(void) { return U2 + U0 + U1; }\n",
         "void u(void) __attribute__((unavailable(\"gone\")));\nint h(void) { return sizeof(u); }\n",
         // __builtin___CFStringMakeConstantString's literal that isn't UTF-8 (#148, check_input_cfstring_literal), past its
         // parentheses and casts; a valid one's, and NSString's, without a word.
