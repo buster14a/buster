@@ -446,12 +446,12 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         const char* const mmd[] = { "-MMD", "-MFjoined.d", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MMD with joined -MF", NULL, mmd, "joined.d");
         const char* const phony_arguments[] = { "-MMD", "-MP", "-MF", "out/phony.d", "-c", "a.c", "-o", "out/phony.o", NULL };
-        CCCompatibilityRun phony = cc_compat_run(&test, test.compiler, NULL, phony_arguments);
+        CCCompatibilityRun phony_depfile = cc_compat_run(&test, test.compiler, NULL, phony_arguments);
         char* phony_rule = cc_compat_read(&test, "out/phony.d");
-        cc_compat_expect(&test, phony.status == 0 && phony_rule != NULL && strcmp(phony_rule, "out/phony.o: a.c h.h\nh.h:\n") == 0,
+        cc_compat_expect(&test, phony_depfile.status == 0 && phony_rule != NULL && strcmp(phony_rule, "out/phony.o: a.c h.h\nh.h:\n") == 0,
                          "-MP phony rules have Clang's exact spacing");
         free(phony_rule);
-        cc_compat_release(&phony);
+        cc_compat_release(&phony_depfile);
         cc_compat_long_depfiles(&test);
 #if !defined(BUSTER_DRIVER_COMPAT_STANDALONE) && !defined(BUSTER_DRIVER_MIXED_STANDALONE)
         cc_compat_publication_failure(&test);
