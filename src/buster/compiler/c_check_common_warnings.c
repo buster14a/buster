@@ -2027,6 +2027,30 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
     }
 }
 
+// Clang treats an uncomputed non-decimal integer literal as a bit pattern when it fits the destination width.
+// Parentheses do not make a graph node; unary operators, casts and computed expressions do.
+static bool check_common_nondecimal_literal(const Parser* parser, Preprocessor* pp, const CheckGraph* graph,
+                                            const TypeTable* types, uint32_t source, const CheckValue* value,
+                                            TypeId target, Arena* scratch)
+{
+    bool result = false;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const uint32_t token = source < graph->count ? graph->tokens[source] : BUSTER_CHECK_NONE;
+    if (source < graph->count && graph->ops[source] == CHECK_OP_VALUE && token < parser->tokens.count &&
+        parser->tokens.kinds[token] == PARSE_KIND_NUMBER && check_common_integer(types, target, &width, &is_signed) &&
+        width != 0 && (value->integer & ~check_action_mask(width)) == 0)
+    {
+        const uint64_t mark = scratch->length;
+        const String8 spelling = check_semantic_token(parser, pp, token, scratch);
+        result = spelling.length >= 2 && spelling.pointer[0] == '0' &&
+                 (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X' || spelling.pointer[1] == 'b' ||
+                  spelling.pointer[1] == 'B' || (spelling.pointer[1] >= '0' && spelling.pointer[1] <= '7'));
+        arena_pop_to(scratch, mark);
+    }
+    return result;
+}
+
 // A value-changing implicit integer conversion of a constant: the warning clang spells at the constant's own
 // token, shared by initializers, assignments, return conversions and a call's per-argument assignment.
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -2034,7 +2058,8 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
                                             TypeId target, Arena* scratch)
 {
     __int128 converted = 0;
-    if (check_common_conversion_changes(types, value->type, target, value, &converted))
+    if (check_common_conversion_changes(types, value->type, target, value, &converted) &&
+        !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch))
     {
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
         const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, 0);
@@ -2273,7 +2298,7 @@ static bool check_common_format_integer_class(TypeTable* types, TypeId type, cha
         }
         else switch (length_modifier)
         {
-            case 'H': result = pointer ? width == 8 : width <= 32; break;
+            case 'H': result = pointer ? width == 8 : width <= 32 && width != 16; break;
             case 'h': result = pointer ? width == 16 : width <= 32; break;
             case 'l':
             case 'z':
@@ -2294,7 +2319,9 @@ static bool check_common_format_integer_pointer(TypeTable* types, TypeId type, c
     {
         return false;
     }
-    return check_common_format_integer_class(types, type_element(types, element), length_modifier, w_width, i_width, true);
+    const TypeId target = type_strip_aligned(types, type_element(types, element));
+    return (type_qualifiers(target) & BUSTER_TYPE_CONST) == 0 &&
+           check_common_format_integer_class(types, target, length_modifier, w_width, i_width, true);
 }
 
 static bool check_common_format_width(TypeTable* types, TypeId type)
@@ -3363,6 +3390,20 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         if (!accepted)
                         {
                             check_common_format_report_type(parser, pp, input, stream, types, spell, graph, offset, value_index, format_token, expected, false, &order, scratch);
+                        }
+                        else if (conversion == 'c' && type_unqualified(type_strip_aligned(types, type)) == BUSTER_TYPE_BOOL)
+                        {
+                            const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
+                            const uint64_t specifier_length = at - percent + 1;
+                            const int printed_length = specifier_length > INT_MAX ? INT_MAX : (int)specifier_length;
+                            const char* message = check_warning_text(scratch, "using '%.*s' format specifier, but argument has boolean value",
+                                                                     printed_length, bytes + percent);
+                            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : order;
+                            order = natural > order ? natural : order;
+                            if (message != NULL)
+                            {
+                                check_common_report_published(parser, pp, input, at_token, order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
+                            }
                         }
                     }
                 }

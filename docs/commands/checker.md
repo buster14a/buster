@@ -74,6 +74,9 @@ requirements. [Command index](README.md).
   nested scopes, cleanups, VLAs and dropped statics. The constant-if fixtures include #1194's
   statement-expression paths: scalar/vector and eager/lazy objects must agree byte for byte and match Clang's
   symbols and execution. These checks remain in the default suite too.
+  `--direct-initializers` selects #1252's Clang parenthesized-initializer regressions alone: attributes and asm labels,
+  first-argument selection with later arguments checked but not evaluated, nested comma expressions, scalar and
+  aggregate conversions, static bytes, deduction and invalid forms. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
@@ -92,6 +95,16 @@ requirements. [Command index](README.md).
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
+  compares original GNU `noderef` placement, propagation, conversion,
+  address-cancellation and unevaluated-expression fixtures with pinned Clang
+  in GNU C17 and C23. It checks complete diagnostic lines and notes through
+  scalar, ordinary and poisoned deferred-reader paths, plus `-Werror=noderef`.
+  Aggregate cases cover arrays, nested designators, anonymous records,
+  overlapping union alternatives, atomic pointer elements, compound literals
+  and GNU range initialization, including preservation and removal of marks.
+  Each body has at most one warned dereference because Clang's delayed warning
+  order for multiple accesses is unstable across invocations.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
@@ -116,6 +129,12 @@ requirements. [Command index](README.md).
   client's options with them, never by copying fields.
   [The request guide](../../docs/compilation-requests.md) has the contract,
   lifetimes, overrides and the series' discontinuities.
+
+The focused `test-checker-fortify --clang clang --executable build/compiler`
+suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3`,
+including ordinary function addresses and scalar/vector, eager/lazy headers.
+The object-size attributes currently use conservative unknown bounds, without
+Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
 
 ## Object and linkage options (#1124)
 

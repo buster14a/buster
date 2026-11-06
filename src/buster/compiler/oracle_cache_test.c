@@ -464,6 +464,105 @@ static bool oracle_test_results(const OracleRun* run, const char* directory, con
     return result;
 }
 
+// Empty PATH components search the current directory, including the last or only component. An unset PATH uses the
+// system's default search path instead. Exercise both direct resolution and execution with the cache on and off.
+static void oracle_test_empty_path(OracleTest* test)
+{
+    char tool[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(tool, sizeof(tool), "%s/oracle-path-tool", test->base);
+    const char script[] = "#!/bin/sh\nprintf path-tool";
+    const bool made = oracle_test_write(tool, script, sizeof(script) - 1) && chmod(tool, 0755) == 0;
+    const char* original = getenv("PATH");
+    char* saved = original != 0 ? strdup(original) : 0;
+    const int directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const bool ready = made && (original == 0 || saved != 0) && directory >= 0 && chdir(test->base) == 0;
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "empty-path");
+    OracleCache off = { 0 };
+    static const char* const paths[] = { ":/nonexistent", "/nonexistent::/nonexistent", "/nonexistent:", "", "." };
+    bool correct = ready;
+    for (uint32_t i = 0; ready && i < sizeof(paths) / sizeof(paths[0]); i += 1)
+    {
+        correct &= setenv("PATH", paths[i], 1) == 0;
+        char resolved[BUSTER_ORACLE_PATH_BYTES];
+        correct &= oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && strcmp(resolved, "./oracle-path-tool") == 0;
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            for (uint32_t changed = 0; changed < 2; changed += 1)
+            {
+                for (uint32_t attempt = 0; attempt < (mode == 0 ? 1u : 2u); attempt += 1)
+                {
+                    char* arguments[] = { "oracle-path-tool", 0 };
+                    OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: empty path", .arguments = arguments,
+                                      .directory = changed != 0 ? test->runs[0] : 0 };
+                    const bool ran = oracle_run(&run);
+                    correct &= ran && run.taken == (mode != 0 && attempt != 0) && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 &&
+                               run.output != 0 && strcmp(run.output, "path-tool") == 0;
+                    oracle_run_release(&run);
+                }
+            }
+        }
+    }
+    char resolved[BUSTER_ORACLE_PATH_BYTES];
+    char alternate[BUSTER_ORACLE_PATH_BYTES + 32];
+    char search[BUSTER_ORACLE_PATH_BYTES + 4];
+    snprintf(alternate, sizeof(alternate), "%s/oracle-path-directory", test->runs[0]);
+    snprintf(search, sizeof(search), ":%s", test->runs[0]);
+    bool skips_directory = ready && mkdir("oracle-path-directory", 0700) == 0 && oracle_test_copy(tool, alternate) && setenv("PATH", search, 1) == 0;
+    skips_directory = skips_directory && oracle_find_tool("oracle-path-directory", resolved, sizeof(resolved)) && strcmp(resolved, alternate) == 0;
+    for (uint32_t mode = 0; mode < 2 && skips_directory; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-directory", 0 };
+        OracleRun run;
+        const bool ran = oracle_test_go(&run, mode == 0 ? &off : &cache, "oracle test: skip directory", arguments, 0, 0);
+        skips_directory = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, "path-tool") == 0;
+        oracle_run_release(&run);
+    }
+    const char identity_script[] = "#!/bin/sh\nprintf '%s' \"$0\"";
+    char cwd[BUSTER_ORACLE_PATH_BYTES];
+    char expected[BUSTER_ORACLE_PATH_BYTES + 32];
+    bool link_spelling = ready && oracle_test_write("oracle-path-argv0", identity_script, sizeof(identity_script) - 1) &&
+                         chmod("oracle-path-argv0", 0755) == 0 && symlink("oracle-path-argv0", "oracle-path-link") == 0 &&
+                         setenv("PATH", "", 1) == 0 && getcwd(cwd, sizeof(cwd)) != 0;
+    if (link_spelling)
+    {
+        const int written = snprintf(expected, sizeof(expected), "%s/./oracle-path-link", cwd);
+        link_spelling = written > 0 && (size_t)written < sizeof(expected);
+    }
+    for (uint32_t mode = 0; mode < 2 && link_spelling; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-link", 0 };
+        OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: path symlink", .arguments = arguments,
+                          .directory = test->runs[0] };
+        const bool ran = oracle_run(&run);
+        link_spelling = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, expected) == 0;
+        oracle_run_release(&run);
+    }
+    bool same_spelling = ready && setenv("PATH", "", 1) == 0;
+    for (uint32_t mode = 0; mode < 2 && same_spelling; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-link", 0 };
+        OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: path symlink same directory", .arguments = arguments,
+                          .directory = "." };
+        const bool ran = oracle_run(&run);
+        same_spelling = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, "./oracle-path-link") == 0;
+        oracle_run_release(&run);
+    }
+    const bool unset = ready && unsetenv("PATH") == 0 && !oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && oracle_find_tool("sh", resolved, sizeof(resolved));
+    const bool restored_path = !ready || (saved != 0 ? setenv("PATH", saved, 1) == 0 : unsetenv("PATH") == 0);
+    const bool restored_directory = directory >= 0 && fchdir(directory) == 0;
+    if (directory >= 0)
+    {
+        close(directory);
+    }
+    free(saved);
+    oracle_test_expect(test, correct && restored_path && restored_directory, "runs: empty PATH components resolve and execute a tool in the current directory");
+    oracle_test_expect(test, skips_directory, "runs: PATH search skips a directory in favor of a later executable");
+    oracle_test_expect(test, link_spelling, "runs: a changed directory preserves the selected executable's symlink spelling");
+    oracle_test_expect(test, same_spelling, "runs: the same directory preserves the selected executable's relative spelling");
+    oracle_test_expect(test, unset, "runs: an unset PATH uses the system default rather than the current directory");
+}
+
 static void oracle_test_runs(OracleTest* test)
 {
     OracleCache cache;
@@ -3419,6 +3518,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_roots(&test);
         oracle_test_trailing_root(&test);
         oracle_test_trailing_dependencies(&test);
+        oracle_test_empty_path(&test);
         oracle_test_runs(&test);
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);
@@ -3468,7 +3568,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         unlink(test.helper);
     }
     oracle_epoch_end(epoch);
-    static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
+    static const char* const directories[] = { "empty-path/oracle",  "runs/oracle",         "dependencies/oracle", "identities/oracle", "tracing/oracle",
                                                "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",      "replay-large/oracle",
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle",

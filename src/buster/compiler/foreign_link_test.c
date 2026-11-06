@@ -35,6 +35,10 @@ static const ForeignLinkTestSource foreign_link_test_sources[] = {
             "lea shared_common(%rip),%rdx\ntest $63,%edx\njne .Lfail\n"
             "cmpq $0,(%rdx)\njne .Lfail\ncmpq $0,56(%rdx)\njne .Lfail\n"
             "movq $17,56(%rdx)\ncmpq $17,56(%rdx)\njne .Lfail\n"
+            "movl $1,section_relro_extra(%rip)\ncmpl $1,section_relro_extra(%rip)\njne .Lfail\n"
+            "movl $2,section_relro_x(%rip)\ncmpl $2,section_relro_x(%rip)\njne .Lfail\n"
+            "movl $3,section_ctors_extra(%rip)\ncmpl $3,section_ctors_extra(%rip)\njne .Lfail\n"
+            "movl $4,section_dtors_extra(%rip)\ncmpl $4,section_dtors_extra(%rip)\njne .Lfail\n"
             "cmpq $64,common_size(%rip)\njne .Lfail\n"
             "cmpl $9,replaced_common(%rip)\njne .Lfail\n"
             "mov $magic_value,%eax\ncmp $5,%eax\njne .Lfail\n"
@@ -135,6 +139,19 @@ static bool foreign_link_test_compile(const char* directory, ForeignTestTally* t
         foreign_test_expect(tally, compiled, "compile handoff fixture", fixture->name);
         result = compiled && result;
     }
+    const char section_source[] =
+        "volatile int section_relro_extra __attribute__((section(\".data.rel.ro_extra\"))) = 0;\n"
+        "volatile int section_relro_x __attribute__((section(\".data.rel.roX\"))) = 0;\n"
+        "volatile int section_ctors_extra __attribute__((section(\".ctors_extra\"))) = 0;\n"
+        "volatile int section_dtors_extra __attribute__((section(\".dtors_extra\"))) = 0;\n"
+        "volatile int section_relro_dot __attribute__((section(\".data.rel.ro.audit\"))) = 9;\n";
+    snprintf(source, sizeof(source), "%s/fl_sections.c", directory);
+    snprintf(object, sizeof(object), "%s/fl_sections.o", directory);
+    char* arguments[] = { (char*)"cc", (char*)"-c", source, (char*)"-o", object, 0 };
+    const bool written = foreign_test_write(source, section_source, strlen(section_source));
+    const bool compiled = written && object_test_run(arguments, output, errors) == 0;
+    foreign_test_expect(tally, compiled, "compile section family fixture", "cc");
+    result = compiled && result;
     return result;
 }
 
@@ -153,7 +170,8 @@ static void foreign_link_test_structure(ForeignTestTally* tally, const Foreign* 
     const SymbolId absent_tls = foreign_link_test_symbol(foreign, converted, "absent_tls");
     const SymbolId absolute = foreign_link_test_symbol(foreign, converted, "magic_value");
     const SymbolId replaced = foreign_link_test_symbol(foreign, converted, "replaced_common");
-    foreign_test_expect(tally, foreign->object_count == 6, "only selected archive member converted", 0);
+    const SymbolId relro_dot = foreign_link_test_symbol(foreign, converted, "section_relro_dot");
+    foreign_test_expect(tally, foreign->object_count == 7, "only selected archive member converted", 0);
     foreign_test_expect(tally, foreign_test_name(foreign, "unused_archive") == 0, "unselected archive name absent", 0);
     foreign_test_expect(tally, foreign_test_name(foreign, "discarded_only_missing") != 0 && foreign_link_test_symbol(foreign, converted, "discarded_only_missing") == 0,
                         "undefined name referenced only by discarded COMDAT is omitted", 0);
@@ -175,6 +193,9 @@ static void foreign_link_test_structure(ForeignTestTally* tally, const Foreign* 
     foreign_test_expect(tally, replaced != 0 && link->symbols.size[replaced] == 4 && link->symbols.atom[replaced] != 0 &&
                                   link->atoms.class[link->symbols.atom[replaced]] == BUSTER_LINK_CLASS_DATA,
                         "strong data replaces common", 0);
+    foreign_test_expect(tally, relro_dot != 0 && link->symbols.atom[relro_dot] != 0 &&
+                                  link->atoms.class[link->symbols.atom[relro_dot]] == BUSTER_LINK_CLASS_DATA_RELRO,
+                        "dotted RELRO input retains its class", 0);
     uint32_t discarded = 0;
     uint32_t frames = 0;
     uint32_t pruned = 0;
@@ -264,6 +285,7 @@ static void foreign_link_test_program(ForeignTestTally* tally, const char* direc
     };
     char* inputs[] = {
         foreign_test_path(directory, "fl_entry.o", arena),
+        foreign_test_path(directory, "fl_sections.o", arena),
         foreign_test_path(directory, "fl_weak.o", arena),
         foreign_test_path(directory, "fl_first.o", arena),
         foreign_test_path(directory, "fl_loser.o", arena),

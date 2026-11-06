@@ -281,7 +281,10 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
         SymbolId* symbols_copy = BUSTER_ARENA_PUSH_ARRAY(kept->arena, SymbolId, functions + 1);
         uint32_t* addresses = BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint32_t, functions + 1);
         uint32_t* fields = BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint32_t, BUSTER_OBJECT_DEBUG_FIELDS);
-        result = symbols_copy != NULL && addresses != NULL && fields != NULL;
+        NativeDebugField* value_fields = BUSTER_ARENA_PUSH_ARRAY(kept->arena, NativeDebugField, (uint64_t)debug->extra.field_count + 1);
+        NativeDebugAddress* value_addresses = BUSTER_ARENA_PUSH_ARRAY(kept->arena, NativeDebugAddress, (uint64_t)debug->extra.address_count + 1);
+        result = symbols_copy != NULL && addresses != NULL && fields != NULL && value_fields != NULL && value_addresses != NULL &&
+                 functions + debug->extra.address_count < UINT32_MAX;
         for (uint32_t section = 0; result && section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
             const String8 bytes = debug->sections[section];
@@ -289,7 +292,10 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             result = copy_bytes != NULL;
             if (result)
             {
-                memcpy(copy_bytes, bytes.pointer, bytes.length);
+                if (bytes.length != 0)
+                {
+                    memcpy(copy_bytes, bytes.pointer, bytes.length);
+                }
                 kept->debug.sections[section] = (String8){ .pointer = copy_bytes, .length = bytes.length };
             }
         }
@@ -302,6 +308,20 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             kept->debug.line_addresses = addresses;
             kept->debug.function_count = debug->function_count;
             kept->debug.fields = fields;
+            if (debug->extra.field_count != 0)
+            {
+                memcpy(value_fields, debug->extra.fields, (uint64_t)debug->extra.field_count * sizeof(*value_fields));
+            }
+            if (debug->extra.address_count != 0)
+            {
+                memcpy(value_addresses, debug->extra.addresses, (uint64_t)debug->extra.address_count * sizeof(*value_addresses));
+            }
+            kept->debug.extra = (NativeDebugExtra){
+                .fields = value_fields,
+                .addresses = value_addresses,
+                .field_count = debug->extra.field_count,
+                .address_count = debug->extra.address_count,
+            };
         }
     }
     if (!result)
@@ -355,6 +375,8 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     const uint64_t mark = arena->length;
     uint64_t sizes[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
     uint64_t functions = 0;
+    uint64_t value_fields = 0;
+    uint64_t value_addresses = 0;
     bool valid = true;
     for (uint32_t u = 0; u < count; u += 1)
     {
@@ -368,8 +390,10 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             valid = valid && own->sections[BUSTER_OBJECT_DEBUG_INFO].length >= 4 && own->fields[field] <= own->sections[BUSTER_OBJECT_DEBUG_INFO].length - 4;
         }
         functions += own->function_count;
+        value_fields += own->extra.field_count;
+        value_addresses += own->extra.address_count;
     }
-    valid = valid && functions < UINT32_MAX;
+    valid = valid && functions < UINT32_MAX && value_fields < UINT32_MAX && value_addresses < UINT32_MAX;
     char* sections[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
     for (uint32_t section = 0; valid && section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
     {
@@ -380,7 +404,11 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     SymbolId* symbols = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, functions + 1) : NULL;
     uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, functions + 1) : NULL;
     uint32_t* unit_functions = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count) : NULL;
-    valid = valid && symbols != NULL && addresses != NULL && unit_functions != NULL;
+    NativeDebugField* extra_fields = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugField, value_fields + 1) : NULL;
+    NativeDebugAddress* extra_addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugAddress, value_addresses + 1) : NULL;
+    valid = valid && symbols != NULL && addresses != NULL && unit_functions != NULL && extra_fields != NULL && extra_addresses != NULL;
+    uint32_t next_field = 0;
+    uint32_t next_address = 0;
     uint64_t bases[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
     uint32_t function = 0;
     for (uint32_t u = 0; valid && u < count; u += 1)
@@ -388,7 +416,10 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
         const ObjectDebug* own = &units[u].kept.debug;
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
-            memcpy(sections[section] + bases[section], own->sections[section].pointer, own->sections[section].length);
+            if (own->sections[section].length != 0)
+            {
+                memcpy(sections[section] + bases[section], own->sections[section].pointer, own->sections[section].length);
+            }
         }
         // The header's abbreviation offset, and the DIE's line program, address base and range lists, in that order.
         for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
@@ -405,6 +436,25 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             addresses[function] = (uint32_t)(bases[BUSTER_OBJECT_DEBUG_LINE] + own->line_addresses[f]);
             function += 1;
         }
+        // Additional sec_offset fields move with the unit's range/location contribution. ref4 type references do not.
+        for (uint32_t f = 0; f < own->extra.field_count; f += 1)
+        {
+            NativeDebugField field = own->extra.fields[f];
+            field.offset += (uint32_t)bases[BUSTER_OBJECT_DEBUG_INFO];
+            char* at = sections[BUSTER_OBJECT_DEBUG_INFO] + field.offset;
+            uint32_t value = 0;
+            memcpy(&value, at, 4);
+            value += (uint32_t)bases[field.section];
+            memcpy(at, &value, 4);
+            extra_fields[next_field++] = field;
+        }
+        for (uint32_t a = 0; a < own->extra.address_count; a += 1)
+        {
+            NativeDebugAddress address = own->extra.addresses[a];
+            address.offset += (uint32_t)bases[BUSTER_OBJECT_DEBUG_INFO];
+            address.symbol = described[u][own->function_count + a];
+            extra_addresses[next_address++] = address;
+        }
         unit_functions[u] = own->function_count;
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
@@ -419,6 +469,12 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             .function_count = (uint32_t)functions,
             .unit_functions = unit_functions,
             .unit_count = count,
+            .extra = {
+                .fields = extra_fields,
+                .addresses = extra_addresses,
+                .field_count = next_field,
+                .address_count = next_address,
+            },
         };
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
@@ -430,6 +486,18 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
         arena_pop_to(arena, mark);
     }
     return valid;
+}
+
+// Native debug addresses bind to definitions, not interposable names, for variables as well as functions.
+// check_units_keep bounds this sum; fields are not included because they reference sections rather than symbols.
+static uint32_t check_units_debug_symbol_count(const ObjectDebug* debug)
+{
+    return debug->function_count + debug->extra.address_count;
+}
+
+static SymbolId check_units_debug_symbol(const ObjectDebug* debug, uint32_t index)
+{
+    return index < debug->function_count ? debug->functions[index] : debug->extra.addresses[index - debug->function_count].symbol;
 }
 
 // Whether a unit's definition `symbol` of `link` takes a name's place from the earlier one, `earlier` of `earlier_link`,
@@ -605,11 +673,11 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     for (uint32_t u = 0; described != NULL && valid && u < count; u += 1)
     {
         const ObjectDebug* own = &units[u].kept.debug;
-        described[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)own->function_count + 1);
+        described[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)check_units_debug_symbol_count(own) + 1);
         valid = described[u] != NULL;
-        for (uint32_t f = 0; valid && f < own->function_count; f += 1)
+        for (uint32_t f = 0; valid && f < check_units_debug_symbol_count(own); f += 1)
         {
-            const SymbolId s = own->functions[f];
+            const SymbolId s = check_units_debug_symbol(own, f);
             const SymbolId merged = maps[u][s];
             const bool kept = defining_unit[merged] == u && defining_symbol[merged] == s;
             described[u][f] = kept ? merged : (SymbolId)(next + replaced);
@@ -673,9 +741,9 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     {
         const Link* unit = &units[u].kept.link;
         const ObjectDebug* own = &units[u].kept.debug;
-        for (uint32_t f = 0; valid && f < own->function_count; f += 1)
+        for (uint32_t f = 0; valid && f < check_units_debug_symbol_count(own); f += 1)
         {
-            const SymbolId s = own->functions[f];
+            const SymbolId s = check_units_debug_symbol(own, f);
             const NameId own_name = unit->symbols.name[s];
             if (described[u][f] != maps[u][s])
             {
@@ -732,9 +800,9 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 link->atoms.alignment_log2[atom] = common && common_alignment[merged] > link->atoms.alignment_log2[atom] ? common_alignment[merged] : link->atoms.alignment_log2[atom];
             }
         }
-        for (uint32_t f = 0; described != NULL && valid && f < units[u].kept.debug.function_count; f += 1)
+        for (uint32_t f = 0; described != NULL && valid && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
         {
-            const SymbolId s = units[u].kept.debug.functions[f];
+            const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
             if (described[u][f] != maps[u][s])
             {
                 valid = link_define_symbol(link, described[u][f], placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
@@ -1169,11 +1237,11 @@ static void check_units_merge_lane(void* argument)
         for (uint32_t u = 0; merge->valid && merge->debug != NULL && u < count; u += 1)
         {
             const ObjectDebug* own = &units[u].kept.debug;
-            merge->described[u] = BUSTER_ARENA_PUSH_ARRAY(merge->scratch, SymbolId, (uint64_t)own->function_count + 1);
+            merge->described[u] = BUSTER_ARENA_PUSH_ARRAY(merge->scratch, SymbolId, (uint64_t)check_units_debug_symbol_count(own) + 1);
             merge->valid = merge->described[u] != NULL;
-            for (uint32_t f = 0; merge->valid && f < own->function_count; f += 1)
+            for (uint32_t f = 0; merge->valid && f < check_units_debug_symbol_count(own); f += 1)
             {
-                const SymbolId s = own->functions[f];
+                const SymbolId s = check_units_debug_symbol(own, f);
                 const SymbolId merged = merge->maps[u][s];
                 const bool kept = merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
                 merge->described[u][f] = kept ? merged : (SymbolId)(next + merge->replaced);
@@ -1310,9 +1378,9 @@ static void check_units_merge_lane(void* argument)
         {
             const Link* unit = &units[u].kept.link;
             const ObjectDebug* own = &units[u].kept.debug;
-            for (uint32_t f = 0; merge->valid && f < own->function_count; f += 1)
+            for (uint32_t f = 0; merge->valid && f < check_units_debug_symbol_count(own); f += 1)
             {
-                const SymbolId s = own->functions[f];
+                const SymbolId s = check_units_debug_symbol(own, f);
                 const NameId own_name = unit->symbols.name[s];
                 if (merge->described[u][f] != merge->maps[u][s])
                 {
@@ -1418,9 +1486,9 @@ static void check_units_merge_lane(void* argument)
                                                                                                                                    link->atoms.alignment_log2[atom];
                 }
             }
-            for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < units[u].kept.debug.function_count; f += 1)
+            for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
             {
-                const SymbolId s = units[u].kept.debug.functions[f];
+                const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
                 if (merge->described[u][f] != map[s])
                 {
                     link->symbols.atom[merge->described[u][f]] = atom_base + unit->symbols.atom[s] - 1;

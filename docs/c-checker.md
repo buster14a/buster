@@ -1667,8 +1667,21 @@ initializer plans. Deferred checking replays their array TypeIds with the
 top-level declaration types. A failed payload or record reservation restores
 the unpublished output suffix and scratch and sets the resource status.
 
-Automatic arrays, volatile and atomic elements, floating/128-bit elements,
-designators, nested braces and nonliteral expressions retain ordinary
+An array of rows (#1383), `T t[N][M]` or `T t[][M]` with `T` such an element,
+takes the same path when every element is a braced row of exactly `M` such
+items: `{ list }` rows separated by commas, one trailing comma inside a row and
+one after the last. `check_literal_table_rows` checks this grammar. Its vector
+path classifies the same 64-token blocks into number, comma, minus and brace
+masks and takes brace depth from a prefix XOR of the brace mask, carried across
+blocks. A `{` must be at depth 0 and a `}` at depth 1, so the parity is the
+depth. Each `}` compares the numbers before it, counted from the table's start
+by `popcnt`, with its rows times `M`. The payload is the row-major values. The
+type of an incomplete array is completed to the row count. A short row, an
+elided or excess one, a deeper array and a designator at either level all keep
+the ordinary path.
+
+Automatic arrays, volatile and atomic elements, 128-bit elements, designators,
+short or elided rows, deeper nesting and nonliteral expressions retain ordinary
 checking and planning. `check_input_tables_reference` provides that exact
 source path for tests. Permanent tests compare complete bytes and array bounds
 between it and both compact paths, exercise protected syntax/output tails,
@@ -2176,7 +2189,9 @@ What the lowering covers past scalars (#145's programs):
   a row's 8 records, sets its operands into frame temporaries, whose halves two
   rows read through their addresses, as clang's code reads its operands' halves
   from their slots, and a third joins the halves (VINSERTF64X4); one of 4 bytes
-  divides its two elements under a mask of them. Their chains are refused as
+  divides its two elements under a mask of them. Vectors wider than 64 bytes
+  use the same rows on register-sized pieces; under excess precision a piece
+  has at most 32 bytes so its widened floats fit one register. Their chains are refused as
   half precision's, and so are their compares; a `__bf16` scalar splats by its
   bits. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
@@ -2186,8 +2201,26 @@ What the lowering covers past scalars (#145's programs):
   (`check_lower_vector_bits`: VMOVD or VMOVQ), where an extended vector's cast
   of a scalar splats it. Integer division and remainder, and 8-bit
   multiplication and shifts, which clang computes an element at a time, are
-  refused by name, and so are vectors of other sizes and of `bool`, logical
-  vector operators and vector conditions.
+  refused by name.
+  Transport vectors (`c_check_program_transport.c`) carry an object's address:
+  a vector of `bool`, of 1 or 2 bytes, or of more than 64 bytes. Tiny arithmetic
+  reads and writes exactly its elements; wide arithmetic uses register-sized
+  pieces. Boolean bitwise operators work on the packed bits and clear padding.
+  Extended vectors' `!`, `&&` and `||` compare each lane with zero and return
+  all-one or all-zero signed lanes. Both operands are evaluated; these vector
+  operators do not short-circuit. Half-precision truth uses scalar conversions
+  and comparisons when there is no packed comparison at the target, preserving
+  floating exceptions. A vector-condition `?:` selects by the condition lane's
+  sign bit, or its packed boolean bit, and evaluates both arms. Its operands'
+  values are captured before later operands run, including a wide condition
+  whose original object an arm overwrites; the omitted middle operand is
+  evaluated once. Scalar arms splat at their element type. Non-boolean logical
+  operations and selections are bounded to 1,024 elements. Scalar-condition
+  `?:` keeps the usual short-circuit behavior. Clang rejects `&&` and `||` of
+  boolean vectors, and whole-vector `++` and `--` of either vector kind; the
+  checker rejects them too. Compound assignments and increments of an element
+  of a boolean vector remain a named lowering refusal because Clang 23
+  miscompiles them.
   Element access through a volatile vector lvalue is also refused: Clang uses
   a whole-vector volatile load, and a read/insert/store for an element write,
   which a scalar access at the element's address cannot preserve. Whole-vector
@@ -2514,7 +2547,8 @@ What the lowering covers past scalars (#145's programs):
     operand is refused by name. Such a literal has no local and isn't evaluated,
     and one evaluated anywhere else is refused by name;
   - max and min, the saturating sums and differences of 8- and 16-bit elements,
-    abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
+    abs, popcount (with BITALG or VPOPCNTDQ), clzg of 32- and 64-bit elements
+    (VPLZCNT, with its fallback
     blended in where an element is zero) and the funnel shifts (VPSHLDV and
     VPSHRDV, with VBMI2) are an instruction each, and so are sqrt and fma of
     floats and doubles (VSQRTPS and VFMADD213PS and theirs at the current
@@ -2561,7 +2595,11 @@ What the lowering covers past scalars (#145's programs):
     VPOPCNTDQ's for the others), each element's width for a zero one; its
     second operand's elements replace the zero ones' (VPTESTNM and VPBLENDM, or
     for 8- and 16-bit elements VPCMPEQ with zeros and a masked VMOVDQU8 or
-    VMOVDQU16). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
+    VMOVDQU16). clzg of 8- and 16-bit elements first reverses each element's
+    bits, then uses this count. Its optional fallback tests whether the count
+    equals the element width, which identifies exactly the zero inputs and
+    keeps the word row within eight records. It needs BITALG and the bit
+    reversal's features (GFNI, or AVX512-BMM for byte elements). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
     instruction deposits or extracts bits), of 32-bit zero extensions of 8- and
     16-bit ones, through frame objects of the vectors
     (`check_lower_vector_lanes`). clmul (#148) is each element's carry-less
@@ -2624,8 +2662,32 @@ What the lowering covers past scalars (#145's programs):
     minimum's sequence, a row a halving (`check_vector_reduce_floating_rows`);
     assoc_fadd adds the halves (VADDP), then the tree to its start value
     (-0.0 without one); in_order_fadd adds each element to the sum, first to
-    last, in the typed stream (`check_lower_reduce_in_order`); and xor
-    reduces as and and or do (VPXORQ).
+    last, in the typed stream (`check_lower_reduce_in_order`); max and min
+    use maxnum and minnum, folding a legal vector's lanes in source order,
+    including the first operand's signed zero on a tie. A wider vector first
+    combines its low and high halves repeatedly in register-sized pieces,
+    before the legal-width reduction, preserving the tree across register
+    boundaries (`check_lower_transport_reduce_floating`). Associative sums
+    replace unused padding lanes with -0.0; padded maxima and minima retain
+    their named refusal. xor reduces as and and or do (VPXORQ).
+  - elementwise integer and floating builtins of transport vectors use the
+    same rows on disjoint register-sized pieces. An `ldexp` piece has as many
+    lanes as fit its widest argument, with each argument advanced by its own
+    element width. A 1- or 2-byte operand is padded into private storage for
+    a minimum-width row, and only the result's actual bytes are stored.
+    Libm functions, pdep, pext and the scalar clmul path read elements through
+    the same address/value handoff. These expansions, ordered floating sums
+    and floating reduction trees are bounded to 1,024 elements and preserve
+    the ordinary rows' element-type and target-feature refusals.
+  - boolean elementwise builtins use packed bit operations at scalar and
+    register-sized widths: max and saturating add are OR; min, pdep, pext
+    and clmul are AND; saturating subtract is `a & ~b`; popcount and
+    bitreverse keep the operand. One-bit funnel shifts have a count modulo
+    one and keep their left or right input, respectively, while evaluating
+    all three arguments once. Tiny stores preserve neighboring bytes, and
+    result padding bits are cleared. Boolean clzg and ctzg retain a named
+    refusal because Clang 23.1.4 emits an invalid scalar-to-vector `trunc`
+    for them and crashes or produces incorrect code.
   - byte funnel shifts of 16-byte vectors use XOP's VPSHLB with signed byte
     counts, masking the original counts modulo eight. Their two halves are
     shifted separately and combined with VPOR; splitting the complementary
@@ -2662,14 +2724,13 @@ What the lowering covers past scalars (#145's programs):
   AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
-  shifts of 8-bit elements outside 16-byte vectors or without XOP; the leading
-  zero counts of 8- and 16-bit elements; the integer elementwise functions of
+  shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
   scalars; nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't (VBMI
   for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI,
   BMI2) are refused by name. `test-checker`'s vector builtin programs
   (`c_check_program_vector_builtins_test.c`) call each at every width, those
-  of vectors of 4 and 8 bytes, the narrowing conversions and the floating
+  of vectors of 1, 2, 4 and 8 bytes and wider than 64 bytes, the narrowing conversions and the floating
   intrinsics as the headers write them, with the masked truncating stores and
   the leaves (monitorx and mwaitx where the host has MWAITX), by both paths
   against clang -O0's code for znver5: the floating functions of inputs with
@@ -5512,8 +5573,8 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
 - **Differences left.**
   - An attribute clang knows that the checker neither has a rule for nor takes
     generically (the next section's "Attributes without a rule") is refused by
-    name before its subject is checked: `int v __attribute__((selectany));` is
-    refused, where clang takes it.
+    name before its subject is checked. The remaining handler and ABI
+    boundaries are listed there; `selectany` has its own rule.
   - The checker stops at a declaration's first error. So a later
     declaration's warnings, which clang gives too, are missing after an error
     row's error (`int e __attribute__((error("x")));`), as after any other
@@ -5854,7 +5915,11 @@ arguments against the function. The checker now gives these as clang does.
     them come their handlers' warnings: `noescape` on a parameter of no
     pointer type, and `optnone` taking over `always_inline` and `minsize`,
     "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
-    argument must be a string literal;
+    argument must be a string literal. Its later arguments must be constant
+    expressions, including floating values and addresses. A rejected extra
+    argument names its position starting at 1 after the string, with the
+    evaluator's note at the failing subexpression or division operator
+    (`check_input_attribute_annotate`);
   - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
     `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
     subject's diagnostic is all clang gives in C;
@@ -5887,11 +5952,16 @@ arguments against the function. The checker now gives these as clang does.
     function's declarator is its type's, clang's "non-member function has no
     implicit object parameter" error; elsewhere its subjects' error.
   - `loader_uninitialized`'s variable is a definition without an initializer,
-    in `.bss`, never common: where common linkage would be clang's (`-fcommon`,
+    in `.bss` by default, never common: where common linkage would be clang's (`-fcommon`,
     or `common`, without `nocommon` or a section) a weak one, as clang's code
     makes it for an initializer that isn't zero. An initializer, `extern`, an
     incomplete type, and adding it after the variable's definition are clang's
-    errors (the last with its note at the definition).
+    errors. An incomplete variable names its type and its tag's forward
+    declaration; a redefinition names the variable and its earlier definition.
+    An ordinary explicit `section` places its undefined initializer in
+    read-only storage, while named BSS and TLS families retain their section
+    kind. Both the executable's atom class and the object's section flags
+    retain that choice.
   - `weak_import`'s declaration is a weak reference where the unit doesn't
     define its entity. On a variable's definition (a tentative one, a local's
     or a parameter's) it is clang's warning "cannot be specified on a
@@ -5909,7 +5979,8 @@ arguments against the function. The checker now gives these as clang does.
   `requires_capability`, `acquire_capability`, `capability` and the others,
   `check_input_thread_rows`) change nothing here past their handlers'
   checks (`c_check_thread_safety_input.c`). Their arguments are
-  expressions that clang's parser reads where the attribute is, so each of
+  complete expressions, evaluated with the declaration evaluator, including
+  members, calls, casts and binary operators. Each of
   their names must be the scope's there: an earlier declaration (not the
   one being declared), a struct's earlier member, or a function
   declarator's own parameter; one that names nothing is clang's "use of
@@ -5919,6 +5990,14 @@ arguments against the function. The checker now gives these as clang does.
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of
   bounds" error and its extra information.
+
+  `-Wthread-safety-attributes`, off by default, retains capability-type,
+  pointer-subject, non-static-method, invalid-string and acquire-order-context
+  warnings as sparse events. Capability checks preserve the typedef
+  declaration that carries an annotation; annotating one typedef of `int`
+  does not annotate every `int`. The completed declarator's parameters and
+  earlier record members supply expression bindings without reopening the
+  ordinary scope.
 
   The retain-ownership attributes (`cf_consumed`, `ns_consumed`,
   `os_consumed`, `cf_returns_retained`, `cf_returns_not_retained`,
@@ -6058,10 +6137,16 @@ arguments against the function. The checker now gives these as clang does.
   first token. The checker stops at a declaration's first attribute error,
   where clang goes on to the next declaration's.
 
-  The rest stay refused by name: `selectany` (a COMDAT),
-  `no_caller_saved_registers` (a calling convention), and the attributes
-  whose handlers clang has its own (`pass_object_size`, `ms_struct`,
-  `interrupt` and others).
+  `selectany` has an explicit rule for its arguments, subject and external
+  linkage, so `int v __attribute__((selectany));` is accepted by the checker.
+  This rule does not supply ELF COMDAT emission or duplicate-definition
+  selection; those are tracked separately in
+  [#1458](https://github.com/buster14a/buster/pull/1458).
+
+  The rest stay refused by name: `no_caller_saved_registers` (register
+  preservation), and the attributes whose handlers clang has its own
+  (`pass_object_size`, `ms_struct`, `interrupt` and others). Recognizing their
+  names does not supply those handlers or their ABI effects.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -6087,12 +6172,33 @@ arguments against the function. The checker now gives these as clang does.
   "expected a type" alone, and a second argument "expected ')'" without its
   note, as clang's balanced reading of it gives them.
 - **Argument counts.** An attribute's count of arguments other than clang's
-  is clang's error, worded as clang's three messages: "'X' attribute takes no
+  is clang's error, worded as clang's messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at
-  least N arguments", "takes no more than N arguments". A generic attribute's
-  is checked after its subject, as clang checks it; a supported one's as its
-  arguments are read. `cleanup`'s is checked after its subject already, and an
-  attribute whose arguments clang parses its own way isn't counted.
+  least N arguments", "takes no more than N arguments". Declaration attributes
+  are counted after their subject and their arguments' parser errors: a
+  required string slot, an undeclared name, a malformed type, an incomplete
+  `sizeof` operand, a call or a builtin (`check_input_attribute_parsed`,
+  `check_input_attribute_expressions`). The shared expression evaluator retains
+  the actual operation, types and callee so those errors keep their locations
+  and notes. A trailing empty argument is an expression error, while an empty
+  required string slot is the string's error first (`section(,)`). The type
+  attributes `noreturn`, `packed`, `may_alias`, `transparent_union` and
+  nullability, and `sentinel`, keep their count-first checks.
+
+  The scalar parser uses those same generated string-slot facts when a
+  malformed expression would otherwise hide an earlier string error, as in
+  `section(1,)`. A stray name immediately before the closing parenthesis of a
+  `sizeof` or `alignof` type inside a GNU attribute is retained as a parser
+  error with its opener note. The diagnostic-only recovery view drops that
+  name, keeping the original complete type and closing parenthesis, so the
+  outer attribute can still diagnose its count. This view cannot accept or
+  emit the source. A delayed count diagnostic takes its name from its source
+  report and publishes after the arguments, independently of its sort key.
+
+  Custom grammars keep their handlers' rules: `cpu_specific` and
+  `cpu_dispatch` require at least one identifier, `no_sanitize` at least one
+  string, and `target_clones` requires a default target. Their zero-argument
+  forms reach those checks after the subject instead of a generic refusal.
 - **Arguments' errors** (`CHECK_INPUT_ATTRIBUTE_ARGUMENT`, with
   c_check_attribute.c's `CheckAttributeArgumentError` in its detail). An
   argument a handler refuses is clang's error, in clang's words and at its
@@ -6142,7 +6248,8 @@ arguments against the function. The checker now gives these as clang does.
     enumeration types", "mode attribute only supported for integer and
     floating-point types", "type of machine mode does not match type of base
     type", "unsupported machine mode 'M'" and "type of machine mode does not
-    support base vector types".
+    support base vector types". A wrong base does not suppress the separate
+    unsupported-mode error when both apply.
   - `mode` on an enum gives it the mode's integer type, signed (an enum of no
     integer type yet takes `int`'s, as clang's `AddModeAttr` defaults it).
     Before its body, as clang's `EnumDecl::setIntegerType` makes it, the enum
@@ -6172,15 +6279,22 @@ arguments against the function. The checker now gives these as clang does.
   (-Wunknown-sanitizers) and format's "GCC requires a function with the
   'format' attribute to be variadic" (-Wgcc-compat) at the declaration's
   name. A cleanup's name that names nothing is clang's parser's error alone:
-  the attribute is dropped, its subject unchecked.
+  the attribute is dropped, its subject unchecked. Target warnings name the
+  decoded string fragment, including permitted escapes, rather than the
+  source literal's escape spelling.
 - **Subject before arguments** (`CheckInputAttribute.deferred`). The
   handlers clang runs once an attribute's subject takes it give their
-  arguments' errors only then: tls_model's model, constructor's, destructor's
-  and assume_aligned's integers. The reader evaluates them where it reads them
+  arguments' errors only then: tls_model's model, constructor's, destructor's,
+  assume_aligned's, alloc_size's and alloc_align's integers, and format's kind
+  and indices. The reader evaluates them where it reads them
   (a tag's subjects are reached from the constant evaluator) and moves the
   error into the attribute (`check_input_attribute_defer`), which
   `check_input_attribute_subjects` gives after the subject, the exclusions and
-  the count; a use of an undeclared name, clang's parser's error, stays. The
+  the count; a use of an undeclared name, clang's parser's error, stays. An
+  unsupported format kind or a non-pointer allocation result warns and ignores
+  the attribute before any constant-value error. A malformed format kind is
+  likewise checked only after its subject: `format(1, 2, 3)` on a variable
+  has only the subject's warning. The
   type attributes clang leaves to a declarator's type (regparm,
   ext_vector_type) are ignored on a tag's declaration without a word, their
   arguments unread (`CheckInputReader.tag_attributes`).
@@ -6261,10 +6375,12 @@ arguments against the function. The checker now gives these as clang does.
   the attributes after it are checked against, only from a block's first
   declaration of its entity, which a later file-scope declaration that sees
   none links to and inherits from; the late masks take file scope's and
-  those. Each attributed block-scope declaration with linkage that has a
+  those. Each block-scope declaration with linkage that has a
   visible previous one records its scope's end
   (`CheckInputReader.declaration_scope_ends`, allocated at the first); the
-  others count as file scope's.
+  others count as file scope's. Recording the scope does not depend on
+  whether attribute evaluation has published the declaration's attributes
+  yet, so delayed publication cannot make a closed block visible again.
 - **Bodies on lanes** (`check_input_attribute_late`). A body read on a lane
   can't read its entity's other declarations' attributes, which other lanes'
   columns hold, nor publish its own to later ones. A redeclaration there that
@@ -6278,45 +6394,72 @@ arguments against the function. The checker now gives these as clang does.
   unit of 19 glibc headers with their extern inline functions (merged). So
   source order costs nothing measured there, where publishing the attribute
   state across lanes would take a merge of its own.
+- **GNU `noderef`** (`c_check_noderef_types.c`, `c_check_noderef_input.c`,
+  `c_check_noderef_graph.c`). Source-only immutable shadows retain annotations
+  through pointers, arrays, function results and parameters, typedefs, record
+  members, `typeof` and inferred declarations. They never enter canonical type
+  identity, layout or generated values. A sparse token column exists only in
+  units spelling `noderef` or `__noderef__`; ordinary units take no expression
+  pass or annotation allocation. Declarator and constant/type-name readers
+  compose the same shadow shape. An attribute just inside declarator parentheses
+  marks that chunk's type without adding a canonical layer. An invalid
+  placement retains its type sugar and gives `-Wignored-attributes`, as Clang
+  does; a trailing declaration
+  spelling has no dereference effect. C23 `clang::noderef` remains ignored.
+  The checked graph transfers the annotations through calls, casts, pointer
+  arithmetic, assignments, comma and conditional expressions, then gives
+  `-Wnoderef` for dereferences, subscripts and arrow accesses. A pointer or array
+  identifier's warning names it and notes its declaration; an atomic operand
+  uses the generic expression warning. Unary dereferences that select array
+  values compute addresses without a warning; subscripts retain their annotation
+  check. `sizeof`, `alignof`, `typeof`
+  and generic controlling expressions suppress the warning. Taking an address
+  cancels its lvalue's dereference, including array-member address computations,
+  while loading an intermediate pointer member still warns. Implicit pointer
+  conversions that remove the annotation warn; explicit casts do not. The
+  check uses the original source and destination pointer types before array
+  decay or atomic value conversion, and only fixed prototype parameters
+  supply assignment conversions at calls. Conversion locations share the
+  attribute argument reader's expression spelling, including parentheses.
+  This lookup follows the first token's parent chain once, retaining a
+  subscript base's location without repeatedly scanning nested prefixes.
+  Checked subscripts also consult the existing operand type and value category:
+  an implicit lvalue or array conversion reports the base's beginning, as does
+  the value conversion of a materialized record's member (`get().pointer`).
+  A value such as `p++` keeps its own operator location. The pointer operand
+  supplies that location in reversed subscripts such as `0[p]` too.
+  Initializer conversion diagnostics follow the actual selected member or
+  array element, including nested designators, union alternatives, atomic
+  pointer elements and GNU ranges. The graph pass retains one bit per value
+  for these consumers; its temporary expression shadows remain disposable.
+  The initializer's warning sink keeps one conversion warning per selected
+  range element, while dropping scalar initializers already diagnosed by the
+  graph pass. Conversion warnings also apply in unevaluated operands;
+  dereference warnings keep their query suppression.
+  Function redeclarations preserve the previous composite function type's
+  sugar, while an object's most recent declaration and a definition's own
+  parameters keep their own sugar. Parameter adjustment preserves atomic
+  wrappers; K&R declarations retain the adjusted annotations and the typed
+  parameter's location for declaration notes. Call arguments and their sparse
+  parameter annotations advance in source order together. A body's annotated
+  record members request source-order replay before publishing member indexes;
+  other body shadows remain immutable in the deferred reader's retained arenas.
+- **C23 type placement.** A list after the declaration specifiers applies to
+  their base type before the declarator is built. Thus
+  `void [[gnu::ms_abi]] f(void);` warns "'ms_abi' only applies to function
+  types; type here is 'void'" and ignores the attribute. A pointer's `_Atomic`
+  qualifier is consumed before checking a following list, so
+  `int * _Atomic [[gnu::unused]] p` gives "an attribute list cannot appear
+  here".
 - **Differences left.**
-  - A C23 function type's attribute after the specifiers
-    (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
-    it to the specifiers' type and warns "'ms_abi' only applies to function
-    types; type here is 'void'".
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
     recovery errors and their notes (a first error's "to match this '('" is
     the parser's: `docs/c-parser.md`).
-  - GNU's `noderef` is refused by name.
-  - A thread-safety attribute's argument is checked for its names alone: an
-    expression of other errors (`g.x` of an `int`) is taken, where clang
-    gives its error; a trylock's first argument's type is worked out from a
-    literal or a name alone. Their `-Wthread-safety-attributes` warnings,
-    off by default, aren't made.
-  - A `loader_uninitialized` variable's incomplete type is the generic
-    "object has incomplete type", and a definition after one the generic
-    "conflicting declaration", as every incomplete object's and redefinition's
-    are here, where clang names the type and the variable (with notes). With a
-    `section` attribute too, clang's object marks its section read-only
-    (LLVM's kind of an undefined initializer), which a write faults in; its
-    section here is writable.
-  - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
-    "an attribute list cannot appear here".
-  - An argument's undeclared name after a type's keyword or a `sizeof` stays
-    the generic error, which comes first, where clang's parser gives the
-    type's errors in turn and then the name's. A format kind's warning, and
-    alloc_size's and alloc_align's of a function that returns no pointer,
-    come after the arguments are evaluated: an argument that is no constant
-    is its error first, where clang's handler warns and stops. `mode`'s base
-    of the wrong type is one error, where clang goes on to "unsupported
-    machine mode" where both apply. A string argument with escapes names the
-    piece of target's string from its spelling.
   - A function definition's attribute whose argument count is wrong
     (`regparm`, `pcs`) is the count's error alone: clang's parser's
     `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
     made (nor `-Wreturn-type` but for a function returning an aggregate).
-  - `annotate`'s arguments after its string must be constant expressions,
-    clang's error with its evaluator's notes otherwise; they are taken here.
   - After a missing `;`'s recovery, as everywhere, a declaration's checker
     error ends what is published (`int x _Alignas(3) int y _Alignas(4);`
     stops at "requested alignment is not a power of 2", where clang goes on
@@ -6341,23 +6484,6 @@ arguments against the function. The checker now gives these as clang does.
     (`ParenType`): `__attribute__((regparm(1))) int (*p);` is 'int *', where
     clang's is 'int (*)'. Types here keep no parentheses; other diagnostics
     that print such a type differ the same way.
-  - A block-scope declaration whose attributes are set after it binds (by a
-    constant's job) records no scope, and is taken as a file scope's.
-  - A supported attribute's argument count is checked after its subject, as
-    clang's (`int x __attribute__((format(printf)));` is the subject's
-    warning alone), and after the errors clang's parser gives of its
-    arguments: a string literal's position that holds none, and a name that
-    names nothing (`check_input_attribute_parsed`). An argument whose
-    parser errors clang gives otherwise (a tag's or `typeof`'s type, a call,
-    a builtin, an empty one) keeps the count's error first, where clang gives
-    those (`aligned(sizeof(struct q), 2)` is the count's error, where clang
-    gives the incomplete type's). A type's (`noreturn`, `packed`,
-    `may_alias`, `transparent_union`, nullability) and `sentinel`'s count
-    is checked first, as clang's. Those whose arguments clang parses its own
-    way (`cpu_specific()`, `no_sanitize()`, `target_clones()`) aren't
-    counted against clang's and are refused; `format`'s first argument that
-    is no identifier is its error before the subject's, where clang's
-    handler checks it after.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -6393,7 +6519,14 @@ arguments against the function. The checker now gives these as clang does.
     `c_check_lane_attribute_driver_test.c`).
 
   `test-checker` checks the exclusions table's order and pairs, and that the
-  facts tell C's attributes from another language's.
+  facts tell C's attributes from another language's. The binding tests retain
+  a block declaration's effective scope before its attributes are published.
+  `c_check_attribute_arguments_driver_test.c` compares complete diagnostic
+  streams for malformed expressions, custom empty lists, annotate constants,
+  deferred format/allocation checks, secondary mode errors and escaped target
+  strings. `c_check_attribute_effects_driver_test.c` covers complete
+  thread-safety expressions with their warning option, loader diagnostics and
+  loader section bytes and flags, through the scalar and vector paths.
 
 ## Ignorable and unsupported pragmas
 

@@ -66,6 +66,8 @@ struct EmittedCode
     // First records by label index; UINT32_MAX is an absent label, not an indirect control-flow target.
     uint32_t* label_records;
     uint32_t label_count;
+    const Tier0Home* local_homes;
+    uint32_t local_count;
     const uint32_t* source_records;
     const uint32_t* source_origins;
     uint32_t source_count;
@@ -272,6 +274,8 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
     };
     if (code->error == TIER0_OK && sources)
     {
+        result.local_homes = code->local_homes;
+        result.local_count = code->local_count;
         result.source_records = code->entry_records;
         result.source_count = code->entry_count;
     }
