@@ -1017,7 +1017,7 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types, 
     for (uint32_t node = 0; result && node < count; node += 1)
     {
         const uint32_t header = statics[node];
-        if (header == BUSTER_CHECK_TRANSITION_LEAF && check_graph_leaf_of(graph, node)->overload_head == 0)
+        if (header == BUSTER_CHECK_TRANSITION_LEAF && check_graph_leaf_overload_head(graph, node) == 0)
         {
             check_graph_leaf(types, graph, stream, node);
             uint32_t template = 0;

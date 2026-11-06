@@ -171,13 +171,14 @@ static bool check_benchmark_generate(CheckGraph* graph, bool chain)
             valid = node != BUSTER_CHECK_NONE;
             if (valid)
             {
-                *check_graph_leaf_of(graph, node) = (CheckValue){
+                const CheckValue leaf = {
                     .type = BUSTER_TYPE_ULONG,
                     .category = CHECK_RVALUE,
                     .flags = BUSTER_CHECK_ICE,
                     .constant_kind = CHECK_CONSTANT_INTEGER,
                     .integer = random >> 16,
                 };
+                check_graph_set_leaf(graph, node, &leaf);
             }
         }
         else

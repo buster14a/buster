@@ -645,7 +645,8 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   change, and #592's passes' too. They are sparse columns now (below).
 - **The graph's leaves.** Their 96-byte values take 14 MB for 144,720 leaves, of
   which the identifiers' carry little but a type and an object: columns and
-  payload rows, as the stream's values have, would take about 8 MB less.
+  payload rows, as the stream's values have, would take about 8 MB less. They
+  are 32-byte records now ("The graph's leaves", below).
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
   8.3 MB, written at declarations, most of whose bits would fit one byte. Seven
   of them are one now ("The declaration bits", below).
@@ -841,6 +842,121 @@ record](https://github.com/buster14a/buster-performance/tree/3dd0b4bfce2982eae0f
 Every round of the 8 has the branch 1.8 to 2.8 ms faster. The peak is 8.1 MB
 lower, of the 12 MB that #1167 bounded for the two changes. Main's own peak had
 risen 4 MB since `b70deb47`, by its changes between.
+
+### The graph's leaves (#628)
+
+On main `ec5f0f6b`, a map of each push's resident pages (the attributes
+column's record's `peak-map.patch`, on this repository's 4-CPU cloud VM, one
+lane, with huge pages on as the 9700X has them, `BUSTER_HUGE_PAGES=1`) finds
+three peaks of `-c sqlite3.c` almost alike:
+- the reader's end, 283.5 MB, with its arena of rare columns, 31 MB, still
+  mapped;
+- `check-declarations`' end, 286.1 MB, with the graph run's outputs;
+- the backend's, with `check_program`'s and the lowering's columns: 278.8 MB
+  with `-w`, but 297.0 MB with the step's options. `sqlite3.c`'s one warning
+  (#1339's, which the scalar path and clang don't give) makes the preprocessor
+  record its history (`pp_history_record`): it preprocesses the unit again, and
+  the replay keeps 16.6 MB to the end, 12 MB of it its output tokens, which only
+  its comparison with the unit's output reads.
+
+All three hold the parser's columns (16 MB), the graph's leaves (14.3 MB), the
+preprocessor's output tokens (12.5 MB) and its file's windows (11.5 MB). The
+leaves were a 96-byte `CheckValue` each, 144,720 of them: 24,071 have more than
+the stream's columns hold (#1022), 23,991 of those only an integer (a
+literal's or an enumerator's value), and 80 more than an integer of 64 bits.
+
+They are 32-byte records now (`CheckGraphLeaf`, `c_checker.c`):
+- **The layout.** A record holds the value's type, flags, object, overload set,
+  the low 64 bits of its integer, category and constant kind. A value with more
+  (`check_graph_leaf_rest`: a wider integer, a floating payload, an address's
+  offset, a bit-field's width or place, a fault) also takes a whole `CheckValue`
+  row of `leaf_payloads`, the record's `row`. A leaf takes a row at its first
+  write at most, so that the rows are at most the leaves: the column has room
+  for a row a node, of which only those written take memory. On `sqlite3.c`
+  the records take 4.6 MB and the rows 7.5 KB.
+- **Reads and writes.** `check_graph_leaf_value` gives a leaf's whole value,
+  and `check_graph_leaf_type`, `check_graph_leaf_flags`,
+  `check_graph_leaf_object` and `check_graph_leaf_overload_head` its record's
+  fields. `check_graph_set_leaf` writes a leaf the first time, as the reader's
+  walk and its coded classes write each once, without reading what its storage
+  held; `check_graph_update_leaf` writes over one in the row it has. A
+  hand-built graph may hold whole values in `dense_leaves`, as a stream may hold
+  `dense_values`, and every accessor reads either.
+- **The graph run** writes a leaf that is its record alone, without a row, an
+  integer or an overload set (an identifier's, most of them), into the stream's
+  columns with no value in memory between them.
+- **Lanes.** The deferred reader's parts write their leaves in ranges of their
+  own (`leaf_offset`), and their rows in the same ranges of the rows. The merge
+  moves a part's rows after the graph's and renumbers its records' rows
+  (`check_deferred_expression_leaves`), a scalar loop that only runs where both
+  have rows.
+
+`test-checker`'s `check_test_leaf_records` writes random values, each field zero
+or not and some with more than a record, into records and into dense leaves,
+their twin, over storage that earlier writes left dirty; writes a quarter again;
+then appends a part written in its own range as the merge appends it. Every
+leaf must read back the same, whole and by its fields, with at most a row a
+leaf.
+
+On the VM, main `ec5f0f6b` against the change, three runs each, which agree
+within 8 KiB, with every object and diagnostic the same bytes by both paths:
+
+| pages | measure | main | records |
+| --- | --- | ---: | ---: |
+| huge (`BUSTER_HUGE_PAGES=1`) | peak RSS | 297,024 KiB | 290,836 KiB |
+| | `check-input`'s peak added | 145,328 KiB | 139,188 KiB |
+| base (the VM's default) | peak RSS | 227,988 KiB | 218,908 KiB |
+| | minor faults | 72,411 | 70,154 |
+
+The peak is the backend's in both, 6.2 MB lower with huge pages, where the
+records take three of them and the rows one, against seven for the values; in
+base pages the 9.1 MB of the values' pages that the records don't touch.
+
+On the 9700X, CPU 2 under the host's lock, main `ec5f0f6b` against the change
+(`9cfc0f50`), built with `BUSTER_HOST_ARCH=znver5`, measured as the attributes'
+change was: 8 interleaved rounds of `perf stat -r 3`, then `measure-compile
+--runs 11` of each with the other as its reference, all of them under one hold
+of the host's lock (about 20 seconds), and one `--time-stages` run of each under
+another. Every object is the same bytes by both paths, on 8 lanes and with
+`-g`.
+
+| measure | main | records |
+| --- | ---: | ---: |
+| task clock | 138.86 ms | 138.28 ms |
+| user cycles | 676.1 M | 674.1 M |
+| user instructions | 1,636.3 M | 1,637.8 M |
+| kernel cycles | 94.7 M | 93.0 M |
+| peak RSS (`wait4`, `measure-compile`) | 293,592 KiB | 289,976 KiB |
+| peak RSS (`--time-stages`) | 293,660 KiB | 289,888 KiB |
+| its growth past the process's start | 291,792 KiB | 284,176 KiB |
+| `check-input`'s peak added | 149,916 KiB | 143,840 KiB |
+| `check-input` (`measure-compile`) | 59.71 ms | 59.22 ms |
+
+- **The time.** Every round of the 8 has the change 0.3 to 1.0 ms faster; the
+  kernel's cycles are 1.7% fewer, the user instructions 0.1% more (the
+  accessors).
+- **The peak.** `check-input` adds 6.1 MB less, as on the VM, and the stages
+  after it about as much as main's do, so that the process grows 7.6 MB less past its
+  start. But on `sqlite3.c` the change's process starts 3.8 MB larger at its
+  first mark than main's (5,712 against 1,868 KiB), which an empty file's
+  doesn't show (2,016 against 1,868 KiB) and the VM doesn't either (5,556
+  against 5,588 KiB), and nothing the change writes runs by then: the whole
+  peak is 3.8 MB lower.
+
+What the peaks still hold for little, after this:
+- **The scratch's high-water.** 90 MB at the reader's end, and to the end of
+  `static-data`, where `check_program` and the backend use 57 MB of it. Two
+  things reach its top: the parse's buffers (`parse_vector_buffers_reserve`'s
+  statements, to 83 MB) and the reader's deepest temporaries (the deprecated-use
+  pass's, to 86 MB, which #1530 changes). Below them the reader keeps its own
+  columns, 64 MB, its traversal's 13.5 MB among them.
+- **The rare columns**, 31 MB at the reader's end ("Pages held for nothing",
+  above).
+- **The replay's output tokens**, 12 MB for a unit with any diagnostic. Its
+  collected diagnostics read its tokens' origins, so only the token columns
+  could go after its comparison.
+- **The stream's conversions**, 32 bytes a node, 10 MB from `check-expressions`
+  through the backend, where a leaf's is its type.
 
 ## The checker's graph and program passes (#530)
 
