@@ -178,6 +178,8 @@ struct AsmInstruction
     // Whether an AT&T suffix gave request.width without the parser checking each operand against it: the matcher does,
     // by each form's suffix width (x86_match_suffix_width), and a failure tries the operands without it to say so.
     bool suffixed;
+    // REP BSF/BSR is matched as a baseline scan, then encoded with its F3-prefixed form.
+    bool rep_scan;
     bool branch;
     bool local_branch;
 };
@@ -2253,7 +2255,7 @@ static void asm_prefixed_mnemonic(AsmParser* parser, String8* name, uint32_t end
 // repnz are repe and repne, rep before a compare or a scan is repe, and AT&T's dword suffix l is d. `name` is the
 // mnemonic's token; a prefix takes the next token, the instruction, which the parser then skips. Any other mnemonic
 // stays as it is, and only a prefix's first letter or an AT&T dword's suffix makes one worth comparing.
-static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
+static bool asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
 {
     static const char* const prefixes[][2] = { { "rep", "rep" }, { "repe", "repe" }, { "repz", "repe" }, { "repne", "repne" }, { "repnz", "repne" } };
     static const char* const bases[] = { "movs", "stos", "lods", "cmps", "scas" };
@@ -2281,29 +2283,15 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
         *name = strcmp(prefix, "repne") == 0 ? BUSTER_S8("repne ret") : BUSTER_S8("rep ret");
         parser->at += 1;
     }
-    // lzcnt written `rep bsr` (dr_flac's `rep; bsr`, for assemblers that don't know lzcnt) and tzcnt written `rep bsf`:
-    // the same bytes (F3 0F BD and F3 0F BC), which a processor without LZCNT or BMI runs as the scans themselves. An
-    // AT&T size suffix stays on the name, as on bsr's.
+    // Match REP BSF/BSR against the baseline scans. Their F3-prefixed encodings also spell TZCNT/LZCNT, but explicit
+    // scan syntax is valid without those features. An AT&T size suffix stays on the name.
     const char suffix = instruction.length == 4 && !parser->options.intel ? instruction.pointer[3] : 0;
     const bool scan = prefixed && (strcmp(prefix, "rep") == 0 || strcmp(prefix, "repe") == 0) && (instruction.length == 3 || suffix == 'w' || suffix == 'l' || suffix == 'q') &&
                       (memcmp(instruction.pointer, "bsr", 3) == 0 || memcmp(instruction.pointer, "bsf", 3) == 0);
     if (scan)
     {
-        char* bytes = arena_push(parser->arena, instruction.length + 2, 1);
-        if (bytes == 0)
-        {
-            asm_fail(parser, parser->tokens[parser->at - 1].start, "arena exhausted");
-        }
-        else
-        {
-            memcpy(bytes, instruction.pointer[2] == 'r' ? "lzcnt" : "tzcnt", 5);
-            if (suffix != 0)
-            {
-                bytes[5] = suffix;
-            }
-            *name = (String8){ .pointer = bytes, .length = instruction.length + 2 };
-            parser->at += 1;
-        }
+        *name = instruction;
+        parser->at += 1;
     }
     uint32_t base = BUSTER_ARRAY_LENGTH(bases);
     for (uint32_t i = 0; candidate && instruction.length == 5 && i < BUSTER_ARRAY_LENGTH(bases); i += 1)
@@ -2332,6 +2320,7 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
             parser->at += prefixed ? 1 : 0;
         }
     }
+    return scan;
 }
 
 // A string instruction's explicit operand (#1115): memory of RSI or RDI (or ESI or EDI) alone, with a segment or not;
@@ -2594,7 +2583,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         String8* name = &instruction->request.mnemonic;
         asm_lock_mnemonic(parser, name, end);
         asm_prefixed_mnemonic(parser, name, end);
-        asm_string_mnemonic(parser, name, end);
+        instruction->rep_scan = asm_string_mnemonic(parser, name, end);
         instruction->written = asm_token_text(parser, parser->at - 1);
         uint8_t string_prefixes[2];
         const uint32_t string_prefix_count = asm_string_operands(parser, name, end, string_prefixes);
@@ -4012,7 +4001,14 @@ static void asm_match_instructions(AsmParser* parser)
         else
         {
             instruction->record = match.instruction;
-            fragment->size = match.length;
+            if (instruction->rep_scan)
+            {
+                // The scan and count forms have matching widths, operands and segment variants; only F3 is added.
+                const bool reverse = x86_match_name(instruction->request.mnemonic, "bsr");
+                const uint32_t delta = reverse ? X86_FORM_LZCNT_R16_RM16 - X86_FORM_BSR_R16_RM16 : X86_FORM_TZCNT_R16_RM16 - X86_FORM_BSF_R16_RM16;
+                instruction->record.form += delta;
+            }
+            fragment->size = match.length + instruction->rep_scan;
             const X86FormDescription* form = x86_form_description(instruction->record.form);
             instruction->branch = form->relative_bytes != 0;
             if (instruction->branch && instruction->expressions[0].plus == 0)
