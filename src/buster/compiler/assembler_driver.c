@@ -304,7 +304,10 @@ static int run_assembler_command(int count, char** arguments)
         }
         const uint64_t start = asm_clock();
         X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(&arena, X86MatchIndex, 1);
-        if (!valid || index == 0 || !x86_encoder_initialize() || !x86_semantics_initialize() || !(preprocessed ? asm_preprocess_file(input, preprocessing, &arena, &source) : asm_read_file(input, &arena, &source)))
+        // A baked executable starts with the semantics tables built (baked.h, #590): only one that isn't builds them
+        // (#1571), since x86_semantics_initialize rebuilds them unconditionally.
+        if (!valid || index == 0 || !x86_encoder_initialize() || !(x86_semantics_initialized || x86_semantics_initialize()) ||
+            !(preprocessed ? asm_preprocess_file(input, preprocessing, &arena, &source) : asm_read_file(input, &arena, &source)))
         {
             fprintf(stderr, "%s: unable to initialize or read assembly input (maximum 64 MiB)\n", input);
         }
