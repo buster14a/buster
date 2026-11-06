@@ -49,6 +49,87 @@ static uint32_t check_literal_table_shape(const uint8_t* kinds, uint32_t begin, 
     return valid && previous != PARSE_KIND_MINUS ? count : 0;
 }
 
+// The lanes of `bits` that follow an odd count of its set bits, with `carry` a set bit before lane 0: a prefix XOR.
+static uint64_t check_literal_table_parity(uint64_t bits, bool carry)
+{
+    uint64_t parity = bits;
+    parity ^= parity << 1;
+    parity ^= parity << 2;
+    parity ^= parity << 4;
+    parity ^= parity << 8;
+    parity ^= parity << 16;
+    parity ^= parity << 32;
+    return carry ? ~parity : parity;
+}
+
+// A table of rows (#1383): one or more `{ list }` of check_literal_table_shape's grammar, each holding exactly `columns`
+// numbers, separated by commas with one trailing comma allowed, and nothing deeper; returns the numbers' count, or 0.
+// A short row (zeros after it), an elided or excess one, a deeper brace and anything else is ineligible. The SIMD form
+// reads 64 token kinds a block: each kind's predecessor (carried from the block before) and brace depth, the lanes after
+// an odd count of braces (check_literal_table_parity, its carry the depth). A `{` must be at depth 0 and a `}` at 1, so
+// depth stays 0 or 1 and its parity is it; each `}`'s numbers before it, from the table's start, are its rows' columns.
+static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns, bool scalar)
+{
+    uint64_t count = 0;
+    uint64_t rows = 0;
+    uint64_t row = 0;
+    uint32_t previous = PARSE_KIND_COMMA;
+    bool inside = false;
+    bool valid = begin < end && columns != 0;
+    for (uint32_t first = begin; valid && first < end;)
+    {
+        const uint32_t left = end - first;
+        const uint32_t take = scalar ? 1 : left < 64 ? left : 64;
+        if (scalar)
+        {
+            const uint32_t kind = kinds[first];
+            valid = kind == PARSE_KIND_NUMBER ? inside && (previous == PARSE_KIND_COMMA || previous == PARSE_KIND_MINUS || previous == PARSE_KIND_L_BRACE) :
+                    kind == PARSE_KIND_MINUS ? inside && (previous == PARSE_KIND_COMMA || previous == PARSE_KIND_L_BRACE) :
+                    kind == PARSE_KIND_COMMA ? previous == PARSE_KIND_NUMBER || previous == PARSE_KIND_R_BRACE :
+                    kind == PARSE_KIND_L_BRACE ? !inside && previous == PARSE_KIND_COMMA :
+                    kind == PARSE_KIND_R_BRACE && inside && (previous == PARSE_KIND_NUMBER || previous == PARSE_KIND_COMMA) && row == columns;
+            row = kind == PARSE_KIND_L_BRACE ? 0 : row + (kind == PARSE_KIND_NUMBER);
+            rows += kind == PARSE_KIND_R_BRACE;
+            count += kind == PARSE_KIND_NUMBER;
+            inside = kind == PARSE_KIND_L_BRACE || (inside && kind != PARSE_KIND_R_BRACE);
+            previous = kind;
+        }
+        else
+        {
+            const uint64_t lanes = take == 64 ? UINT64_MAX : (UINT64_C(1) << take) - 1;
+            const __m512i block = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+            const uint64_t numbers = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_NUMBER));
+            const uint64_t commas = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_COMMA));
+            const uint64_t minus = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_MINUS));
+            const uint64_t opens = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_L_BRACE));
+            const uint64_t closes = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_R_BRACE));
+            const uint64_t after = check_literal_table_parity(opens | closes, inside);
+            const uint64_t before = after << 1 | inside;
+            const uint64_t number_before = numbers << 1 | (previous == PARSE_KIND_NUMBER);
+            const uint64_t comma_before = commas << 1 | (previous == PARSE_KIND_COMMA);
+            const uint64_t minus_before = minus << 1 | (previous == PARSE_KIND_MINUS);
+            const uint64_t open_before = opens << 1 | (previous == PARSE_KIND_L_BRACE);
+            const uint64_t close_before = closes << 1 | (previous == PARSE_KIND_R_BRACE);
+            valid = (numbers | commas | minus | opens | closes) == lanes && ((numbers | minus) & ~after) == 0 && (opens & before) == 0 &&
+                    (closes & ~before) == 0 && (numbers & ~(comma_before | minus_before | open_before)) == 0 &&
+                    (minus & ~(comma_before | open_before)) == 0 && (commas & ~(number_before | close_before)) == 0 &&
+                    (opens & ~comma_before) == 0 && (closes & ~(number_before | comma_before)) == 0;
+            for (uint64_t pending = closes; valid && pending != 0; pending &= pending - 1)
+            {
+                const uint64_t below = (pending & (0 - pending)) - 1;
+                rows += 1;
+                valid = count + (uint64_t)__builtin_popcountll(numbers & below) == rows * columns;
+            }
+            count += (uint64_t)__builtin_popcountll(numbers);
+            inside = (after >> (take - 1) & 1) != 0;
+            previous = kinds[first + take - 1];
+        }
+        first += take;
+    }
+    valid = valid && !inside && (previous == PARSE_KIND_R_BRACE || previous == PARSE_KIND_COMMA) && count == rows * columns && count <= UINT32_MAX;
+    return valid ? (uint32_t)count : 0;
+}
+
 // Common bin2c spellings: one to three decimal digits (without an octal prefix), or exactly two hexadecimal digits.
 // Each word contains only bytes copied within its spelling, with zero padding. Other integer forms use the existing
 // literal reader; floating, malformed and imaginary forms make the whole table fall back without dropping diagnostics.
@@ -724,18 +805,24 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
                     parser->tree.parents[begin] == end - 1 && parser->tokens.kinds[end - 1] == PARSE_KIND_R_BRACE;
     uint32_t width = 0;
     bool is_signed = false;
-    const TypeId element = eligible ? type_element(reader->types, type) : 0;
+    const TypeId row = eligible ? type_element(reader->types, type) : 0;
+    // An array of rows (#1383): its element a complete array of a scalar the table holds, `columns` of them each.
+    const bool rows = row != 0 && type_kind(reader->types, row) == BUSTER_TYPE_KIND_ARRAY;
+    const uint64_t columns = rows ? reader->types->types.extent[type_index(row)] : 1;
+    const TypeId element = rows ? type_element(reader->types, row) : row;
     const bool floating = element != 0 && (type_unqualified(element) == BUSTER_TYPE_FLOAT || type_unqualified(element) == BUSTER_TYPE_DOUBLE);
     if (eligible)
     {
         width = floating ? (type_unqualified(element) == BUSTER_TYPE_FLOAT ? 32 : 64) : 0;
-        eligible = (type_qualifiers(element) & BUSTER_TYPE_VOLATILE) == 0 &&
+        eligible = ((type_qualifiers(row) | type_qualifiers(element)) & BUSTER_TYPE_VOLATILE) == 0 && columns != 0 &&
                    (floating || (type_kind(reader->types, element) == BUSTER_TYPE_KIND_INTEGER && type_unqualified(element) != BUSTER_TYPE_BOOL &&
                     check_action_integer_type(reader->types, element, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64)));
     }
-    const uint32_t count = eligible ? check_literal_table_shape(parser->tokens.kinds, begin + 1, end - 1, parser->options.scalar) : 0;
+    const uint32_t count = !eligible ? 0 :
+                           rows      ? check_literal_table_rows(parser->tokens.kinds, begin + 1, end - 1, columns, parser->options.scalar) :
+                                       check_literal_table_shape(parser->tokens.kinds, begin + 1, end - 1, parser->options.scalar);
     eligible = eligible && count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
-               (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || count <= reader->types->types.extent[type_index(type)]);
+               (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || count / columns <= reader->types->types.extent[type_index(type)]);
     const uint64_t mark = reader->arena->length;
     const uint64_t bytes = (uint64_t)count * (width / 8);
     uint8_t* payload = eligible ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, bytes) : NULL;
@@ -764,7 +851,7 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     accepted = accepted && table != NULL;
     if (accepted && kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {
-        type = check_input_type_result(reader, type_array(reader->types, type_element(reader->types, type), count));
+        type = check_input_type_result(reader, type_array(reader->types, type_element(reader->types, type), count / columns));
         accepted = type != 0;
     }
     if (accepted)
