@@ -243,6 +243,15 @@ a page at a time rather than touch below it, since kernels before Linux 4.20
 refuse an access more than 64 KiB below rsp where the main thread's stack must
 grow.
 
+A reservation under a page is touched only where the frame is realigned or the
+body moves rsp (an allocation, a stack restore): a dynamic allocation must
+start from a touched rsp, or its first touch could land a page below an
+untouched reservation, past a guard page (LLVM's constraint). Other frames
+under a page, with a frame pointer or not, leave less than a page untouched,
+and the next call's return address is the next touch. Until #1450 a frame
+pointer alone made both tiers touch: a read-modify-write of `[rsp]` on every
+call, which cost Tier 0's `closures.lua` 4.59% (#177).
+
 - **Tier 1's prologue** takes `PROBE_STACK` (`Tier1EmitOptions.frame_flags`):
   the planner's `PROBE_ALLOCATE` and `PROBE_ALIGN` above, with their frame
   events. `Tier1Frame.probe_stack` records it. Selection accepts object
@@ -268,7 +277,9 @@ grow.
   loop's full capacity before emission, and release adds the area back without
   a probe.
 - **Tier 0's prologue** probes a reservation of a page or more, and a realigned
-  frame's whatever its size (`tier0_probes_reservation`), with Tier 1's records:
+  frame's or one whose body moves rsp (`Tier0Frame.moves`, published as
+  `Tier0Code.frame_moves` for the unwind reader) whatever its size
+  (`tier0_probes_reservation`), with Tier 1's records:
   `tier0_emit_probed_reservation`, r11 set to rsp less the pages, rsp moved a
   page and touched until it reaches r11, then the remainder's subtraction and
   touch; a realigned frame touches after its `and`, or past a page's alignment
