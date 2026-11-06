@@ -314,6 +314,7 @@ int run_foreign_benchmark(int argc, char** argv);
 // (what the machine and the kernel charge a linker) are other translation units.
 int run_link_benchmark(int argc, char** argv);
 int run_floors_benchmark(int argc, char** argv);
+int run_floors_input_tests(void);
 
 // Branch sizing (each branch's rel8 or rel32 form inside a function, before it's encoded), the functions its tests
 // generate, and its tests, for the test-branch-sizing command. Its benchmark is another translation unit.
@@ -1083,6 +1084,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-floors") == 0)
     {
         result = run_floors_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-floors-input") == 0)
+    {
+        result = run_floors_input_tests();
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
     {
