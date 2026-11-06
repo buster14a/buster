@@ -1511,6 +1511,9 @@ struct CheckInputReader
     uint32_t* declaration_starts;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
+    // Weak names applied so far, with the declaration token. A use before that token still folds, as clang folds it.
+    struct CheckInputWeakName* weak_names;
+    uint32_t weak_name_count;
     uint8_t* declaration_abis;
     CheckInputAttributes** attribute_bases;
     CheckInputAttributes* specifier_attributes;
@@ -4125,6 +4128,75 @@ static const CheckConstexprValue* check_input_constexpr_find(const CheckInputRea
     {
         result = value->declaration == declaration ? value : 0;
     }
+    return result;
+}
+
+// A weak attribute's name and the declaration token it was applied at.
+typedef struct CheckInputWeakName CheckInputWeakName;
+struct CheckInputWeakName
+{
+    IdentId name;
+    uint32_t token;
+};
+
+// Whether a `#pragma weak` at or before `use` names `name`. A pragma after the use does not affect it.
+static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint32_t use)
+{
+    const CheckInputSymbolPragmas* pragmas = input->symbol_pragmas;
+    const uint32_t count = pragmas != NULL ? pragmas->count : 0;
+    bool weak = false;
+    for (uint32_t i = 0; !weak && i < count; i += 1)
+    {
+        weak = pragmas->records[i].replacement == 0 && pragmas->records[i].name == name && pragmas->records[i].token <= use;
+    }
+    return weak;
+}
+
+// Records `name` as a weak address at `token`. A use before that token still folds.
+static void check_input_note_weak_name(CheckInputReader* reader, IdentId name, uint32_t token)
+{
+    bool seen = name == 0;
+    for (uint32_t i = 0; !seen && i < reader->weak_name_count; i += 1)
+    {
+        seen = reader->weak_names[i].name == name && reader->weak_names[i].token == token;
+    }
+    if (!seen)
+    {
+        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)reader->weak_name_count + 1);
+        if (names != 0)
+        {
+            if (reader->weak_name_count != 0)
+            {
+                memcpy(names, reader->weak_names, (uint64_t)reader->weak_name_count * sizeof(CheckInputWeakName));
+            }
+            names[reader->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
+            reader->weak_names = names;
+            reader->weak_name_count += 1;
+        }
+        reader->output->resource |= names == 0;
+    }
+}
+
+// Whether this use's address may be null: a weak attribute or `#pragma weak` at or before `use`.
+static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t declaration, uint32_t use)
+{
+    const Parser* parser = reader->parser;
+    const bool named = parser != NULL && parser->tokens.names != NULL && declaration < parser->tokens.count;
+    const IdentId name = named ? parser->tokens.names[declaration] : 0;
+    bool weak = reader->output != NULL && check_input_pragma_weak(reader->output, name, use);
+    for (uint32_t i = 0; !weak && i < reader->weak_name_count; i += 1)
+    {
+        weak = reader->weak_names[i].name == name && reader->weak_names[i].token <= use;
+    }
+    return weak;
+}
+
+// BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
+// An enumerator is an integer. A weak attribute or pragma at or before `use` can resolve to a null pointer.
+static uint32_t check_input_nonnull_flag(const CheckInputReader* reader, uint32_t declaration, uint32_t use, bool enumeration, uint32_t object)
+{
+    const bool weak = check_input_address_is_weak(reader, declaration, use);
+    const uint32_t result = object != 0 && !enumeration && !weak ? BUSTER_CHECK_NONNULL_ADDRESS : 0;
     return result;
 }
 
@@ -7169,6 +7241,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 {
                     CheckInputAttribute* attribute = attributes->records + a;
                     attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
+                    const bool weak_address = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_WEAK || attribute->kind == CHECK_ATTRIBUTE_WEAKREF ||
+                                                                       attribute->kind == CHECK_ATTRIBUTE_WEAK_IMPORT);
+                    if (weak_address)
+                    {
+                        check_input_note_weak_name(reader, parser->tokens.names[name], name);
+                    }
                     if (valid && attribute->kind == CHECK_ATTRIBUTE_WEAKREF && !attribute->ignored && check_input_linkage(reader->declaration_bits, name) != 1)
                     {
                         const uint32_t reports = reader->output->report_count;
@@ -9228,7 +9306,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     {
                         .type = type,
                         .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
+                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                         .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                         .integer = enumeration ? reader->enum_values[declaration] : 0,
                         .object = reader->objects[declaration],
@@ -9267,7 +9345,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 {
                     .type = string->type,
                     .category = CHECK_LVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };
@@ -9302,7 +9380,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     {
                         .type = pointer,
                         .category = CHECK_RVALUE,
-                        .flags = BUSTER_CHECK_STATIC_OBJECT,
+                        .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_NONNULL_ADDRESS,
                         .constant_kind = CHECK_CONSTANT_ADDRESS,
                         .object = label + 1,
                     };
@@ -9486,7 +9564,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
-                    .flags = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .flags = (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT) | check_input_nonnull_flag(reader, declaration, token, false, reader->objects[declaration]),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };

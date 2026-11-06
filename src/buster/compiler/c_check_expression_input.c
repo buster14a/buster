@@ -430,7 +430,8 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     const uint64_t category = enumeration ? CHECK_RVALUE : type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     const uint64_t flags = (enumeration ? BUSTER_CHECK_ICE : 0) |
                            (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                           (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0);
+                           (type != 0 && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) |
+                           (type != 0 ? check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]) : 0);
     const uint64_t kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS;
     const uint64_t head = input->overload_heads != NULL ? input->overload_heads[token] : 0;
     identifiers->types[at] = (uint64_t)type | category << 32;
@@ -497,9 +498,12 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         const __mmask16 static_object = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_STATIC)) &
                                         _mm512_mask_testn_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_THREAD_LOCAL));
         const __mmask16 in_register = _mm512_mask_test_epi32_mask(typed, bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_REGISTER));
+        const __mmask16 has_object = _mm512_mask_test_epi32_mask(typed, objects, objects);
+        const __mmask16 nonnull = has_object & ~enumeration;
         const __m512i flags = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(enumeration, _mm512_set1_epi32(BUSTER_CHECK_ICE)),
                                                               _mm512_maskz_mov_epi32(static_object, _mm512_set1_epi32(BUSTER_CHECK_STATIC_OBJECT))),
-                                              _mm512_maskz_mov_epi32(in_register, _mm512_set1_epi32(BUSTER_CHECK_REGISTER)));
+                                              _mm512_or_si512(_mm512_maskz_mov_epi32(in_register, _mm512_set1_epi32(BUSTER_CHECK_REGISTER)),
+                                                              _mm512_maskz_mov_epi32(nonnull, _mm512_set1_epi32(BUSTER_CHECK_NONNULL_ADDRESS))));
         const __m512i constant = _mm512_mask_mov_epi32(_mm512_set1_epi32(CHECK_CONSTANT_ADDRESS), enumeration, _mm512_set1_epi32(CHECK_CONSTANT_INTEGER));
         const __m512i status = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(acted, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_ACTED)),
                                                                _mm512_maskz_mov_epi32(acted & typed, _mm512_set1_epi32(BUSTER_CHECK_IDENTIFIER_NODE))),
@@ -528,6 +532,17 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         }
         _mm512_mask_storeu_epi32(identifiers->declarations + at, lanes, declaration);
         _mm512_mask_storeu_epi32(identifiers->status + at, lanes, status);
+    }
+    // Weak addresses are rare. The gather marks every object non-null; this clears a weak attribute or `#pragma weak`.
+    if (reader->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
+    {
+        for (uint32_t at = 0; at < count; at += 1)
+        {
+            if (check_input_address_is_weak(reader, identifiers->declarations[at], found[at]))
+            {
+                identifiers->flags[at] &= ~(uint64_t)BUSTER_CHECK_NONNULL_ADDRESS;
+            }
+        }
     }
     for (; position < acting; position += 1)
     {
@@ -1003,7 +1018,7 @@ static bool check_input_expression_string(CheckInputReader* reader, CheckInputBa
             {
                 .type = string->type,
                 .category = CHECK_LVALUE,
-                .flags = BUSTER_CHECK_STATIC_OBJECT,
+                .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                 .constant_kind = CHECK_CONSTANT_ADDRESS,
                 .object = string->object,
             };

@@ -86,6 +86,9 @@ typedef enum CheckFault
 // constant (a variable's read, a modification), or holds such an operand itself. A constant expression's evaluation fails
 // on it (expect_with_probability's probability: `(s, 0.75)`, `((void)s, 0.75)`), where a fold past side effects goes on.
 #define BUSTER_CHECK_DISCARDED_UNEVALUABLE 0x200000u
+// The address of an object or function that is not weak. It is never null, at any byte displacement. A weak
+// declaration or `#pragma weak` can be a null pointer, so those addresses do not carry this flag.
+#define BUSTER_CHECK_NONNULL_ADDRESS 0x800000u
 
 // -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
@@ -518,9 +521,13 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
     }
     else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
-        // Absolute addresses, including null, are independent of final placement and weak symbol resolution.
-        *truth = value->offset != 0;
-        known &= value->object == 0;
+        // Absolute addresses, including null, are independent of final placement. An rvalue address of a non-weak
+        // object or function is non-null, including a displacement that wraps in 64 bits: clang folds (_Bool)&s and
+        // (_Bool)((char*)&s + (1ul << 63)) to 1. The flag stays on the lvalue too, but a failed value load must not
+        // become "true" just because the object exists. A weak symbol is not a constant.
+        const bool nonnull = (value->flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 && value->category != CHECK_LVALUE;
+        *truth = nonnull || value->offset != 0;
+        known &= value->object == 0 || nonnull;
     }
     else
     {
@@ -1474,7 +1481,7 @@ static bool check_action_fold_symbolic(const TypeTable* table, CheckOp op, const
         result->constant_kind = CHECK_CONSTANT_ADDRESS;
         result->object = address->object;
         result->offset = (int64_t)(op == CHECK_OP_SUBTRACT ? offset - amount : offset + amount);
-        result->flags |= BUSTER_CHECK_STATIC_OBJECT;
+        result->flags |= BUSTER_CHECK_STATIC_OBJECT | (address->flags & BUSTER_CHECK_NONNULL_ADDRESS);
         result->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
     }
     return valid;
@@ -1853,7 +1860,7 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
             check_action_promote(table, &index, &result->conversions[index_slot], action->node);
             result->value.type = action->op == CHECK_OP_SUBSCRIPT ? type_element(table, pointer.type) : pointer.type;
             result->value.category = action->op == CHECK_OP_SUBSCRIPT ? CHECK_LVALUE : CHECK_RVALUE;
-            result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED);
+            result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS);
             result->value.flags |= action->op == CHECK_OP_SUBSCRIPT && (pointer.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
             uint64_t index_bits = 0;
             const uint64_t stride = check_action_pointer_stride(table, pointer.type);
@@ -2060,7 +2067,7 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
             result->value.type = type_qualify(table, table->members.type[member], qualifiers);
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
-            result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED);
+            result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS);
             result->value.flags |= type_kind(table, type_strip_aligned(table, result->value.type)) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ?
                                    BUSTER_CHECK_CONST_READ_RESTRICTED : 0;
             result->value.flags |= arrow && (base.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
