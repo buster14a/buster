@@ -3905,6 +3905,9 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
 #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
 #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
+// The base pages that a lane's records arena and its bytes arena start with (file_cache_arenas): a unit fills a few
+// hundred kilobytes of each (sqlite3.c's 268 and 376 KB), where each one's first huge page took 2 MB (#672).
+#define BUSTER_FILE_CACHE_SMALL_BYTES (2ull << 20)
 // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
 // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
 // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
@@ -4026,9 +4029,11 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
         bool reserved = true;
         for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            // The token columns are the first three.
+            // The token columns are the first three. The records' arena and the bytes arena, the last two, start with
+            // BUSTER_FILE_CACHE_SMALL_BYTES of base pages.
             const bool small = lane != 0 && cache->lane_small_bytes != 0 && i < 3;
-            *arenas[i] = small ? arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, cache->lane_small_bytes) : arena_reserve(BUSTER_FILE_CACHE_ARENA_BYTES);
+            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_ARENA_SMALL_BYTES;
+            *arenas[i] = arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, base_pages);
             reserved = arenas[i]->base != 0;
         }
         for (uint32_t i = 0; !reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
@@ -21579,7 +21584,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             const char* value = argument[2] != 0 ? argument + 2 : next;
             i += argument[2] == 0;
             result = value != 0;
-            if (result && argument[1] == 'I')
+            if (result && argument[1] == 'I' && strcmp(value, "-") == 0)
+            {
+                // The obsolete -I- split. Clang rejects it; a directory literally named "-" is -I./- .
+                fprintf(stderr, "error: '-I-' not supported, please use -iquote instead\n");
+                result = false;
+            }
+            else if (result && argument[1] == 'I')
             {
                 include[options->include_directory_count] = value;
                 options->include_directory_count += 1;

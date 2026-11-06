@@ -1404,11 +1404,43 @@ static __m512i ir_lookup_bytes(__m512i table, __m128i op)
     return _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), table)));
 }
 
+// The types of one operand column's `valid` lanes, and zero in the others. `low` and `high` hold the 128 types from
+// `base`, which end with the batch's own; `head` holds the function's first 64, its parameters' and its entry's
+// constants'. A value in neither, rare in a producer's local code, is a load of its own (#786).
+static __m512i ir_operand_types(const IrFunction* f, __m512i low, __m512i high, __m512i head, uint32_t base, __m512i value, __mmask16 valid)
+{
+    // A function of at most 128 instructions has all its types in the window, from 0.
+    const __m512i local = f->instruction_count <= 2 * 64 ? value : _mm512_sub_epi32(value, _mm512_set1_epi32((int)base));
+    const __mmask16 near = f->instruction_count <= 2 * 64 ? valid : valid & _mm512_cmplt_epu32_mask(local, _mm512_set1_epi32(2 * 64));
+    __m512i result = _mm512_maskz_cvtepu8_epi32(near, _mm512_castsi512_si128(_mm512_permutex2var_epi8(low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(local)), high)));
+    const __mmask16 outside = valid & ~near;
+    if (outside != 0)
+    {
+        const __mmask16 early = outside & _mm512_cmplt_epu32_mask(value, _mm512_set1_epi32(64));
+        result = _mm512_mask_mov_epi32(result, early, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(_mm512_cvtepi32_epi8(value)), head))));
+        uint32_t far = outside & ~early;
+        if (far != 0)
+        {
+            uint32_t values[BUSTER_IR_VECTOR_COUNT];
+            uint32_t types[BUSTER_IR_VECTOR_COUNT];
+            _mm512_storeu_si512(values, value);
+            const __mmask16 loaded = (__mmask16)far;
+            while (far != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(far);
+                far &= far - 1;
+                types[lane] = f->type[values[lane]];
+            }
+            result = _mm512_mask_loadu_epi32(result, loaded, types);
+        }
+    }
+    return result;
+}
+
 // A bit for every row needing the scalar semantic check. The common arithmetic, comparison, selection and memory
-// rules are checked here. Operand types are in-register permutes when a function's whole type array fits in two
-// registers; larger functions keep the scalar gather's per-lane loads, whose invalid and unused lanes keep the
-// gather's zero through the masks (#786).
-static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t count, __mmask16* terminators)
+// rules are checked here. Operand types are in-register byte permutes (ir_operand_types), whose invalid and unused
+// lanes are zero as the scalar gather's were.
+static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t first, uint32_t count, __mmask16* terminators)
 {
     const __mmask16 active = (__mmask16)((1u << count) - 1u);
     const __m128i op_bytes = _mm_maskz_loadu_epi8(active, f->op + first);
@@ -1452,44 +1484,16 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     const __mmask16 memory = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
     bad |= memory & (_mm512_test_epi32_mask(flags, _mm512_set1_epi32(~BUSTER_IR_VOLATILE)) | _mm512_cmpgt_epu32_mask(align, _mm512_set1_epi32(31)));
     bad |= ~memory & (_mm512_test_epi32_mask(flags, none) | _mm512_test_epi32_mask(align, none));
-    __m512i ta;
-    __m512i tb;
-    __m512i tc;
-    if (f->instruction_count <= 2 * 64)
-    {
-        const __mmask64 low_types = f->instruction_count >= 64 ? (__mmask64)-1 : ((__mmask64)1 << f->instruction_count) - 1;
-        const __mmask64 high_types = f->instruction_count >= 2 * 64 ? (__mmask64)-1 : f->instruction_count > 64 ? ((__mmask64)1 << (f->instruction_count - 64)) - 1 : 0;
-        const __m512i types_low = _mm512_maskz_loadu_epi8(low_types, f->type);
-        const __m512i types_high = _mm512_maskz_loadu_epi8(high_types, f->type + (f->instruction_count < 64 ? f->instruction_count : 64));
-        ta = _mm512_maskz_cvtepu8_epi32(valid_a, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(a)), types_high)));
-        tb = _mm512_maskz_cvtepu8_epi32(valid_b, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(b)), types_high)));
-        tc = _mm512_maskz_cvtepu8_epi32(valid_c, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(c)), types_high)));
-    }
-    else
-    {
-        uint32_t types_a[BUSTER_IR_VECTOR_COUNT] = { 0 };
-        uint32_t types_b[BUSTER_IR_VECTOR_COUNT] = { 0 };
-        uint32_t types_c[BUSTER_IR_VECTOR_COUNT] = { 0 };
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            const uint32_t bit = 1u << lane;
-            if ((valid_a & bit) != 0)
-            {
-                types_a[lane] = f->type[f->a[first + lane]];
-            }
-            if ((valid_b & bit) != 0)
-            {
-                types_b[lane] = f->type[f->b[first + lane]];
-            }
-            if ((valid_c & bit) != 0)
-            {
-                types_c[lane] = f->type[f->c[first + lane]];
-            }
-        }
-        ta = _mm512_loadu_si512(types_a);
-        tb = _mm512_loadu_si512(types_b);
-        tc = _mm512_loadu_si512(types_c);
-    }
+    // The 128 types that end with the batch's own: all of a function of at most 128 instructions.
+    const uint32_t base = first + count > 2 * 64 ? first + count - 2 * 64 : 0;
+    const uint32_t window = f->instruction_count - base;
+    const __mmask64 low_types = window >= 64 ? (__mmask64)-1 : ((__mmask64)1 << window) - 1;
+    const __mmask64 high_types = window >= 2 * 64 ? (__mmask64)-1 : window > 64 ? ((__mmask64)1 << (window - 64)) - 1 : 0;
+    const __m512i types_low = _mm512_maskz_loadu_epi8(low_types, f->type + base);
+    const __m512i types_high = _mm512_maskz_loadu_epi8(high_types, f->type + base + (window < 64 ? window : 64));
+    const __m512i ta = ir_operand_types(f, types_low, types_high, head, base, a, valid_a);
+    const __m512i tb = ir_operand_types(f, types_low, types_high, head, base, b, valid_b);
+    const __m512i tc = ir_operand_types(f, types_low, types_high, head, base, c, valid_c);
     bad |= use_a & (_mm512_cmpeq_epi32_mask(ta, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(ta, _mm512_set1_epi32(IR_TYPE_COUNT)));
     bad |= use_b & (_mm512_cmpeq_epi32_mask(tb, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(tb, _mm512_set1_epi32(IR_TYPE_COUNT)));
     bad |= use_c & (_mm512_cmpeq_epi32_mask(tc, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(tc, _mm512_set1_epi32(IR_TYPE_COUNT)));
@@ -1522,7 +1526,7 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
 }
 
 // The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify_path
-// and ir_build_uses) stay out of line and start lines of their own, so that where the code before them ends doesn't
+// and ir_uses_validated) stay out of line and start lines of their own, so that where the code before them ends doesn't
 // move their loops within lines, which changed their times between builds of the same code (#786).
 static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunction* f, bool vector)
 {
@@ -1531,6 +1535,12 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     uint32_t block = 0;
     uint32_t first = 0;
+    // The first 64 types, which only a function of more than 128 instructions looks up apart (ir_operand_types).
+    __m512i head = _mm512_setzero_si512();
+    if (BUSTER_VECTOR_PATH(vector) && f->instruction_count > 2 * 64)
+    {
+        head = _mm512_loadu_si512(f->type);
+    }
     while (check.error == IR_OK && first < f->instruction_count)
     {
         const uint32_t remaining = f->instruction_count - first;
@@ -1545,7 +1555,7 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
         uint32_t pending = 1;
         if (BUSTER_VECTOR_PATH(vector))
         {
-            pending = ir_check_batch(f, first, count, &actual);
+            pending = ir_check_batch(f, head, first, count, &actual);
         }
         else if (f->op[first] < IR_OP_COUNT)
         {
@@ -1941,44 +1951,148 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool 
     return check;
 }
 
+// The exact check of instruction i's operands, in ir_operand's order: each defined before its use within a block and,
+// with a dominator tree, in a block that dominates the use's. A phi's incoming value is used at its predecessor's end.
+// The scalar twin checks every instruction so, and the vector path the lanes its batch leaves to it.
+static IrCheck ir_check_operands(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t i)
+{
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    const uint64_t count = ir_operand_count(f, i);
+    const bool phi = f->op[i] == IR_PHI;
+    for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
+    {
+        const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
+        const uint32_t definition = cfg->instruction_blocks[operand.value];
+        const uint32_t position = phi ? f->block_offsets[operand.block + 1] - 1 : i;
+        bool invalid = operand.value >= position;
+        if (definition != operand.block)
+        {
+            invalid = dominance != 0 && (dominance->leave[definition] == 0 || dominance->leave[operand.block] == 0 || dominance->enter[definition] > dominance->enter[operand.block] || dominance->leave[definition] < dominance->leave[operand.block]);
+        }
+        if (invalid)
+        {
+            check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
+        }
+    }
+    return check;
+}
+
+// The lanes of one operand column whose value is defined in an earlier block (`earlier`) and whose definition's block
+// doesn't dominate the use's: its block and its tree interval are gathered, the use's are the lanes' own.
+static __mmask16 ir_dominance_earlier(const IrCfg* cfg, const IrDominance* dominance, __mmask16 earlier, __m512i value, __m512i use_enter, __m512i use_leave)
+{
+    __mmask16 bad = 0;
+    if (earlier != 0)
+    {
+        const __m512i zero = _mm512_setzero_si512();
+        const __m512i block = _mm512_mask_i32gather_epi32(zero, earlier, value, cfg->instruction_blocks, 4);
+        const __m512i enter = _mm512_mask_i32gather_epi32(zero, earlier, block, dominance->enter, 4);
+        const __m512i leave = _mm512_mask_i32gather_epi32(zero, earlier, block, dominance->leave, 4);
+        bad = _mm512_cmpeq_epi32_mask(leave, zero) | _mm512_cmpeq_epi32_mask(use_leave, zero) | _mm512_cmpgt_epu32_mask(enter, use_enter) | _mm512_cmplt_epu32_mask(leave, use_leave);
+        bad &= earlier;
+    }
+    return bad;
+}
+
+// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's and a call's, whose
+// operands are in extra; a use of a value at or after its own instruction, which is an error within the block; and,
+// with a dominator tree, a use of an earlier block's value whose block doesn't dominate the use's. Any other use is of
+// an earlier value of its own block, which needs nothing more (#786).
+static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t first, uint32_t count)
+{
+    const __mmask16 active = (__mmask16)((1u << count) - 1u);
+    const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op);
+    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op);
+    const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
+    const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
+    const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i two = _mm512_set1_epi32(2);
+    const __m512i four = _mm512_set1_epi32(4);
+    const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT));
+    const __mmask16 direct = active & ~extra;
+    const __mmask16 use_a = direct & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
+    const __mmask16 use_b = direct & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
+    const __mmask16 use_c = direct & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(c, none)));
+    __mmask16 pending = extra | (use_a & _mm512_cmpge_epu32_mask(a, index)) | (use_b & _mm512_cmpge_epu32_mask(b, index)) | (use_c & _mm512_cmpge_epu32_mask(c, index));
+    if (dominance != 0)
+    {
+        // Sixteen instructions are in at most sixteen consecutive blocks from the first's: their starts and tree
+        // intervals are one load each, which each lane's block picks by a permute.
+        const uint32_t base = cfg->instruction_blocks[first];
+        const uint32_t span = f->block_count - base;
+        const __mmask16 held = span >= BUSTER_IR_VECTOR_COUNT ? (__mmask16)0xffff : (__mmask16)((1u << span) - 1u);
+        const __m512i local = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(active, cfg->instruction_blocks + first), _mm512_set1_epi32((int)base));
+        const __m512i start = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, f->block_offsets + base));
+        const __m512i use_enter = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, dominance->enter + base));
+        const __m512i use_leave = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, dominance->leave + base));
+        pending |= ir_dominance_earlier(cfg, dominance, use_a & _mm512_cmplt_epu32_mask(a, start), a, use_enter, use_leave);
+        pending |= ir_dominance_earlier(cfg, dominance, use_b & _mm512_cmplt_epu32_mask(b, start), b, use_enter, use_leave);
+        pending |= ir_dominance_earlier(cfg, dominance, use_c & _mm512_cmplt_epu32_mask(c, start), c, use_enter, use_leave);
+    }
+    return pending;
+}
+
 static __attribute__((noinline, aligned(64))) IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
 {
     (void)vector;
 
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
-    IrUseBatch batch = { 0 };
-    for (uint32_t i = 0; check.error == IR_OK && i < f->instruction_count; i += 1)
+    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? BUSTER_IR_VECTOR_COUNT : 1;
+    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
     {
-        const uint64_t count = ir_operand_count(f, i);
-        for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
+        const uint32_t remaining = f->instruction_count - first;
+        uint32_t pending = 1;
+        if (BUSTER_VECTOR_PATH(vector))
         {
-            const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
-            const uint32_t definition_block = cfg->instruction_blocks[operand.value];
-            const uint32_t lane = batch.count;
-            batch.definitions[lane] = operand.value;
-            batch.positions[lane] = f->op[i] == IR_PHI ? f->block_offsets[operand.block + 1] - 1 : i;
-            batch.definition_blocks[lane] = definition_block;
-            batch.use_blocks[lane] = operand.block;
-            batch.instructions[lane] = i;
-            batch.operands[lane] = operand.position;
-            if (dominance != 0)
+            pending = ir_dominance_batch(f, cfg, dominance, first, remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT);
+        }
+        while (check.error == IR_OK && pending != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(pending);
+            pending &= pending - 1;
+            check = ir_check_operands(f, cfg, dominance, first + lane);
+        }
+    }
+    return check;
+}
+
+// A phi's and a switch's own rules. Phis start a block other than the entry, one incoming value per predecessor, each
+// from a distinct predecessor and of the phi's type; a switch's cases are distinct. A phi after a non-phi of its block
+// is the first misplaced one, since one after a misplaced phi comes after that phi's error.
+static IrCheck ir_check_join(const IrFunction* f, const IrCfg* cfg, Arena* scratch, uint32_t* seen, uint32_t i)
+{
+    IrCheck check = ir_check(IR_OK, i, 0);
+    if (f->op[i] == IR_PHI)
+    {
+        const uint32_t b = cfg->instruction_blocks[i];
+        const bool misplaced = i != f->block_offsets[b] && f->op[i - 1] != IR_PHI;
+        // Initial function entry has no predecessor from which a phi can select a value. A producer needing a loop at
+        // entry must add a real preheader with an explicit initial value before introducing phis.
+        if (b == 0 || misplaced || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
+        {
+            check = ir_check(IR_ERROR_PHI, i, 0);
+        }
+        for (uint32_t p = 0; check.error == IR_OK && p < f->b[i]; p += 1)
+        {
+            const uint32_t predecessor = f->extra[f->a[i] + p * 2];
+            const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
+            if (predecessor >= f->block_count || !ir_predecessor(cfg, b, predecessor) || seen[predecessor] == i || value >= f->instruction_count || f->type[value] != f->type[i])
             {
-                batch.definition_enter[lane] = dominance->enter[definition_block];
-                batch.definition_leave[lane] = dominance->leave[definition_block];
-                batch.use_enter[lane] = dominance->enter[operand.block];
-                batch.use_leave[lane] = dominance->leave[operand.block];
+                check = ir_check(IR_ERROR_PHI, i, p);
             }
-            batch.count += 1;
-            if (batch.count == BUSTER_IR_VECTOR_COUNT)
+            else
             {
-                check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
-                batch.count = 0;
+                seen[predecessor] = i;
             }
         }
     }
-    if (check.error == IR_OK && batch.count != 0)
+    else
     {
-        check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
+        check = ir_check(ir_switch_unique(f, i, scratch), i, 0);
     }
     return check;
 }
@@ -2009,41 +2123,27 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
             check = ir_check(IR_ERROR_DOMINANCE, BUSTER_IR_NONE, b);
         }
     }
-    for (uint32_t b = 0; check.error == IR_OK && b < f->block_count; b += 1)
+    // The phis and switches, which the vector path finds 64 operations at a time.
+    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? 64 : 1;
+    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
     {
-        bool past_phis = false;
-        for (uint32_t i = f->block_offsets[b]; check.error == IR_OK && i < f->block_offsets[b + 1]; i += 1)
+        const uint32_t remaining = f->instruction_count - first;
+        uint64_t pending = 0;
+        if (BUSTER_VECTOR_PATH(vector))
         {
-            if (f->op[i] == IR_PHI)
-            {
-                // Initial function entry has no predecessor from which a phi can select a value. A producer needing
-                // a loop at entry must add a real preheader with an explicit initial value before introducing phis.
-                if (b == 0 || past_phis || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
-                {
-                    check = ir_check(IR_ERROR_PHI, i, 0);
-                }
-                for (uint32_t p = 0; check.error == IR_OK && p < f->b[i]; p += 1)
-                {
-                    const uint32_t predecessor = f->extra[f->a[i] + p * 2];
-                    const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
-                    if (predecessor >= f->block_count || !ir_predecessor(cfg, b, predecessor) || seen[predecessor] == i || value >= f->instruction_count || f->type[value] != f->type[i])
-                    {
-                        check = ir_check(IR_ERROR_PHI, i, p);
-                    }
-                    else
-                    {
-                        seen[predecessor] = i;
-                    }
-                }
-            }
-            else
-            {
-                past_phis = true;
-            }
-            if (check.error == IR_OK && f->op[i] == IR_SWITCH)
-            {
-                check = ir_check(ir_switch_unique(f, i, scratch), i, 0);
-            }
+            const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
+            const __m512i op = _mm512_maskz_loadu_epi8(active, f->op + first);
+            pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH));
+        }
+        else
+        {
+            pending = f->op[first] == IR_PHI || f->op[first] == IR_SWITCH;
+        }
+        while (check.error == IR_OK && pending != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+            pending &= pending - 1;
+            check = ir_check_join(f, cfg, scratch, seen, first + lane);
         }
     }
     if (check.error == IR_OK)
@@ -2113,11 +2213,13 @@ static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDom
     return ir_verify_path(f, scratch, dominance, false);
 }
 
-static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+// The use lists of a verified function, which ir_build_uses verifies first; a caller that has just verified it, as the
+// optimizer has, builds them without verifying it again (#786). Arena and scratch are disjoint.
+static __attribute__((noinline, aligned(64))) IrError ir_uses_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
 {
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
-    IrCheck check = arena == scratch ? ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0) : ir_verify(f, scratch, 0);
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     IrUses uses = {
         .value_count = f->instruction_count,
     };
@@ -2188,6 +2290,17 @@ static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunc
     }
     arena_pop_to(scratch, temporary);
     return check.error;
+}
+
+static IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+{
+    const IrCheck check = arena == scratch ? ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0) : ir_verify(f, scratch, 0);
+    IrError error = check.error;
+    if (error == IR_OK)
+    {
+        error = ir_uses_validated(f, arena, scratch, result);
+    }
+    return error;
 }
 
 static void ir_print_constant(FILE* output, IrConstant value)

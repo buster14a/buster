@@ -52,8 +52,10 @@ representation, both verifier paths, compact CFG/use arrays and stable printer.
 Independent fixtures cover operand roles, conversions, phi edges and dominance;
 guard pages cover instruction columns and vector tails. Malformed metadata,
 u32 limits, allocation rollback and adversarial switch cases are rejected or
-handled without relying on twin agreement alone. The default random count is
-64; `--count 1024` expands the seeded mutation cases.
+handled without relying on twin agreement alone. Generated multi-block
+functions with phis must give both paths the first use error, or none, that an
+independent dominance oracle gives (four per count, #786). The default random
+count is 64; `--count 1024` expands the seeded mutation cases.
 
 `./build/compiler test-ir-lowering [--seed N] [--count N]` lowers generated
 typed programs through both paths, compares every column and verifies each

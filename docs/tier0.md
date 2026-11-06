@@ -938,6 +938,83 @@ is compiled by both paths, encoded by both encoders and run from a driver, and t
 
 What the probe returns must reach the driver, through the hidden pointer too.
 
+## Preserving frames (#147)
+
+A function that keeps registers for its caller past System V's callee-saved ones (clang's `preserve_most` and
+`preserve_all`, [the calling convention guide](calling-convention.md#other-calling-conventions)) names them in its
+`Tier0Function`. Without them, nothing in the frame changes:
+
+- `preserve_general` has a bit per caller-saved general register to keep;
+- `preserve_vectors` keeps vector registers 0 to it less 1 (0, 16 or 32), `preserve_vector_bytes` of each (16, 32 or 64);
+- `preserve_mask_bytes` keeps k0 to k7 (0, 2 or 8 bytes each).
+
+Tier 0 leaves out the result's registers (`tier0_result_set`): rax for a hidden pointer's result, and each register
+part's. The frame (`tier0_kept_pointer` keeps a frame pointer for it):
+
+1. **The prologue** pushes rbp and points it at the push, then the callee-saved registers, then the kept general registers
+   in their numbers' order (`Tier0Frame.preserved`, counted in `pushes`). Right below the pushes it reserves the
+   preserve block (`Tier0Frame.preserve_bytes`, `tier0_preserve_block_bytes`). It then stores each kept vector register
+   whole, in their numbers' order, then k0 to k7, 8 bytes each, from rbp (`tier0_emit_preserve`). This happens before
+   the frame's own reservation, any realignment and the parameters' moves. Every slot is a stored register's, and the
+   block is at most 2,112 bytes, so a probed frame's stores touch all of it, under a page.
+   The moves are movups, vmovdqu or vmovdqu64, and kmovw or kmovq, which take any address. The block counts with the
+   pushes in the frame's alignment, its bias and its incoming area (`above` in `tier0_layout_frame`). Each slot is at a
+   fixed offset from the CFA in every frame shape, a realigned one's and one whose body moves rsp included.
+2. **The epilogue** loads the result's registers, then the kept vector and mask registers back from rbp. The teardown's
+   release steps over the block. It then pops the kept general registers first, then the callee-saved ones and rbp.
+
+The set is the convention's whole set, not the registers the body touches. Tier 0's register set covers the general
+registers and xmm0 to xmm15 alone, and nothing has checked a template's scratch caller-saved registers against
+`Tier0Frame.clobbers`. These conventions are rare. A leaf `preserve_most` function pays seven pushes and pops.
+
+`tier0_preserve_valid` refuses a callee-saved register, a vector width the count doesn't allow (32 registers only as
+ZMMs), a mask width other than 2 or 8, and a preserving frame with `eh_return`, tail calls or `returns_twice`. Their
+teardowns and saves know nothing of the kept registers, and the producer refuses such functions by name. `test-tier0`'s
+"aggregate errors" break each rule once, and both compile paths must refuse the metadata. Tier 1 leaves the function to
+Tier 0 (`ir_lower_typed_target_path`).
+
+**The unwind tables.** With the frame pointer, none of the kept registers' moves is a transition.
+`unwind_tier0_frame_tails` checks the pushes, the block's sub, stores and loads, and the pops in place, from
+`Tier0Code.frame_preserved`, `frame_preserve_vectors`, `frame_preserve_vector_bytes` and `frame_preserve_mask_bytes`.
+It compares each store and load whole with the record `tier0_emit_preserve` writes (`tier0_preserve_move`). A move under
+an opmask, or with any other operand, saves or reloads only part of the register, and leaves the frame undescribed.
+The emission describes every kept register at every boundary (`emitted_tier0_preserve_rows`), since the CIE's
+`same_value` rules cover the callee-saved registers alone:
+
+- its caller's value (`DW_CFA_same_value`) from the entry;
+- its slot (`DW_CFA_offset`) from the end of its push or store; a vector register's names its low 128 bits by DWARF's XMM
+  numbers (17 to 32, 67 to 82), and a mask register's is 118 to 125;
+- its own value again from the end of its reload.
+
+LLVM describes its spills the same way. libgcc's unwinder and GDB read no vector register's rule. The general registers'
+rules are proved by the frame verifier's fixpoint (`--verify`, `emitted_verify_frames`), and the vector and mask
+registers' by `emitted_verify_saved_vectors`: each slot's rule right after the store of that register into that slot
+from rbp, with the CFA at rbp plus 16, and each caller's value at the entry or right after the load back. Each move
+must be whole (`emitted_saved_vector_move`): one of the emitter's forms, without a segment override, opmask, zeroing,
+index, vvvv or immediate.
+
+**Tests.**
+
+- `test-emitted-code`:
+  - every register set (`preserve_most`'s, `preserve_all`'s with 16 and 32 bytes, and every register with 64 bytes and
+    the masks) in frames of each size, alignment (a realigned frame's) and probing;
+  - the rules' completeness at every boundary, the verifier's proof, and the mutants it refutes;
+  - each frame's first and last block stores and loads changed: under an opmask (merging or zeroing), with a vvvv, an
+    index or an immediate, through FS, or 8 bytes off (`emitted_test_preserve_moves`). The reader refuses each, the
+    adapter leaves it undescribed, and the verifier refutes the frame's rules over it;
+  - a hand-written frame whose wrong vector rules are refuted, and its zmm twin's masked stores and loads.
+- `test-checker-driver`'s `check_test_driver_preserving_frames` runs both paths' code, built with `--verify`, from a
+  harness clang builds. Every register the convention keeps but the result's must come back, and so must rsp. A callee's
+  `_Unwind_Backtrace` must recover the caller's general registers through the frame with `_Unwind_GetGR`. The runs cover:
+  - results in a register, in two, in xmm0 and none;
+  - calls;
+  - a variable-length array, which moves rsp;
+  - an object aligned to 64 (a realigned frame);
+  - variadic arguments;
+  - a backtrace from a callee.
+
+  They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
