@@ -2418,6 +2418,21 @@ static bool type_test_printing(Arena* arena)
                              "parenthesized printing", grouped[i].text);
             arena_pop_to(arena, mark);
         }
+        // Array levels outside a qualified pointer see an empty name in the AFTER pass even when qualifiers make
+        // BEFORE's placeholder nonempty. Their stored groups must not produce unmatched opening parentheses.
+        {
+            const uint64_t mark = arena->length;
+            const TypeId qualified_pointer = int_pointer | BUSTER_TYPE_CONST;
+            const TypeId inner = type_array(table, qualified_pointer, 3);
+            const TypeId outer = type_array(table, inner, 1);
+            const TypePrintParen entries[] = { { outer, 1 }, { inner, 1 } };
+            const TypeNames spelling = { .parentheses = entries, .parenthesis_count = BUSTER_ARRAY_LENGTH(entries) };
+            const String8 printed = type_print(table, arena, outer, (String8){ 0 }, &spelling, 0);
+            const char* expected = "int *const[1][3]";
+            type_test_expect(&tally, printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0,
+                             "parenthesized printing", "qualified array pointer with an empty placeholder");
+            arena_pop_to(arena, mark);
+        }
         // Exercise the indexed view with unsorted entries, repeated levels and unrelated types. Repeated entries
         // have the same meaning as their combined count, including when the index crosses the small-view cutoff.
         {

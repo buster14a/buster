@@ -5542,6 +5542,8 @@ struct TypePrintFrame
     bool after;
     // The outer declarator's occurrence, whose TypeNames.parentheses may name a level; nested TYPE frames have none.
     bool root_spelling;
+    // Placeholder state at this level in the matching AFTER traversal.
+    bool after_empty;
 };
 
 typedef struct TypePrinter TypePrinter;
@@ -5555,6 +5557,7 @@ struct TypePrinter
     bool empty;
     bool valid;
     bool root_spelling;
+    bool after_empty;
     // Sorted, coalesced parenthesis levels for a large occurrence; small ones use names directly.
     TypePrintParen* parentheses;
     uint32_t parenthesis_count;
@@ -5652,6 +5655,7 @@ static void type_print_push(TypePrinter* printer, uint8_t operation, TypeId type
             .saved = saved,
             .after = after,
             .root_spelling = printer->root_spelling,
+            .after_empty = printer->after_empty,
         };
         printer->depth += 1;
     }
@@ -5887,6 +5891,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_POINTER_END, type, printer->empty, false, printer->step);
         printer->empty = false;
+        printer->after_empty = false;
         type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
@@ -5897,6 +5902,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     {
         type_print_push(printer, BUSTER_TYPE_PRINT_FUNCTION_END, type, printer->empty, false, 0);
         printer->empty = false;
+        printer->after_empty = false;
         type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_VECTOR)
@@ -5980,6 +5986,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
 {
     const TypeTable* table = printer->table;
     printer->root_spelling = frame.root_spelling;
+    printer->after_empty = frame.after_empty;
     if (frame.operation == BUSTER_TYPE_PRINT_TYPE)
     {
         // TypePrinter::print: the placeholder is empty but at the top, where it is the name.
@@ -5987,6 +5994,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         printer->root_spelling = frame.after;
         type_print_push(printer, BUSTER_TYPE_PRINT_RESTORE, frame.type, printer->empty, false, 0);
         printer->empty = !named;
+        printer->after_empty = !named;
         const uint32_t level = printer->frames_typed++ << 8;
         type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, frame.type, false, false, level);
         if (named)
@@ -6005,7 +6013,8 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         const TypeId unqualified = type_unqualified(type);
         uint32_t whole = UINT32_MAX;
         const uint32_t sugar = type_print_sugar(printer, type, &whole);
-        const uint32_t parentheses = !printer->empty ? type_print_parentheses(printer, type, sugar != UINT32_MAX) : 0;
+        // Group exactly the levels whose matching AFTER frame sees a nonempty placeholder.
+        const uint32_t parentheses = !printer->after_empty ? type_print_parentheses(printer, type, sugar != UINT32_MAX) : 0;
         if (parentheses != 0)
         {
             type_print_push(printer, BUSTER_TYPE_PRINT_PAREN_END, type, false, false, parentheses);

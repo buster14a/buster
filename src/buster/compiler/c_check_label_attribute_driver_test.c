@@ -779,6 +779,11 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "enum G { G0 __attribute__((mode(SI))) };\n",
         // Function types' attributes on other types, at each declarator a specifier's reaches; the handlers' own subjects
         // (sentinel's, transparent_union's) and nonstring's types, at the declaration's start.
+        // Grouping around qualified pointers and arrays must be balanced in the diagnostic type spelling.
+        "int * const ((x)[1])[3] __attribute__((ms_abi));\n"
+        "int (* const ((y)[4]))[2] __attribute__((ms_abi));\n"
+        "int * volatile ((z)[2])[5] __attribute__((ms_abi));\n"
+        "int (* restrict ((w)[2]))[3] __attribute__((ms_abi));\n",
         "int a __attribute__((stdcall));\nint *b __attribute__((ms_abi));\nint c __attribute__((noreturn));\nint d __attribute__((regparm(2)));\n"
         "typedef int T; T e __attribute__((sysv_abi));\nstruct S { int m __attribute__((preserve_most)); };\nvoid f(int p __attribute__((vectorcall)));\n"
         "int __attribute__((cdecl)) i;\n[[gnu::stdcall]] int j;\n[[gnu::__stdcall__]] int j2;\nint __attribute__((stdcall)) e1, e2;\n"
