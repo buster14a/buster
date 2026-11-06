@@ -259,7 +259,10 @@ grow.
   saved registers' slots.
 - **Tier 1's dynamic outgoing call areas** (`tier1_emit_cfg_adjust`) touch
   their lowest byte for a sub-page area and use the frame emitter's page loop
-  and final partial touch for a larger one (#1450). Reserved r11 holds the
+  and final partial touch for a larger one (#1450), which selection doesn't
+  make today: an area is the call's stack bytes, at most 2,560, rounded to the
+  calls' alignment. `test-tier1-emit`'s native call-probe fixture runs the loop.
+  Reserved r11 holds the
   bound, leaving all argument registers and an indirect callee intact; the
   dynamic frame's CFA stays in rbp. Records and branch columns reserve the
   loop's full capacity before emission, and release adds the area back without
@@ -301,8 +304,10 @@ each path, with a frame pointer and without, under `--verify`, every function
 required to use Tier 1, including the two-page-aligned frame. Its probes fixture prints clang -O0's line through frames of
 pages, variable-length arrays and allocas in loops, an allocation of none, of
 a page and of a constant, recursion through two-page frames and a realigned
-frame, plus a dynamic call whose aligned local rounds its outgoing area to
-two pages. `test-tier1-emit`'s native call-probe fixture checks six integer and
+frame, plus a dynamic call after an allocation in a frame realigned to two
+pages, whose outgoing area stays the call's own 256 bytes: rsp keeps the
+calls' alignment, not the frame's (#1450), and selection's 2,560 stack bytes
+make no area of a page. `test-tier1-emit`'s native call-probe fixture checks six integer and
 eight vector argument registers, AL, an indirect-callee register, callee-save
 registers and exact rsp restoration for zero, sub-page, page and multi-page
 areas. Protected intermediate and final partial pages fault only with probes;
