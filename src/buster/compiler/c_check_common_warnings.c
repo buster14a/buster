@@ -667,7 +667,8 @@ typedef struct CheckCommonEmission
     uint32_t work_count;
     Arena* scratch;
     // Each token's subtree's first token (check_common_emission_subtree_start, #1350), built at the first query; null
-    // before it, and after an allocation that failed, which leaves the queries to check_common_subtree_start.
+    // before it, and after an allocation that failed (which fails the unit), the queries then left to
+    // check_common_subtree_start.
     uint32_t* subtree_starts;
     bool subtree_starts_failed;
 } CheckCommonEmission;
@@ -685,6 +686,11 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
         uint32_t* first = CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count);
         uint32_t* starts = first != NULL ? CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count) : NULL;
         emission->subtree_starts_failed = starts == NULL;
+        // A failed allocation fails the unit, as every common warning's scratch does; the search stands in until it stops.
+        if (starts == NULL)
+        {
+            check_common_exhausted(emission->pp);
+        }
         if (starts != NULL)
         {
             memset(first, 0xff, (uint64_t)count * sizeof(uint32_t));
