@@ -4260,7 +4260,8 @@ struct CheckInputWeakName
     uint32_t token;
 };
 
-// Whether a `#pragma weak` at or before `use` names `name`. A pragma after the use does not affect it.
+// Whether a `#pragma weak` at or before `use` names `name`. A pragma after the use does not affect it, and neither
+// does one clang ignores with a warning (#1460 keeps a record of it, `#pragma weak w extra` among them).
 static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint32_t use)
 {
     const CheckInputSymbolPragmas* pragmas = input->symbol_pragmas;
@@ -4268,7 +4269,9 @@ static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint3
     bool weak = false;
     for (uint32_t i = 0; !weak && i < count; i += 1)
     {
-        weak = pragmas->records[i].replacement == 0 && pragmas->records[i].name == name && pragmas->records[i].token <= use;
+        const CheckInputSymbolPragma* record = pragmas->records + i;
+        weak = record->kind == CHECK_SYMBOL_PRAGMA_WEAK && record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->name == name &&
+               record->token <= use;
     }
     return weak;
 }
