@@ -295,10 +295,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     uint32_t inlined_calls = 0;
     const CheckTier1Inline* inlining = lane->inlining;
     const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
+    // Whether `lowered` is still the lowering's verified result: inlining's expansion isn't verified until promotion.
+    bool lowered_verified = true;
     if (stage == CHECK_TIER1_COMPILED && inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count &&
         check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, &expanded, &inlined_calls))
     {
         lowered = expanded;
+        lowered_verified = false;
     }
     IrFunction promoted = { 0 };
     // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
@@ -321,7 +324,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) : ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
+        // GVN's result and the lowering's are each verified whole as they're made, so promotion doesn't verify them again
+        // (#1379); an inlined expansion it does.
+        const bool verified = gvn_applied || lowered_verified;
+        const IrCheck check = verified ? ssa_ir_promote_verified_input(unssa, !scalar, &lane->steps[1], scratch, &promoted) :
+                              scalar   ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) :
+                                         ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
         outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;

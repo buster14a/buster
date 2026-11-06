@@ -1666,7 +1666,9 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
             .leave = verification.dominators.subtree_end,
             .block_count = function->block_count,
         };
-        check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, &dominance) : ir_verify(function, scratch, &dominance);
+        // ir_optimize_prepare verified the function whole on this path, so only the graph against the dominance it
+        // built is left to check (#1379).
+        check = ir_verify_graph(function, scratch, &dominance, !BUSTER_SCALAR_PATH(scalar));
     }
     arena_pop_to(scratch, mark);
     return check;
