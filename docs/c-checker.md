@@ -1667,8 +1667,21 @@ initializer plans. Deferred checking replays their array TypeIds with the
 top-level declaration types. A failed payload or record reservation restores
 the unpublished output suffix and scratch and sets the resource status.
 
-Automatic arrays, volatile and atomic elements, floating/128-bit elements,
-designators, nested braces and nonliteral expressions retain ordinary
+An array of rows (#1383), `T t[N][M]` or `T t[][M]` with `T` such an element,
+takes the same path when every element is a braced row of exactly `M` such
+items: `{ list }` rows separated by commas, one trailing comma inside a row and
+one after the last. `check_literal_table_rows` checks this grammar. Its vector
+path classifies the same 64-token blocks into number, comma, minus and brace
+masks and takes brace depth from a prefix XOR of the brace mask, carried across
+blocks. A `{` must be at depth 0 and a `}` at depth 1, so the parity is the
+depth. Each `}` compares the numbers before it, counted from the table's start
+by `popcnt`, with its rows times `M`. The payload is the row-major values. The
+type of an incomplete array is completed to the row count. A short row, an
+elided or excess one, a deeper array and a designator at either level all keep
+the ordinary path.
+
+Automatic arrays, volatile and atomic elements, 128-bit elements, designators,
+short or elided rows, deeper nesting and nonliteral expressions retain ordinary
 checking and planning. `check_input_tables_reference` provides that exact
 source path for tests. Permanent tests compare complete bytes and array bounds
 between it and both compact paths, exercise protected syntax/output tails,
