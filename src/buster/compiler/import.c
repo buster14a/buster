@@ -392,6 +392,12 @@ static bool import_starts_with(String8 string, const char* text)
     return string.length >= length && memcmp(string.pointer, text, length) == 0;
 }
 
+static bool import_section_family(String8 name, const char* base)
+{
+    const uint64_t length = strlen(base);
+    return import_starts_with(name, base) && (name.length == length || name.pointer[length] == '.');
+}
+
 // An ELF file's header and section table, checked: the section headers lie within the file, and so does each
 // section's contents (but a NOBITS section's), and the section names' table is a string table.
 typedef struct ImportElf ImportElf;
@@ -524,7 +530,7 @@ static bool import_table(const Elf64_Shdr* header, uint64_t entry_size, uint64_t
 #define BUSTER_IMPORT_PATTERN_BYTES 16
 
 // The section names the classes and input metadata depend on, each with how many of its bytes a name must match:
-// all of them and the NUL, or for .data.rel.ro, .ctors and .dtors, a prefix.
+// all of them and the NUL, or a dotted family prefix for .data.rel.ro, .ctors and .dtors.
 typedef enum ImportPattern
 {
     IMPORT_PATTERN_INIT,
@@ -532,10 +538,13 @@ typedef enum ImportPattern
     IMPORT_PATTERN_EH_FRAME,
     IMPORT_PATTERN_SFRAME,
     IMPORT_PATTERN_DATA_RELRO,
+    IMPORT_PATTERN_DATA_RELRO_DOT,
     IMPORT_PATTERN_INIT_ARRAY,
     IMPORT_PATTERN_FINI_ARRAY,
     IMPORT_PATTERN_CTORS,
+    IMPORT_PATTERN_CTORS_DOT,
     IMPORT_PATTERN_DTORS,
+    IMPORT_PATTERN_DTORS_DOT,
     IMPORT_PATTERN_GNU_STACK,
     IMPORT_PATTERNS,
 } ImportPattern;
@@ -546,10 +555,13 @@ static const char import_section_patterns[IMPORT_PATTERNS][BUSTER_IMPORT_PATTERN
     [IMPORT_PATTERN_EH_FRAME] = ".eh_frame",
     [IMPORT_PATTERN_SFRAME] = ".sframe",
     [IMPORT_PATTERN_DATA_RELRO] = ".data.rel.ro",
+    [IMPORT_PATTERN_DATA_RELRO_DOT] = ".data.rel.ro.",
     [IMPORT_PATTERN_INIT_ARRAY] = ".init_array",
     [IMPORT_PATTERN_FINI_ARRAY] = ".fini_array",
     [IMPORT_PATTERN_CTORS] = ".ctors",
+    [IMPORT_PATTERN_CTORS_DOT] = ".ctors.",
     [IMPORT_PATTERN_DTORS] = ".dtors",
+    [IMPORT_PATTERN_DTORS_DOT] = ".dtors.",
     [IMPORT_PATTERN_GNU_STACK] = ".note.GNU-stack",
 };
 
@@ -558,11 +570,14 @@ static const uint8_t import_section_pattern_bytes[IMPORT_PATTERNS] = {
     [IMPORT_PATTERN_FINI] = sizeof(".fini"),
     [IMPORT_PATTERN_EH_FRAME] = sizeof(".eh_frame"),
     [IMPORT_PATTERN_SFRAME] = sizeof(".sframe"),
-    [IMPORT_PATTERN_DATA_RELRO] = sizeof(".data.rel.ro") - 1,
+    [IMPORT_PATTERN_DATA_RELRO] = sizeof(".data.rel.ro"),
+    [IMPORT_PATTERN_DATA_RELRO_DOT] = sizeof(".data.rel.ro.") - 1,
     [IMPORT_PATTERN_INIT_ARRAY] = sizeof(".init_array"),
     [IMPORT_PATTERN_FINI_ARRAY] = sizeof(".fini_array"),
-    [IMPORT_PATTERN_CTORS] = sizeof(".ctors") - 1,
-    [IMPORT_PATTERN_DTORS] = sizeof(".dtors") - 1,
+    [IMPORT_PATTERN_CTORS] = sizeof(".ctors"),
+    [IMPORT_PATTERN_CTORS_DOT] = sizeof(".ctors.") - 1,
+    [IMPORT_PATTERN_DTORS] = sizeof(".dtors"),
+    [IMPORT_PATTERN_DTORS_DOT] = sizeof(".dtors.") - 1,
     [IMPORT_PATTERN_GNU_STACK] = sizeof(".note.GNU-stack"),
 };
 
@@ -605,8 +620,8 @@ static uint8_t import_section_class(const Elf64_Shdr* header, String8 name, bool
     uint8_t result = BUSTER_LINK_CLASS_NONE;
     *supported = true;
     *priority = BUSTER_IMPORT_NO_PRIORITY;
-    if (type == SHT_REL || type == SHT_PREINIT_ARRAY || import_starts_with(name, import_section_patterns[IMPORT_PATTERN_CTORS]) ||
-        import_starts_with(name, import_section_patterns[IMPORT_PATTERN_DTORS]))
+    if (type == SHT_REL || type == SHT_PREINIT_ARRAY || import_section_family(name, import_section_patterns[IMPORT_PATTERN_CTORS]) ||
+        import_section_family(name, import_section_patterns[IMPORT_PATTERN_DTORS]))
     {
         *supported = false;
     }
@@ -644,7 +659,7 @@ static uint8_t import_section_class(const Elf64_Shdr* header, String8 name, bool
     }
     else if ((flags & SHF_WRITE) != 0)
     {
-        const bool relro = import_starts_with(name, import_section_patterns[IMPORT_PATTERN_DATA_RELRO]);
+        const bool relro = import_section_family(name, import_section_patterns[IMPORT_PATTERN_DATA_RELRO]);
         result = type == SHT_NOBITS ? BUSTER_LINK_CLASS_BSS : relro ? BUSTER_LINK_CLASS_DATA_RELRO : BUSTER_LINK_CLASS_DATA;
     }
     else if (type == SHT_NOBITS)
@@ -1521,7 +1536,8 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
         const uint32_t fini_array = import_lanes_equal(type, SHT_FINI_ARRAY);
         const uint32_t contents = import_lanes_equal(type, SHT_PROGBITS) | nobits | init_array | fini_array | unwind;
         const uint32_t group = import_lanes_equal(type, SHT_GROUP);
-        const uint32_t unsupported = import_lanes_equal(type, SHT_REL) | import_lanes_equal(type, SHT_PREINIT_ARRAY) | matches[IMPORT_PATTERN_CTORS] | matches[IMPORT_PATTERN_DTORS];
+        const uint32_t unsupported = import_lanes_equal(type, SHT_REL) | import_lanes_equal(type, SHT_PREINIT_ARRAY) | matches[IMPORT_PATTERN_CTORS] |
+                                     matches[IMPORT_PATTERN_CTORS_DOT] | matches[IMPORT_PATTERN_DTORS] | matches[IMPORT_PATTERN_DTORS_DOT];
         const uint32_t dropped = ~import_lanes_have(flags, SHF_ALLOC) | group | import_lanes_equal(type, SHT_NOTE) | import_lanes_equal(type, BUSTER_IMPORT_SHT_GNU_SFRAME) |
                                  matches[IMPORT_PATTERN_SFRAME];
         // An init or fini array named other than .init_array and .fini_array has a priority, read below.
@@ -1558,7 +1574,8 @@ static bool import_vector_sections(Link* link, const ImportElf* elf, uint32_t un
         class = _mm512_mask_mov_epi64(class, (__mmask8)(code & matches[IMPORT_PATTERN_INIT]), _mm512_set1_epi64(BUSTER_LINK_CLASS_INIT));
         class = _mm512_mask_mov_epi64(class, (__mmask8)(code & matches[IMPORT_PATTERN_FINI]), _mm512_set1_epi64(BUSTER_LINK_CLASS_FINI));
         class = _mm512_mask_mov_epi64(class, (__mmask8)data, _mm512_set1_epi64(BUSTER_LINK_CLASS_DATA));
-        class = _mm512_mask_mov_epi64(class, (__mmask8)(data & matches[IMPORT_PATTERN_DATA_RELRO]), _mm512_set1_epi64(BUSTER_LINK_CLASS_DATA_RELRO));
+        class = _mm512_mask_mov_epi64(class, (__mmask8)(data & (matches[IMPORT_PATTERN_DATA_RELRO] | matches[IMPORT_PATTERN_DATA_RELRO_DOT])),
+                                      _mm512_set1_epi64(BUSTER_LINK_CLASS_DATA_RELRO));
         class = _mm512_mask_mov_epi64(class, (__mmask8)(data & nobits), _mm512_set1_epi64(BUSTER_LINK_CLASS_BSS));
         class = _mm512_mask_mov_epi64(class, (__mmask8)(left & ~merged_strings), _mm512_set1_epi64(BUSTER_LINK_CLASS_RODATA));
         class = _mm512_mask_mov_epi64(class, (__mmask8)(left & merged_strings), _mm512_set1_epi64(BUSTER_LINK_CLASS_STRINGS));
