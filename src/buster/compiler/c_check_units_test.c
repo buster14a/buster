@@ -53,11 +53,12 @@
 //   sum, beside small.c's main, which checks the sum against the test's own: with -c by --lanes 8 and --shared-parts
 //   (its emission pauses after each part it takes itself), each object its own alone, the six lanes that take no unit
 //   take parts of big.c's functions, one lane alone, the last to stop taking units, leaves its memory to the exit, and
-//   no unit keeps its scratch's pages, none being left to take, by the command's report; again without the board
-//   (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where no lane takes parts and still one lane alone leaves
-//   its memory; with -c by --lanes 1, each object its own alone and big.c alone keeping its scratch's pages, for
-//   small.c (CheckProgramOptions.keep_scratch); linked by --lanes 1, by 8 and by the scalar path on 8, the same bytes,
-//   a program whose sum is the test's, and on 8 lanes the parts taken so and no lane's memory left to the exit.
+//   every unit gives back its scratch's pages as a unit alone does, none being left to take, by the command's report;
+//   again without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where no lane takes parts and
+//   still one lane alone leaves its memory; with -c by --lanes 1, each object its own alone and big.c alone giving back
+//   whole huge pages of its scratch alone, for small.c (CheckProgramOptions.discard_huge); linked by --lanes 1, by 8 and
+//   by the scalar path on 8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so and
+//   no lane's memory left to the exit.
 // - The units' memory (#1109, check_units_test_memory): the budget read from files of the test's own for each branch of
 //   check_units_memory_read (without MemAvailable, the free pages: a page at least, bounded; a limit whose use can't
 //   be read: nothing); two equal units by two lanes with a byte of memory, one of which must wait for the other's
@@ -1430,7 +1431,7 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
                                 "-c of the few large units by 8 lanes: the lanes without units take the large one's parts with the board, none without it", runs[b]);
         check_units_test_expect(tally, status != 0 || kept == 1, "-c of the few large units by 8 lanes: the last lane alone leaves its memory to the exit", runs[b]);
         check_units_test_expect(tally, status != 0 || scratch == 0,
-                                "-c of the few large units by 8 lanes: no unit is left to take, so each gives its scratch's pages back", runs[b]);
+                                "-c of the few large units by 8 lanes: no unit is left to take, so each gives its scratch's pages back as alone", runs[b]);
         for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
         {
             char first[PATH_MAX];
@@ -1441,8 +1442,8 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
             check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by 8 lanes: each object its own alone", detail);
         }
     }
-    // Both at once with -c by one lane (#777): the large unit, taken first, keeps its scratch's pages for the small one,
-    // which has no unit left after it and gives them back; each object its own alone.
+    // Both at once with -c by one lane (#777): the large unit, taken first, gives back whole huge pages of its scratch
+    // alone, for the small one, which has no unit left after it and gives its pages back as alone; each object its own.
     uint64_t one_scratch = UINT64_MAX;
     if (alone)
     {
@@ -1457,13 +1458,15 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
         one_scratch = check_units_test_shared_count(text, "units' scratch: ", UINT64_MAX);
         free(text);
         check_units_test_expect(tally, status == 0 && one_scratch == 1,
-                                "-c of the few large units by one lane: the large unit alone keeps its scratch's pages, for the small one", shared_directory);
+                                "-c of the few large units by one lane: the large unit alone gives back whole huge pages of its scratch alone",
+                                shared_directory);
         for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
         {
             char first[PATH_MAX];
             snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
             snprintf(first, sizeof(first), "%s/%s", shared_directory, objects[o][1]);
-            check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by one lane: each object its own alone", objects[o][0]);
+            check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by one lane: each object its own alone",
+                                    objects[o][0]);
         }
     }
     // Linked by one lane (no board), by 8 and by the scalar path on 8: the same bytes, which run.
@@ -1509,7 +1512,8 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
                                 detail);
     }
     printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's; with -c the last lane alone "
-           "leaves its memory to the exit, with the board and without it, and none before a link; by one lane %llu unit keeps its scratch's pages for the next\n",
+           "leaves its memory to the exit, with the board and without it, and none before a link; by one lane %llu unit gives back whole huge "
+           "pages of its scratch alone, for the next\n",
            (unsigned long long)taken, (unsigned long long)one_scratch);
 }
 

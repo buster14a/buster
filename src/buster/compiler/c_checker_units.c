@@ -133,10 +133,10 @@ struct CheckUnitsLane
     CheckUnitsMemory* memory;
     uint64_t held;
     // The run whose units the lane takes, which tells its unit's checker whether a unit is left to take
-    // (check_units_keep_scratch), and the lane's units whose checker kept its scratch's pages for one (--shared-parts'
-    // report).
+    // (check_units_discard_huge), and the lane's units whose checker gave back whole huge pages of its scratch alone, for
+    // one (--shared-parts' report).
     const struct CheckUnitsRun* run;
-    uint32_t scratch_kept;
+    uint32_t discarded_huge;
 };
 
 #include "c_driver_mixed.c"
@@ -167,17 +167,18 @@ struct CheckUnitsRun
     uint32_t taking;
     uint32_t kept;
     // The units the lanes have taken so far (check_units_lane), which reaches `count` once none is left to take
-    // (check_units_keep_scratch). A lane counts its unit after taking it, so the count may lag the takes, never lead them.
+    // (check_units_discard_huge). A lane counts its unit after taking it, so the count may lag the takes, never lead them.
     uint32_t started;
 };
 
-// Whether `lane`'s unit keeps its scratch's pages (CheckProgramOptions.keep_scratch, #777), counted on the lane: when a
-// unit of its run is still to be taken, which a lane that finishes its unit takes next, likely this one. The count may
-// lag a take, which only keeps the pages for longer.
-static bool check_units_keep_scratch(CheckUnitsLane* lane)
+// Whether `lane`'s unit gives back whole huge pages of its scratch alone (CheckProgramOptions.discard_huge, #777),
+// counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
+// likely this one, pushing as far into its scratch again. The count may lag a take, which only keeps a partial huge
+// page for longer.
+static bool check_units_discard_huge(CheckUnitsLane* lane)
 {
     const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
-    lane->scratch_kept += result ? 1 : 0;
+    lane->discarded_huge += result ? 1 : 0;
     return result;
 }
 
@@ -2660,14 +2661,14 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             }
             if (command->shared_parts)
             {
-                uint32_t scratch_kept = 0;
+                uint32_t discarded_huge = 0;
                 for (uint32_t l = 0; l < active; l += 1)
                 {
-                    scratch_kept += states[l].scratch_kept;
+                    discarded_huge += states[l].discarded_huge;
                 }
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
                 fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
-                fprintf(stderr, "units' scratch: %u kept %s pages for a unit left to take\n", scratch_kept, scratch_kept != 1 ? "their" : "its");
+                fprintf(stderr, "units' scratch: %u gave back whole huge pages alone, for a unit left to take\n", discarded_huge);
             }
             if (command->units_memory != 0)
             {
