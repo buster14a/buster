@@ -94,7 +94,7 @@ static bool pp_test_time_errors(const char* path)
                           intern_initialize(&table) && pp_initialize(&pp, &options, &table);
             if (result)
             {
-                const uint32_t file = pp_lookup_path(&pp, path, (uint32_t)strlen(path), BUSTER_PP_USER_FILE);
+                const uint32_t file = pp_lookup_path(&pp, path, (uint32_t)strlen(path), BUSTER_PP_NONE, BUSTER_PP_USER_FILE);
                 result = file != BUSTER_PP_NONE && pp.files[file].data != BUSTER_PP_NONE;
                 if (result)
                 {

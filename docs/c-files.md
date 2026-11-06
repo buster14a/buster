@@ -131,6 +131,63 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   `FileCacheCounts` counts its opens, mappings and reads for whoever called
   it: a unit's `Preprocessor.probes`, or a run's lanes.
 
+### Search directories' listings (#653)
+
+A system header found in the last search directory costs a failed `open` in
+every directory before it. `<stdio.h>` fails in clang's resource directory and
+`/usr/local/include`, and on Debian in the multiarch directory too, and each
+of its own headers does the same. `deflate.c`'s compile made 122 failed opens
+of 204. A unit with a hundred `-I` directories makes a hundred for each
+header. So the cache reads a directory's names once that pays:
+
+- **Counting.** Each directory the search looks in (a search directory, or
+  an includer's for a quoted name) has a `FileCacheDirectory`. It counts the
+  failed probes of paths in it that the cache never looked up before, ENOENT
+  only (which also says the directory could be searched).
+- **Listing.** At the 16th failed probe (`BUSTER_FILE_CACHE_LISTING_MISSES`),
+  the cache reads the directory's names (`file_cache_list_directory`). That
+  takes an `open`, an `fstatfs`, `getdents64` to the end and a `close`, and
+  puts the names' hashes in a table. A listing costs about as much as 10 to 20
+  failed probes. Listing only after 16 failures keeps the cost bounded:
+  - a short search path, or a unit with few includes, never pays for one;
+  - a directory that fails 16 times and then never again pays at most about
+    twice what probing alone would have cost.
+- **Answering.** Afterwards a path in the directory is "absent" when its first
+  component (`sys` of `sys/types.h`) isn't in the listing
+  (`file_cache_listed_absent`). Its path entry is then the one a failed probe
+  gives it, ENOENT, with no system call. Any other path is opened by its full
+  path as before, so a listing only ever answers "no file here". Hashes
+  compare, so a collision only costs a probe.
+- **Exactly what a probe would find.** Every name a listing rules out would
+  fail with ENOENT:
+  - The file system's type must be one whose lookups find what its listings
+    show (`file_cache_exact_names`): ext2/3/4, XFS, Btrfs, tmpfs, overlayfs,
+    F2FS, SquashFS, EROFS and bcachefs. vfat, NTFS and CIFS alias names
+    their listings don't show (short names, trailing dots), and NFS and FUSE
+    answer as their servers do, so their directories are probed as before.
+  - Names compare with ASCII letters' case folded. That covers casefold
+    directories (ext4, F2FS, tmpfs and bcachefs, per directory) and XFS's
+    `ascii-ci`.
+  - A directory with a name past ASCII isn't listed, and a component past
+    ASCII is probed, so Unicode's foldings and normalizations never matter.
+  - These components are probed too: `.` and `..`; an empty one; one longer
+    than `NAME_MAX`, whose lookup fails with ENAMETOOLONG, which is fatal.
+- **What a listing doesn't see.** A file created in the directory during the
+  run, after its listing. The cache already keeps every path's answer for the
+  whole run, as #653 says, so no unit could have seen it after looking once.
+  A process out of descriptors gets "not found" for a ruled-out name, where an
+  `open` would have failed with EMFILE: as clang's search, which `stat`s, does.
+- **Across units and the walk.** The listings live in the cache, so every unit
+  of a run that shares it uses them. The walk (`files_advance`) moves past a
+  candidate a listing rules out without waiting for a wave's probes. It counts
+  a wave's failed probes as it adds them (`files_add_probes`, on one lane, in
+  the probes' order), so every lane count lists the same directories at the
+  same point. `main.c`'s walk took 27 waves instead of 46, and made 1,912 opens
+  instead of 2,688.
+- **No vector path.** A listing is a few hundred names, read once, and a
+  lookup hashes one component. The system calls are the cost; scalar code
+  is enough here.
+
 ### Per-file jobs on lanes
 
 `benchmark-files` and `test-files` start one command-owned `LaneTeam` before

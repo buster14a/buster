@@ -133,6 +133,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the search directories' listings (`pp_test_directory_listings`, #653): the opens a listed directory saves after its
+  sixteenth failed probe, the names it can't rule out still opened (another case, a subdirectory, a dangling link,
+  `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
+  ASCII never listed, and every path, file and error the same as with listings off;
   the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
   `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
   its error, three columns before it (clang reads one past an identifier's first character silently); one in an
@@ -374,7 +378,7 @@ refresh are in [the measurement record](https://github.com/buster14a/buster-perf
 Its invocation scripts take a separate normal shared-host lock for each command.
 
 `./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
-vectorized|scalar] [--read-limit N,...] [options] file...` preprocesses each file from nothing per
+vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [options] file...` preprocesses each file from nothing per
 run (a new intern table and preprocessor), with the vectorized kernels and their
 scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
@@ -403,7 +407,12 @@ The older per-pass run totals still include intermediate captures and must
 not be divided by the final output count to claim a share of that output.
 `--read-limit` gives a list of the largest files a run reads rather than maps
 (16 KB by default; 0 maps every file), each run in turn in every pass, which
-must all give the same output.
+must all give the same output. `--listing-misses` does the same for the failed
+probes after which a search directory's names are read (16 by default; 0 never
+reads them: `docs/c-files.md`, "Search directories' listings"), each with each
+read limit, so that one executable compares listings on and off, in turns.
+The probe counts then also give the directories listed and the opens their
+listings saved.
 `--clang` also times `clang -E -P` with the same options, a process per file, with `--buster-headers` translated to ours' search and every argument passed (`pp_clang_preprocess`). A failed clang run fails the benchmark and reports no timing.
 Our predefines follow the target options as clang's do; `--predefines FILE`
 still replaces them (the benchmark leaves it out of clang's command line). The

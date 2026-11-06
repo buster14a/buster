@@ -3216,7 +3216,7 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
                      pp->statistics.include_searches == BUSTER_ARRAY_LENGTH(cases) + 1 && pp->statistics.include_ticks != 0 && pp->input_tokens == 0 &&
                      pp->cache->prepared_records == 0 && pp->ticks[PP_PHASE_LEX] == 0 && pp->ticks[PP_PHASE_REFINE] == 0 && pp->ticks[PP_PHASE_DIRECTIVES] == 0;
             // A missing main-file path keeps ENOENT and has no fstat, whether first probed or cached by the other unit.
-            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_USER_FILE);
+            const uint32_t root = pp_lookup_path(pp, missing_root, (uint32_t)strlen(missing_root), BUSTER_PP_NONE, BUSTER_PP_USER_FILE);
             result = result && root != BUSTER_PP_NONE && pp->files[root].data == BUSTER_PP_NONE && pp->files[root].error == ENOENT &&
                      pp->probes.opens == expected_opens + (u == 0 ? 1u : 0u) && pp->probes.fstats == expected_fstats &&
                      pp->statistics.include_opens == expected_opens && pp->statistics.include_fstats == expected_fstats;
@@ -3353,6 +3353,206 @@ static bool pp_test_lookup_accounting(const char* directory)
     rmdir(first);
     rmdir(second);
     printf("lookup accounting: %s (file and metadata attempts, unit/shared caches, scalar/vector and timing off)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
+// Whether two units' path tables are the same: every path each looked up, in the same order, with the same file found
+// or none and the same error.
+static bool pp_test_same_lookups(const Preprocessor* a, const Preprocessor* b)
+{
+    bool result = a->file_count == b->file_count;
+    for (uint32_t f = 0; result && f < a->file_count; f += 1)
+    {
+        const PPFile* x = &a->files[f];
+        const PPFile* y = &b->files[f];
+        result = x->path_length == y->path_length && memcmp(x->path, y->path, x->path_length) == 0 && (x->data != BUSTER_PP_NONE) == (y->data != BUSTER_PP_NONE) &&
+                 x->error == y->error;
+        if (!result)
+        {
+            printf("directory listings: path %u: %s (%s, error %d) against %s (%s, error %d)\n", f, x->path, x->data != BUSTER_PP_NONE ? "found" : "none", x->error,
+                   y->path, y->data != BUSTER_PP_NONE ? "found" : "none", y->error);
+        }
+    }
+    return result;
+}
+
+// A directory's listing (FileCacheDirectory, #653). After BUSTER_FILE_CACHE_LISTING_MISSES failed probes in a search
+// directory, the cache reads its names once. A path whose first component the listing doesn't have then gets ENOENT
+// without an open. Every search finds what it finds with listings off, the oracle: a cache whose listing_misses is 0
+// gives the same paths, files and errors. Names the listing can't rule out are still opened: one it has in another
+// case, a directory, a dangling link, "." and "..", a name past ASCII, and one longer than NAME_MAX (ENAMETOOLONG,
+// not ENOENT). A second unit that shares the cache uses the listing at once. A directory with a name past ASCII is never
+// listed. On a file system whose lookups a listing can't answer for (file_cache_exact_names), nothing is listed and
+// every candidate is opened.
+static bool pp_test_directory_listings(const char* directory)
+{
+    char first[4200];
+    char second[4200];
+    char latin[4200];
+    char sub[4300];
+    char path[4400];
+    snprintf(first, sizeof(first), "%s/listing-first", directory);
+    snprintf(second, sizeof(second), "%s/listing-second", directory);
+    snprintf(latin, sizeof(latin), "%s/listing-latin", directory);
+    snprintf(sub, sizeof(sub), "%s/sub", first);
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(latin, 0700) == 0 && mkdir(sub, 0700) == 0;
+    snprintf(path, sizeof(path), "%s/Mixed.H", first);
+    result = result && pp_test_write_file(path, "int mixed;\n");
+    snprintf(path, sizeof(path), "%s/inner.h", sub);
+    result = result && pp_test_write_file(path, "int inner;\n");
+    snprintf(path, sizeof(path), "%s/dangling.h", first);
+    result = result && symlink("nowhere.h", path) == 0;
+    snprintf(path, sizeof(path), "%s/\xc3\xa9.h", latin);
+    result = result && pp_test_write_file(path, "int latin;\n");
+    for (uint32_t i = 0; result && i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        result = pp_test_write_file(path, "int header;\n");
+    }
+    // Whether this file system's lookups match its listings, so that `first` is listed at its sixteenth miss (a listing
+    // is tried there either way).
+    struct statfs system;
+    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    // The names after h00.h to h39.h, each with the opens it takes with `first` listed: its paths in `first` and
+    // `second`, but for one the listing rules out.
+    char long_name[301];
+    memset(long_name, 'a', 298);
+    memcpy(long_name + 298, ".h", 3);
+    static const struct
+    {
+        const char* name;
+        uint32_t opens;
+    } names[] = {
+        { "Mixed.H", 1 },
+        { "mixed.h", 2 },
+        { "MIXED.H", 2 },
+        { "sub/inner.h", 1 },
+        { "sub/absent.h", 2 },
+        { "SUB/inner.h", 2 },
+        { "nosub/x.h", 1 },
+        { "dangling.h", 2 },
+        { "./h00.h", 2 },
+        { "../listing-second/h01.h", 1 },
+        { "\xc3\xa9.h", 2 },
+        { "zz.h", 1 },
+        { "H02.h", 1 },
+        { 0, 2 },
+    };
+    const char* const directories[] = { first, second };
+    const char* const latin_directories[] = { latin, second };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .quiet = true,
+    };
+    // Units 0 (listings) and 1 (the oracle) search every name; unit 2 shares unit 0's cache, and unit 3 searches
+    // `latin` first.
+    static InternTable tables[4];
+    static Preprocessor units[4];
+    for (uint32_t u = 0; u < 4; u += 1)
+    {
+        units[u] = (Preprocessor){ 0 };
+        options.files = u == 2 ? units[0].cache : 0;
+        options.include_directories = u == 3 ? latin_directories : directories;
+        result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, u == 2 ? &tables[0] : &tables[u]);
+    }
+    if (result)
+    {
+        units[1].cache->listing_misses = 0;
+    }
+    uint64_t expected_opens = 0;
+    uint64_t expected_listed = 0;
+    const uint32_t misses = BUSTER_FILE_CACHE_LISTING_MISSES;
+    const uint32_t count = 40 + (uint32_t)BUSTER_ARRAY_LENGTH(names);
+    for (uint32_t c = 0; result && c < count; c += 1)
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "h%02u.h", c);
+        const char* name = c < 40 ? header : names[c - 40].name != 0 ? names[c - 40].name : long_name;
+        const uint32_t probes = c < 40 ? 1 : names[c - 40].opens;
+        const uint32_t oracle_opens = c < 40 ? 2 : 2 - (c - 40 == 0 || c - 40 == 3 || c - 40 == 9);
+        const bool skips = listable && c >= misses && probes < oracle_opens;
+        expected_opens += skips ? probes : oracle_opens;
+        expected_listed += skips;
+        uint32_t found[2];
+        uint32_t files[2];
+        for (uint32_t u = 0; u < 2; u += 1)
+        {
+            files[u] = pp_find_include(&units[u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found[u],
+                                       BUSTER_PP_NONE);
+        }
+        result = (files[0] == BUSTER_PP_NONE) == (files[1] == BUSTER_PP_NONE) && found[0] == found[1] && units[0].probes.opens == expected_opens &&
+                 units[0].probes.listed == expected_listed && units[0].probes.listings == (c + 1 >= misses ? 1u : 0u) &&
+                 units[1].probes.listings == 0 && units[1].probes.listed == 0;
+        if (!result)
+        {
+            printf("directory listings: %s: found %u/%u in %u/%u, opens %lu/%lu, listed %lu/%lu, listings %lu\n", name, files[0] != BUSTER_PP_NONE,
+                   files[1] != BUSTER_PP_NONE, found[0], found[1], (unsigned long)units[0].probes.opens, (unsigned long)expected_opens,
+                   (unsigned long)units[0].probes.listed, (unsigned long)expected_listed, (unsigned long)units[0].probes.listings);
+        }
+    }
+    result = result && pp_test_same_lookups(&units[0], &units[1]);
+    // The unit that shares the cache: a header the cache knows makes no system call, and a name the listing rules out
+    // is opened in `second` alone.
+    if (result)
+    {
+        uint32_t found;
+        const uint32_t known = pp_find_include(&units[2], (const uint8_t*)"h05.h", 5, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        const uint32_t absent = pp_find_include(&units[2], (const uint8_t*)"yy.h", 4, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        result = known != BUSTER_PP_NONE && absent == BUSTER_PP_NONE && units[2].probes.opens == (listable ? 1u : 2u) && units[2].probes.listed == (listable ? 1u : 0u) &&
+                 units[2].files[units[2].file_count - 2].error == ENOENT;
+        if (!result)
+        {
+            printf("directory listings: the shared cache: opens %lu, listed %lu\n", (unsigned long)units[2].probes.opens, (unsigned long)units[2].probes.listed);
+        }
+    }
+    // A directory with a name past ASCII: its listing is tried once, and every path in it is still opened.
+    for (uint32_t c = 0; result && c < 20; c += 1)
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "h%02u.h", c);
+        uint32_t found;
+        const uint32_t file = pp_find_include(&units[3], (const uint8_t*)header, (uint32_t)strlen(header), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found,
+                                              BUSTER_PP_NONE);
+        result = file != BUSTER_PP_NONE && found == 1 && units[3].probes.opens == 2 * (c + 1) && units[3].probes.listed == 0 &&
+                 units[3].probes.listings == (c + 1 >= misses ? 1u : 0u);
+        if (!result)
+        {
+            printf("directory listings: %s after a name past ASCII: opens %lu, listed %lu, listings %lu\n", header, (unsigned long)units[3].probes.opens,
+                   (unsigned long)units[3].probes.listed, (unsigned long)units[3].probes.listings);
+        }
+    }
+    for (uint32_t u = 4; u > 0; u -= 1)
+    {
+        pp_release(&units[u - 1]);
+    }
+    for (uint32_t u = 0; u < 4; u += 1)
+    {
+        intern_release(&tables[u]);
+    }
+    for (uint32_t i = 0; i < 40; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%02u.h", second, i);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/Mixed.H", first);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/inner.h", sub);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/dangling.h", first);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/\xc3\xa9.h", latin);
+    unlink(path);
+    rmdir(sub);
+    rmdir(first);
+    rmdir(second);
+    rmdir(latin);
+    printf("directory listings: %s (%s; skipped opens, names a listing can't rule out, a shared cache, a name past ASCII)\n", result ? "as expected" : "WRONG",
+           listable ? "listed" : "this file system's directories aren't listed");
     return result;
 }
 
@@ -6551,7 +6751,7 @@ static bool pp_test_header_beside(void)
             search = strcmp(pp.directories[i], resource) == 0 ? i : search;
         }
         result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.fallback_directory);
-        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
+        const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_NONE, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
         uint32_t found_in = BUSTER_PP_NONE;
         const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
@@ -8472,6 +8672,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_text(fuzz->seed));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_lookups(directory, with_clang));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_listings(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_scalar_reference(directory));
