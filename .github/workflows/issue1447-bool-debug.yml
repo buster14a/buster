@@ -1,0 +1,77 @@
+name: Issue 1447 boolean builtin differential
+on:
+  push:
+    branches: [codex/issue-1447-bool-debug-01a1ad8e]
+permissions:
+  contents: read
+jobs:
+  boolean-builtins:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2, 3]
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_BUILD_DEFINES: -DBUSTER_HOST_VECTOR=0
+      BUSTER_DEBUG_INFO: 0
+    steps:
+      - name: Check out oracle sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install pinned Clang 23.1.4
+        run: bash tools/ci/setup-hosted.sh
+      - name: Identify AVX-512 execution availability
+        id: cpu
+        run: |
+          eligible=yes
+          for feature in avx512f avx512bw avx512dq avx512vl; do
+            if ! grep -qm1 " $feature " /proc/cpuinfo; then eligible=no; fi
+          done
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+          echo "AVX512_EXECUTION=$eligible"
+          clang -### -march=native -c -x c /dev/null -o /dev/null 2>&1
+      - name: Probe Clang lane values and retain v4 assembly
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          for arch in x86-64 x86-64-v4; do
+            for opt in O0 O2; do
+              echo "BOOL CLANG ARCH=$arch OPT=$opt"
+              clang -std=gnu17 -"$opt" -march="$arch" -Wno-deprecated-builtins tools/issue1447-bool-debug.c -o "$RUNNER_TEMP/bool-probe"
+              if [ "$arch" = x86-64 ] || [ "${{ steps.cpu.outputs.eligible }}" = yes ]; then
+                "$RUNNER_TEMP/bool-probe"; echo "RUN_STATUS=$?"
+              else
+                timeout 30s qemu-x86_64 -cpu max "$RUNNER_TEMP/bool-probe"; echo "EMULATED_RUN_STATUS=$?"
+              fi
+            done
+          done
+          clang -std=gnu17 -O0 -march=x86-64-v4 -Wno-deprecated-builtins -S tools/issue1447-bool-debug.c -o "$RUNNER_TEMP/bool-probe.s"
+          cat "$RUNNER_TEMP/bool-probe.s"
+          exit 0
+      - name: Build current vector compiler
+        if: steps.cpu.outputs.eligible == 'yes'
+        run: ./build.sh --config Release
+      - name: Probe Buster lane values in both schedules
+        if: steps.cpu.outputs.eligible == 'yes'
+        shell: bash
+        run: |
+          set +e
+          ulimit -c 0
+          for mode in default scalar; do
+            flags=()
+            if [ "$mode" = scalar ]; then flags=(--scalar); fi
+            echo "BOOL BUSTER MODE=$mode"
+            ./build/compiler "${flags[@]}" -c -march=x86-64-v4 tools/issue1447-bool-debug.c -o "$RUNNER_TEMP/bool-ours.o"
+            status=$?
+            echo "BUSTER_COMPILE_STATUS=$status"
+            if [ "$status" = 0 ]; then
+              clang -march=x86-64-v4 "$RUNNER_TEMP/bool-ours.o" -o "$RUNNER_TEMP/bool-ours"
+              "$RUNNER_TEMP/bool-ours"; echo "BUSTER_RUN_STATUS=$?"
+              objdump -d "$RUNNER_TEMP/bool-ours.o"
+            fi
+          done
+          exit 0
