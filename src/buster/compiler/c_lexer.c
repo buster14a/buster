@@ -2793,7 +2793,8 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
         __m512i kinds = perm2b(c_char_kinds, raw[j]);
         // Multi-character punctuators (in 14% of the vectors of C sources, too many to branch on): a 2-character one
         // by its characters' entry of c_pair_kinds. The vectors are consecutive in memory, so an unaligned load gives
-        // each character's next one without a shuffle.
+        // each character's next one without a shuffle. `raw` is 64-byte aligned, so the load crosses a cache line every
+        // time, but a vpermt2b of raw[j] and raw[j + 1] in its place measured 1.3% to 1.7% slower on the 9700X (#1555).
         const __m512i next_characters = _mm512_loadu_si512((const uint8_t*)&raw[j] + 1);
         const __m512i sum = _mm512_add_epi8(raw[j], next_characters);
         const __m512i twice = _mm512_add_epi8(sum, sum);
