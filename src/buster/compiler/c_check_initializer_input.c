@@ -19,6 +19,7 @@ struct CheckInitializers
     uint32_t* warning_tokens;
     uint32_t warning_count;
     CheckInitStatus status;
+    TypeId failed_type;
     uint32_t token;
     uint32_t completion;
 };
@@ -248,6 +249,7 @@ typedef struct CheckInitDiagnostic CheckInitDiagnostic;
 struct CheckInitDiagnostic
 {
     CheckInitStatus status;
+    TypeId failed_type;
     uint32_t token;
     uint32_t completion;
     uint32_t warning_count;
@@ -397,6 +399,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             else if (!accepted && plan.status != CHECK_INIT_CHECK_FAILED && plan.failed_token < result->token)
             {
                 result->status = plan.status;
+                result->failed_type = plan.failed_type;
                 result->token = plan.failed_token;
                 result->completion = end;
             }
@@ -545,6 +548,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         else
         {
             result->status = plan->status;
+            result->failed_type = plan->failed_type;
             result->token = plan->failed_token;
             result->completion = check_sparse_get(input->initializer_ends, token);
 
@@ -560,10 +564,11 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
     else
     {
         const CheckInitStatus status = result->status;
+        const TypeId failed_type = result->failed_type;
         const uint32_t token = result->token;
         const uint32_t completion = result->completion;
         arena_pop_to(output, output_mark);
-        *result = (CheckInitializers){ .status = status, .token = token, .completion = completion };
+        *result = (CheckInitializers){ .status = status, .failed_type = failed_type, .token = token, .completion = completion };
         if (semantic != NULL)
         {
             if (semantic->arena != NULL)

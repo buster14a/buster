@@ -5,9 +5,12 @@
 // cmake, ctest and ninja on PATH:
 //
 //   cc -std=c17 -O2 -Wall -Wextra -Werror -o build-regression tools/ci/build_regression.c && ./build-regression
+//   ./build-regression --flags-only  # Just the fresh-tree ignored-flag regressions; cleans the selected build tree.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
+//   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
+//     global/configuration flags, in generated compile/link commands and real unit compiles;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
 //   - a fresh ./build.sh builds and publishes the Release executable and its configuration's compile commands, and
 //     leaves no temporary file behind;
@@ -42,6 +45,7 @@
 #include <unistd.h>
 
 #define BUSTER_REGRESSION_ENTRIES 4096
+#define BUSTER_REGRESSION_INVALID_FLAG "buster-regression-invalid"
 
 typedef struct Text Text;
 struct Text
@@ -509,6 +513,141 @@ static bool same_bytes(const char* a, const char* b)
     return same;
 }
 
+static void check_ignored_flag_text(const char* path)
+{
+    Text text = read_file(path);
+    if (strstr(text.data, BUSTER_REGRESSION_INVALID_FLAG) != 0)
+    {
+        fail("an ignored flag reached %s", path);
+    }
+    free(text.data);
+}
+
+// Each configure starts without a cache or compiler identity. The two environment variables are tested
+// independently so a compile failure cannot hide a link failure. Real unit compiles complement Ninja's commands for
+// the whole executable; the full harness's fresh build below also executes the link under both hostile variables.
+static void check_ignored_flags(void)
+{
+    static const char* const names[] =
+    {
+        "build.sh with CFLAGS",
+        "build.sh with LDFLAGS",
+        "direct CMake with CFLAGS",
+        "direct CMake with LDFLAGS",
+        "a preset with CFLAGS",
+        "a preset with LDFLAGS",
+        "direct CMake with global and configuration cache flags"
+    };
+    static const char* const cflags[] = { "CFLAGS=-f" BUSTER_REGRESSION_INVALID_FLAG "-cflags", "LDFLAGS=", 0 };
+    static const char* const ldflags[] = { "CFLAGS=", "LDFLAGS=-Wl,--" BUSTER_REGRESSION_INVALID_FLAG "-ldflags", 0 };
+    static const char* const empty[] = { "CFLAGS=", "LDFLAGS=", 0 };
+    static const char* const cache_flags[] =
+    {
+        "-DCMAKE_C_FLAGS=-f" BUSTER_REGRESSION_INVALID_FLAG "-cache-cflags",
+        "-DCMAKE_C_FLAGS_DEBUG=-f" BUSTER_REGRESSION_INVALID_FLAG "-debug-cflags",
+        "-DCMAKE_C_FLAGS_RELEASE=-f" BUSTER_REGRESSION_INVALID_FLAG "-release-cflags",
+        "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--" BUSTER_REGRESSION_INVALID_FLAG "-cache-ldflags",
+        "-DCMAKE_EXE_LINKER_FLAGS_DEBUG=-Wl,--" BUSTER_REGRESSION_INVALID_FLAG "-debug-ldflags",
+        "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-Wl,--" BUSTER_REGRESSION_INVALID_FLAG "-release-ldflags"
+    };
+    static const char* const probe_logs[] =
+    {
+        "CMakeFiles/CMakeConfigureLog.yaml",
+        "CMakeFiles/CMakeOutput.log",
+        "CMakeFiles/CMakeError.log"
+    };
+    static const char* const configurations[] = { "Debug", "Release" };
+    for (uint32_t test = 0; test < sizeof(names) / sizeof(names[0]); test += 1)
+    {
+        const bool wrapper = test < 2;
+        const bool preset = test == 4 || test == 5;
+        const bool cached = test == 6;
+        const char* const* assignments = cached ? empty : test % 2 == 0 ? cflags : ldflags;
+        char directory[PATH_MAX];
+        char log[PATH_MAX];
+        snprintf(log, sizeof(log), "%s/flags-%u.log", work, test);
+        if (wrapper)
+        {
+            BUILD("clean");
+            snprintf(directory, sizeof(directory), "%s", tree);
+        }
+        else
+        {
+            snprintf(directory, sizeof(directory), "%s/flags-%u", work, test);
+        }
+        char* configure[32] = { "cmake", "-B", directory };
+        uint32_t count = 3;
+        if (preset)
+        {
+            configure[count++] = "--preset";
+            configure[count++] = "native";
+        }
+        else
+        {
+            configure[count++] = "-S";
+            configure[count++] = root;
+            configure[count++] = "-G";
+            configure[count++] = "Ninja Multi-Config";
+        }
+        configure[count++] = "-DCMAKE_C_COMPILER=clang";
+        configure[count++] = "-DCMAKE_C_COMPILER_LAUNCHER=";
+        configure[count++] = "-DCMAKE_C_LINKER_LAUNCHER=";
+        if (cached)
+        {
+            for (uint32_t flag = 0; flag < sizeof(cache_flags) / sizeof(cache_flags[0]); flag += 1)
+            {
+                configure[count++] = (char*)cache_flags[flag];
+            }
+        }
+        configure[count] = 0;
+        char* script[] = { "./build.sh", "configure", 0 };
+        if (run(log, assignments, wrapper ? script : configure) != 0)
+        {
+            fputs(read_file(log).data, stderr);
+            fail("%s failed to configure a fresh tree", names[test]);
+        }
+        check_ignored_flag_text(log);
+        bool probed = false;
+        for (uint32_t probe = 0; probe < sizeof(probe_logs) / sizeof(probe_logs[0]); probe += 1)
+        {
+            char path[PATH_MAX + 64];
+            snprintf(path, sizeof(path), "%s/%s", directory, probe_logs[probe]);
+            if (access(path, F_OK) == 0)
+            {
+                check_ignored_flag_text(path);
+                Text text = read_file(path);
+                probed = probed || strstr(text.data, "CMakeCCompilerABI.c") != 0;
+                free(text.data);
+            }
+        }
+        if (!probed)
+        {
+            fail("%s has no fresh C compiler ABI probe in its logs", names[test]);
+        }
+        for (uint32_t config = 0; config < sizeof(configurations) / sizeof(configurations[0]); config += 1)
+        {
+            char ninja_file[64];
+            snprintf(ninja_file, sizeof(ninja_file), "build-%s.ninja", configurations[config]);
+            char* commands[] = { "ninja", "-C", directory, "-f", ninja_file, "-t", "commands", "compiler", 0 };
+            Text printed = capture(commands);
+            if (strstr(printed.data, BUSTER_REGRESSION_INVALID_FLAG) != 0 || strstr(printed.data, "compiler.link") == 0)
+            {
+                fail("%s: %s has an ignored flag or no executable link command", names[test], configurations[config]);
+            }
+            free(printed.data);
+            char* build[] = { "cmake", "--build", directory, "--config", (char*)configurations[config], "--parallel", "1", "--target", "buster_tier1_model_measure", "--verbose", 0 };
+            if (run(log, assignments, build) != 0)
+            {
+                fputs(read_file(log).data, stderr);
+                fail("%s: the real %s unit compile failed", names[test], configurations[config]);
+            }
+            check_ignored_flag_text(log);
+        }
+        pass("%s: fresh probes, Debug/Release compile/link commands and real unit compiles ignore the flags", names[test]);
+    }
+    BUILD("clean");
+}
+
 // The fresh build, the unchanged one and the edits.
 static void check_incremental(void)
 {
@@ -519,8 +658,9 @@ static void check_incremental(void)
     mkdir(temporary, 0755);
     char tmpdir[PATH_MAX + 8];
     snprintf(tmpdir, sizeof(tmpdir), "TMPDIR=%s", temporary);
-    const char* const scratch[] = { tmpdir, 0 };
-    BUILD_ENV(scratch, "build");
+    const char* const scratch[] = { tmpdir, "CFLAGS=-f" BUSTER_REGRESSION_INVALID_FLAG "-cflags", "LDFLAGS=-Wl,--" BUSTER_REGRESSION_INVALID_FLAG "-ldflags", 0 };
+    BUILD_ENV(scratch, "build", "--verbose");
+    check_ignored_flag_text(build_log);
     if (access(release, X_OK) != 0 || !same_file("build/compiler", release))
     {
         fail("the fresh build didn't publish %s as build/compiler", release);
@@ -1128,6 +1268,11 @@ static void check_crt_link_dependencies(void)
 
 int main(int argc, char** argv)
 {
+    const bool flags_only = argc == 2 && strcmp(argv[1], "--flags-only") == 0;
+    if (argc != 1 && !flags_only)
+    {
+        fail("usage: build-regression [--flags-only]");
+    }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
         fail("run it from the repository root");
@@ -1159,12 +1304,16 @@ int main(int argc, char** argv)
     *strrchr(tree, '/') = 0;
     *strrchr(tree, '/') = 0;
     snprintf(ninja_log, sizeof(ninja_log), "%s/.ninja_log", tree);
-    check_clean_all();
-    check_incremental();
-    check_configurations();
-    check_failures();
-    check_presets_and_prints();
-    check_experiments();
+    check_ignored_flags();
+    if (!flags_only)
+    {
+        check_clean_all();
+        check_incremental();
+        check_configurations();
+        check_failures();
+        check_presets_and_prints();
+        check_experiments();
+    }
     char* remove[] = { "rm", "-rf", work, 0 };
     run(0, 0, remove);
     return 0;

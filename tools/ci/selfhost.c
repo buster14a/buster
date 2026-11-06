@@ -273,18 +273,20 @@ static uint64_t run_command(Qualification *qualification, const char *phase, con
     bool timed_out = false;
     for (;;)
     {
-        pid_t waited = wait4(child, &status, WNOHANG, &usage);
-        if (waited == child)
-        {
-            break;
-        }
+        // Keep the leader waitable until the last group signal so its PID cannot be reused.
+        siginfo_t information = {0};
+        int waited = waitid(P_PID, child, &information, WEXITED | WNOHANG | WNOWAIT);
         if (waited < 0)
         {
             if (errno == EINTR)
             {
                 continue;
             }
-            fail("wait4: %s", strerror(errno));
+            fail("waitid: %s", strerror(errno));
+        }
+        if (information.si_pid == child)
+        {
+            break;
         }
         uint64_t now = now_ns();
         if (now >= deadline)
@@ -297,44 +299,44 @@ static uint64_t run_command(Qualification *qualification, const char *phase, con
             uint64_t kill_at = now + BUSTER_SELFHOST_KILL_GRACE_NS;
             for (;;)
             {
-                waited = wait4(child, &status, WNOHANG, &usage);
-                if (waited == child)
-                {
-                    break;
-                }
+                information.si_pid = 0;
+                waited = waitid(P_PID, child, &information, WEXITED | WNOHANG | WNOWAIT);
                 if (waited < 0)
                 {
                     if (errno == EINTR)
                     {
                         continue;
                     }
-                    fail("wait4: %s", strerror(errno));
+                    fail("waitid: %s", strerror(errno));
                 }
-                if (now_ns() >= kill_at)
+                if (information.si_pid == child || now_ns() >= kill_at)
                 {
-                    if (kill(-child, SIGKILL) != 0)
-                    {
-                        kill(child, SIGKILL);
-                    }
-                    do
-                    {
-                        waited = wait4(child, &status, 0, &usage);
-                    } while (waited < 0 && errno == EINTR);
-                    if (waited != child)
-                    {
-                        fail("wait4: %s", strerror(errno));
-                    }
                     break;
                 }
                 struct timespec pause = {0, (long)BUSTER_SELFHOST_POLL_NS};
                 nanosleep(&pause, NULL);
+            }
+            // The leader's exit does not imply that its descendants accepted SIGTERM.
+            if (kill(-child, SIGKILL) != 0)
+            {
+                kill(child, SIGKILL);
             }
             break;
         }
         struct timespec pause = {0, (long)BUSTER_SELFHOST_POLL_NS};
         nanosleep(&pause, NULL);
     }
+    // No handler may signal this numeric group ID after wait4 releases the leader's PID.
     selfhost_active_child = -1;
+    pid_t waited;
+    do
+    {
+        waited = wait4(child, &status, 0, &usage);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != child)
+    {
+        fail("wait4: %s", strerror(errno));
+    }
     uint64_t elapsed = now_ns() - start;
     int code = timed_out ? 124 : (WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status));
     fprintf(qualification->timings, "%u\t%s\t%s\t%llu\t%ld\t%d\n", qualification->sequence, phase, label, (unsigned long long)elapsed, usage.ru_maxrss, code);
