@@ -698,6 +698,40 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 12,
                       "static pointer arithmetic retains byte addend");
     const CheckValue address = result.value;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 62);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 && result.value.offset == 0,
+                      "a 2^62 int index wraps the byte addend to zero");
+    CheckValue bytes = address;
+    bytes.offset = 0;
+    bytes.type = type_pointer(table, BUSTER_TYPE_CHAR);
+    action.operands[0] = bytes;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_ULONG, (unsigned __int128)1 << 63);
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 11 &&
+                           result.value.offset == (int64_t)((uint64_t)1 << 63),
+                      "a 2^63 byte index is the signed relocation addend");
+    action = (CheckAction){
+        .op = CHECK_OP_CAST,
+        .type = BUSTER_TYPE_BOOL,
+        .operands = {
+            {
+                .type = type_pointer(table, BUSTER_TYPE_CHAR),
+                .category = CHECK_RVALUE,
+                .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_NONNULL_ADDRESS,
+                .constant_kind = CHECK_CONSTANT_ADDRESS,
+                .object = 11,
+                .offset = (int64_t)((uint64_t)1 << 63),
+            }
+        }
+    };
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == 1,
+                      "a non-weak address is true as _Bool, including a wrapped displacement");
+    action.operands[0].flags = BUSTER_CHECK_STATIC_OBJECT;
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_NONE,
+                      "a weak address is not a constant _Bool");
     action = (CheckAction){
         .op = CHECK_OP_SUBTRACT,
         .operands = {
@@ -2592,6 +2626,54 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "global address initializer",
             "int g; int *p = &g;\n",
             false,
+            false
+        },
+        {
+            "bool of a defined object's address",
+            "int s; _Bool b = (_Bool)&s;\n",
+            false,
+            false
+        },
+        {
+            "bool of a strong external address",
+            "extern int e; _Bool b = (_Bool)&e;\n",
+            false,
+            false
+        },
+        {
+            "bool of a wrapped address",
+            "int s; _Bool b = (_Bool)((char *)&s + (1ul << 63));\n",
+            false,
+            false
+        },
+        {
+            "bool of an automatic address in a static initializer",
+            "void f(void) { int x; static _Bool b = (_Bool)&x; }\n",
+            false,
+            false
+        },
+        {
+            "bool of a weak address",
+            "extern int w __attribute__((weak)); _Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "bool of a weak definition's address",
+            "int w __attribute__((weak)); _Bool b = (_Bool)&w;\n",
+            true,
+            false
+        },
+        {
+            "pointer index that wraps in 64 bits",
+            "int a[4]; int *r = a + (1ul << 62); char s; char *p = &s + (1ul << 63);\n",
+            false,
+            false
+        },
+        {
+            "bool of an address named by pragma weak",
+            "#pragma weak w\nextern int w;\n_Bool b = (_Bool)&w;\n",
+            true,
             false
         },
         {

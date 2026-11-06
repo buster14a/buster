@@ -2210,7 +2210,7 @@ static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t to
         {
             .type = type,
             .category = CHECK_RVALUE,
-            .flags = address ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_ICE,
+            .flags = address ? BUSTER_CHECK_STATIC_OBJECT | (number != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0) : BUSTER_CHECK_ICE,
             .constant_kind = address ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
             .integer = address ? 0 : number,
             .object = address ? (uint32_t)number : 0,
@@ -2731,7 +2731,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     .type = string->type,
                     .category = CHECK_LVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };
@@ -2772,7 +2772,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
-                    .flags = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .flags = (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT) | check_input_nonnull_flag(reader, declaration, token, false, reader->objects[declaration]),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };
@@ -2801,7 +2801,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -3583,7 +3583,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
                     .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0) | check_input_nonnull_flag(reader, declaration, token, enumeration, reader->objects[declaration]),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -3611,7 +3611,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 {
                     .type = string->type,
                     .category = CHECK_LVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
                 };

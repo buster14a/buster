@@ -21639,9 +21639,16 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
             {
                 const bool preprocessed = pp_run_input(&pp, input);
                 bool printed = true;
-                if (!options.dependencies.only)
+                const bool file_output = output != NULL && strcmp(output, "-") != 0;
+                // Do not create or truncate -o until preprocessing succeeded. A failure removes a previous file,
+                // as clang and gcc do, instead of leaving the truncated output.
+                if (!preprocessed && file_output)
                 {
-                    FILE* stream = output != NULL && strcmp(output, "-") != 0 ? fopen(output, "w") : stdout;
+                    unlink(output);
+                }
+                if (preprocessed && !options.dependencies.only)
+                {
+                    FILE* stream = file_output ? fopen(output, "w") : stdout;
                     printed = stream != NULL && (options.dump_macros ? pp_print_macros(&pp, stream) : pp_print(&pp, stream, markers));
                     if (stream != NULL)
                     {
@@ -21653,6 +21660,10 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
                     }
                 }
                 const bool prepared = preprocessed && printed && pp_dependencies(&pp, input, output, &arena, dependencies + unit, stderr);
+                if (!prepared && file_output)
+                {
+                    unlink(output);
+                }
                 result = prepared ? result : 1;
                 pp_diagnostic_summary(&pp);
             }
