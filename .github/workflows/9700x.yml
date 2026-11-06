@@ -208,7 +208,6 @@ jobs:
         run: |
           bash tests/ci/nightly.sh
           bash tests/ci/caches.sh
-          bash tests/ci/checker-baseline.sh
 
       - name: Decide reuse and hardware admission
         id: decide
@@ -1533,8 +1532,6 @@ jobs:
           fi
           git worktree add --detach "$ab/base" "$AB_BASE_SHA"
           trap 'git worktree remove --force "$ab/base"' EXIT
-          # Only the exact unbuildable #1518 base receives the disclosed compatibility fix; other SHAs remain intact.
-          bash tools/ci/checker-baseline.sh "$ab/base" "$AB_BASE_SHA"
           shifts=(0 1088 2112 3136)
           (cd "$ab/base" && taskset -c 0-7 ./build.sh shifts --config Release "$ab/main" main_unit_checker.c "${shifts[@]}")
           taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
