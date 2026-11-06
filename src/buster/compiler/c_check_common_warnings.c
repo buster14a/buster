@@ -2481,7 +2481,10 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             {
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
-                conversion = assignment;
+                const TypeId target = check_stream_type(stream, node);
+                const bool same_integer = constant == CHECK_CONSTANT_INTEGER && !check_common_conversion_arms(graph, source) && target != 0 &&
+                                          check_stream_type(stream, source) == target;
+                conversion = assignment && !same_integer;
             }
         }
         own |= self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
@@ -2498,9 +2501,12 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
                 if (constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source))
                 {
-                    const uint32_t flags = stream->argument_conversions[offset + i].flags;
+                    const CheckConversion conversion_edge = stream->argument_conversions[offset + i];
+                    const uint32_t flags = conversion_edge.flags;
                     const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
-                    conversion = assignment;
+                    const bool same_integer = constant == CHECK_CONSTANT_INTEGER && !check_common_conversion_arms(graph, source) &&
+                                              conversion_edge.type != 0 && check_stream_type(stream, source) == conversion_edge.type;
+                    conversion = assignment && !same_integer;
                 }
             }
         }
