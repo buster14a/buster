@@ -1702,7 +1702,13 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
         const uint32_t source = parser->tokens.sources[token];
         if (source < pp->output.count && pp->output.locations[source] != 0)
         {
-            const uint32_t location = pp_expansion_location(pp, source, pp_history_at(pp, source));
+            uint32_t location = pp->output.locations[source];
+            if (pp->output.flags[source] & BUSTER_PP_FROM_MACRO)
+            {
+                // Only a candidate that needs a macro's invocation asks for the deferred history. Ordinary file
+                // tokens keep their positions without replaying the unit, even when another token expands a macro.
+                location = pp_history_ensure(pp) ? pp_output_expansion_begin(pp, source, pp_history_at(pp, source)) : 0;
+            }
             const uint32_t range = pp_find_range(pp, location);
             const char* file = NULL;
             uint32_t file_length = 0;
@@ -1745,7 +1751,8 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
             // provides (its spelling line is its definition's).
             bool warn = kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
                         kind == PARSE_KIND_SWITCH;
-            warn = warn && !has_else && check_common_spelling_line(parser, pp, token) != 0 &&
+            warn = warn && !has_else && check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_EMPTY_BODY, false) != CHECK_WARNING_IGNORE &&
+                   check_common_spelling_line(parser, pp, token) != 0 &&
                    check_common_spelling_line(parser, pp, token) == check_common_expansion_point(parser, pp, parent, 0);
             uint32_t publication = token;
             if (warn && loop)

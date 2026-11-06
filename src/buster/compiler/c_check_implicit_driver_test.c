@@ -541,10 +541,69 @@ static void check_test_common_sizeof_memo(CheckTest* test)
     check_test_expect(test, memoized && inside > 1000 && outside > 1000, "sizeof operands: every memoized answer is the plain climb's");
 }
 
+// Empty-body checking keeps deferred history untouched when no enabled candidate needs a macro's position: a unit
+// without an empty body, a following file-spelled statement with a later macro operand, and -w's macro body (#1339).
+static void check_test_common_empty_history(CheckTest* test)
+{
+    static const char* const sources[] =
+    {
+        "#define VALUE 1\nint f(int x) { return x + VALUE; }\n",
+        "#define VALUE 1\nint f(int x) {\n  while (x--);\n  x += VALUE;\n  return x;\n}\n",
+        "#define BODY(x) ((void)0)\nvoid f(int x) {\n  while (x--);\n    BODY(x);\n}\n",
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            static InternTable identifiers;
+            static Preprocessor pp;
+            static Parser parser;
+            const PPOptions preprocessing =
+            {
+                .language =
+                {
+                    .standard = 2017,
+                    .gnu = true,
+                },
+                .no_standard_includes = true,
+                .quiet = true,
+                .defer_history = true,
+                .scalar = path != 0,
+                .suppress_warnings = c == 2,
+            };
+            const ParseOptions parsing =
+            {
+                .scalar = path != 0,
+            };
+            const CheckInput input =
+            {
+                0,
+            };
+            Arena scratch = arena_reserve(UINT64_C(1) << 20);
+            const bool ready = scratch.base != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
+                               parse_initialize(&parser, &parsing, preprocessing.language) &&
+                               pp_run_source(&pp, "empty-history.c", (const uint8_t*)sources[c], (uint32_t)strlen(sources[c])) &&
+                               parse_translation_unit(&parser, &pp);
+            check_test_expect(test, ready && pp.history_deferred, "empty-body source reaches checking with deferred history");
+            if (ready)
+            {
+                check_common_empty_bodies(&parser, &pp, &input, &scratch);
+            }
+            check_test_expect(test, ready && pp.history_deferred && pp.warnings == 0 && !pp.fatal,
+                              "empty-body checking leaves file-spelled positions without a history replay");
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+            arena_release(&scratch);
+        }
+    }
+}
+
 static void check_test_driver_common_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_common_self_candidates(test);
     check_test_common_sizeof_memo(test);
+    check_test_common_empty_history(test);
     static const char defaults[] =
         "#include <stdio.h>\n#include <string.h>\nenum E { A, B, C };\n"
         "int *f(void) { int a = 1; return &a; }\n"
@@ -713,6 +772,47 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int h(int x)\n{\n    while (x) ;\n}\n"
         "int i(int x)\n{\n    while (x) ;\n      if (x) ;\n    return 0;\n}\n"
         "int j(int x)\n{\n    switch (x) {\n    case 1:\n        while (x) ;\n        break;\n    }\n    return 0;\n}\n";
+    // #1339: the statement's invocation starts at the loop's column even when its body is defined farther right.
+    // Keep quiet cases in their own unit: an earlier positive diagnostic would already have replayed the history.
+    static const char empty_macro_bodies[] =
+        "#define BODY(x) ((void)0)\n"
+        "#define OBJECT ((void)0)\n"
+        "#define NEST(x) BODY(x)\n"
+        "#define CALL(x) consume(x)\n"
+        "void consume(int);\n"
+        "void a(int x) {\n  while (x--);\n  BODY(x);\n}\n"
+        "void b(int x) {\n  for (; x; --x);\n  OBJECT;\n}\n"
+        "void c(int x) {\n  while (x--);\n  NEST(x);\n}\n"
+        "void d(int x) {\n  for (; x; --x);\n  CALL(x);\n}\n";
+    // An argument-first expansion begins at the invocation's name, not at the argument's column. Forwarded
+    // arguments and a paste follow the same outer invocation, while a non-macro expression remains a control.
+    static const char empty_macro_arguments[] =
+        "#define ID(x) x\n"
+        "#define FORWARD(x) ID(x)\n"
+        "#define JOIN(a, b) a##b\n"
+        "void consume(int);\n"
+        "void a(int x) {\n  while (x--);\n  ID(consume(x));\n}\n"
+        "void b(int x) {\n  for (; x; --x);\n  FORWARD(consume(x));\n}\n"
+        "void c(int x) {\n  while (x--);\n  JOIN(con, sume)(x);\n}\n"
+        "void d(int x) {\n  while (x--);\n  consume(x);\n}\n";
+    static const char empty_macro_positive[] =
+        "#define BODY(x) ((void)0)\n"
+        "#define OBJECT ((void)0)\n"
+        "#define ID(x) x\n"
+        "void consume(int);\n"
+        "void a(int x) { while (x--); BODY(x); }\n"
+        "void b(int x) { for (; x; --x); OBJECT; }\n"
+        "void c(int x) {\n  while (x--);\n    ID(consume(x));\n}\n"
+        "void d(int x) {\n  for (; x; --x);\n    BODY(x);\n}\n";
+    static const char empty_macro_heads[] =
+        "#define LOOP(x) while (x--)\n"
+        "#define ID(x) x\n"
+        "#define HEAD(x) ID(while (x--))\n"
+        "#define BODY(x) ((void)0)\n"
+        "void a(int x) {\n  LOOP(x);\n  BODY(x);\n}\n"
+        "void b(int x) {\n  HEAD(x);\n  BODY(x);\n}\n"
+        "void c(int x) {\n  LOOP(x);\n    BODY(x);\n}\n"
+        "void d(int x) {\n  HEAD(x);\n    BODY(x);\n}\n";
     static const char for_increments[] =
         "int a(int x) { for (; x; x) return 0; }\n"
         "int b(int x) { for (; x; x) break; }\n"
@@ -1057,6 +1157,51 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },
         { empty_bodies, { "-Wall", NULL, NULL, NULL } },
+        {
+            empty_macro_bodies,
+            {
+                "-Wall",
+                "-Werror=empty-body",
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_arguments,
+            {
+                "-Wall",
+                "-Werror=empty-body",
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_positive,
+            {
+                "-Wall",
+                NULL,
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_positive,
+            {
+                "-Wall",
+                "-Wno-empty-body",
+                NULL,
+                NULL,
+            },
+        },
+        {
+            empty_macro_heads,
+            {
+                "-Wall",
+                NULL,
+                NULL,
+                NULL,
+            },
+        },
         { for_increments, { "-Wall", "-Wextra", NULL, NULL } },
         { zero_length_array, { "-Wall", NULL, NULL, NULL } },
         { switch_fixed_shadow, { "-Wall", NULL, NULL, NULL } },

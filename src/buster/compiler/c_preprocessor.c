@@ -19012,12 +19012,10 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
     return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
 }
 
-// The end of output token `token`'s outermost expansion, as clang's SourceManager::getExpansionRange(...).getEnd()
-// resolves it (#148's source-location builtins, #1126's review): a function-like invocation's closing parenthesis, an
-// object-like macro's name, followed while that end was itself made by an expansion (PPExpansion.end_origin); an
-// argument's or a generated token's is the end of the expansion that substituted or made it; a file token's is its own
-// location. `origin` is the token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
-static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+// Either boundary of output token `token`'s outermost expansion. An argument or a generated token follows the
+// expansion that substituted or made it; a file token keeps its own location. `origin` is pp_history_at's, after
+// pp_history_ensure. Unlike pp_expansion_place, an argument reaches its invocation rather than its spelling place.
+static uint32_t pp_output_expansion_boundary(const Preprocessor* pp, uint32_t token, uint32_t origin, bool end)
 {
     bool valid = token < pp->output.count && pp->output.locations != 0;
     uint32_t location = valid ? pp->output.locations[token] : 0;
@@ -19039,12 +19037,27 @@ static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocess
         else
         {
             valid = kind == 0 && index < pp->history_count;
-            location = valid ? pp->history[index].end : location;
-            origin = valid ? pp->history[index].end_origin : 0;
+            location = valid ? (end ? pp->history[index].end : pp->history[index].begin) : location;
+            origin = valid ? (end ? pp->history[index].end_origin : pp->history[index].parent) : 0;
         }
     }
     valid &= origin == 0;
     return valid ? location : 0;
+}
+
+// The begin of the outermost invocation, as clang's getExpansionLoc: the invocation's name even when its first
+// output token is an argument. Statement indentation uses this place, not the argument's spelling column (#1339).
+static __attribute__((unused)) uint32_t pp_output_expansion_begin(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    return pp_output_expansion_boundary(pp, token, origin, false);
+}
+
+// The end, as clang's SourceManager::getExpansionRange(...).getEnd() (#148's source-location builtins, #1126's
+// review): a function-like invocation's closing parenthesis or an object-like macro's name, followed while that
+// end was itself made by an expansion (PPExpansion.end_origin). Returns 0 for a history that leads to no location.
+static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    return pp_output_expansion_boundary(pp, token, origin, true);
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current
