@@ -132,6 +132,17 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "comma conditional arms do not acquire outer conversion",
+        .source = "int side(void);void take(int);int f(int c){int x=c?(side(),2.5):3.0;x=c?3.0:(side(),2.5);take(c?(side(),2.5):3.0);return c?(side(),2.5):3.0;}\n",
+        .options = { "-Werror=literal-conversion" },
+        .c23 = true,
+    },
+    {
+        .name = "top level comma still receives outer conversion",
+        .source = "int side(void);int f(void){return (side(),2.5);}\n",
+        .warnings = 1,
+    },
+    {
         .name = "unevaluated sizeof and generic arms suppress literal conversions",
         .source = "int f(void){return sizeof((int){1.5})+_Generic(0,int:0,default:(int){2.5});}\n",
     },

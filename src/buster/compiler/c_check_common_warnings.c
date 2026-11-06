@@ -2265,12 +2265,15 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
         uint64_t* work = local;
         uint32_t capacity = BUSTER_ARRAY_LENGTH(local);
         uint32_t count = 1;
-        work[0] = (uint64_t)evaluated << 32 | source;
+        // Clang descends through a comma at the conversion root, but not through a comma that is
+        // itself an arm of a conditional expression.
+        work[0] = UINT64_C(1) << 33 | (uint64_t)evaluated << 32 | source;
         while (count != 0 && !pp->fatal)
         {
             const uint64_t item = work[--count];
             const uint32_t node = (uint32_t)item;
-            const bool reached = (item >> 32) != 0;
+            const bool reached = ((item >> 32) & 1u) != 0;
+            const bool follow_comma = (item >> 33) != 0;
             const CheckOp op = graph->ops[node];
             uint32_t children[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
             bool selected[2] = { reached, reached };
@@ -2287,7 +2290,7 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
             }
             else if (op == CHECK_OP_COMMA)
             {
-                children[0] = graph->operand1[node];
+                children[0] = follow_comma ? graph->operand1[node] : BUSTER_CHECK_NONE;
             }
             else
             {
@@ -2318,7 +2321,8 @@ static void check_common_conversion_warning_at(const Parser* parser, Preprocesso
                     }
                     if (!pp->fatal)
                     {
-                        work[count++] = (uint64_t)selected[child] << 32 | children[child];
+                        work[count++] = (uint64_t)(follow_comma && op == CHECK_OP_COMMA) << 33 |
+                                        (uint64_t)selected[child] << 32 | children[child];
                     }
                 }
             }

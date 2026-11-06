@@ -3873,7 +3873,7 @@ unless `--keep` or a failure.
 
 `c_check_common_warnings.c`, included by the driver, reports the expression
 warnings that need the completed graph or the parser's operator tree:
-`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Wliteral-conversion`, `-Warray-bounds`,
 `-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
@@ -3971,11 +3971,13 @@ function specifiers carry `-Wduplicate-decl-specifier` at the repeated token,
 including pointer and parameter qualifiers. These warnings use the common
 command-line and source pragma policy.
 
+Literal floating-to-integer conversions warn for the supported initializer, assignment, return and call-argument paths, including conditional arms and top-level comma values. A comma inside a conditional arm does not inherit the outer conversion. The logical operators' implicit float-to-bool conversions are not yet covered.
+
 The graph's passes share one pass in graph order, `check_common_facts`, which
 gives each node its parent, whether another node uses its value, whether it is
 evaluated, a conditional's or comma's arm effect, and its reach: a bit each for
 whether its subtree holds a node whose own warning may fire, a division by a
-constant, or a comparison (#1340). The expression walk starts only at a root that
+constant, a comparison, or a possible implicit conversion (#1340). The expression walk starts only at a root that
 reaches something or whose discarded expression may get the statement's
 unused-value warning, and enters only the subtrees that hold its walk's bit;
 every warning keeps its order. The default-ignored warnings' work runs only
