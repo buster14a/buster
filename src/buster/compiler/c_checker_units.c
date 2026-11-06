@@ -403,6 +403,7 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     for (uint32_t u = 0; u < count; u += 1)
     {
         const ObjectDebug* own = &units[u].kept.debug;
+        valid = valid && native_debug_extra_valid(own->sections, &own->extra);
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
             sizes[section] += own->sections[section].length;
@@ -481,7 +482,7 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             }
             else
             {
-                // The definition's COMDAT was discarded. Its original address bytes are a zero tombstone; never
+                // The definition's COMDAT was discarded. Its validated address field becomes a zero tombstone; never
                 // relocate this DIE to an atom that no longer exists or to an unrelated replacement definition.
                 memset(sections[BUSTER_OBJECT_DEBUG_INFO] + address.offset, 0, 8);
             }

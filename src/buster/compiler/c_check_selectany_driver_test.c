@@ -93,6 +93,100 @@ static bool check_units_test_selectany_object(const char* path, bool foreign)
     return valid;
 }
 
+static bool check_units_test_selectany_bytes(const char* bytes, uint64_t size, uint64_t address, void* result, uint64_t length)
+{
+    bool found = false;
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)bytes;
+    const bool valid = size >= sizeof(*header) && memcmp(header->e_ident, ELFMAG, SELFMAG) == 0 &&
+                       header->e_phentsize == sizeof(Elf64_Phdr) && header->e_phoff <= size &&
+                       header->e_phnum <= (size - header->e_phoff) / sizeof(Elf64_Phdr);
+    for (uint32_t p = 0; valid && !found && p < header->e_phnum; p += 1)
+    {
+        Elf64_Phdr segment;
+        memcpy(&segment, bytes + header->e_phoff + (uint64_t)p * sizeof(segment), sizeof(segment));
+        const uint64_t offset = address >= segment.p_vaddr ? address - segment.p_vaddr : UINT64_MAX;
+        found = segment.p_type == PT_LOAD && offset <= segment.p_filesz && length <= segment.p_filesz - offset &&
+                segment.p_offset <= size && offset <= size - segment.p_offset && length <= size - segment.p_offset - offset;
+        if (found)
+        {
+            memcpy(result, bytes + segment.p_offset + offset, length);
+        }
+    }
+    return found;
+}
+
+// Ask binutils to decode the executable independently: the retained `choice` must point to the fixture's actual
+// Row and pointee, while the second unit's discarded definition must not describe an unrelated live object.
+static bool check_units_test_selectany_debug(const char* directory, const char* name, const char* errors)
+{
+    char dwarf_path[PATH_MAX];
+    char image_path[PATH_MAX];
+    snprintf(dwarf_path, sizeof(dwarf_path), "%s/debug-dump.txt", directory);
+    snprintf(image_path, sizeof(image_path), "%s/%s", directory, name);
+    char* dwarf_args[] = { (char*)"readelf", (char*)"--wide", (char*)"--debug-dump=info", (char*)name, NULL };
+    bool valid = check_units_test_run(directory, dwarf_args, dwarf_path, errors, false) == 0;
+    uint64_t size = 0;
+    char* dwarf = valid ? check_units_test_read(dwarf_path, &size) : NULL;
+    char* image = valid ? check_units_test_read(image_path, &size) : NULL;
+    valid = dwarf != NULL && image != NULL;
+    uint32_t definitions = 0;
+    uint32_t aliases = 0;
+    const char* at = dwarf;
+    while (valid && at != NULL && (at = strstr(at, "DW_AT_name")) != NULL)
+    {
+        const char* end = strchr(at, '\n');
+        const char* colon = strchr(at, ':');
+        if (end == NULL || colon == NULL || colon > end)
+        {
+            valid = false;
+            break;
+        }
+        const char* value = colon + 1;
+        while (value < end && (*value == ' ' || *value == '\t'))
+        {
+            value += 1;
+        }
+        if ((size_t)(end - value) >= 9 && memcmp(value, "(string) ", 9) == 0)
+        {
+            value += 9;
+        }
+        if ((size_t)(end - value) == 6 && memcmp(value, "choice", 6) == 0)
+        {
+            const char* next_die = strstr(end, "DW_TAG_");
+            const char* location = strstr(end, "DW_OP_addr:");
+            if (location != NULL && (next_die == NULL || location < next_die))
+            {
+                char* after = NULL;
+                const unsigned long long address = strtoull(location + strlen("DW_OP_addr:"), &after, 16);
+                uint64_t pointer = 0;
+                uint32_t row = 0;
+                uint32_t pointee = 0;
+                const bool live = address != 0 && address <= UINT64_MAX - sizeof(pointer) && check_units_test_selectany_bytes(image, size, address, &pointer, sizeof(pointer)) &&
+                                  check_units_test_selectany_bytes(image, size, address + sizeof(pointer), &row, sizeof(row)) &&
+                                  check_units_test_selectany_bytes(image, size, pointer, &pointee, sizeof(pointee)) && row == 17 && pointee == 13;
+                valid = after != location + strlen("DW_OP_addr:") && definitions < 2 && (definitions == 0 ? live : address == 0);
+                definitions += 1;
+            }
+        }
+        else if ((size_t)(end - value) == 12 && memcmp(value, "losing_alias", 12) == 0)
+        {
+            const char* next_die = strstr(end, "DW_TAG_");
+            const char* location = strstr(end, "DW_OP_addr:");
+            if (location != NULL && (next_die == NULL || location < next_die))
+            {
+                char* after = NULL;
+                const unsigned long long address = strtoull(location + strlen("DW_OP_addr:"), &after, 16);
+                valid = after != location + strlen("DW_OP_addr:") && address == 0;
+                aliases += 1;
+            }
+        }
+        at = end + 1;
+    }
+    free(dwarf);
+    free(image);
+    return valid && definitions == 2 && aliases == 1;
+}
+
 static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* executable, const char* clang, const char* directory)
 {
     static const char first[] =
@@ -112,6 +206,8 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
         "struct Row { int *pointer; int value; };\n"
         "extern int discarded_only;\n"
         "struct Row choice __attribute__((selectany, section(\".shared\"))) = { &discarded_only, 97 };\n"
+        "struct Row *choice_reference = &choice;\n"
+        "extern struct Row losing_alias __attribute__((alias(\"choice\"), selectany));\n"
         "int extra __attribute__((selectany, section(\".shared\"))) = 99;\n"
         "int zero __attribute__((selectany)) = 777;\n"
         "const int constant __attribute__((selectany)) = 777;\n"
@@ -121,10 +217,10 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
     static const char main_unit[] =
         "#include <stdio.h>\n"
         "struct Row { int *pointer; int value; };\n"
-        "extern struct Row choice; extern int extra, zero, override; extern const int constant;\n"
+        "extern struct Row choice; extern struct Row *choice_reference; extern int extra, zero, override; extern const int constant;\n"
         "extern int selected_alias, selected_group_alias;\n"
         "extern _Thread_local int tls, tls_zero;\n"
-        "int main(void) { printf(\"%d %d %d %d %d %d %d\\n\", *choice.pointer + choice.value, extra, zero, constant, tls, tls_zero, override); return selected_alias != 31 || selected_group_alias != 29; }\n";
+        "int main(void) { printf(\"%d %d %d %d %d %d %d\\n\", *choice.pointer + choice.value, extra, zero, constant, tls, tls_zero, override); return selected_alias != 31 || selected_group_alias != 29 || choice_reference != &choice; }\n";
     static const char one[] = "int value __attribute__((selectany)) = 11; int main(void) { return value == 11 ? 0 : 1; }\n";
     static const char* const sources[] = { "first.c", "second.c", "main.c", "one.c" };
     const char* const texts[] = { first, second, main_unit, one };
@@ -187,6 +283,11 @@ static void check_units_test_selectany(CheckUnitsTestTally* tally, const char* e
         char* actual = ran == 0 ? check_units_test_read(output, &length) : NULL;
         check_units_test_expect(tally, actual != NULL && length == expected_length && memcmp(actual, expected, length) == 0,
                                 "direct selectany linking drops discarded relocations and runs like Clang", name);
+        if (mode == 4 || mode == 5)
+        {
+            check_units_test_expect(tally, built == 0 && check_units_test_selectany_debug(own, name, errors),
+                                    "selectany DWARF retains the live address and tombstones the discarded definition", name);
+        }
         if (mode < 4)
         {
             check_units_test_expect(tally, built == 0 && check_test_driver_same_files(path, first_output),
