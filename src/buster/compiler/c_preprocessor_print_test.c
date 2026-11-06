@@ -765,6 +765,101 @@ static bool pp_test_print_unspliced(void)
     return result;
 }
 
+// pp_splice_possible_vector against its scalar twin, and the rule against the splices themselves. Random spellings of
+// 0 to 300 bytes of letters, backslashes, every blank, '?', '/', 'x', digits and quotes, each ending at a PROT_NONE
+// page (the masked loads must read no byte past it), with and without trigraphs: both checks must agree, and so must
+// pp_remove_splices_by's spellings with and without `scalar`, for each kind it treats apart; and wherever the rule
+// finds no possible splice, the full cleaning (pp_clean_splices) must give back the same bytes. Then a backslash at
+// every position of spellings of 1 to 200 bytes, before a blank, a letter or nothing, at the 64-byte block edges too.
+static bool pp_test_splice_possible(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool result = mapping != MAP_FAILED && mprotect(mapping, page, PROT_READ | PROT_WRITE) == 0;
+    static const uint8_t alphabet[] = "aaaaaaaaaaaaaaaaaaa\\\\\\\\\\\\ \t\n\r\f\v?" "?/=\"'x0189R(";
+    const uint8_t kinds[] =
+    {
+        C_TOKEN_NUMERIC_CONSTANT,
+        C_TOKEN_STRING_LITERAL,
+        C_TOKEN_CHAR_CONSTANT,
+        C_TOKEN_UNKNOWN,
+    };
+    uint8_t scalar_buffer[512];
+    uint8_t vector_buffer[512];
+    uint8_t cleaned[512];
+    uint64_t state = 1388;
+    uint32_t trials = 0;
+    uint32_t possible = 0;
+    uint32_t kept = 0;
+    for (uint32_t trial = 0; result && trial < 40000; trial += 1)
+    {
+        const bool trigraphs = (trial & 1) != 0;
+        const uint64_t random = pp_print_test_random(&state);
+        const uint32_t length = (uint32_t)(random % (random % 4 == 0 ? 301 : 140));
+        // Mostly letters with a few specials, or specials as often as letters.
+        const uint32_t sparse = (uint32_t)((random >> 32) % 3);
+        uint8_t* spelling = mapping + page - length;
+        for (uint32_t b = 0; b < length; b += 1)
+        {
+            const uint64_t pick = pp_print_test_random(&state);
+            spelling[b] = sparse != 0 && pick % 8 != 0 ? 'a' : alphabet[(pick >> 8) % (sizeof(alphabet) - 1)];
+        }
+        const bool scalar = pp_splice_possible_scalar(spelling, length, trigraphs);
+        result = pp_splice_possible_vector(spelling, length, trigraphs) == scalar;
+        for (uint32_t kind = 0; result && kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+        {
+            const uint8_t* scalar_spelling = 0;
+            const uint8_t* vector_spelling = 0;
+            const uint32_t flags = trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
+            const uint32_t scalar_length = pp_remove_splices_by(spelling, length, flags, kinds[kind], true, scalar_buffer, &scalar_spelling);
+            const uint32_t vector_length = pp_remove_splices_by(spelling, length, flags, kinds[kind], false, vector_buffer, &vector_spelling);
+            result = scalar_length == vector_length && (scalar_spelling == spelling) == (vector_spelling == spelling) &&
+                     memcmp(scalar_spelling, vector_spelling, scalar_length) == 0;
+            if (result && !scalar)
+            {
+                const uint32_t clean_length = pp_clean_splices(spelling, length, trigraphs, pp_is_string_literal(kinds[kind]), cleaned);
+                result = clean_length == length && memcmp(cleaned, spelling, length) == 0 && scalar_spelling == spelling;
+            }
+        }
+        if (!result)
+        {
+            printf("splice scan: trial %u (length %u, trigraphs %u) failed\n", trial, length, trigraphs);
+        }
+        possible += scalar;
+        kept += !scalar;
+        trials += 1;
+    }
+    // A backslash at every position, before a blank, a letter, a digit or nothing (the end), with each block edge.
+    static const uint8_t after[] = { ' ', '\n', '\t', 'n', 'x', '0', 0 };
+    for (uint32_t length = 1; result && length <= 200; length += 1)
+    {
+        for (uint32_t at = 0; result && at < length; at += 1)
+        {
+            for (uint32_t form = 0; result && form < BUSTER_ARRAY_LENGTH(after); form += 1)
+            {
+                uint8_t* spelling = mapping + page - length;
+                memset(spelling, 'a', length);
+                spelling[at] = '\\';
+                if (at + 1 < length)
+                {
+                    spelling[at + 1] = after[form];
+                }
+                const bool expected = at + 1 == length || after[form] <= ' ';
+                result = pp_splice_possible_scalar(spelling, length, false) == expected && pp_splice_possible_vector(spelling, length, false) == expected &&
+                         pp_splice_possible_vector(spelling, length, true) == expected;
+                if (!result)
+                {
+                    printf("splice scan: backslash at %u of %u before 0x%02x failed\n", at, length, after[form]);
+                }
+            }
+        }
+    }
+    munmap(mapping, 2 * page);
+    printf("splice scan: %u spellings, %u possibly spliced, %u kept as written, %s (guarded tails, blocks past 64 bytes, trigraphs, every kind)\n", trials,
+           possible, kept, result ? "pass" : "FAIL");
+    return result;
+}
+
 // Both printers' bytes, with markers and without, with trigraphs and without, for 65 alignments of a source whose
 // chunks take every path of the vector printer's spellings: tokens of two headers' macros between the file's own (a
 // chunk's several ranges), escapes in literals (no splice: the fast path), a backslash before a blank or at a token's

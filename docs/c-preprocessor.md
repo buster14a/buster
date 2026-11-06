@@ -413,6 +413,15 @@ makes its own; with one, the units and lanes that share it read each file once
     tells `pp_without_splices` to leave them alone, so `S(??\`, a line
     splice, then `=)` stays `"??="`. Pastes and `_Pragma`'s text are lexed
     again, so their line splices and trigraphs still come out (`pp_scratch`).
+  - `pp_remove_splices` copies a spelling only when the printer's rule
+    (`pp_print_unspliced`, below) says it may hold a splice: a backslash
+    before a byte up to `' '` or at its end, or with trigraphs any `?`
+    (`pp_splice_possible_vector`, 64 bytes at a time, or its scalar twin with
+    `--scalar`). The scalar lexer's characters give any other backslash back
+    as written, so a literal with escapes keeps its bytes rather than a copy
+    (#1388). `test-preprocessor` checks both against each other, and the
+    cleaning against the bytes wherever the rule finds no splice, on 40,000
+    random spellings ending at a `PROT_NONE` page.
 
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
