@@ -912,6 +912,36 @@ The peak is the backend's in both, 6.2 MB lower with huge pages, where the
 records take three of them and the rows one, against seven for the values; in
 base pages the 9.1 MB of the values' pages that the records don't touch.
 
+On the 9700X, CPU 2 under the host's lock, main `ec5f0f6b` against the change
+(`9cfc0f50`), built with `BUSTER_HOST_ARCH=znver5`, measured as the attributes'
+change was: 8 interleaved rounds of `perf stat -r 3`, then `measure-compile
+--runs 11` of each with the other as its reference, and one `--time-stages` run
+of each. Every object is the same bytes by both paths, on 8 lanes and with
+`-g`.
+
+| measure | main | records |
+| --- | ---: | ---: |
+| task clock | 138.86 ms | 138.28 ms |
+| user cycles | 676.1 M | 674.1 M |
+| user instructions | 1,636.3 M | 1,637.8 M |
+| kernel cycles | 94.7 M | 93.0 M |
+| peak RSS (`wait4`, `measure-compile`) | 293,592 KiB | 289,976 KiB |
+| peak RSS (`--time-stages`) | 293,660 KiB | 289,888 KiB |
+| its growth past the process's start | 291,792 KiB | 284,176 KiB |
+| `check-input`'s peak added | 149,916 KiB | 143,840 KiB |
+| `check-input` (`measure-compile`) | 59.71 ms | 59.22 ms |
+
+- **The time.** Every round of the 8 has the change 0.3 to 1.0 ms faster; the
+  kernel's cycles are 1.7% fewer, the user instructions 0.1% more (the
+  accessors).
+- **The peak.** `check-input` adds 6.1 MB less, as on the VM, and the stages
+  after it about as much as main's do, so that the process grows 7.6 MB less past its
+  start. But on `sqlite3.c` the change's process starts 3.8 MB larger at its
+  first mark than main's (5,712 against 1,868 KiB), which an empty file's
+  doesn't show (2,016 against 1,868 KiB) and the VM doesn't either (5,556
+  against 5,588 KiB), and nothing the change writes runs by then: the whole
+  peak is 3.8 MB lower.
+
 What the peaks still hold for little, after this:
 - **The scratch's high-water.** 90 MB at the reader's end, and to the end of
   `static-data`, where `check_program` and the backend use 57 MB of it. Two
