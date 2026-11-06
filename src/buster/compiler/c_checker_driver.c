@@ -4424,7 +4424,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                         .asm_helpers = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
-                        // A units lane with a unit left to take gives back whole huge pages of its scratch alone (#777).
+                        // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
+                        // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                     });
                     const bool program_diagnostics = result == 0 ||

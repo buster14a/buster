@@ -559,9 +559,11 @@ static bool lane_test_arenas(void)
         }
         arena_release(&discarded);
     }
-    // arena_discard_huge (#777): the same from the first huge page boundary past the length, but only to the last one at or
-    // below the peak, so that no huge page is freed in part: the bytes past it keep what was written, the length and the
-    // peak stay, and a push past the length takes the freed pages again, zero.
+    // arena_discard_huge (#777): the same from the first huge page boundary past the length, but through the huge page
+    // that holds the peak, so that no huge page is freed in part: every byte from the boundary reads zero, the bytes
+    // below it keep what was written, the length and the peak stay, and a push past the length takes the freed pages
+    // again, zero. Past the peak, a byte no push took is written here to see the discard reach it, which no arena's
+    // user does.
     for (uint64_t l = 0; l < BUSTER_ARRAY_LENGTH(discard_lengths); l += 1)
     {
         Arena discarded = arena_reserve(64ull << 20);
@@ -573,21 +575,26 @@ static bool lane_test_arenas(void)
             const uint64_t length = discard_lengths[l];
             arena_pop_to(&discarded, length);
             const uint64_t peak = discarded.peak;
-            arena_discard_huge(&discarded);
             const uintptr_t boundary = ((uintptr_t)bytes + length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
-            const uintptr_t last = ((uintptr_t)bytes + peak) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uintptr_t huge_end = ((uintptr_t)bytes + peak + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
             const uint64_t cut = boundary - (uintptr_t)bytes;
-            const uint64_t stop = last > boundary ? last - (uintptr_t)bytes : cut;
+            const uint64_t stop = huge_end - (uintptr_t)bytes;
+            const bool committed = discarded.committed - discarded.mapping_offset >= stop;
+            if (committed)
+            {
+                bytes[stop - 1] = 0x5a;
+            }
+            arena_discard_huge(&discarded);
             bool kept = true;
             bool zeroed = true;
-            for (uint64_t i = 0; i < written_bytes; i += 1)
+            for (uint64_t i = 0; i < stop; i += 1)
             {
-                const bool freed = i >= cut && i < stop;
-                kept &= freed || bytes[i] == 0x5a;
-                zeroed &= !freed || bytes[i] == 0;
+                kept &= i >= cut || bytes[i] == 0x5a;
+                zeroed &= i < cut || bytes[i] == 0;
             }
-            lane_test_expect(&tally, stop > cut && kept && zeroed && discarded.length == length && discarded.peak == peak,
-                             "a discard in whole huge pages freed part of one, missed a whole one, or moved the length or the peak");
+            lane_test_expect(&tally, committed && stop > written_bytes && kept && zeroed && discarded.length == length && discarded.peak == peak,
+                             "a discard in whole huge pages stopped short of the peak's huge page, changed the bytes below the boundary, or moved "
+                             "the length or the peak");
             const uint8_t* again = arena_push(&discarded, stop - length, 1);
             bool fresh = again == bytes + length;
             for (uint64_t i = cut; fresh && i < stop; i += 1)

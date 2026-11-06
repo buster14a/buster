@@ -133,8 +133,8 @@ struct CheckUnitsLane
     CheckUnitsMemory* memory;
     uint64_t held;
     // The run whose units the lane takes, which tells its unit's checker whether a unit is left to take
-    // (check_units_discard_huge), and the lane's units whose checker gave back whole huge pages of its scratch alone, for
-    // one (--shared-parts' report).
+    // (check_units_discard_huge), and the lane's units whose checker gave its scratch's pages back in whole huge pages,
+    // for one (--shared-parts' report).
     const struct CheckUnitsRun* run;
     uint32_t discarded_huge;
 };
@@ -167,14 +167,15 @@ struct CheckUnitsRun
     uint32_t taking;
     uint32_t kept;
     // The units the lanes have taken so far (check_units_lane), which reaches `count` once none is left to take
-    // (check_units_discard_huge). A lane counts its unit after taking it, so the count may lag the takes, never lead them.
+    // (check_units_discard_huge). A lane counts its unit after taking it, so the count may lag the takes, never lead
+    // them.
     uint32_t started;
 };
 
-// Whether `lane`'s unit gives back whole huge pages of its scratch alone (CheckProgramOptions.discard_huge, #777),
+// Whether `lane`'s unit gives its scratch's pages back in whole huge pages (CheckProgramOptions.discard_huge, #777),
 // counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
-// likely this one, pushing as far into its scratch again. The count may lag a take, which only keeps a partial huge
-// page for longer.
+// likely this one, pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in
+// whole huge pages where none was left to take.
 static bool check_units_discard_huge(CheckUnitsLane* lane)
 {
     const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
@@ -2668,7 +2669,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 }
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
                 fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
-                fprintf(stderr, "units' scratch: %u gave back whole huge pages alone, for a unit left to take\n", discarded_huge);
+                fprintf(stderr, "units' scratch: %u gave %s pages back in whole huge pages, for a unit left to take\n", discarded_huge,
+                        discarded_huge != 1 ? "their" : "its");
             }
             if (command->units_memory != 0)
             {
