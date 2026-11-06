@@ -201,4 +201,75 @@ static int *pointer=&value;
 int **external=&pointer;
 #pragma redefine_extname value renamed
 int value=7;
+#elif CASE == 43
+extern int value;
+int use(void){return 1; label:return value;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 44
+extern int value;
+int use(void){goto end; return value; end:return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 45
+extern int value;
+int use(void){while(0)return value; return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 46
+extern int value;
+int use(void){for(;0;)return value; return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 47
+extern int value;
+int use(void){if(1)return 1; return value;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 48
+extern int value;
+void terminal(void) __attribute__((noreturn));
+int use(void){terminal(); return value;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 49
+extern int value;
+int use(void){return 1; static int *pointer=&value; return *pointer;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 50
+extern int value;
+int use(void){goto end; label:return value; end:return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 51
+extern int value;
+int use(void){do {break; return value;}while(0);return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 52
+extern int value;
+int use(int x){switch(1){case 2:return value;default:return x;}}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 53
+extern int value;
+int use(void){if(0){label:return value;}return 1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 54
+extern int value;
+int use(void){return 0?({label:value;}):1;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 55
+extern int value;
+int use(void){for(;;){} return value;}
+#pragma redefine_extname value renamed
+int value=7;
+#elif CASE == 56
+extern int value;
+int use(void){__builtin_trap(); return value;}
+#pragma redefine_extname value renamed
+int value=7;
 #endif
