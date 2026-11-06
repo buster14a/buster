@@ -16,7 +16,7 @@ requirements. [Command index](README.md).
   verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
   and both promoted forms, with and without frame objects and copies.
   `test-ssa-source [--typed] [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS]
-  [--steps N] [--lifetimes] [--keep] [preprocessor options] [file...]`
+  [--steps N] [--lifetimes] [--tier1] [--keep] [preprocessor options] [file...]`
   (`ssa_source_test.c`, #134) promotes every function `-c` compiles of C files,
   and of random programs of structured and unstructured control flow
   (`ssa_source_generate.c`, each built by clang -O0 for its output), by both paths
@@ -28,8 +28,16 @@ requirements. [Command index](README.md).
   of their block (#141: `ssa_ir_accesses`, the [SSA guide](../../docs/ssa.md)'s
   adapter), which Tier 1's CFG consumer moves nothing for (`tier1_cfg.c`'s
   undefined phi operands).
-  Tier 1's code joins that comparison once Tier 1 compiles general CFGs (#138).
+  `--tier1` also compiles each executable source through the driver's strict
+  Tier 1 path, by the default and scalar host paths, then compares both native
+  programs' status and output with the interpreted forms. Compilation must
+  succeed with every emitted function compiled by Tier 1; a refusal or Tier 0
+  fallback fails. Native builds and executions follow the interpreter children
+  sequentially, so the command keeps the same CPU grant.
   `--typed` adds the production typed interpreter as a fourth form. It runs the
   retained typed stream directly; no IR is executed for that form. The source
   suite and random-program CI commands enable it, including the subprocess
-  failure controls in `--self-test`.
+  failure controls in `--self-test`. `--self-test --tier1` also checks the native
+  comparison's launch, compilation, timeout and output failure boundaries.
+  [Stage 4 acceptance](../type-checking-ssa.md) maps #130's requirements to
+  these commands and the existing corpus and 9700X records.

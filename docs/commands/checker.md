@@ -95,9 +95,11 @@ requirements. [Command index](README.md).
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
   including scheduling and output materialization. `docs/c-checker.md`
-  records the actual contract and the remaining declaration/initializer,
-  control-flow, corpus and downstream integration still needed
-  for #133; this module does not establish whole-compiler semantic coverage.
+  records the checker contract, declaration/initializer and control-flow
+  integration, constraint catalogue, corpus qualification and measurements
+  completed for #133. [Stage 4 acceptance](../type-checking-ssa.md) connects
+  that evidence to the typed-stream and SSA consumers; expression checking
+  alone does not establish whole-compiler semantic coverage.
 - `src/buster/compiler/c_check_request.c` is one request's configuration
   (#1057): the code generation, instrumentation and layout options the
   driver refuses (`check_request_scan`, `check_request_refusal`, among them
