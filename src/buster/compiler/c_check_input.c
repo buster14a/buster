@@ -4268,7 +4268,7 @@ static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint3
     bool weak = false;
     for (uint32_t i = 0; !weak && i < count; i += 1)
     {
-        weak = pragmas->records[i].replacement == 0 && pragmas->records[i].name == name && pragmas->records[i].token <= use;
+        weak = pragmas->records[i].kind != CHECK_SYMBOL_PRAGMA_REDEFINE && pragmas->records[i].name == name && pragmas->records[i].token <= use;
     }
     return weak;
 }
