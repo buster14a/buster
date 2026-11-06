@@ -86,6 +86,15 @@ static bool check_program_attribute_gnu_inline(const CheckInputAttributes* attri
     return gnu_inline;
 }
 
+// #1361's unchecked wrappers need a private ordinary-ABI body when used, even at -O0. They cannot defer
+// an extern-inline call to libc, whose ordinary declaration is a different overload.
+static bool check_program_object_size_inline(const CheckInput* input, uint32_t declaration)
+{
+    const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
+    return attributes != NULL && attributes->object_sizes != NULL && input->function_flags != NULL &&
+           (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+}
+
 // Whether clang emits `body`'s function where the unit defines it (CheckProgram.body_eager), as CodeGenModule::EmitGlobal
 // decides when the parser hands over the definition: by the declarations that exist then, those of the function up to
 // and including the definition (a run of check_data_prepare's keys, in object and token order), not the unit's final
@@ -102,7 +111,7 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
 {
     const CheckInput* input = program->input;
     const uint8_t definition = input->function_flags != 0 ? input->function_flags[body->declaration] : 0;
-    const bool external = check_input_linkage(input->declaration_bits, body->declaration) == 2;
+    const bool external = check_input_linkage(input->declaration_bits, body->declaration) == 2 && !check_program_object_size_inline(input, body->declaration);
     bool eager = external && (definition & CHECK_INPUT_FUNCTION_INLINE) == 0;
     if (!eager)
     {
@@ -552,7 +561,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 // An object made only for what references it (CheckDataObject.optional: a constant CFString's record, #148).
                 flags |= !function && data->objects[raw - full->body_count].optional ? BUSTER_C_LOWERING_OPTIONAL : 0;
                 const uint32_t declaration = full->object_declarations[object];
-                if (declaration != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2)
+                if (declaration != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2 &&
+                    !check_program_object_size_inline(input, declaration))
                 {
                     bool inline_only = false;
                     if (function)

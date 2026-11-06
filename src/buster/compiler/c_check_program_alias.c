@@ -256,6 +256,7 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
             overloaded[object] = 2;
             mangle = mangle.arena == NULL ? scratch_begin(scratch) : mangle;
             mangling.internal = check_input_linkage(input->declaration_bits, token) == 1;
+            mangling.object_size_compat = candidate->object_sizes != NULL;
             String8 spelling = { 0 };
             const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[token], mangle.arena, &spelling);
             // A signature the mangling refuses names nothing here, and the emission refuses it if it emits the function.

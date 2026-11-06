@@ -3057,6 +3057,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 mangle_scratch = scratch_begin(scratch);
             }
             mangling.internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1;
+            mangling.object_size_compat = candidate->object_sizes != NULL;
             const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
                                                                mangle_scratch.arena, &symbol_names[symbol]);
             valid = status == CHECK_MANGLE_OK;
@@ -3386,7 +3387,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // Weak where a weak attribute makes it so, or a weakref's target that the unit doesn't define is referred to
             // through weakrefs alone (#147), whatever linkage its own declarations give it (the reader refuses weak on
             // one of internal linkage).
-            flags = kind | (check_input_linkage(program->input->declaration_bits, declaration) != 2 && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
+            const bool private_size_wrapper = check_program_object_size_inline(program->input, declaration);
+            flags = kind | ((check_input_linkage(program->input->declaration_bits, declaration) != 2 || private_size_wrapper) && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
                             weak[s + 1]                                      ? BUSTER_LINK_SYMBOL_WEAK :
                                                                                BUSTER_LINK_SYMBOL_GLOBAL);
             if (check_input_linkage(program->input->declaration_bits, declaration) == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)

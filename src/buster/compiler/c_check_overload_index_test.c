@@ -78,7 +78,7 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
                 candidate.object = result.object;
                 candidate.flags = result.flags;
                 candidates[i] = candidate;
-                index.lexical_next[i] = check_overload_index_previous(candidates, candidate.type, head, index.lexical_next);
+                index.lexical_next[i] = check_overload_index_previous(candidates, candidate.type, false, head, index.lexical_next);
                 index.checked[i] = 1;
                 check_overload_index_publish(&index, slot, key, 1, 1, i);
                 uint32_t length = 0;
@@ -123,6 +123,19 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
         const CheckOverloadResult defined = check_overload_declare_chain(table, ordinary, 2, 1, &definition, &context, ordinary_next, unchecked, 0);
         check_test_expect(test, defined.status == CHECK_OVERLOAD_REDEFINITION,
                           "an ordinary snapshot cannot stand for definition state it has not inherited");
+
+        // A collided signature bucket can contain ordinary and size-annotated functions of the very same C type.
+        // Replacing size snapshots must keep the ordinary candidate, and replacing ordinary ones must keep sizes.
+        const uint8_t object_sizes[] = { 1 };
+        CheckOverloadCandidate size_variants[3] = { candidates[0], candidates[0], candidates[0] };
+        size_variants[1].object_sizes = object_sizes;
+        size_variants[1].object_size_count = 1;
+        size_variants[2].object_sizes = object_sizes;
+        size_variants[2].object_size_count = 1;
+        const uint32_t size_next[] = { UINT32_MAX, 0, 1 };
+        check_test_expect(test, check_overload_index_previous(size_variants, size_variants[0].type, true, 2, size_next) == 0 &&
+                                check_overload_index_previous(size_variants, size_variants[0].type, false, 2, size_next) == 2,
+                          "colliding ordinary and object-size identities survive signature compaction");
 
         // Two exact-size vector buckets against a guard page, all keys deliberately colliding. Include wraparound
         // and full-table refusal, with independent expected slots rather than only agreement between the twins.

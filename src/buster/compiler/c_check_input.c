@@ -4298,6 +4298,18 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT;
         const bool tag_type = reader->tag_attributes && (attribute->kind == CHECK_ATTRIBUTE_REGPARM || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE);
         attribute->ignored |= tag_type;
+        if (attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF)
+        {
+            uint32_t first = 0;
+            uint32_t end = 0;
+            int64_t value = 0;
+            // glibc uses enable_if(1, "") only to prefer a wrapper. Conditional candidate filtering remains unsupported.
+            valid = check_input_attribute_argument(attribute, 0, &first, &end) && check_input_constant_ice(reader, first, end, &value) && value != 0;
+            if (!valid)
+            {
+                check_input_attribute_error(reader, &parsed, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            }
+        }
         if (attribute->deferred != NULL)
         {
             // Its earlier handler error wins once the declaration accepts the attribute. In particular a malformed
@@ -4565,6 +4577,7 @@ struct CheckDeclaratorPart
     bool identifier_list;
     // A function's first parameter's lifetimebound attribute (#147), its first token plus one, or 0.
     uint32_t lifetimebound;
+    bool object_size;
     // The type once this part applies, the declarator's type built so far (check_input_attribute_type_warnings).
     TypeId type;
 };
@@ -4575,6 +4588,9 @@ struct CheckDeclaratorParameter
     TypeId type;
     uint32_t next;
     uint32_t missing_name;
+    uint32_t object_size_token;
+    uint8_t object_size;
+    bool const_pointer;
     const CheckNoderefType* noderef;
 };
 
@@ -5381,11 +5397,38 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         }
                         if (valid)
                         {
+                            const CheckInputAttributes* lists[] = { frame->common_attributes, frame->attributes };
+                            uint8_t object_size = 0;
+                            uint32_t object_size_token = BUSTER_CHECK_NONE;
+                            for (uint32_t list = 0; list < BUSTER_ARRAY_LENGTH(lists); list += 1)
+                            {
+                                const CheckInputAttributes* attributes = lists[list];
+                                for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
+                                {
+                                    const CheckInputAttribute* attribute = attributes->records + a;
+                                    const bool size = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_PASS_OBJECT_SIZE ||
+                                                                            attribute->kind == CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE);
+                                    if (size)
+                                    {
+                                        if (object_size != 0 || type_kind(reader->types, type_strip_aligned(reader->types, adjusted)) != BUSTER_TYPE_KIND_POINTER)
+                                        {
+                                            check_input_report(reader, attribute->first, CHECK_INPUT_DECLARATION);
+                                            valid = false;
+                                        }
+                                        object_size = (uint8_t)attribute->value + (attribute->kind == CHECK_ATTRIBUTE_PASS_OBJECT_SIZE ? 1 : 5);
+                                        object_size_token = attribute->first;
+                                    }
+                                }
+                            }
+                            function->object_size |= object_size != 0;
                             parameters[parameter_count] = (CheckDeclaratorParameter)
                             {
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .missing_name = frame->name == BUSTER_CHECK_NONE ? frame->missing_name : BUSTER_CHECK_NONE,
+                                .object_size_token = object_size_token,
+                                .object_size = object_size,
+                                .const_pointer = ((type_kind_is_array(kind) ? frame->array_qualifiers : qualifiers) & BUSTER_TYPE_CONST) != 0,
                                 .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
                             };
                             if (function->parameter_last != BUSTER_CHECK_NONE)
@@ -5551,7 +5594,41 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     reader->declarator_lifetimebound = own != NULL && own->lifetimebound != 0 && type_kind(reader->types, run->result) == BUSTER_TYPE_KIND_FUNCTION &&
                                        type_kind(reader->types, type_return(reader->types, run->result)) == BUSTER_TYPE_KIND_VOID ? own->lifetimebound - 1 : BUSTER_CHECK_NONE;
     const bool captured = own == NULL || check_input_capture_names(reader, own);
-    const TypeId result = complete && captured ? run->result : 0;
+    bool object_sizes = true;
+    if (own != NULL && own->object_size)
+    {
+        CheckInputAttributes* attributes = run->attributes;
+        if (attributes == NULL)
+        {
+            attributes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
+            if (attributes != NULL)
+            {
+                *attributes = (CheckInputAttributes){ 0 };
+            }
+        }
+        uint8_t* sizes = attributes != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, own->parameter_count) : NULL;
+        object_sizes = sizes != NULL;
+        reader->output->resource |= !object_sizes;
+        const bool definition = run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE;
+        uint32_t index = 0;
+        for (uint32_t p = own->parameter_first; sizes != NULL && p != BUSTER_CHECK_NONE; p = run->parameters[p].next)
+        {
+            const CheckDeclaratorParameter* parameter = run->parameters + p;
+            sizes[index++] = parameter->object_size;
+            if (definition && parameter->object_size != 0 && !parameter->const_pointer)
+            {
+                check_input_report(reader, parameter->object_size_token, CHECK_INPUT_DECLARATION);
+                object_sizes = false;
+            }
+        }
+        if (attributes != NULL)
+        {
+            attributes->object_sizes = sizes;
+            attributes->object_size_count = own->parameter_count;
+            reader->declarator_attributes = attributes;
+        }
+    }
+    const TypeId result = complete && captured && object_sizes ? run->result : 0;
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
     {
@@ -7372,8 +7449,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     const uint32_t previous = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
                     if (previous != 0)
                     {
-                        const uint32_t declaration = reader->bindings.declaration[previous - 1];
-                        check_input_set_linkage(reader->declaration_bits, name, check_input_linkage(reader->declaration_bits, declaration) != 0 ? check_input_linkage(reader->declaration_bits, declaration) : check_input_linkage(reader->declaration_bits, name));
+                        uint32_t declaration = reader->bindings.declaration[previous - 1];
+                        if (function && check_input_overload_active(reader, name))
+                        {
+                            const uint32_t head = reader->bindings.kind[previous - 1] == C_BINDING_FUNCTION ? reader->output->overload_heads[declaration] : 0;
+                            const CheckOverloadCandidate* visible = head != 0 ? reader->overload_candidates + head - 1 : NULL;
+                            const CheckOverloadCandidate* prior = visible != NULL ? check_input_overload_prior(reader, name, type, visible->scope) : NULL;
+                            declaration = prior != NULL ? prior->declaration : BUSTER_CHECK_NONE;
+                        }
+                        if (declaration != BUSTER_CHECK_NONE && check_input_linkage(reader->declaration_bits, declaration) != 0)
+                        {
+                            check_input_set_linkage(reader->declaration_bits, name, check_input_linkage(reader->declaration_bits, declaration));
+                        }
                     }
                 }
                 // GNU's weak attribute needs external linkage (#147). A redeclaration of an already defined linked
@@ -7530,18 +7617,8 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         TypeId previous = 0;
         if (overload)
         {
-            uint64_t signature_hash = 0;
-            const bool hashed = check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
-            reader->output->resource |= !hashed;
-            const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-            const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
-            for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); previous == 0 && linked != UINT32_MAX; linked = reader->overload_index.linked_next[linked])
-            {
-                const TypeId candidate = reader->overload_candidates[linked].type;
-                const TypeAnswer signature = check_overload_signature(reader->types, candidate, type);
-                reader->output->resource |= signature == TYPE_ANSWER_FULL;
-                previous = signature == TYPE_ANSWER_YES ? candidate : 0;
-            }
+            const CheckOverloadCandidate* prior = check_input_overload_prior(reader, token, type, UINT32_MAX);
+            previous = prior != NULL ? prior->type : 0;
         }
         else if (old != 0 && reader->bindings.kind[old - 1] == C_BINDING_FUNCTION)
         {

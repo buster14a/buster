@@ -2226,7 +2226,9 @@ What the lowering covers past scalars (#145's programs):
   a row's 8 records, sets its operands into frame temporaries, whose halves two
   rows read through their addresses, as clang's code reads its operands' halves
   from their slots, and a third joins the halves (VINSERTF64X4); one of 4 bytes
-  divides its two elements under a mask of them. Their chains are refused as
+  divides its two elements under a mask of them. Vectors wider than 64 bytes
+  use the same rows on register-sized pieces; under excess precision a piece
+  has at most 32 bytes so its widened floats fit one register. Their chains are refused as
   half precision's, and so are their compares; a `__bf16` scalar splats by its
   bits. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
@@ -2236,8 +2238,26 @@ What the lowering covers past scalars (#145's programs):
   (`check_lower_vector_bits`: VMOVD or VMOVQ), where an extended vector's cast
   of a scalar splats it. Integer division and remainder, and 8-bit
   multiplication and shifts, which clang computes an element at a time, are
-  refused by name, and so are vectors of other sizes and of `bool`, logical
-  vector operators and vector conditions.
+  refused by name.
+  Transport vectors (`c_check_program_transport.c`) carry an object's address:
+  a vector of `bool`, of 1 or 2 bytes, or of more than 64 bytes. Tiny arithmetic
+  reads and writes exactly its elements; wide arithmetic uses register-sized
+  pieces. Boolean bitwise operators work on the packed bits and clear padding.
+  Extended vectors' `!`, `&&` and `||` compare each lane with zero and return
+  all-one or all-zero signed lanes. Both operands are evaluated; these vector
+  operators do not short-circuit. Half-precision truth uses scalar conversions
+  and comparisons when there is no packed comparison at the target, preserving
+  floating exceptions. A vector-condition `?:` selects by the condition lane's
+  sign bit, or its packed boolean bit, and evaluates both arms. Its operands'
+  values are captured before later operands run, including a wide condition
+  whose original object an arm overwrites; the omitted middle operand is
+  evaluated once. Scalar arms splat at their element type. Non-boolean logical
+  operations and selections are bounded to 1,024 elements. Scalar-condition
+  `?:` keeps the usual short-circuit behavior. Clang rejects `&&` and `||` of
+  boolean vectors, and whole-vector `++` and `--` of either vector kind; the
+  checker rejects them too. Compound assignments and increments of an element
+  of a boolean vector remain a named lowering refusal because Clang 23
+  miscompiles them.
   Element access through a volatile vector lvalue is also refused: Clang uses
   a whole-vector volatile load, and a read/insert/store for an element write,
   which a scalar access at the element's address cannot preserve. Whole-vector
@@ -2564,7 +2584,8 @@ What the lowering covers past scalars (#145's programs):
     operand is refused by name. Such a literal has no local and isn't evaluated,
     and one evaluated anywhere else is refused by name;
   - max and min, the saturating sums and differences of 8- and 16-bit elements,
-    abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
+    abs, popcount (with BITALG or VPOPCNTDQ), clzg of 32- and 64-bit elements
+    (VPLZCNT, with its fallback
     blended in where an element is zero) and the funnel shifts (VPSHLDV and
     VPSHRDV, with VBMI2) are an instruction each, and so are sqrt and fma of
     floats and doubles (VSQRTPS and VFMADD213PS and theirs at the current
@@ -2611,7 +2632,11 @@ What the lowering covers past scalars (#145's programs):
     VPOPCNTDQ's for the others), each element's width for a zero one; its
     second operand's elements replace the zero ones' (VPTESTNM and VPBLENDM, or
     for 8- and 16-bit elements VPCMPEQ with zeros and a masked VMOVDQU8 or
-    VMOVDQU16). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
+    VMOVDQU16). clzg of 8- and 16-bit elements first reverses each element's
+    bits, then uses this count. Its optional fallback tests whether the count
+    equals the element width, which identifies exactly the zero inputs and
+    keeps the word row within eight records. It needs BITALG and the bit
+    reversal's features (GFNI, or AVX512-BMM for byte elements). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
     instruction deposits or extracts bits), of 32-bit zero extensions of 8- and
     16-bit ones, through frame objects of the vectors
     (`check_lower_vector_lanes`). clmul (#148) is each element's carry-less
@@ -2674,8 +2699,32 @@ What the lowering covers past scalars (#145's programs):
     minimum's sequence, a row a halving (`check_vector_reduce_floating_rows`);
     assoc_fadd adds the halves (VADDP), then the tree to its start value
     (-0.0 without one); in_order_fadd adds each element to the sum, first to
-    last, in the typed stream (`check_lower_reduce_in_order`); and xor
-    reduces as and and or do (VPXORQ).
+    last, in the typed stream (`check_lower_reduce_in_order`); max and min
+    use maxnum and minnum, folding a legal vector's lanes in source order,
+    including the first operand's signed zero on a tie. A wider vector first
+    combines its low and high halves repeatedly in register-sized pieces,
+    before the legal-width reduction, preserving the tree across register
+    boundaries (`check_lower_transport_reduce_floating`). Associative sums
+    replace unused padding lanes with -0.0; padded maxima and minima retain
+    their named refusal. xor reduces as and and or do (VPXORQ).
+  - elementwise integer and floating builtins of transport vectors use the
+    same rows on disjoint register-sized pieces. An `ldexp` piece has as many
+    lanes as fit its widest argument, with each argument advanced by its own
+    element width. A 1- or 2-byte operand is padded into private storage for
+    a minimum-width row, and only the result's actual bytes are stored.
+    Libm functions, pdep, pext and the scalar clmul path read elements through
+    the same address/value handoff. These expansions, ordered floating sums
+    and floating reduction trees are bounded to 1,024 elements and preserve
+    the ordinary rows' element-type and target-feature refusals.
+  - boolean elementwise builtins use packed bit operations at scalar and
+    register-sized widths: max and saturating add are OR; min, pdep, pext
+    and clmul are AND; saturating subtract is `a & ~b`; popcount and
+    bitreverse keep the operand. One-bit funnel shifts have a count modulo
+    one and keep their left or right input, respectively, while evaluating
+    all three arguments once. Tiny stores preserve neighboring bytes, and
+    result padding bits are cleared. Boolean clzg and ctzg retain a named
+    refusal because Clang 23.1.4 emits an invalid scalar-to-vector `trunc`
+    for them and crashes or produces incorrect code.
   - byte funnel shifts of 16-byte vectors use XOP's VPSHLB with signed byte
     counts, masking the original counts modulo eight. Their two halves are
     shifted separately and combined with VPOR; splitting the complementary
@@ -2712,14 +2761,13 @@ What the lowering covers past scalars (#145's programs):
   AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
-  shifts of 8-bit elements outside 16-byte vectors or without XOP; the leading
-  zero counts of 8- and 16-bit elements; the integer elementwise functions of
+  shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
   scalars; nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't (VBMI
   for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI,
   BMI2) are refused by name. `test-checker`'s vector builtin programs
   (`c_check_program_vector_builtins_test.c`) call each at every width, those
-  of vectors of 4 and 8 bytes, the narrowing conversions and the floating
+  of vectors of 1, 2, 4 and 8 bytes and wider than 64 bytes, the narrowing conversions and the floating
   intrinsics as the headers write them, with the masked truncating stores and
   the leaves (monitorx and mwaitx where the host has MWAITX), by both paths
   against clang -O0's code for znver5: the floating functions of inputs with
