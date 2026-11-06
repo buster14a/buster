@@ -1281,6 +1281,18 @@ struct PPHistoryRun
 };
 _Static_assert(sizeof(PPHistoryRun) == 8, "an output history run is eight bytes");
 
+// A semantic use of __FLT_EVAL_METHOD__, including expansions consumed by #if or another directive. The output
+// boundary and preceding pragma count retain the expansion's place even when a capture has not lifted its pragmas
+// into the output yet. No record is made for ordinary -E, or for tokens that were never expanded.
+typedef struct PPEvalMethodUse PPEvalMethodUse;
+struct PPEvalMethodUse
+{
+    uint32_t position;
+    uint32_t pragmas;
+    uint32_t location;
+    uint32_t origin;
+};
+
 // The most invocations in one invocation's arguments that pp_finish_simple expands in place (Preprocessor.nested).
 #define BUSTER_PP_NESTED_PLANS 8
 
@@ -1544,6 +1556,10 @@ struct Preprocessor
     int64_t unit_seconds;
     // The builtin __FLT_EVAL_METHOD__'s value (predefines_text).
     uint32_t flt_eval_method;
+    // Cold semantic expansion uses, in preprocessing order. History replay supplies their retained origins too.
+    PPEvalMethodUse* eval_method_uses;
+    uint32_t eval_method_use_count;
+    uint32_t eval_method_use_capacity;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
     uint64_t ticks[PP_PHASE_COUNT];
     uint64_t input_tokens;
@@ -1744,6 +1760,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position);
 
 #include "c_preprocessor_history.c"
 
@@ -11922,6 +11939,43 @@ static __attribute__((unused)) uint32_t pp_path_file_name(const char* path, uint
     return size != 0 ? size : length;
 }
 
+static void pp_eval_method_use(Preprocessor* pp, PPToken name)
+{
+    if (pp->options.semantic_pragmas && !pp->fatal)
+    {
+        const uint32_t count = pp->eval_method_use_count;
+        if (count == pp->eval_method_use_capacity)
+        {
+            const uint64_t capacity = count != 0 ? (uint64_t)count * 2 : 8;
+            PPEvalMethodUse* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(&pp->arena, PPEvalMethodUse, capacity) : NULL;
+            if (records == NULL)
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for floating evaluation macro uses");
+            }
+            else
+            {
+                if (count != 0)
+                {
+                    memcpy(records, pp->eval_method_uses, (uint64_t)count * sizeof(PPEvalMethodUse));
+                }
+                pp->eval_method_uses = records;
+                pp->eval_method_use_capacity = (uint32_t)capacity;
+            }
+        }
+        if (!pp->fatal)
+        {
+            pp->eval_method_uses[count] = (PPEvalMethodUse)
+            {
+                .position = pp->output.count,
+                .pragmas = pp->pragma_lines,
+                .location = name.location,
+                .origin = name.origin,
+            };
+            pp->eval_method_use_count = count + 1;
+        }
+    }
+}
+
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     const uint32_t saved_history = pp->history_current;
@@ -11976,6 +12030,7 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             break;
         case PP_BUILTIN_FLT_EVAL_METHOD:
             // The translation unit's: under -E, clang's `#pragma clang fp eval_method` doesn't change it.
+            pp_eval_method_use(pp, name);
             pp_emit(pp, pp_number_token(pp, pp->flt_eval_method, flags));
             break;
         case PP_BUILTIN_DATE:
@@ -18594,6 +18649,21 @@ static bool pp_tokens_same(const PPTokens* a, const PPTokens* b)
            memcmp(a->values, b->values, (uint64_t)a->count * sizeof(uint32_t)) == 0 && memcmp(a->locations, b->locations, (uint64_t)a->count * sizeof(uint32_t)) == 0;
 }
 
+// The semantic event timeline is part of replay identity even for expansions that left no output token. Origins
+// are intentionally excluded: the deferred first pass has none, and the replay supplies their exact history.
+static bool pp_eval_method_uses_same(const Preprocessor* a, const Preprocessor* b)
+{
+    const uint32_t count = a->eval_method_use_count;
+    bool same = count == b->eval_method_use_count;
+    for (uint32_t i = 0; same && i < count; i += 1)
+    {
+        const PPEvalMethodUse* left = a->eval_method_uses + i;
+        const PPEvalMethodUse* right = b->eval_method_uses + i;
+        same = left->position == right->position && left->pragmas == right->pragmas && left->location == right->location;
+    }
+    return same;
+}
+
 // Records a deferred history (PPOptions.defer_history): preprocesses the unit again as pp_run or pp_run_source ran it,
 // with history, into a preprocessor of its own (in an arena of its own) with the same options, file cache, intern table
 // and time, which prints the diagnostics if `report` says so, and takes its history, which the replay keeps until
@@ -18626,7 +18696,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
-               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output);
+               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output) &&
+               pp_eval_method_uses_same(pp, replay);
     }
     if (same)
     {
@@ -18652,6 +18723,9 @@ static void pp_history_record(Preprocessor* pp, bool report)
         pp->history_runs = replay->history_runs;
         pp->history_run_count = replay->history_run_count;
         pp->history_run_capacity = replay->history_run_capacity;
+        pp->eval_method_uses = replay->eval_method_uses;
+        pp->eval_method_use_count = replay->eval_method_use_count;
+        pp->eval_method_use_capacity = replay->eval_method_use_capacity;
         // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
@@ -18734,6 +18808,26 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
         pp_history_record(pp, false);
     }
     return pp->history != 0;
+}
+
+// A source expansion may have no output token (#if), so its retained location/origin is the diagnostic source.
+// Use the ordinary lexical diagnostic path, including error limits and macro notes; never invent a token origin
+// from a neighboring output token. The caller supplies the final boundary after preceding captured pragmas.
+BUSTER_PREPROCESSOR_ENTRY void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position)
+{
+    pp_history_ensure(pp);
+    if (use < pp->eval_method_use_count && !pp->fatal)
+    {
+        const PPEvalMethodUse record = pp->eval_method_uses[use];
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        const uint32_t saved_position = pp->diagnostic_position;
+        pp->diagnostic_origin = record.origin;
+        pp->diagnostic_position = position;
+        pp_diagnose(pp, PP_SEVERITY_ERROR, record.location,
+                    "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'");
+        pp->diagnostic_origin = saved_origin;
+        pp->diagnostic_position = saved_position;
+    }
 }
 
 // Preprocesses the main file (pp_preprocess_file); with PPOptions.defer_history, then prints the diagnostics the run

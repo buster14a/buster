@@ -70,6 +70,8 @@ struct CheckCorpusPath
     uint32_t token;
     uint32_t position;
     uint32_t pragma;
+    uint32_t pp_eval_use;
+    uint32_t pp_eval_position;
     uint32_t line;
     uint32_t column;
     const char* phase;
@@ -83,6 +85,12 @@ static void check_corpus_input_diagnostic(CheckCorpusPath* path, const Parser* p
     CheckWarningSpelling spell = { 0 };
     const char* message = check_semantic_input(parser, pp, &path->input, &path->types, report, &spell, &path->scratch);
     snprintf(path->message, sizeof(path->message), "%s", message);
+    if (report->message == CHECK_INPUT_FP_EVAL_USE)
+    {
+        path->pp_eval_use = report->subject;
+        path->pp_eval_position = report->detail;
+        path->phase = "macro";
+    }
     path->resource |= pp->diagnostic_collection_failed;
 }
 
@@ -345,12 +353,11 @@ static void check_corpus_field(FILE* stream, const char* value)
     }
 }
 
-static bool check_corpus_primary_location(const Preprocessor* pp, uint32_t token, uint32_t* location)
+static bool check_corpus_primary_location(const Preprocessor* pp, uint32_t spelling, uint32_t origin, uint32_t* location)
 {
-    uint32_t origin = pp_history_at(pp, token);
     const uint64_t maximum = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
-    bool valid = token < pp->output.count;
-    *location = valid ? pp->output.locations[token] : 0;
+    bool valid = true;
+    *location = spelling;
     for (uint64_t step = 0; valid && origin != 0 && step < maximum; step += 1)
     {
         const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
@@ -389,27 +396,35 @@ static uint32_t check_corpus_source(const CheckCorpusPath* path, const Parser* p
         .token = path->token,
         .pragma = path->pragma,
     };
-    return path->pragma != 0 && strcmp(path->phase, "promoted-warning") == 0 ? path->warning_source :
+    return strcmp(path->phase, "macro") == 0 ? path->pp_eval_position :
+           path->pragma != 0 && strcmp(path->phase, "promoted-warning") == 0 ? path->warning_source :
            check_diagnostic_input_report_source(&path->input, parser, &report);
 }
 
 static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp)
 {
     const uint32_t source = check_corpus_source(path, parser);
-    if (source < pp->output.count)
+    const bool macro = strcmp(path->phase, "macro") == 0;
+    uint32_t location = 0;
+    bool located = false;
+    if (macro)
+    {
+        pp_history_ensure(pp);
+        const uint32_t use = path->pp_eval_use - 1;
+        located = use < pp->eval_method_use_count;
+        path->resource |= !located;
+        if (located)
+        {
+            const PPEvalMethodUse* record = pp->eval_method_uses + use;
+            path->resource |= !check_corpus_primary_location(pp, record->location, record->origin, &location);
+            snprintf(path->spelling, sizeof(path->spelling), "%s", "__FLT_EVAL_METHOD__");
+        }
+    }
+    else if (source < pp->output.count)
     {
         const uint32_t spelling_location = pp->output.locations[source];
-        uint32_t location = 0;
-        path->resource |= !check_corpus_primary_location(pp, source, &location);
-        const char* name = 0;
-        uint32_t length = 0;
-        path->line = pp_presumed(pp, location, &name, &length);
-        snprintf(path->file, sizeof(path->file), "%.*s", (int)length, name != 0 ? name : "");
-        const uint32_t range = pp_find_range(pp, location);
-        if (range != BUSTER_PP_NONE)
-        {
-            pp_line_of(pp, range, location, &path->column);
-        }
+        located = true;
+        path->resource |= !check_corpus_primary_location(pp, spelling_location, pp_history_at(pp, source), &location);
         const uint8_t* spelling = 0;
         const uint8_t kind = pp->output.kinds[source];
         const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
@@ -423,6 +438,18 @@ static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, P
             snprintf(path->spelling, sizeof(path->spelling), "%.*s", (int)spelling_length, spelling);
         }
         scratch_end(scratch);
+    }
+    if (located)
+    {
+        const char* name = 0;
+        uint32_t length = 0;
+        path->line = pp_presumed(pp, location, &name, &length);
+        snprintf(path->file, sizeof(path->file), "%.*s", (int)length, name != 0 ? name : "");
+        const uint32_t range = pp_find_range(pp, location);
+        if (range != BUSTER_PP_NONE)
+        {
+            pp_line_of(pp, range, location, &path->column);
+        }
     }
 }
 
@@ -692,6 +719,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             path->token = result->token;
             path->position = result->position;
             path->pragma = result->pragma;
+            path->pp_eval_use = result->pp_eval_use;
+            path->pp_eval_position = result->pp_eval_position;
             path->warning_token = result->warning_token;
             path->warning_source = result->warning_source;
             path->line = result->line;
@@ -805,6 +834,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     path->token = BUSTER_CHECK_NONE;
     path->position = BUSTER_CHECK_NONE;
     path->pragma = 0;
+    path->pp_eval_use = 0;
+    path->pp_eval_position = 0;
     path->phase = "parse";
     const ParseOptions parse_options = {
         .scalar = BUSTER_SCALAR_PATH(scalar),
@@ -919,7 +950,9 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             path->resource |= path->input.resource;
             for (uint32_t report = 0; report < path->input.report_count; report += 1)
             {
-                if (path->input.reports[report].token < path->token)
+                if (path->input.reports[report].token < path->token ||
+                    (path->input.reports[report].token == path->token && path->input.reports[report].message == CHECK_INPUT_FP_EVAL_USE &&
+                     strcmp(path->phase, "macro") != 0))
                 {
                     path->token = path->input.reports[report].token;
                     path->position = path->token;
@@ -1915,7 +1948,7 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
         const CheckInputFpPragma* p = a->fp_pragmas + i;
         const CheckInputFpPragma* q = b->fp_pragmas + i;
         equal = p->pragma == q->pragma && p->source_begin == q->source_begin && p->source_end == q->source_end && p->token == q->token &&
-                p->scope == q->scope && p->scope_end == q->scope_end && p->kind == q->kind && p->environment == q->environment &&
+                p->scope == q->scope && p->scope_end == q->scope_end && p->error_source == q->error_source && p->kind == q->kind && p->environment == q->environment &&
                 p->warnings == q->warnings && p->warning_severity == q->warning_severity && p->warning_quiet == q->warning_quiet && p->error == q->error && p->valid == q->valid;
     }
     for (uint32_t token = 0; equal && contents && a->fp_environments != NULL && token <= a->token_count; token += 1)
@@ -2083,6 +2116,10 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
                 left->reports[report].pragma == right->reports[report].pragma;
+        if (equal && left->reports[report].message == CHECK_INPUT_FP_EVAL_USE)
+        {
+            equal = left->reports[report].subject == right->reports[report].subject && left->reports[report].detail == right->reports[report].detail;
+        }
     }
     for (uint32_t token = 0; equal && !a->resource && trees && left->declarations != 0 && right->declarations != 0 && token < left_parser->tokens.count; token += 1)
     {

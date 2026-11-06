@@ -106,6 +106,71 @@ static void check_test_fp_action_values(CheckTest* test, TypeTable* table)
     }
 }
 
+// These are conversion boundaries, not just final result types: compound assignment skips the left operand's
+// evaluation promotion, increment skips both, and variadic float arguments still pass as double under extended.
+static void check_test_fp_evaluation_actions(CheckTest* test, TypeTable* table)
+{
+    const uint8_t environments[] = { 0, BUSTER_CHECK_FP_EVAL_DOUBLE, BUSTER_CHECK_FP_EVAL_EXTENDED };
+    const TypeId methods[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    const TypeId parameter = BUSTER_TYPE_FLOAT;
+    const TypeId function = type_function(table, BUSTER_TYPE_INT, &parameter, 1, BUSTER_TYPE_FLAG_PROTOTYPE | BUSTER_TYPE_FLAG_VARIADIC);
+    const TypeId vector = type_vector(table, BUSTER_TYPE_FLOAT, 4, true);
+    for (uint32_t method = 0; method < BUSTER_ARRAY_LENGTH(environments); method += 1)
+    {
+        const CheckContext context = { .fp_environment = environments[method] };
+        const CheckValue operands[] = { check_test_float(BUSTER_TYPE_FLOAT, 1), check_test_float(BUSTER_TYPE_FLOAT, 2) };
+        const CheckOp ordinary[] = { CHECK_OP_ADD, CHECK_OP_POSITIVE, CHECK_OP_NEGATIVE };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ordinary); i += 1)
+        {
+            const CheckActionResult result = check_test_action(test, table, (CheckAction){ .op = ordinary[i], .operands = { operands[0], operands[1] }, .context = context });
+            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == methods[method] && result.conversions[0].type == methods[method],
+                              "usual unary and arithmetic conversions carry the active evaluation type");
+        }
+        const CheckOp logical[] = { CHECK_OP_NOT, CHECK_OP_LOGICAL_AND, CHECK_OP_LOGICAL_OR };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(logical); i += 1)
+        {
+            const CheckActionResult result = check_test_action(test, table, (CheckAction){ .op = logical[i], .operands = { operands[0], operands[1] }, .context = context });
+            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_INT &&
+                                   result.conversions[0].type == (i == 0 ? BUSTER_TYPE_FLOAT : methods[method]),
+                              "binary logical operands use evaluation promotion while unary not uses only lvalue conversion");
+        }
+        const CheckValue object = { .type = BUSTER_TYPE_FLOAT, .category = CHECK_LVALUE };
+        const CheckActionResult integer_update = check_test_action(test, table, (CheckAction){ .op = CHECK_OP_ADD_ASSIGN,
+            .operands = { object, check_test_integer(BUSTER_TYPE_INT, 16777217) }, .context = context });
+        const CheckActionResult float_update = check_test_action(test, table, (CheckAction){ .op = CHECK_OP_ADD_ASSIGN,
+            .operands = { object, operands[1] }, .context = context });
+        const CheckActionResult increment = check_test_action(test, table, (CheckAction){ .op = CHECK_OP_PRE_INCREMENT,
+            .operands = { object }, .context = context });
+        check_test_expect(test, integer_update.diagnostic == CHECK_DIAG_NONE && integer_update.conversions[0].type == BUSTER_TYPE_FLOAT &&
+                               integer_update.conversions[1].type == BUSTER_TYPE_FLOAT && integer_update.value.type == BUSTER_TYPE_FLOAT &&
+                               float_update.diagnostic == CHECK_DIAG_NONE && float_update.conversions[0].type == methods[method] &&
+                               float_update.conversions[1].type == methods[method] && float_update.store_conversion.type == BUSTER_TYPE_FLOAT &&
+                               increment.diagnostic == CHECK_DIAG_NONE && increment.conversions[0].type == BUSTER_TYPE_FLOAT,
+                          "compound assignment promotes only its source operand and increment retains the destination format");
+        const CheckValue arms = { .type = vector };
+        const CheckActionResult conditional = check_test_action(test, table, (CheckAction){ .op = CHECK_OP_CONDITIONAL,
+            .operands = { operands[0], arms, arms }, .context = context });
+        check_test_expect(test, conditional.diagnostic == CHECK_DIAG_NONE && conditional.value.type == vector && conditional.conversions[0].type == methods[method],
+                          "a scalar condition promotes even when vector arms retain their element formats");
+        CheckBuiltinFloatResult comparison, classifier;
+        const CheckBuiltinFloatAction compared = { .id = CBUILTIN_ISGREATER, .arguments = operands, .argument_count = 2, .context = context };
+        const CheckBuiltinFloatAction classified = { .id = CBUILTIN_ISNAN, .arguments = operands, .argument_count = 1, .context = context };
+        check_builtin_float_one(table, &compared, &comparison);
+        check_builtin_float_one(table, &classified, &classifier);
+        check_test_expect(test, comparison.action.diagnostic == CHECK_DIAG_NONE && comparison.floating_type == methods[method] &&
+                               classifier.action.diagnostic == CHECK_DIAG_NONE && classifier.floating_type == BUSTER_TYPE_FLOAT,
+                          "ordered floating builtins promote arithmetic operands while classifiers retain their source format");
+        CheckValue arguments[] = { operands[0], operands[1], check_test_float(BUSTER_TYPE_DOUBLE, 3) };
+        CheckConversion conversions[BUSTER_ARRAY_LENGTH(arguments)] = { 0 };
+        const CheckAction call = { .op = CHECK_OP_CALL, .operands = { { .type = function, .category = CHECK_FUNCTION } }, .arguments = arguments,
+                                  .argument_count = BUSTER_ARRAY_LENGTH(arguments), .argument_conversions = conversions, .context = context };
+        const CheckActionResult called = check_test_action(test, table, call);
+        check_test_expect(test, called.diagnostic == CHECK_DIAG_NONE && conversions[0].type == BUSTER_TYPE_FLOAT && conversions[1].type == BUSTER_TYPE_DOUBLE &&
+                               conversions[2].type == (method == 2 ? BUSTER_TYPE_LONG_DOUBLE : BUSTER_TYPE_DOUBLE),
+                          "fixed prototype arguments keep declared types and variadic float keeps its double ABI under extended evaluation");
+    }
+}
+
 static void check_test_fp_graph(CheckTest* test, TypeTable* table)
 {
     Arena storage = arena_reserve(65536);
@@ -186,7 +251,7 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
                                   "all graph partitions preserve FENV proofs, runtime masks and complete math descriptors");
                 arena_pop_to(&output, mark);
             }
-            environments[divided] = 2;
+            environments[divided] = 0x80;
             CheckStream invalid;
             check_test_expect(test, !check_graph_run(table, &graph, &output, &scratch, &options, &invalid) &&
                                    invalid.status == CHECK_STATUS_INVALID_GRAPH && output.length == mark && scratch.length == 0,
@@ -203,6 +268,7 @@ static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, Typ
     check_test_pragma_extensions(test);
     check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
+    check_test_fp_evaluation_actions(test, table);
     check_test_fp_graph(test, table);
 }
 

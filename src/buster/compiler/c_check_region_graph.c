@@ -131,7 +131,7 @@ static bool check_region_walk(TypeTable* types, const CheckGraph* graph, const C
                     result->constant &= *(const bool*)((const uint8_t*)values->valid + (size_t)index * values->stride);
                 }
                 if (runtime && step->op == CHECK_REGION_BRANCH && graph->fp_environments != NULL &&
-                    graph->fp_environments[step->node] != 0 && check_action_floating_type(types, value.type))
+                    (graph->fp_environments[step->node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0 && check_action_floating_type(types, value.type))
                 {
                     value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
                 }

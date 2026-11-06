@@ -97,6 +97,14 @@ typedef enum CheckFault
 // (-Wreturn-mismatch). Its other errors stay errors there. Per node (CheckGraph.system_headers), never a graph's.
 #define BUSTER_CHECK_EXTENSION_SYSTEM_HEADER 0x04u
 #define BUSTER_CHECK_FP_ENV_ACCESS 0x01u
+// Lexical evaluation methods insert ordinary scalar/complex promotions, as Clang's UsualUnaryFPConversions.
+// They do not mean a dynamic floating environment and must remain active during constant evaluation.
+#define BUSTER_CHECK_FP_EVAL_DOUBLE 0x02u
+#define BUSTER_CHECK_FP_EVAL_EXTENDED 0x04u
+#define BUSTER_CHECK_FP_EVAL_MASK (BUSTER_CHECK_FP_EVAL_DOUBLE | BUSTER_CHECK_FP_EVAL_EXTENDED)
+#define BUSTER_CHECK_FP_ENV_MASK (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)
+// Token history only: an evaluation-method pragma occurred in this lexical scope, even if it selected source.
+#define BUSTER_CHECK_FP_EVAL_PRAGMA 0x08u
 
 typedef struct CheckValue CheckValue;
 struct CheckValue
@@ -1055,6 +1063,31 @@ static inline __attribute__((always_inline)) void check_action_promote(const Typ
     }
 }
 
+static TypeId check_action_fp_evaluation_type(uint32_t environment)
+{
+    return (environment & BUSTER_CHECK_FP_EVAL_EXTENDED) != 0 ? BUSTER_TYPE_LONG_DOUBLE :
+           (environment & BUSTER_CHECK_FP_EVAL_DOUBLE) != 0 ? BUSTER_TYPE_DOUBLE : 0;
+}
+
+// Keep the ordinary promotion path unchanged for source evaluation. The promoted type is a builtin, including
+// its complex counterpart, so this needs no interning or new value payload. Vectors keep their declared element type.
+static void check_action_fp_promote(const TypeTable* table, CheckValue* value, CheckConversion* conversion, uint32_t node, uint32_t environment)
+{
+    const TypeId evaluation = check_action_fp_evaluation_type(environment);
+    if (evaluation != 0)
+    {
+        const TypeId plain = type_unqualified(type_strip_aligned(table, value->type));
+        const uint8_t kind = type_kind(table, plain);
+        const uint32_t element = type_floating_element(table, plain);
+        const uint32_t code = type_index(evaluation);
+        if ((kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_COMPLEX) && element != 0 && element < code)
+        {
+            const TypeId target = kind == BUSTER_TYPE_KIND_COMPLEX ? BUSTER_TYPE_COMPLEX(code) : evaluation;
+            check_action_conversion(table, value, target, BUSTER_CHECK_CONVERT_PROMOTION, conversion, node);
+        }
+    }
+}
+
 static bool check_action_compatible(const TypeTable* table, TypeId left, TypeId right, CheckActionResult* result)
 {
     const TypeAnswer answer = left == right ? TYPE_ANSWER_YES : type_compatible(table, left, right);
@@ -1480,7 +1513,7 @@ static bool check_action_fold_symbolic(const TypeTable* table, CheckOp op, const
     return valid;
 }
 
-static void check_action_arithmetic(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
+static void check_action_arithmetic(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending, bool compound)
 {
     const CheckOp op = action->op;
     const bool unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT;
@@ -1498,9 +1531,17 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
     else
     {
         check_action_promote(table, &left, &result->conversions[0], action->node);
+        if (!compound && (action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+        {
+            check_action_fp_promote(table, &left, &result->conversions[0], action->node, action->context.fp_environment);
+        }
         if (!unary)
         {
             check_action_promote(table, &right, &result->conversions[1], action->node);
+            if ((action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+            {
+                check_action_fp_promote(table, &right, &result->conversions[1], action->node, action->context.fp_environment);
+            }
         }
         TypeId common = left.type;
         if (!unary && !shifts)
@@ -1598,8 +1639,13 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
 static void check_action_logic(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool unary = action->op == CHECK_OP_NOT || action->op == CHECK_OP_CONDITION;
-    const CheckValue left = check_action_operand(table, action, result, 0);
-    const CheckValue right = unary ? left : check_action_operand(table, action, result, 1);
+    CheckValue left = check_action_operand(table, action, result, 0);
+    CheckValue right = unary ? left : check_action_operand(table, action, result, 1);
+    if (!unary && (action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+    {
+        check_action_fp_promote(table, &left, &result->conversions[0], action->node, action->context.fp_environment);
+        check_action_fp_promote(table, &right, &result->conversions[1], action->node, action->context.fp_environment);
+    }
     if (!check_action_is_scalar(table, left.type) || (!unary && !check_action_is_scalar(table, right.type)))
     {
         check_action_diagnose(result, CHECK_DIAG_SCALAR_REQUIRED, check_action_is_scalar(table, left.type) ? 1 : 0);
@@ -1678,7 +1724,11 @@ static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* le
 
 static void check_action_conditional(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
-    const CheckValue condition = check_action_operand(table, action, result, 0);
+    CheckValue condition = check_action_operand(table, action, result, 0);
+    if ((action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+    {
+        check_action_fp_promote(table, &condition, &result->conversions[0], action->node, action->context.fp_environment);
+    }
     CheckValue left = check_action_operand(table, action, result, 1);
     CheckValue right = check_action_operand(table, action, result, 2);
     TypeId common = 0;
@@ -1690,6 +1740,11 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
     {
         check_action_promote(table, &left, &result->conversions[1], action->node);
         check_action_promote(table, &right, &result->conversions[2], action->node);
+        if ((action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+        {
+            check_action_fp_promote(table, &left, &result->conversions[1], action->node, action->context.fp_environment);
+            check_action_fp_promote(table, &right, &result->conversions[2], action->node, action->context.fp_environment);
+        }
         common = type_usual_arithmetic(table, left.type, right.type);
     }
     else if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_VOID || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_VOID)
@@ -2266,6 +2321,9 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
             }
             if (increment)
             {
+                // Increment/decrement operate in the lvalue's type. Clang does not apply usual unary floating
+                // conversions here; compound assignments below do use the current evaluation method.
+                arithmetic.context.fp_environment &= ~BUSTER_CHECK_FP_EVAL_MASK;
                 arithmetic.operands[1] = (CheckValue){
                     .type = BUSTER_TYPE_INT,
                     .flags = BUSTER_CHECK_ICE,
@@ -2285,7 +2343,7 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
             }
             else
             {
-                check_action_arithmetic(table, &arithmetic, result, 0, NULL);
+                check_action_arithmetic(table, &arithmetic, result, 0, NULL, !increment);
             }
             if (increment)
             {
@@ -2522,12 +2580,24 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
             else
             {
                 CheckValue value = check_action_operand_value(table, action, &action->arguments[i], &converted, 0);
+                const TypeId original = type_unqualified(type_strip_aligned(table, value.type));
                 const bool parameter = (prototype || kr) && i < count;
                 if (!parameter)
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);
+                    if ((action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+                    {
+                        check_action_fp_promote(table, &value, &converted.conversions[0], action->node, action->context.fp_environment);
+                    }
                 }
                 TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
+                // Default argument promotion remembers the original type: float and __fp16 are passed as double
+                // even when usual unary evaluation first widened them to long double. Other floating types keep
+                // their evaluation promotion, including a double argument under extended evaluation.
+                if (!parameter && (original == BUSTER_TYPE_FLOAT || original == BUSTER_TYPE_HALF))
+                {
+                    destination = BUSTER_TYPE_DOUBLE;
+                }
                 if (check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC)
                 {
                     destination = type_conversion_operand(table, destination);
@@ -2763,7 +2833,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_SHIFT_RIGHT:
             case CHECK_OP_BIT_AND:
             case CHECK_OP_BIT_OR:
-            case CHECK_OP_BIT_XOR: check_action_arithmetic(table, action, result, common_hint, pending); break;
+            case CHECK_OP_BIT_XOR: check_action_arithmetic(table, action, result, common_hint, pending, false); break;
             case CHECK_OP_BIT_NOT:
             {
                 if (check_action_kind(table, action->operands[0].type) == BUSTER_TYPE_KIND_COMPLEX)
@@ -2772,7 +2842,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
                 }
                 else
                 {
-                    check_action_arithmetic(table, action, result, common_hint, pending);
+                    check_action_arithmetic(table, action, result, common_hint, pending, false);
                 }
             } break;
             case CHECK_OP_REAL:
@@ -2786,7 +2856,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
                 }
                 else
                 {
-                    check_action_arithmetic(table, action, result, common_hint, pending);
+                    check_action_arithmetic(table, action, result, common_hint, pending, false);
                 }
             } break;
             case CHECK_OP_LESS:
@@ -2802,7 +2872,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
                 }
                 else
                 {
-                    check_action_arithmetic(table, action, result, common_hint, pending);
+                    check_action_arithmetic(table, action, result, common_hint, pending, false);
                 }
             } break;
             case CHECK_OP_NOT:

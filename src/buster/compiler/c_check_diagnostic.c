@@ -519,7 +519,7 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
     // when no state was supplied, retains _Pragma's expansion history and therefore its invocation location.
     const uint32_t offset = record->error != 0 ? (record->kind == CHECK_FP_PRAGMA_FENV_ACCESS ? 3 : 2) :
                             (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? 2 : record->source_end - record->source_begin > 5 ? 4 : 3;
-    const uint32_t source = record->source_begin + offset;
+    const uint32_t source = record->error_source != 0 ? record->error_source : record->source_begin + offset;
     return source;
 }
 

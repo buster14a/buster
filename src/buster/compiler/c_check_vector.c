@@ -530,10 +530,14 @@ static void check_vector_member(TypeTable* table, const CheckAction* action, Che
 
 static void check_vector_conditional(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
-    const CheckValue condition = check_action_operand(table, action, result, 0);
+    CheckValue condition = check_action_operand(table, action, result, 0);
     CheckValue left = check_action_operand(table, action, result, 1);
     CheckValue right = check_action_operand(table, action, result, 2);
     const bool vc = check_vector_type(table, condition.type);
+    if (!vc && (action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+    {
+        check_action_fp_promote(table, &condition, &result->conversions[0], action->node, action->context.fp_environment);
+    }
     const bool lv = check_vector_type(table, left.type);
     const bool rv = check_vector_type(table, right.type);
     TypeId common = 0;

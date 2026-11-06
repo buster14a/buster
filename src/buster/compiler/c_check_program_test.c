@@ -4140,6 +4140,39 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){clear_fp();int a=0;{\n#pragma clang fp exceptions(ignore)\n1.0/3.0;a=fp_state();}"
             "clear_fp();1.0/3.0;return a*100+fp_state()+n;}",
             "clang-fp-exception-scope", clang);
+        check_test_program_source(test,
+            "#pragma clang fp eval_method(double)\n"
+            "static float fixed(float x){return x;}static double wide(float x,float y){return (x+y)-x;}"
+            "static double casted(float x,float y){return (float)(x+y)-x;}"
+            "static double stored(float x,float y){float z=x+y;return z-x;}static double passed(float x,float y){return fixed(x+y)-x;}"
+            "static double compound(int k){float x=1;x+=16777217+k;return x-16777216.0f;}"
+            "static double ordinary(int k){float x=1;return (x+(16777217+k))-16777216.0f;}"
+            "int tested(int n){float x=0x1p24f,y=(float)((n&7)+1);return (int)(wide(x,y)*4096+casted(x,y)*256+stored(x,y)*16+passed(x,y))"
+            "+(int)compound(n)*65536+(int)ordinary(n)*1048576;}",
+            "eval-double-runtime-rounding-and-barriers", clang);
+        check_test_program_source(test,
+            "static int inspect(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);double f=__builtin_va_arg(ap,double);"
+            "long double d=__builtin_va_arg(ap,long double);__builtin_va_end(ap);return (int)(f*8)+(int)(d-0x1p53L);}\n"
+            "#pragma clang fp eval_method(extended)\n"
+            "static double fixed(double x){return x;}static long double extra(double x){return (x+1.0)-x;}"
+            "int tested(int n){volatile float f=(float)n/4.0f;volatile double d=0x1p53;long double a=extra(d);"
+            "long double b=fixed(d+1.0)-d;return (int)a*4096+(int)b*256+inspect(2,f,d)+n;}",
+            "eval-extended-runtime-and-variadic-abi", clang);
+        check_test_program_source(test,
+            "#pragma clang fp eval_method(double)\n"
+            "int tested(int n){float _Complex a=__builtin_complex(0x1p24f,0x1p24f);"
+            "float _Complex b=__builtin_complex((float)((n&3)+1),2.0f);"
+            "double _Complex sum=(a+b)-a,conjugate=~(a+b)-~a;"
+            "float _Complex stored=a+b;double _Complex barrier=stored-a;"
+            "return (int)(__real__ sum)*4096+(int)(__imag__ sum)*256+(int)(__imag__ conjugate)*16+(int)(__real__ barrier);}",
+            "eval-complex-runtime-and-store-barrier", clang);
+        check_test_program_source(test,
+            "#pragma STDC FENV_ACCESS ON\n#pragma clang fp eval_method(double)\n"
+            "int change_rounding(int);int clear_fp(void);int fp_state(void);"
+            "int tested(int n){change_rounding(n);volatile float a=1.0f;clear_fp();double b=a+0x1p-24f;"
+            "int wide=fp_state();clear_fp();float stored=b;int narrow=fp_state();change_rounding(0);"
+            "return (b>1.0)*4096+(stored>1.0f)*256+wide*32+narrow;}",
+            "eval-double-preserves-runtime-environment", clang);
     }
     if (!check_test_program_daz())
     {

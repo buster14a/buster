@@ -2656,14 +2656,15 @@ static const CheckInputThreadRow* check_input_thread_row(String8 name)
 // uninitialized, no_sanitize_memory, analyzer_noreturn and carries_dependency; the
 // thread-safety analysis's (check_input_thread_rows); one of no C subject (`subjectless`: Objective-C's, C++'s and the like,
 // whose subject's diagnostic is all clang gives in C); and these, whose handlers change nothing in C past their subjects,
-// counts and arguments' kinds (#147): available_only_in_default_eval_method (whose `#pragma clang fp eval_method` the
-// checker refuses), btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
+// counts and arguments' kinds (#147): btf_decl_tag (BPF's debug information), randomize_layout and no_randomize_layout (without
 // -frandomize-layout-seed), Objective-C's boxable and bridge_mutable, Fuchsia's handles (the analyzer's), suppress, Swift's
 // bridge, unsafe_buffer_usage and AMDGPU's max_num_work_groups (a kernel's alone).
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact, bool subjectless)
 {
     static const char* const unchanged[] = {
-        "available_only_in_default_eval_method", "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
+        // Its resolved typedef uses are checked after expression reading, including constant-only type queries.
+        "available_only_in_default_eval_method",
+        "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
         "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",

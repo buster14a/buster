@@ -13,6 +13,8 @@ static uint32_t check_test_pragma_diagnostics(const char* text, const char* grou
     return count;
 }
 
+#include "c_check_fp_eval_driver_test.c"
+
 static void check_test_driver_pragma_system(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char header_text[] = "#pragma buster_header\n#define PRAGMA_FROM_HEADER _Pragma(\"buster_macro\")\n";
@@ -818,6 +820,7 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     check_test_driver_pragma_system(test, clang, executable, directory);
     check_test_driver_pragma_execution(test, executable, directory);
     check_test_driver_fp_pragma_errors(test, clang, executable, directory);
+    check_test_driver_fp_evaluation(test, clang, executable, directory);
     check_test_driver_symbol_pragma_diagnostics(test, clang, executable, directory);
     check_test_driver_symbol_pragma_objects(test, clang, executable, directory);
     check_test_driver_ms_diagnostics(test, clang, executable, directory);
