@@ -65,6 +65,7 @@ struct CheckUnitsUnit
 {
     const char* path;
     CheckDriverInputKind kind;
+    bool preprocessed;
     uint64_t bytes;
     const char* object;
     int status;
@@ -2192,6 +2193,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         PPOptions options = command->options;
         options.files = &lane->cache;
         options.diagnostics = errors;
+        options.preprocessed = unit->preprocessed;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
         // On the board, the unit's functions as parts that the lanes without units may take (#777).
         lane->functions = (CheckProgramLanes){
@@ -2506,6 +2508,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             const uint32_t cost = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX - 1;
             units[u].path = inputs[u];
             units[u].kind = command->inputs != NULL ? command->inputs[u].kind : CHECK_DRIVER_INPUT_C;
+            units[u].preprocessed = command->inputs != NULL && command->inputs[u].preprocessed;
             units[u].bytes = units[u].kind != CHECK_DRIVER_INPUT_LINK ? size : 0;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }

@@ -173,7 +173,8 @@ executable invocations against Clang and GNU Make.
 ## Mixed inputs
 
 The implicit compile/link driver classifies each positional input before opening
-it (#1120). `.c`, `.h` and `.i` are C; `.s` is assembly; `.S` is preprocessed
+it (#1120). `.c` and `.h` are C; `.i` is C that has already been preprocessed:
+directives run, and tokens are not macro-expanded again. `.s` is assembly; `.S` is preprocessed
 assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Known
 unsupported source suffixes, including C++ (`.cpp`, `.cc`, `.cxx`, `.C`, `.ii`
 and C++ headers and module sources), Objective-C (`.m`, `.mi`, `.mm`, `.M`, `.mii`),
