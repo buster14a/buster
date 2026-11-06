@@ -7,6 +7,7 @@
 //   cc -std=c17 -O2 -Wall -Wextra -Werror -o build-regression tools/ci/build_regression.c && ./build-regression
 //
 // It removes every tree under build/cmake (clean --all) and checks that
+//   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
 //   - a fresh ./build.sh builds and publishes the Release executable and its configuration's compile commands, and
 //     leaves no temporary file behind;
@@ -23,6 +24,7 @@
 //   - shifts link the padded executables, each shift once, and lexer-variant builds a tree of its own.
 // It leaves the tree built. Each check prints what it checked; the first that fails stops it, after it restores the
 // source it edits.
+// `--crt-link-only` runs just the small CRT dependency fixture without building the compiler.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -1009,7 +1011,122 @@ static void on_signal(int number)
     raise(number);
 }
 
-int main(void)
+// Exercise the production buster_link function in a tiny project: it builds actual linked outputs without recompiling
+// the compiler. The post-link copies stand in for baking and check that relinking propagates to downstream outputs.
+static void check_crt_link_dependencies(void)
+{
+    if (chdir(work) != 0)
+    {
+        fail("can't enter %s", work);
+    }
+    char* dirs[] = { "cmake", "-E", "make_directory", "runtime/usr/lib/x86_64-linux-gnu",
+                     "runtime/usr/lib/gcc/x86_64-linux-gnu/15", 0 };
+    if (run(0, 0, dirs) != 0)
+    {
+        fail("can't make the CRT fixture directories");
+    }
+    write_file("crt1.c", "void _start(void) {}\n", 0644);
+    write_file("crti.c", "void crt_init(void) {}\n", 0644);
+    write_file("crtn.c", "void crt_end(void) {}\n", 0644);
+    write_file("main.c", "int fixture(void) { return 0; }\n", 0644);
+    const char* names[] = { "crt1", "crti", "crtn" };
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        char source[32];
+        char object[128];
+        snprintf(source, sizeof(source), "%s.c", names[i]);
+        snprintf(object, sizeof(object), "runtime/usr/lib/x86_64-linux-gnu/%s.o", names[i]);
+        char* compile[] = { "clang", "-c", source, "-o", object, 0 };
+        if (run(0, 0, compile) != 0)
+        {
+            fail("can't compile %s", source);
+        }
+    }
+    const char* libraries[] = { "runtime/usr/lib/x86_64-linux-gnu/libm.so.6",
+                                "runtime/usr/lib/x86_64-linux-gnu/libc.so.6",
+                                "runtime/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a" };
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        char* archive[] = { "ar", "rcs", (char*)libraries[i], 0 };
+        if (run(0, 0, archive) != 0)
+        {
+            fail("can't make %s", libraries[i]);
+        }
+    }
+    write_file("CMakeLists.txt",
+        "cmake_minimum_required(VERSION 3.25)\n"
+        "project(crt_fixture C)\n"
+        "set(CMAKE_LINK_DEPENDS_USE_LINKER OFF)\n"
+        "set(BUSTER_HOST_RUNTIME ${CMAKE_CURRENT_SOURCE_DIR}/runtime)\n"
+        "set(buster_arch x86-64)\n"
+        "set(buster_link_mode -no-pie)\n"
+        "file(READ \"${BUSTER_SOURCE}/CMakeLists.txt\" source)\n"
+        "string(FIND \"${source}\" \"function(buster_link target)\" begin)\n"
+        "if(begin LESS 0)\n  message(FATAL_ERROR \"buster_link not found\")\nendif()\n"
+        "string(SUBSTRING \"${source}\" ${begin} -1 tail)\n"
+        "string(FIND \"${tail}\" \"\\nendfunction()\" end)\n"
+        "if(end LESS 0)\n  message(FATAL_ERROR \"buster_link end not found\")\nendif()\n"
+        "string(LENGTH \"\\nendfunction()\" marker_length)\n"
+        "math(EXPR length \"${end} + ${marker_length}\")\n"
+        "string(SUBSTRING \"${tail}\" 0 ${length} function_text)\n"
+        "cmake_language(EVAL CODE \"${function_text}\")\n"
+        "foreach(name compiler_link compiler_shift)\n"
+        "  add_executable(${name} main.c)\n"
+        "  buster_link(${name})\n"
+        "  add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/$<CONFIG>/${name}.baked\n"
+        "    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${name}> ${CMAKE_BINARY_DIR}/$<CONFIG>/${name}.baked\n"
+        "    DEPENDS ${name} VERBATIM)\n"
+        "  add_custom_target(${name}_baked ALL DEPENDS ${CMAKE_BINARY_DIR}/$<CONFIG>/${name}.baked)\n"
+        "endforeach()\n", 0644);
+    char source_arg[PATH_MAX + 32];
+    snprintf(source_arg, sizeof(source_arg), "-DBUSTER_SOURCE=%s", root);
+    char* configure[] = { "cmake", "-S", ".", "-B", "out", "-G", "Ninja Multi-Config", "-DCMAKE_C_COMPILER=clang",
+                          source_arg, 0 };
+    Text log = capture(configure);
+    free(log.data);
+    char* build[] = { "cmake", "--build", "out", "--config", "Debug", "--parallel", "1", 0 };
+    log = capture(build);
+    free(log.data);
+    log = capture(build);
+    if (strstr(log.data, "no work to do") == 0)
+    {
+        fail("unchanged CRT fixture rebuilt: %s", log.data);
+    }
+    free(log.data);
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        const struct timespec delay = { 1, 0 };
+        nanosleep(&delay, 0);
+        char object[128];
+        snprintf(object, sizeof(object), "runtime/usr/lib/x86_64-linux-gnu/%s.o", names[i]);
+        if (utimensat(AT_FDCWD, object, 0, 0) != 0)
+        {
+            fail("can't update %s", object);
+        }
+        log = capture(build);
+        if (strstr(log.data, "Linking C executable Debug/compiler_link") == 0 ||
+            strstr(log.data, "Linking C executable Debug/compiler_shift") == 0 ||
+            strstr(log.data, "Generating Debug/compiler_link.baked") == 0 ||
+            strstr(log.data, "Generating Debug/compiler_shift.baked") == 0)
+        {
+            fail("%s didn't relink and post-link both executables: %s", names[i], log.data);
+        }
+        free(log.data);
+        log = capture(build);
+        if (strstr(log.data, "no work to do") == 0)
+        {
+            fail("unchanged build after %s rebuilt: %s", names[i], log.data);
+        }
+        free(log.data);
+    }
+    if (chdir(root) != 0)
+    {
+        fail("can't return to %s", root);
+    }
+    pass("each baseline CRT startup object relinks and post-links both executables; unchanged builds are no-ops");
+}
+
+int main(int argc, char** argv)
 {
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -1023,6 +1140,16 @@ int main(void)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    check_crt_link_dependencies();
+    if (argc == 2 && strcmp(argv[1], "--crt-link-only") == 0)
+    {
+        char* remove[] = { "rm", "-rf", work, 0 };
+        return run(0, 0, remove);
+    }
+    if (argc != 1)
+    {
+        fail("unknown argument");
+    }
     BUILD("clean");
     char* output[] = { "./build.sh", "print-output", 0 };
     char* output_debug[] = { "./build.sh", "print-output", "--config", "Debug", 0 };

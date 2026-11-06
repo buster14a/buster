@@ -216,6 +216,8 @@ function(buster_link target)
         set(support "${BUSTER_HOST_RUNTIME}/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a")
         target_link_options(${target} PRIVATE ${buster_link_mode} -nostdlib ${buster_linker_flags}
             "${library}/crt1.o" "${library}/crti.o")
+        # Paths in link options aren't tracked as inputs, so record these startup objects explicitly.
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${library}/crt1.o" "${library}/crti.o")
         target_link_libraries(${target} PRIVATE -Wl,--push-state,--as-needed "${library}/libm.so.6" -Wl,--pop-state
             "${library}/libc.so.6" "${support}" "${library}/crtn.o")
     else()
