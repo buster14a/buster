@@ -886,10 +886,141 @@ static void check_test_void_return_conversion(CheckTest* test, TypeTable* table)
                       "return conversion accepts exact void expressions in every mode, preserving effects and rejecting integer returns");
 }
 
+// check_test_string_literal_blocks' generator: xorshift64, whose whole word is random (check_test_random gives 32 bits).
+static uint64_t check_test_string_block_random(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+// One random string literal part of check_test_string_literal_blocks into `bytes` (room for 4096): a prefix ("", u8,
+// L, u or U), a quote, a body of `target` bytes (at most 300) or a piece more of one style (plain text with UTF-8, \x
+// escapes, octal escapes, or any of the pieces: escapes of every form, stray backslashes, quotes, line breaks, NUL and
+// every lead and continuation byte, valid or not), maybe a flipped byte, and a closing quote. Returns its length.
+static uint32_t check_test_string_block_part(uint64_t* state, uint32_t target, uint8_t* bytes)
+{
+    static const char* const pieces[] = {
+        "\\", "\\", "x", "0", "1", "3", "4", "7", "8", "9", "a", "f", "F", "g", "e", "n", "u", "U", "?", "'", "\"", "\n", "\r", "\0", " ", "\t",
+        "\x7f", "\xc2", "\xdf", "\xe0", "\xed", "\xef", "\xf0", "\xf4", "\xf5", "\x80", "\x9f", "\xa0", "\xbf", "\xc0", "\xc1", "\xff",
+        "\xc3\xa9", "\xe2\x82\xac", "\xf0\x9f\x98\x80", "\xed\x9f\xbf", "\xed\xa0\x80", "\xf4\x8f\xbf\xbf", "\xf4\x90\x80\x80",
+        "\\x41", "\\x4", "\\xff", "\\x100", "\\x", "\\101", "\\777", "\\400", "\\377", "\\0", "\\\\", "\\n", "\\e", "\\?", "\\u00e9", "\\U0001f600",
+        "\\u0041", "\\N{LATIN SMALL LETTER E}", "abcdefgh", "ABCDEFGHIJKLMNOP",
+    };
+    static const char* const text[] = { "a", "b", "Z", " ", "\xc3\xa9", "\xe2\x82\xac", "\xf0\x9f\x98\x80", "\\n", "\\\"", "\\\\", "1", "x" };
+    static const char* const prefixes[] = { "", "", "", "", "", "u8", "u8", "u8", "L", "u", "U" };
+    const char* prefix = prefixes[check_test_string_block_random(state) % BUSTER_ARRAY_LENGTH(prefixes)];
+    const uint32_t style = (uint32_t)(check_test_string_block_random(state) % 4);
+    uint32_t length = (uint32_t)strlen(prefix);
+    memcpy(bytes, prefix, length);
+    bytes[length] = '"';
+    length += 1;
+    const uint32_t body = length;
+    char piece[8];
+    while (length - body < target)
+    {
+        const uint64_t random = check_test_string_block_random(state);
+        const bool stray = random % 40 == 0;
+        const char* chosen = pieces[(random >> 8) % BUSTER_ARRAY_LENGTH(pieces)];
+        uint32_t size = chosen[0] == 0 ? 1 : (uint32_t)strlen(chosen);
+        if (!stray && style == 1)
+        {
+            size = (uint32_t)snprintf(piece, sizeof(piece), "\\x%02x", (unsigned)((random >> 16) & 255));
+            chosen = piece;
+        }
+        else if (!stray && style == 2)
+        {
+            size = (uint32_t)snprintf(piece, sizeof(piece), "\\%o", (unsigned)((random >> 16) % ((random >> 32) % 2 != 0 ? 256 : 512)));
+            chosen = piece;
+        }
+        else if (!stray && style == 3)
+        {
+            chosen = text[(random >> 16) % BUSTER_ARRAY_LENGTH(text)];
+            size = (uint32_t)strlen(chosen);
+        }
+        memcpy(bytes + length, chosen, size);
+        length += size;
+    }
+    const uint64_t flip = check_test_string_block_random(state);
+    if (length > body && flip % 8 == 0)
+    {
+        bytes[body + (flip >> 8) % (length - body)] = (uint8_t)(flip >> 32);
+    }
+    bytes[length] = '"';
+    return length + 1;
+}
+
+// The string decoder's 64-byte blocks (#1388) against its scalar twin, check_literal_strings_by with `scalar`: random
+// groups of 1 to 3 parts of up to 300 bytes, half around the blocks' edges (60 to 68, 124 to 132 bytes), each part
+// ending at a PROT_NONE page so that a load past it faults, in both language modes. Both must agree on whether the
+// group is valid, which part fails, the element type, the UTF-8 flag and every byte of the result.
+static void check_test_string_literal_blocks(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t part_pages = (4096 + page - 1) / page;
+    uint8_t* mapping = mmap(NULL, 3 * 2 * part_pages * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool ready = mapping != MAP_FAILED;
+    for (uint32_t p = 0; ready && p < 3; p += 1)
+    {
+        ready = mprotect(mapping + 2 * p * part_pages * page, part_pages * page, PROT_READ | PROT_WRITE) == 0;
+    }
+    Arena scalar_arena = arena_reserve(1u << 20);
+    Arena vector_arena = arena_reserve(1u << 20);
+    uint64_t state = 1388;
+    uint32_t trials = 0;
+    uint32_t valid = 0;
+    uint32_t mismatches = 0;
+    uint8_t scratch[4096];
+    for (uint32_t trial = 0; ready && trial < 30000; trial += 1)
+    {
+        const uint32_t count = 1 + (uint32_t)(check_test_string_block_random(&state) % 3);
+        CheckStringPart parts[3];
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            const uint64_t random = check_test_string_block_random(&state);
+            const uint32_t shape = (uint32_t)(random % 4);
+            const uint32_t target = shape == 0 ? 60 + (uint32_t)((random >> 8) % 9) : shape == 1 ? 124 + (uint32_t)((random >> 8) % 9) : (uint32_t)((random >> 8) % 301);
+            const uint32_t length = check_test_string_block_part(&state, target, scratch);
+            uint8_t* bytes = mapping + (2 * p + 1) * part_pages * page - length;
+            memcpy(bytes, scratch, length);
+            parts[p] = (CheckStringPart){ .bytes = bytes, .length = length };
+        }
+        const bool c23 = (trial & 1) != 0;
+        const uint64_t scalar_mark = scalar_arena.length;
+        const uint64_t vector_mark = vector_arena.length;
+        const CheckStringLiteral scalar = check_literal_strings_by(parts, count, c23, true, &scalar_arena);
+        const CheckStringLiteral vector = check_literal_strings_by(parts, count, c23, false, &vector_arena);
+        const bool same = scalar.valid == vector.valid && scalar.failed_part == vector.failed_part && scalar.resource == vector.resource &&
+                          scalar.element_type == vector.element_type && scalar.byte_count == vector.byte_count && scalar.unit_count == vector.unit_count &&
+                          scalar.utf8 == vector.utf8 && (!scalar.valid || memcmp(scalar.bytes, vector.bytes, scalar.byte_count) == 0);
+        if (!same && mismatches < 4)
+        {
+            printf("string blocks: trial %u differs (scalar valid %u part %u bytes %llu, vector valid %u part %u bytes %llu)\n", trial, scalar.valid,
+                   scalar.failed_part, (unsigned long long)scalar.byte_count, vector.valid, vector.failed_part, (unsigned long long)vector.byte_count);
+        }
+        mismatches += same ? 0 : 1;
+        valid += scalar.valid ? 1 : 0;
+        trials += 1;
+        arena_pop_to(&scalar_arena, scalar_mark);
+        arena_pop_to(&vector_arena, vector_mark);
+    }
+    printf("string blocks: %u groups, %u valid, %u differ from the scalar twin\n", trials, valid, mismatches);
+    check_test_expect(test, ready && mismatches == 0 && valid != 0 && valid != trials,
+                      "string literal blocks decode random groups at page and block edges as the scalar twin does");
+    arena_release(&scalar_arena);
+    arena_release(&vector_arena);
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 3 * 2 * part_pages * page);
+    }
+}
+
 static __attribute__((noinline)) void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_void_return_conversion(test, table);
     check_test_string_literals(test, clang);
+    check_test_string_literal_blocks(test);
     check_test_static_selection(test, table);
     check_test_record_casts(test, table);
     check_test_mixed_void_conditional(test, table);

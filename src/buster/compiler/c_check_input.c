@@ -3936,7 +3936,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
             CheckStringLiteral literal = { 0 };
             if (valid)
             {
-                literal = check_literal_strings(parts, count, parser->language.standard >= 2023, reader->arena);
+                literal = check_literal_strings_by(parts, count, parser->language.standard >= 2023, BUSTER_SCALAR_PATH(parser->options.scalar), reader->arena);
                 reader->output->resource |= literal.resource;
                 valid = literal.valid;
             }
