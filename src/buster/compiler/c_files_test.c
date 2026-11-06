@@ -1599,6 +1599,15 @@ static bool files_test_sources(const char* directory)
     {
         printf("files_list_sources: %u paths, expected a.c, b.h and sub/c.c\n", sources.count);
     }
+    uint32_t slots = 0;
+    const bool slots_fit = files_table_slots(0, &slots) && slots == 16 && files_table_slots(8, &slots) && slots == 16 && files_table_slots(9, &slots) && slots == 32 &&
+                           files_table_slots(1u << 30, &slots) && slots == (1u << 31);
+    const uint64_t lane_cap = (uint64_t)BUSTER_LANE_MAX_COUNT * BUSTER_FILES_MAX_REQUESTS;
+    const bool slots_refuse = !files_table_slots(lane_cap, &slots) && !files_table_slots((uint64_t)1 << 32, &slots);
+    if (!slots_fit || !slots_refuse)
+    {
+        printf("files_table_slots: a lane-cap sum must not wrap a 32-bit request total\n");
+    }
     arena_release(&sources.arena);
     unlink(link_path);
     unlink(nested);
@@ -1607,7 +1616,7 @@ static bool files_test_sources(const char* directory)
     unlink(source_c);
     rmdir(sub);
     rmdir(root);
-    return names;
+    return names && slots_fit && slots_refuse;
 }
 
 static int run_files_tests(int argument_count, char** arguments)

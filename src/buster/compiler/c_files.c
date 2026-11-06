@@ -1087,27 +1087,40 @@ static uint32_t files_search_key(const FilesRun* run, const FilesRequest* reques
     return length;
 }
 
+// The open-addressed table's slot count for `total` items: at least twice as many slots, a power of two.
+// False when that count does not fit in a 32-bit index. Each lane's cap is BUSTER_FILES_MAX_REQUESTS and a run
+// may have BUSTER_LANE_MAX_COUNT lanes, so the sum is 2^32 and a uint32_t total wraps to an empty table.
+static bool files_table_slots(uint64_t total, uint32_t* slots)
+{
+    bool result = total <= UINT32_MAX / 2;
+    uint32_t count = 16;
+    while (result && (uint64_t)count < total * 2)
+    {
+        result = count <= UINT32_MAX / 2;
+        count = result ? count * 2 : count;
+    }
+    *slots = count;
+    return result;
+}
+
 // On one lane: the lanes' requests in order (lane by lane, each in its items' order, so the walk's order), each with the
 // search of its key, new keys getting new searches.
 static void files_search_requests(FilesRun* run)
 {
     Arena* round = &run->round;
-    uint32_t total = 0;
+    uint64_t total = 0;
     for (uint32_t l = 0; l < run->lane_count; l += 1)
     {
         total += run->lanes[l].request_count;
     }
-    run->requests = arena_push_array(round, (uint64_t)total + 1, sizeof(FilesRequest*), 8);
-    run->request_search = arena_push_array(round, (uint64_t)total + 1, sizeof(uint32_t), 8);
-    run->searches = arena_push_array(round, (uint64_t)total + 1, sizeof(FilesSearch), 8);
-    uint32_t slots = 16;
-    while (slots < 2 * total)
-    {
-        slots *= 2;
-    }
-    run->search_slots = arena_push_array(round, slots, sizeof(uint32_t), 64);
-    run->search_slot_mask = slots - 1;
-    uint64_t* hashes = arena_push_array(round, (uint64_t)total + 1, sizeof(uint64_t), 8);
+    uint32_t slots = 0;
+    const bool counted = files_table_slots(total, &slots);
+    run->requests = counted ? arena_push_array(round, total + 1, sizeof(FilesRequest*), 8) : 0;
+    run->request_search = counted ? arena_push_array(round, total + 1, sizeof(uint32_t), 8) : 0;
+    run->searches = counted ? arena_push_array(round, total + 1, sizeof(FilesSearch), 8) : 0;
+    run->search_slots = counted ? arena_push_array(round, slots, sizeof(uint32_t), 64) : 0;
+    run->search_slot_mask = counted ? slots - 1 : 0;
+    uint64_t* hashes = counted ? arena_push_array(round, total + 1, sizeof(uint64_t), 8) : 0;
     // Room for two keys, the request's and one it is compared with, of the round's longest.
     uint64_t bound = 0;
     for (uint32_t l = 0; l < run->lane_count; l += 1)
@@ -1119,13 +1132,13 @@ static void files_search_requests(FilesRun* run)
         }
     }
     uint8_t* keys = arena_push(round, 2 * bound + 1, 1);
-    const bool room = run->requests != 0 && run->request_search != 0 && run->searches != 0 && run->search_slots != 0 && hashes != 0 && keys != 0;
+    const bool room = counted && run->requests != 0 && run->request_search != 0 && run->searches != 0 && run->search_slots != 0 && hashes != 0 && keys != 0;
     files_fail(run, !room);
     run->request_count = 0;
     run->search_count = 0;
     if (room)
     {
-        memset(run->search_slots, 0, slots * sizeof(uint32_t));
+        memset(run->search_slots, 0, (uint64_t)slots * sizeof(uint32_t));
     }
     for (uint32_t l = 0; room && l < run->lane_count; l += 1)
     {
@@ -1251,26 +1264,23 @@ static void files_advance(FilesRun* run, FilesLane* mine)
 // with room for what each probe finds.
 static void files_collect_probes(FilesRun* run)
 {
-    uint32_t total = 0;
+    uint64_t total = 0;
     for (uint32_t l = 0; l < run->lane_count; l += 1)
     {
         total += run->lanes[l].path_count;
     }
-    uint32_t slots = 16;
-    while (slots < 2 * total)
-    {
-        slots *= 2;
-    }
-    run->probes = arena_push_array(&run->round, (uint64_t)total + 1, sizeof(FilesPath), 8);
-    run->found = arena_push_array(&run->round, (uint64_t)total + 1, sizeof(FileProbe), 8);
-    run->probe_slots = arena_push_array(&run->round, slots, sizeof(uint32_t), 64);
+    uint32_t slots = 0;
+    const bool counted = files_table_slots(total, &slots);
+    run->probes = counted ? arena_push_array(&run->round, total + 1, sizeof(FilesPath), 8) : 0;
+    run->found = counted ? arena_push_array(&run->round, total + 1, sizeof(FileProbe), 8) : 0;
+    run->probe_slots = counted ? arena_push_array(&run->round, slots, sizeof(uint32_t), 64) : 0;
     run->probe_slot_mask = slots - 1;
     run->probe_count = 0;
-    const bool room = run->probes != 0 && run->found != 0 && run->probe_slots != 0;
+    const bool room = counted && run->probes != 0 && run->found != 0 && run->probe_slots != 0;
     files_fail(run, !room);
     if (room)
     {
-        memset(run->probe_slots, 0, slots * sizeof(uint32_t));
+        memset(run->probe_slots, 0, (uint64_t)slots * sizeof(uint32_t));
     }
     for (uint32_t l = 0; room && l < run->lane_count; l += 1)
     {
