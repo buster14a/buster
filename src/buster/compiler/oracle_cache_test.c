@@ -464,6 +464,54 @@ static bool oracle_test_results(const OracleRun* run, const char* directory, con
     return result;
 }
 
+// Empty PATH components search the current directory, including the last or only component. An unset PATH uses the
+// system's default search path instead. Exercise both direct resolution and execution with the cache on and off.
+static void oracle_test_empty_path(OracleTest* test)
+{
+    char tool[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(tool, sizeof(tool), "%s/oracle-path-tool", test->base);
+    const char script[] = "#!/bin/sh\nprintf path-tool";
+    const bool made = oracle_test_write(tool, script, sizeof(script) - 1) && chmod(tool, 0755) == 0;
+    const char* original = getenv("PATH");
+    char* saved = original != 0 ? strdup(original) : 0;
+    const int directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const bool ready = made && (original == 0 || saved != 0) && directory >= 0 && chdir(test->base) == 0;
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "empty-path");
+    OracleCache off = { 0 };
+    static const char* const paths[] = { ":/nonexistent", "/nonexistent::/nonexistent", "/nonexistent:", "", "." };
+    bool correct = ready;
+    for (uint32_t i = 0; ready && i < sizeof(paths) / sizeof(paths[0]); i += 1)
+    {
+        correct &= setenv("PATH", paths[i], 1) == 0;
+        char resolved[BUSTER_ORACLE_PATH_BYTES];
+        correct &= oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && strcmp(resolved, "./oracle-path-tool") == 0;
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            for (uint32_t changed = 0; changed < 2; changed += 1)
+            {
+                char* arguments[] = { "oracle-path-tool", 0 };
+                OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: empty path", .arguments = arguments,
+                                  .directory = changed != 0 ? test->runs[0] : 0 };
+                const bool ran = oracle_run(&run);
+                correct &= ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, "path-tool") == 0;
+                oracle_run_release(&run);
+            }
+        }
+    }
+    char resolved[BUSTER_ORACLE_PATH_BYTES];
+    const bool unset = ready && unsetenv("PATH") == 0 && !oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && oracle_find_tool("sh", resolved, sizeof(resolved));
+    const bool restored_path = !ready || (saved != 0 ? setenv("PATH", saved, 1) == 0 : unsetenv("PATH") == 0);
+    const bool restored_directory = directory >= 0 && fchdir(directory) == 0;
+    if (directory >= 0)
+    {
+        close(directory);
+    }
+    free(saved);
+    oracle_test_expect(test, correct && restored_path && restored_directory, "runs: empty PATH components resolve and execute a tool in the current directory");
+    oracle_test_expect(test, unset, "runs: an unset PATH uses the system default rather than the current directory");
+}
+
 static void oracle_test_runs(OracleTest* test)
 {
     OracleCache cache;
@@ -3419,6 +3467,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_roots(&test);
         oracle_test_trailing_root(&test);
         oracle_test_trailing_dependencies(&test);
+        oracle_test_empty_path(&test);
         oracle_test_runs(&test);
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);
