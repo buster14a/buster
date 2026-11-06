@@ -84,7 +84,9 @@
 //   counts; a lane count of 0, which it must refuse; and a command that fails each run, which it must fail.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
 //   --poison-arenas: each file's status and object as with the file alone, and its diagnostics in their place, in the
-//   files' order.
+//   files' order. Resolve DIR before the children change directory, and require a successful standalone compilation.
+//   The default suite tests this mode with relative and absolute paths, a mix of valid and invalid files, and empty,
+//   all-invalid, missing and non-directory corpora (check_units_test_corpus_harness).
 // - With --generate DIR, nothing is tested: a program of synth's shape (--units, 512 by default, of --functions, 200) is
 //   written in DIR, for measurements.
 
@@ -2389,7 +2391,9 @@ static void check_units_test_unstarted(CheckUnitsTestTally* tally, const char* e
 static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* executable, const char* corpus, char* const* options, uint32_t option_count,
                                     const char* directory)
 {
-    DIR* listing = opendir(corpus);
+    // The compiler children run in the output directories, so every source path must start from an absolute DIR.
+    char absolute[PATH_MAX];
+    DIR* listing = realpath(corpus, absolute) != NULL ? opendir(absolute) : NULL;
     check_units_test_expect(tally, listing != NULL, "open the corpus", corpus);
     uint32_t count = 0;
     uint32_t capacity = 0;
@@ -2408,10 +2412,10 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
             }
             if (count < capacity)
             {
-                char* file = malloc(strlen(corpus) + length + 2);
+                char* file = malloc(strlen(absolute) + length + 2);
                 if (file != NULL)
                 {
-                    sprintf(file, "%s/%s", corpus, entry->d_name);
+                    sprintf(file, "%s/%s", absolute, entry->d_name);
                     files[count++] = file;
                 }
             }
@@ -2478,6 +2482,8 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
                               strstr(text, "\nfatal error:") != NULL || strstr(text, ": fatal error:") != NULL);
         free(text);
     }
+    // Matching failures alone do not check object equivalence: a broken setup must never pass the corpus run.
+    check_units_test_expect(tally, compiled != 0, "the corpus has a successful standalone compilation", corpus);
     for (uint32_t poisoned = 0; made && arguments != NULL && statuses != NULL && poisoned < 2; poisoned += 1)
     {
         uint32_t used = 0;
@@ -2532,6 +2538,63 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
     free(arguments);
     free(statuses);
     free(diagnostics);
+}
+
+// Exercise --corpus through the command, including its exit status. Expected failures keep their temporary trees
+// under this suite's directory, so the suite's usual cleanup also removes them.
+static void check_units_test_corpus_harness(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    char inputs[PATH_MAX];
+    char invalid[PATH_MAX];
+    char empty[PATH_MAX];
+    char output[PATH_MAX];
+    char temporary[PATH_MAX + 8];
+    snprintf(inputs, sizeof(inputs), "%s/corpus inputs", directory);
+    snprintf(invalid, sizeof(invalid), "%s/corpus invalid", directory);
+    snprintf(empty, sizeof(empty), "%s/corpus empty", directory);
+    snprintf(output, sizeof(output), "%s/corpus_harness.txt", directory);
+    snprintf(temporary, sizeof(temporary), "TMPDIR=%s", directory);
+    bool made = mkdir(inputs, 0755) == 0 && mkdir(invalid, 0755) == 0 && mkdir(empty, 0755) == 0;
+    const char* const names[] = { "a.c", "b.c", "bad.c" };
+    const char* const sources[] = {
+        "int corpus_a(void) { return 1; }\n",
+        "int corpus_b(void) { return 2; }\n",
+        "int broken = ;\n",
+    };
+    for (uint32_t f = 0; made && f < BUSTER_ARRAY_LENGTH(names); f += 1)
+    {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", inputs, names[f]);
+        made = parse_test_write(path, sources[f], strlen(sources[f]));
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/bad.c", invalid);
+    made = made && parse_test_write(path, sources[2], strlen(sources[2]));
+    check_units_test_expect(tally, made, "write the corpus harness's fixtures", directory);
+    const char* const paths[] = {
+        "corpus inputs/../corpus inputs",
+        inputs,
+        "corpus invalid",
+        "corpus empty",
+        "corpus missing",
+        "corpus inputs/a.c",
+    };
+    for (uint32_t c = 0; made && c < BUSTER_ARRAY_LENGTH(paths); c += 1)
+    {
+        char* arguments[] = { "env", temporary, (char*)executable, "test-check-units", "--corpus", (char*)paths[c], NULL };
+        const int status = check_units_test_run(directory, arguments, output, "/dev/null", false);
+        uint64_t length = 0;
+        char* text = check_units_test_read(output, &length);
+        const bool success = c < 2;
+        check_units_test_expect(tally, status == (success ? 0 : 1), "the corpus command compiles usable paths and refuses unusable corpora", paths[c]);
+        const bool reported = text != NULL && (success ?
+            strstr(text, "  corpus: 3 files, 2 compiled, 3 objects as alone\n") != NULL &&
+            strstr(text, "  corpus: 3 files, 2 compiled, 3 objects as alone, the lanes' arenas poisoned\n") != NULL :
+            strstr(text, "  failed: the corpus has a successful standalone compilation: ") != NULL);
+        check_units_test_expect(tally, reported, "the corpus command reports real compilations or missing coverage", paths[c]);
+        free(text);
+    }
+    printf("  corpus harness: relative and absolute paths, mixed valid and invalid files; empty, all-invalid, missing and non-directory corpora refused\n");
 }
 
 // benchmark-check-units (#1128), at its smallest: three units by one lane and two, a run each, which must succeed and
@@ -2710,6 +2773,7 @@ static int run_check_units_tests(int argc, char** argv)
 #endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
+        check_units_test_corpus_harness(&tally, executable, directory);
         check_units_test_benchmark(&tally, executable, directory);
     }
     if (made && !keep && tally.failures == 0)
