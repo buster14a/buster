@@ -2438,7 +2438,11 @@ static bool oracle_without_pidfd;
 static bool oracle_run_spawn(OracleRun* run, bool traced)
 {
     bool result = run->tool[0] != 0 || oracle_find_tool(run->arguments[0], run->tool, sizeof(run->tool));
-    if (result && run->directory != 0 && run->tool[0] != '/')
+    struct stat current;
+    struct stat destination;
+    const bool same_directory = result && run->directory != 0 && run->tool[0] != '/' && stat(".", &current) == 0 && stat(run->directory, &destination) == 0 &&
+                                current.st_dev == destination.st_dev && current.st_ino == destination.st_ino;
+    if (result && run->directory != 0 && !same_directory && run->tool[0] != '/')
     {
         // Lookup is relative to this process, before the child changes directory. Keep the selected path's
         // spelling after the working directory: resolving symlinks changes a script's argv[0].
