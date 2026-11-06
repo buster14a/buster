@@ -2898,7 +2898,16 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
     arena_pop_to(scratch, mark);
-    check_program_lanes_release(lanes);
+    // A units' lane keeps lane 0's writer's columns for its next unit (check_program_lanes_settle, #442); a command of one
+    // file is done with them.
+    if (lanes != NULL && lanes->units_lane != NULL)
+    {
+        check_program_lanes_settle(lanes);
+    }
+    else
+    {
+        check_program_lanes_release(lanes);
+    }
     arena_release(&bytes);
     arena_release(&output);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);

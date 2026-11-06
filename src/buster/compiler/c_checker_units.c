@@ -2163,7 +2163,7 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
-    arena_release(&lane->functions.arenas[0].scratch);
+    check_program_lanes_release(&lane->functions);
     check_units_memory_give(lane);
 }
 
@@ -2534,10 +2534,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
         }
-        // And the lowering's runtime functions' names' lengths and hashes (#442), which every unit's lowering reads.
+        // And the lowering's runtime functions' names' lengths and hashes (#442), which every unit's lowering reads, before
+        // the lanes start: a lowering that finds them unmade measures and hashes the names itself, as the emission's
+        // backend setup leaves it to.
         if (ready && emitting && !check_lower_runtime_names_ready)
         {
-            ready = check_lower_runtime_names_initialize();
+            check_lower_runtime_names_initialize();
         }
         if (ready && command->mixed_inputs)
         {

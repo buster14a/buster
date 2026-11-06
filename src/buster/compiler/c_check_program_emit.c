@@ -691,7 +691,8 @@ static void check_program_lanes_use(CheckProgramLanes* lanes, uint32_t count)
     }
 }
 
-// Releases the lanes' arenas: after the caller is done with the last emission's link.
+// Releases the lanes' arenas: after the caller is done with the last emission's link. Lane 0's writer's columns too, which
+// a settle (check_program_lanes_settle) kept past the lanes it marked unused.
 static void check_program_lanes_release(CheckProgramLanes* lanes)
 {
     for (uint32_t lane = 0; lanes != NULL && lane < lanes->arenas_used; lane += 1)
@@ -703,6 +704,7 @@ static void check_program_lanes_release(CheckProgramLanes* lanes)
     }
     if (lanes != NULL)
     {
+        arena_release(&lanes->arenas[0].scratch);
         lanes->arenas_used = 0;
     }
 }
