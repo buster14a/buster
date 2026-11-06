@@ -53,12 +53,13 @@ timing requests retain the original complete-unit expression walk.
 publication times. `expressions` remains elapsed wall time; the detailed
 `expressions.work.*` fields sum work across lanes, rather than elapsed time.
 
-The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
-(and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
-of the bodies' tokens beyond the larger of the largest body's and twice the
-second largest's, no more than its lanes or the bodies: a lane's copy of the
-reader, which grows with the top level, and its wake-up must be paid for by its
-share of the walks. The calling thread cuts the bodies into parts before the
+The reader runs one lane per `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (and one per
+`BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens) of the
+bodies' tokens beyond the larger of the largest body's and twice the second
+largest's, at least one and no more than its lanes or the bodies: a lane's copy
+of the reader, which grows with the top level, and its wake-up must be paid for
+by its share of the walks, and a second lane needs two shares, since it also
+puts the merge's pass and the post-merge rounds on lanes (#447). The calling thread cuts the bodies into parts before the
 lanes start (`parts_by_cost`), stably promotes the part containing the largest
 body, and reads that part at once as the first lane. The others, woken for the
 bodies, take the rest in the remaining cost order from the counter
@@ -93,7 +94,8 @@ lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
-`--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+`--cpus` parser must refuse 65 CPUs without a write past its room for 64,
+and its `--rss` must see 16 MB of fresh pages in a peak it reset first.
 A lane's per-name columns must be laid out with their names' entries
 committed, kept, cleared after a poisoned reading and laid out again for more
 names, cleared where the kernel keeps their old pages
@@ -114,14 +116,18 @@ requiring real expression execution on the caller and at least one other lane.
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
 left to source order by reason. `./build/compiler benchmark-checker-deferred
-[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [-E's options]
-file...` times source order's reader against the deferred one on one lane and
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold] [--raw]
+[--rss] [-E's options] file...` times source order's reader against the deferred one on one lane and
 on up to N, with the parse, the top level, the bodies' walks, their position
 checks, the lanes' span and the merge apart (and the merge's parts: its replay,
 appended tables, events, tags, pass and rest), and what a lane costs: its copy of
 the reader, the launcher's dispatch, the other lanes' wake-up, which no lane
 waits for, and the lanes' arenas before the lanes start; and in how many passes
-the first lane read the largest body. Each deferred reading releases its state,
+the first lane read the largest body; then each reading's absolute median in
+nanoseconds (#447), with `--raw` every pass's unrounded samples, and with
+`--rss` each reading's peak resident memory and its growth over the reading's
+start, taken outside its time (`--cold`: fresh caller arenas, so the growth is
+all the reading touched). Each deferred reading releases its state,
 as a process's one reading does, or with `--warm` keeps it for the next, as a
 process's later readings do. One active lane uses
 the existing `lane_run_cold(1, ..., NULL)`, which starts no worker, makes no
