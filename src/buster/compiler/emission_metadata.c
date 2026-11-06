@@ -109,7 +109,7 @@ struct EmissionSourceEvent
 
 // Register numbers are the output ABI's unwind-register numbers, not an encoder's register numbering. RESTORE means
 // the CIE's initial rule, SAME_VALUE means the current register, and REGISTER names the holding register in value.
-// CFA/CFA_OFFSET and OFFSET carry signed byte offsets. This protocol does not assume eight-byte slots. A target
+// CFA/CFA_OFFSET and OFFSET carry signed 64-bit byte offsets. This protocol does not assume eight-byte slots. A target
 // writer may still refuse a rule it cannot encode. No expression or target-specific opcode is accepted implicitly.
 typedef enum EmissionFrameKind
 {
@@ -128,7 +128,7 @@ typedef struct EmissionFrameEvent EmissionFrameEvent;
 struct EmissionFrameEvent
 {
     EmissionAnchor at;
-    int32_t value;
+    int64_t value;
     uint16_t reg;
     uint8_t kind;
     uint8_t reserved;
@@ -163,14 +163,16 @@ struct EmissionSourceRow
 };
 
 typedef struct EmissionFrameRow EmissionFrameRow;
+// Keep the resolved row padding-free: fixed-shape recognition compares complete rows.
 struct EmissionFrameRow
 {
     uint32_t offset;
-    int32_t value;
     uint16_t reg;
     uint8_t kind;
     uint8_t reserved;
+    int64_t value;
 };
+_Static_assert(sizeof(EmissionFrameRow) == 16, "resolved frame rows have no padding");
 
 typedef struct EmissionStorage EmissionStorage;
 struct EmissionStorage
@@ -361,7 +363,7 @@ static EmissionCheck emission_metadata_check(const EmissionMetadata* metadata, c
                     } break;
                     case EMISSION_FRAME_REGISTER:
                     {
-                        valid &= event.reg < registers && event.value >= 0 && (uint32_t)event.value < registers;
+                        valid &= event.reg < registers && event.value >= 0 && event.value < registers;
                     } break;
                     case EMISSION_FRAME_RESTORE:
                     case EMISSION_FRAME_SAME_VALUE:

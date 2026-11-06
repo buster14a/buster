@@ -5,8 +5,8 @@
 // #134's acceptance on real and generated C (test-ssa-source):
 //
 //   build/compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes]
-//                                  [--keep] [preprocessor options] [file...]
-//   build/compiler test-ssa-source --self-test [--keep]
+//                                  [--typed] [--tier1] [--keep] [preprocessor options] [file...]
+//   build/compiler test-ssa-source --self-test [--typed] [--tier1] [--keep]
 //
 // Each file's functions, as -c compiles them (ir_source_prepare, test-ir-source's preparation, with the program kept),
 // are lowered to the IR with every local in memory and promoted by both of ssa_ir.c's paths, each with ssa.c's verifier
@@ -27,6 +27,11 @@
 // --lifetimes asks each program for its blocks' objects' lifetimes, as the C driver's --tier1 does (#177): the lowered IR
 // has their markers, and promotion makes a local undefined at each start of its block's (#141), which the form with
 // every local in memory, whose markers read and write nothing, must agree with on every program C defines.
+//
+// --tier1 additionally builds each program with --tier1 --tier1-strict --verify, with and without --scalar. Every
+// selected function must be compiled by Tier 1, and both native programs must finish with the interpreted output and
+// status. These runs follow the interpreter children sequentially. The interpreter children and native programs see
+// an empty environment in this mode, including libc's getenv, as well as main's explicit envp.
 //
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
 // with its functions, each path's phis and its runs, a line per failure, and the totals; the exit status is 1 on any
@@ -90,6 +95,9 @@ struct SsaSourceTotals
     uint64_t steps[BUSTER_SSA_SOURCE_FORMS];
     uint64_t generated;
     uint64_t unbuilt;
+    uint64_t native_programs;
+    uint64_t native_passed;
+    uint64_t native_functions[2];
 };
 
 // What a program is expected to do: exit with `status` (a wait status) having written `length` bytes of `output` to its
@@ -111,6 +119,10 @@ struct SsaSourceLimits
     // The programs' lifetimes (--lifetimes, ir_source_prepare's `lifetimes`).
     bool lifetimes;
     bool typed;
+    bool tier1;
+    // The actual compiler and its original working directory, borrowed for the command's duration.
+    const char* compiler;
+    const char* directory;
 };
 
 // What a run of a form gave: its process, its wait status (-1 if it couldn't be waited for), its output (malloc's), and
@@ -262,7 +274,7 @@ static __attribute__((noreturn)) void ssa_source_child_result(int descriptor, In
 // natives, their objects (stdout) by the sizes the program declares them with. Its exit status is main's result's low
 // byte, or 255 if the interpreter stopped it (past `steps` steps among other reasons). It never returns.
 static void ssa_source_child(const IrSourceFile* file, const IrFunction* functions, uint32_t entry, const char* directory, const char* output, const char* record,
-                             uint32_t timeout, uint64_t steps)
+                             uint32_t timeout, uint64_t steps, bool empty_environment)
 {
     const int input = open("/dev/null", O_RDONLY);
     const int capture = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -276,6 +288,18 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
     if (setvbuf(stdout, 0, _IOFBF, BUFSIZ) != 0)
     {
         ssa_source_child_failure();
+    }
+    char* environment[] = { NULL };
+    if (empty_environment)
+    {
+        // main's envp has always been empty here. Native comparisons also clear libc's environment, so imported
+        // getenv does not accidentally observe the harness's environment while the native executable cannot.
+        extern char** environ;
+        if (clearenv() != 0)
+        {
+            ssa_source_child_failure();
+        }
+        environ = environment;
     }
     alarm(timeout);
     if (functions == 0)
@@ -475,7 +499,7 @@ static void ssa_source_start_form(SsaSourceRun* run, const IrSourceFile* file, c
     run->child = fork();
     if (run->child == 0)
     {
-        ssa_source_child(file, functions, entry, directory, output, record, limits->timeout, limits->steps);
+        ssa_source_child(file, functions, entry, directory, output, record, limits->timeout, limits->steps, limits->tier1);
     }
 }
 
@@ -541,11 +565,14 @@ static bool ssa_source_same(const SsaSourceRun* a, const SsaSourceRun* b)
     return a->status == b->status && results && a->output != 0 && b->output != 0 && a->length == b->length && memcmp(a->output, b->output, a->length) == 0;
 }
 
+#include "ssa_source_native_test.c"
+
 // Runs the program in its three forms at once, each in a directory of its own under `work` (run-INDEX-FORM), and compares
 // them with each other and with `expected`, if any: whether they agree and give it, with each form's interpreter's steps
 // in `steps` (BUSTER_SSA_SOURCE_FORMS of them). The directories go unless the run fails or `keep`.
 static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* forms, uint32_t entry, const SsaSourceExpected* expected, const char* name, const char* work,
-                               uint64_t index, const SsaSourceLimits* limits, bool keep, uint64_t* steps, int* statuses)
+                               uint64_t index, const SsaSourceLimits* limits, bool keep, uint64_t* steps, int* statuses, char** options, uint32_t option_count,
+                               SsaSourceTotals* totals)
 {
     const uint32_t form_count = limits->typed ? BUSTER_SSA_SOURCE_FORMS : BUSTER_SSA_SOURCE_IR_FORMS;
     char directories[BUSTER_SSA_SOURCE_FORMS][PATH_MAX];
@@ -613,6 +640,27 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
             passed = false;
         }
     }
+    char native_directories[2][PATH_MAX];
+    bool native_started = false;
+    if (passed && limits->tier1)
+    {
+        // The interpreter children have all been reaped before either native build or run. The existing CPU budget
+        // covers these sequential processes too. Their observable outcome, not interpreter bookkeeping, must agree.
+        const SsaSourceExpected interpreted = { .output = runs[0].output, .length = runs[0].length, .status = runs[0].status };
+        native_started = true;
+        totals->native_programs += 1;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const int length = snprintf(native_directories[path], sizeof(native_directories[path]), "%s/run-%" PRIu64 "-tier1-%s", work, index,
+                                        path == 0 ? "vector" : "scalar");
+            const bool named = length >= 0 && (size_t)length < sizeof(native_directories[path]);
+            SsaSourceNativeResult result = { 0 };
+            const bool matched = named && ssa_source_native_one(name, options, option_count, native_directories[path], path != 0, &interpreted, file->count, limits, &result);
+            totals->native_functions[path] += matched ? result.functions : 0;
+            passed = matched && passed;
+        }
+        totals->native_passed += passed;
+    }
     for (uint32_t form = 0; form < form_count; form += 1)
     {
         free(runs[form].output);
@@ -620,6 +668,10 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
     for (uint32_t form = 0; passed && !keep && form < form_count; form += 1)
     {
         c_testsuite_remove_directory(directories[form]);
+    }
+    for (uint32_t path = 0; passed && !keep && native_started && path < 2; path += 1)
+    {
+        c_testsuite_remove_directory(native_directories[path]);
     }
     return passed;
 }
@@ -727,7 +779,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
         const SsaSourceExpected from_file = { .output = bytes, .length = length, .status = 0 };
         const SsaSourceExpected* wanted = expected != 0 ? expected : bytes != 0 ? &from_file : 0;
         uint64_t steps[BUSTER_SSA_SOURCE_FORMS] = { 0 };
-        const bool passed = ssa_source_execute(&file, forms, entry, wanted, name, work, totals->programs, limits, keep, steps, statuses);
+        const bool passed = ssa_source_execute(&file, forms, entry, wanted, name, work, totals->programs, limits, keep, steps, statuses, options, option_count, totals);
         totals->programs += 1;
         totals->passed += passed;
         snprintf(counted, sizeof(counted), " steps=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64, steps[0], steps[1], steps[2], steps[3]);
@@ -825,7 +877,7 @@ static void ssa_source_generated(SsaSourceTotals* totals, uint64_t seed, uint32_
 // no expected-output sidecar. In particular, the timeout must be three real SIGALRM outcomes with empty records, not
 // a fabricated wait status or a direct test of the acceptance predicate. Keep the directories until the controls have
 // checked every record; an unexpected failure keeps the whole work directory through the command's usual cleanup.
-static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work, bool typed)
+static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* requested)
 {
     typedef struct SsaSourceControl SsaSourceControl;
     struct SsaSourceControl
@@ -841,6 +893,7 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         // The program's functions, 1 for 0; and whether the file is left out, with no run.
         uint32_t functions;
         bool left_out;
+        bool native_only;
     };
     const SsaSourceControl controls[] = {
         {
@@ -908,11 +961,30 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
             .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
             .left_out = true,
         },
+        {
+            .name = "native-arguments-and-environment",
+            .source = "extern int strcmp(const char *, const char *); extern char *getenv(const char *);\n"
+                      "int main(int argc, char **argv, char **envp) { return argc != 1 || strcmp(argv[0], \"program\") != 0 || argv[1] != 0 || envp[0] != 0 ||\n"
+                      "getenv(\"BUSTER_SSA_SOURCE_NATIVE_SENTINEL\") != 0; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .recorded = true,
+            .result = INTERPRETER_OK,
+            .passed = true,
+            .native_only = true,
+        },
     };
-    bool passed = true;
+    const bool typed = requested->typed;
+    const char* previous = requested->tier1 ? getenv("BUSTER_SSA_SOURCE_NATIVE_SENTINEL") : NULL;
+    char* saved = previous != NULL ? strdup(previous) : NULL;
+    const bool environment_ready = !requested->tier1 || ((previous == NULL || saved != NULL) && setenv("BUSTER_SSA_SOURCE_NATIVE_SENTINEL", "inherited", 1) == 0);
+    bool passed = environment_ready;
     for (uint32_t control = 0; control < sizeof(controls) / sizeof(controls[0]); control += 1)
     {
         const SsaSourceControl* test = &controls[control];
+        if (test->native_only && !requested->tier1)
+        {
+            continue;
+        }
         char directory[PATH_MAX];
         char source[PATH_MAX];
         snprintf(directory, sizeof(directory), "%s/control-%u", work, control);
@@ -928,12 +1000,17 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         {
             SsaSourceLimits limits = test->limits;
             limits.typed = typed;
+            // The original interpreter-only failure controls must retain their own step/record outcomes. Successful
+            // programs additionally compare both native paths when requested, including exit(255) and aliases.
+            limits.tier1 = requested->tier1 && test->passed;
+            limits.compiler = requested->compiler;
+            limits.directory = requested->directory;
             ssa_source_file(&totals, source, 0, 0, 0, arenas, directory, &limits, true, statuses);
             const uint64_t functions = test->left_out ? 0 : test->functions != 0 ? test->functions : 1;
             // A file the preparation leaves out is counted as left out alone.
             checked = totals.files == (test->left_out ? 0 : 1) && totals.left_out == (uint64_t)test->left_out && totals.failed_files == 0 &&
                       totals.failures == 0 && totals.functions == functions && totals.programs == (test->left_out ? 0 : 1) &&
-                      totals.passed == (uint64_t)test->passed;
+                      totals.passed == (uint64_t)test->passed && (!limits.tier1 || (totals.native_programs == 1 && totals.native_passed == 1));
         }
         for (uint32_t form = 0; checked && !test->left_out && form < (typed ? BUSTER_SSA_SOURCE_FORMS : BUSTER_SSA_SOURCE_IR_FORMS); form += 1)
         {
@@ -955,6 +1032,12 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         printf("test-ssa-source: self-test=%s %s statuses=%d/%d/%d\n", test->name, checked ? "passed" : "FAILED", statuses[0], statuses[1], statuses[2]);
         passed = checked && passed;
     }
+    if (requested->tier1 && environment_ready)
+    {
+        const int restored = saved != NULL ? setenv("BUSTER_SSA_SOURCE_NATIVE_SENTINEL", saved, 1) : unsetenv("BUSTER_SSA_SOURCE_NATIVE_SENTINEL");
+        passed = restored == 0 && passed;
+    }
+    free(saved);
     return passed;
 }
 
@@ -972,6 +1055,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     bool keep = false;
     bool lifetimes = false;
     bool typed = false;
+    bool tier1 = false;
     bool self_test = false;
     bool valid = options != 0 && files != 0;
     for (int i = 0; valid && i < count; i += 1)
@@ -1013,6 +1097,10 @@ static int run_ssa_source_tests(int count, char** arguments)
         {
             typed = true;
         }
+        else if (strcmp(arguments[i], "--tier1") == 0)
+        {
+            tier1 = true;
+        }
         else if (arguments[i][0] != '-')
         {
             files[file_count++] = arguments[i];
@@ -1029,6 +1117,17 @@ static int run_ssa_source_tests(int count, char** arguments)
         }
     }
     valid = valid && (self_test ? file_count == 0 && generate == 0 : file_count != 0 || generate != 0);
+    char compiler[PATH_MAX] = { 0 };
+    char directory[PATH_MAX] = { 0 };
+    if (valid && tier1)
+    {
+        const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
+        valid = length > 0 && (size_t)length < sizeof(compiler) - 1 && getcwd(directory, sizeof(directory)) != NULL;
+        if (valid)
+        {
+            compiler[length] = 0;
+        }
+    }
     SsaSourceArenas arenas = {
         .lowered = arena_reserve(UINT64_C(1) << 36),
         .tables = arena_reserve(UINT64_C(1) << 32),
@@ -1045,9 +1144,18 @@ static int run_ssa_source_tests(int count, char** arguments)
     snprintf(work, sizeof(work), "%s/ssa-source-XXXXXX", temporary != 0 && temporary[0] == '/' ? temporary : "/tmp");
     valid = valid && mkdtemp(work) != 0;
     const bool epoch = valid && oracle_epoch_begin();
-    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps, .lifetimes = lifetimes, .typed = typed };
+    const SsaSourceLimits limits = {
+        .timeout = (uint32_t)timeout,
+        .steps = steps,
+        .lifetimes = lifetimes,
+        .typed = typed,
+        .tier1 = tier1,
+        .compiler = compiler,
+        .directory = directory,
+    };
     SsaSourceTotals totals = { 0 };
-    const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work, typed);
+    const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work, &limits);
+    const bool native_controls = !valid || !self_test || !tier1 || ssa_source_native_tests(work, &limits);
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         ssa_source_file(&totals, files[i], options, option_count, 0, &arenas, work, &limits, keep, 0);
@@ -1056,15 +1164,17 @@ static int run_ssa_source_tests(int count, char** arguments)
     {
         ssa_source_generated(&totals, seed, (uint32_t)generate, clang, options, option_count, &arenas, work, &limits, keep);
     }
-    const bool passed = valid && controls && totals.failed_files == 0 && totals.failures == 0 && totals.passed == totals.programs && totals.unbuilt == 0 &&
-                        (self_test || totals.functions != 0);
+    const bool passed = valid && controls && native_controls && totals.failed_files == 0 && totals.failures == 0 && totals.passed == totals.programs && totals.unbuilt == 0 &&
+                        (self_test || totals.functions != 0) && (!tier1 || (totals.left_out == 0 && totals.native_programs == totals.programs && totals.native_passed == totals.programs));
     if (valid)
     {
         printf("test-ssa-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " instructions=%" PRIu64
                " promoted=%" PRIu64 "/%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%" PRIu64 " programs=%" PRIu64 " passed=%" PRIu64 " steps=%" PRIu64
-               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 "\n",
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 " native_programs=%" PRIu64 " native_passed=%" PRIu64
+               " native_functions=%" PRIu64 "/%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.instructions, totals.promoted[0], totals.promoted[1], totals.phis[0],
-               totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt);
+               totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt,
+               totals.native_programs, totals.native_passed, totals.native_functions[0], totals.native_functions[1]);
         oracle_cache_report(oracle_cache(), "test-ssa-source");
         if (!keep && passed)
         {
@@ -1077,8 +1187,8 @@ static int run_ssa_source_tests(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes] [--typed] [--keep] [preprocessor options] "
-                        "[file...]\n       compiler test-ssa-source --self-test [--typed] [--keep]\n");
+        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes] [--typed] [--tier1] [--keep] [preprocessor options] "
+                        "[file...]\n       compiler test-ssa-source --self-test [--typed] [--tier1] [--keep]\n");
     }
     oracle_epoch_end(epoch);
     for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)

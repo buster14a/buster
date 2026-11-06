@@ -159,7 +159,8 @@ static void tier1_select_test_signed_loads(Tier1SelectTest* test)
                                 if (variant == 0)
                                 {
                                     const Tier1SelectPattern* pattern = &plan.patterns[6];
-                                    tier1_select_test_expect(test, pattern->rule == TIER1_RULE_LOAD_ADDRESS && pattern->source_width == source_width && pattern->width == width &&
+                                    tier1_select_test_expect(test, pattern->rule == TIER1_RULE_LOAD_ADDRESS && pattern->width == source_width &&
+                                                                     pattern->operation == X86_OPERATION_MOVSX && (pattern->source_width == 4 || pattern->source_width == 8) &&
                                                                      pattern->values[0] == 0 && pattern->values[1] == 1 && plan.covered[3] != 0,
                                                              "signed load retains the access width and folds its base and index");
                                     const uint32_t first = plan.effective_use_offsets[6];

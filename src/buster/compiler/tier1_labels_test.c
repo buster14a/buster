@@ -13,8 +13,8 @@
 #define BUSTER_TIER1_LABELS_SAMPLES 64u
 
 // The code's branches sized and encoded into new pages, each reference to label k's symbol (k + 1) given label k's
-// first record's address, and made executable: whether it runs natively here. The caller unmaps `executable`
-// (MAP_FAILED where nothing was mapped).
+// first record's address, and made executable: whether it runs natively here. An absent label (UINT32_MAX) keeps the
+// driver's symbol placeholder at byte zero. The caller unmaps `executable` (MAP_FAILED where nothing was mapped).
 static bool tier1_labels_load(Tier1EmitTest* test, const Tier1EmitResult* emitted, void** executable, uint64_t* bytes)
 {
     const Tier1SelectCode* code = &emitted->code;
@@ -43,12 +43,14 @@ static bool tier1_labels_load(Tier1EmitTest* test, const Tier1EmitResult* emitte
         const LinkReference* reference = &emitted->references[r];
         const uint32_t label = reference->target - 1;
         const uint32_t distance = x86_fixup_distance(code->records[reference->instruction].form, reference->field);
-        ready = reference->kind == BUSTER_LINK_FIXUP_PC32 && reference->addend == 0 && reference->target != 0 && label < emitted->label_count && distance == sizeof(int32_t) && ends[r] >= distance &&
-                ends[r] <= (uint64_t)size;
+        ready = reference->kind == BUSTER_LINK_FIXUP_PC32 && reference->addend == 0 && reference->target != 0 && label < emitted->label_count &&
+                (emitted->label_records[label] < code->count || emitted->label_records[label] == UINT32_MAX) && distance == sizeof(int32_t) && ends[r] >= distance && ends[r] <= (uint64_t)size;
         tier1_emit_test_expect(test, ready, "each of the function's references is a label's address from rip");
         if (ready)
         {
-            const int32_t relative = (int32_t)((int64_t)offsets[emitted->label_records[label]] - (int64_t)ends[r]);
+            const uint32_t record = emitted->label_records[label];
+            const uint32_t offset = record == UINT32_MAX ? 0 : offsets[record];
+            const int32_t relative = (int32_t)((int64_t)offset - (int64_t)ends[r]);
             memcpy((uint8_t*)*executable + ends[r] - distance, &relative, sizeof(relative));
         }
     }
@@ -139,15 +141,25 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
     return stub;
 }
 
-// #1016's review, one compile of the chain's function (`fixture` 0) or of the shared labels' with phis (1) or without (2)
-// by one path and one set of options: its emission's error, and where the chain's or the shared labels' without phis
-// emits, its code run on the samples against its oracle. The arenas are as they were after a refusal.
+// #1016's review, one compile of the chain's function (`fixture` 0) or of the shared labels' with phis (1), without (2),
+// or with an absent third label (3, the optimizer's representation of an unreachable label): by one path and one set
+// of options, its emission's error, and where the chain's or the shared labels' without phis emits, its code run on
+// the samples against its oracle. The arenas are as they were after a refusal.
 static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t register_mask)
 {
     IrFunction function;
     const bool created = fixture == 0 ? tier1_select_test_indirect_chain_function(&test->input, &function) : tier1_select_test_shared_labels_function(&test->input, fixture == 1, &function);
+    uint32_t labels[] = { 3, 4, BUSTER_IR_NONE };
+    if (created && fixture == 3)
+    {
+        function.labels = labels;
+        function.label_count = BUSTER_ARRAY_LENGTH(labels);
+        function.symbol_count += 1;
+    }
+    const bool verified = created && (fixture != 3 || (ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK));
+    tier1_emit_test_expect(test, fixture != 3 || verified, "an absent label outside both indirect jumps' target lists is valid IR by both paths");
     IrDominance dominance;
-    const bool dominated = created && tier1_terminal_dominance(test, &function, vector, &dominance);
+    const bool dominated = verified && tier1_terminal_dominance(test, &function, vector, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
@@ -168,9 +180,10 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
     void* executable = MAP_FAILED;
     uint64_t bytes = 0;
     const uint64_t skipped = test->native_skipped;
-    const bool kept = error == TIER1_EMIT_OK && fixture != 1 && emitted.label_count == 2;
+    const bool kept = error == TIER1_EMIT_OK && fixture != 1 && emitted.label_count == (fixture == 3 ? 3 : 2) && emitted.label_records[0] < emitted.code.count &&
+                      emitted.label_records[1] < emitted.code.count && (fixture != 3 || emitted.label_records[2] == UINT32_MAX);
     const bool loaded = kept && tier1_labels_load(test, &emitted, &executable, &bytes);
-    tier1_emit_test_expect(test, error != TIER1_EMIT_OK || fixture == 1 || (kept && (loaded || test->native_skipped > skipped)), "an emitted review fixture keeps both labels' records and runs");
+    tier1_emit_test_expect(test, error != TIER1_EMIT_OK || fixture == 1 || (kept && (loaded || test->native_skipped > skipped)), "an emitted review fixture keeps its live labels and any absent label marker and runs");
     if (loaded)
     {
         uint64_t random = UINT64_C(0x3c5e7a91b2d4f608) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ ((uint64_t)fixture << 32);
@@ -213,6 +226,7 @@ static void tier1_labels_review(Tier1EmitTest* test)
         tier1_emit_test_expect(test, tier1_labels_review_compile(test, 0, vector, rematerialize, mask) == TIER1_EMIT_OK, "a later block's chain that only earlier blocks read emits");
         tier1_emit_test_expect(test, tier1_labels_review_compile(test, 1, vector, rematerialize, mask) == TIER1_EMIT_UNSUPPORTED, "two jumps sharing a label whose edges have stubs are refused");
         tier1_emit_test_expect(test, tier1_labels_review_compile(test, 2, vector, rematerialize, mask) == TIER1_EMIT_OK, "two jumps sharing labels whose edges have no moves emit");
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 3, vector, rematerialize, mask) == TIER1_EMIT_OK, "two indirect jumps and an absent label emit without inventing a target at entry");
     }
 }
 

@@ -45,8 +45,9 @@ static bool check_init_history_needed(const Parser* parser, uint32_t begin, uint
             {
                 const uint8_t kind = parser->tokens.kinds[first + i];
                 const uint8_t previous = first + i != 0 ? parser->tokens.kinds[first + i - 1] : 0;
-                needed = (kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE) &&
-                         (previous == PARSE_KIND_L_BRACE || previous == PARSE_KIND_COMMA);
+                needed = ((kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE) &&
+                          (previous == PARSE_KIND_L_BRACE || previous == PARSE_KIND_COMMA)) ||
+                         (kind == PARSE_KIND_COLON && first + i > begin && check_init_old_style_designator(parser, first + i - 1, end));
             }
         }
         else
@@ -54,12 +55,15 @@ static bool check_init_history_needed(const Parser* parser, uint32_t begin, uint
             const __mmask64 lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
             const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, parser->tokens.kinds + first);
             uint64_t selected = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_PERIOD)) |
-                                 _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_SQUARE))) & lanes;
+                                 _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) |
+                                 _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_COLON))) & lanes;
             for (; !needed && selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
                 const uint8_t previous = token != 0 ? parser->tokens.kinds[token - 1] : 0;
-                needed = previous == PARSE_KIND_L_BRACE || previous == PARSE_KIND_COMMA;
+                needed = parser->tokens.kinds[token] == PARSE_KIND_COLON ?
+                         token > begin && check_init_old_style_designator(parser, token - 1, end) :
+                         previous == PARSE_KIND_L_BRACE || previous == PARSE_KIND_COMMA;
             }
         }
     }

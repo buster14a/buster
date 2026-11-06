@@ -789,7 +789,7 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
         .location = 4,
     };
     f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 0, 0);
-    tier1_cert_test_pair(test, &f, 0, "exit assertions name one location per value");
+    tier1_cert_test_pair(test, &f, 1, "exit assertions independently prove multiple homes per value");
     f.exit[1] = (Tier1CertFact){
         .value = 1,
         .location = 7,
@@ -1176,7 +1176,7 @@ static void tier1_cert_test_bounds(Tier1CertTest* test)
     f.code[0][0].locations[0] = 0;
     f.blocks[0].certificate_count = 3;
     f.facts[0][2] = f.facts[0][0];
-    tier1_cert_test_pair(test, &f, 0, "duplicate one-location assertion");
+    tier1_cert_test_pair(test, &f, 1, "duplicate assertion is idempotent");
     f.blocks[0].certificate_count = 2;
     f.program.location_count = UINT32_MAX;
     tier1_cert_test_pair(test, &f, 0, "oversized domain rejected");
@@ -1193,6 +1193,185 @@ static void tier1_cert_test_bounds(Tier1CertTest* test)
     tier1_cert_test_pair(test, &f, 1, "empty function with zero storage and values");
 }
 
+// Multiple homes are assumptions local to a block, not a valid-row flag: each
+// home needs proof on every incoming edge, including after clobbers and name
+// redefinitions. Exercise the fast token forest against the dense oracle.
+static void tier1_cert_test_homes(Tier1CertTest* test)
+{
+    Tier1CertFixture f;
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        tier1_cert_test_init(&f);
+        const uint32_t reg = variant == 0 ? 0 : variant == 1 ? 7 : variant == 2 ? 9 : 11;
+        const uint32_t width = f.locations[reg].width;
+        f.values[0].width = (uint16_t)width;
+        f.values[0].class = f.locations[reg].class;
+        f.locations[4].width = (uint16_t)width;
+        f.locations[4].extent = (uint16_t)width;
+        f.entry[0].location = reg;
+        f.facts[0][0] = f.entry[0];
+        f.program.block_count = 2;
+        f.blocks[0].edge_count = 1;
+        f.edges[0][0].destination = 1;
+        f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, reg, 0);
+        f.facts[1][0] = f.entry[0];
+        f.facts[1][1] = (Tier1CertFact){
+            .value = 0,
+            .location = 4,
+        };
+        f.facts[1][2] = f.entry[1];
+        f.blocks[1].certificate_count = 3;
+        tier1_cert_test_use(&f, 1, 1, 1, false);
+        f.source[1][0].after[0] = reg;
+        f.source[1][0].after_count = 1;
+        f.code[1][f.blocks[1].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, reg, 4, 0);
+        tier1_cert_test_use(&f, 1, 0, reg, false);
+        tier1_cert_test_pair(test, &f, 1, "a proved row survives a call clobber beside the register assertion");
+        f.code[0][0].a = reg;
+        tier1_cert_test_pair(test, &f, 0, "a row without its predecessor store is not proved");
+        f.code[0][0].a = 4;
+        const Tier1CertFact row = f.facts[1][1];
+        f.facts[1][1] = f.entry[1];
+        f.blocks[1].certificate_count = 2;
+        tier1_cert_test_pair(test, &f, 0, "inferred but unasserted row cannot supply a local reload");
+        f.facts[1][1] = row;
+        f.blocks[1].certificate_count = 3;
+        // A definition changes the name, not the bytes saved under its old incarnation.
+        tier1_cert_test_def(&f, 0, 0, reg);
+        tier1_cert_test_pair(test, &f, 0, "a redefined name cannot keep its old row as a second home");
+    }
+
+    // One 32-bit value stored and loaded by the emitter's 64-bit moves: the
+    // row assertion covers only its defined low bytes, not unknown upper bits.
+    tier1_cert_test_init(&f);
+    f.values[0].width = 4;
+    f.entry[0].location = 7;
+    f.facts[0][0] = f.entry[0];
+    f.locations[16] = f.locations[15];
+    f.locations[16].unit = 32;
+    f.program.location_count = 17;
+    f.program.block_count = 2;
+    f.blocks[0].edge_count = 1;
+    f.edges[0][0].destination = 1;
+    f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 0, 0);
+    f.facts[1][0] = f.entry[0];
+    f.facts[1][1] = (Tier1CertFact){
+        .value = 0,
+        .location = 16,
+    };
+    f.facts[1][2] = f.entry[1];
+    f.blocks[1].certificate_count = 3;
+    tier1_cert_test_use(&f, 1, 1, 1, false);
+    f.source[1][0].after[0] = 0;
+    f.source[1][0].after_count = 1;
+    f.code[1][f.blocks[1].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 0, 4, 0);
+    tier1_cert_test_use(&f, 1, 0, 7, false);
+    tier1_cert_test_pair(test, &f, 1, "a narrow carried row proves only the value width inside a wide move");
+    f.facts[1][1].location = 15;
+    tier1_cert_test_pair(test, &f, 0, "unknown upper row bytes cannot assert the narrow value");
+
+    tier1_cert_test_init(&f);
+    f.program.block_count = 4;
+    f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 0, 0);
+    f.blocks[0].edge_count = 2;
+    f.edges[0][0].destination = 1;
+    f.edges[0][1].destination = 2;
+    for (uint32_t b = 1; b < 4; b += 1)
+    {
+        f.facts[b][0] = f.entry[0];
+        f.facts[b][1] = f.entry[1];
+        f.facts[b][2] = (Tier1CertFact){
+            .value = 0,
+            .location = 4,
+        };
+        f.blocks[b].certificate_count = 3;
+        f.blocks[b].edge_count = b < 3 ? 1 : 0;
+        f.edges[b][0].destination = 3;
+    }
+    tier1_cert_test_use(&f, 3, 0, 4, true);
+    tier1_cert_test_pair(test, &f, 1, "a join may assert both homes when every incoming edge proves both");
+    f.facts[3][2].value = 1;
+    tier1_cert_test_pair(test, &f, 0, "the wrong value's carried row is refused at an edge");
+    f.facts[3][2].value = 0;
+    f.code[2][f.blocks[2].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 1, 0);
+    tier1_cert_test_pair(test, &f, 0, "one predecessor overwriting the saved row invalidates the join assertion");
+    f.blocks[2].code_count = 0;
+    f.blocks[3].edge_count = 1;
+    f.edges[3][0].destination = 1;
+    tier1_cert_test_pair(test, &f, 1, "unchanged multiple homes are proved across a loop");
+    tier1_cert_test_def(&f, 3, 0, 0);
+    tier1_cert_test_pair(test, &f, 0, "a loop back edge cannot assert the previous incarnation's row");
+
+    // Undefined phi inputs are choices of bits, not equality proofs between arbitrary physical homes. Joining
+    // otherwise independent ABI values through an undef's two assertions would certify the wrong original use.
+    tier1_cert_test_init(&f);
+    f.program.block_count = 2;
+    f.blocks[0].edge_count = 1;
+    f.edges[0][0].destination = 1;
+    f.edges[0][0].rename_count = 1;
+    f.renames[0][0][0] = (Tier1CertRename){ .destination = 2, .source = BUSTER_CERT_NONE };
+    f.facts[1][0] = f.entry[0];
+    f.facts[1][1] = f.entry[1];
+    f.facts[1][2] = (Tier1CertFact){ .value = 2, .location = 0 };
+    f.facts[1][3] = (Tier1CertFact){ .value = 2, .location = 1 };
+    f.blocks[1].certificate_count = 4;
+    tier1_cert_test_use(&f, 1, 0, 1, false);
+    tier1_cert_test_pair(test, &f, 0, "an undefined phi cannot join independent known values through two homes");
+    f.blocks[1].certificate_count = 3;
+    f.code[1][0].locations[0] = 0;
+    tier1_cert_test_pair(test, &f, 1, "an undefined phi may alias one known physical home");
+    f.locations[16] = f.locations[0];
+    f.program.location_count = 17;
+    f.facts[1][3].location = 16;
+    f.blocks[1].certificate_count = 4;
+    tier1_cert_test_pair(test, &f, 1, "duplicate physical views of an undefined phi remain idempotent");
+    f.facts[1][3].location = 2;
+    tier1_cert_test_pair(test, &f, 0, "an undefined phi still cannot assert equality with uninitialized storage");
+    // A defined incoming phi can have several homes: the source's actual store proves their equality.
+    f.renames[0][0][0].source = 0;
+    f.facts[1][0] = (Tier1CertFact){ .value = 2, .location = 0 };
+    f.facts[1][1] = (Tier1CertFact){ .value = 2, .location = 4 };
+    f.blocks[1].certificate_count = 2;
+    f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 0, 0);
+    f.source[1][0].operands[0].value = 2;
+    tier1_cert_test_use(&f, 1, 2, 4, true);
+    tier1_cert_test_pair(test, &f, 1, "a defined phi may carry independently proved register and row homes");
+
+    // All six orders of a:R, b:S, a:S must establish b:R too. In particular,
+    // the last fact may join two tokens that already own disjoint homes.
+    for (uint32_t first = 0; first < 3; first += 1)
+    {
+        for (uint32_t second = 0; second < 3; second += 1)
+        {
+            if (first != second)
+            {
+                tier1_cert_test_init(&f);
+                f.entry[1].location = 0;
+                f.facts[0][1] = f.entry[1];
+                f.program.block_count = 2;
+                f.blocks[0].edge_count = 1;
+                f.edges[0][0].destination = 1;
+                f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 1, 0, 0);
+                const Tier1CertFact assertions[3] = {
+                    { .value = 0, .location = 0 },
+                    { .value = 1, .location = 1 },
+                    { .value = 0, .location = 1 },
+                };
+                f.facts[1][0] = assertions[first];
+                f.facts[1][1] = assertions[second];
+                f.facts[1][2] = assertions[3 - first - second];
+                f.blocks[1].certificate_count = 3;
+                tier1_cert_test_use(&f, 1, 1, 0, false);
+                tier1_cert_test_use(&f, 1, 0, 1, false);
+                tier1_cert_test_pair(test, &f, 1, "multiple-home alias closure is independent of assertion order");
+                f.entry[1].location = 1;
+                f.facts[0][1] = f.entry[1];
+                tier1_cert_test_pair(test, &f, 0, "alias closure is not proof that initially distinct values agree");
+            }
+        }
+    }
+}
+
 static int run_tier1_certificate_tests(void)
 {
     Tier1CertTest test = {
@@ -1207,6 +1386,7 @@ static int run_tier1_certificate_tests(void)
     else
     {
         tier1_cert_test_cases(&test);
+        tier1_cert_test_homes(&test);
         tier1_cert_test_fuzz(&test);
         tier1_cert_test_bounds(&test);
         tier1_cert_test_guards(&test);

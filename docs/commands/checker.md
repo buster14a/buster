@@ -20,8 +20,9 @@ requirements. [Command index](README.md).
   first, so that its error is clang's first (`c_checker_driver.c`);
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
-  each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
-  "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
+  each one's class, numbers their nodes into a batch whose columns it writes 16
+  nodes at a time (`check_input_expression_flush`), with the walk (`--scalar`)
+  its twin (`docs/c-checker.md`'s "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
   an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
   "The sparse output columns", #628), and `attributes` as a wide one, of 64-bit
   values ("The attributes column", #1167); `c_check_binding.c` publishes each use's retained answer from those events
@@ -67,7 +68,10 @@ requirements. [Command index](README.md).
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
-  `--program-selection` selects the emission-selection and constant-if regressions alone, including #1194's
+  `--program-selection` selects the emission-selection, constant-if and constant-switch regressions alone.
+  The switch fixtures (#1192, `c_check_program_switch_test.c`) cover matching/default/no-match dispatch,
+  fallthrough, converted values, range ordering, label/declaration/inner-break fallbacks, nonfoldable selectors,
+  nested scopes, cleanups, VLAs and dropped statics. The constant-if fixtures include #1194's
   statement-expression paths: scalar/vector and eager/lazy objects must agree byte for byte and match Clang's
   symbols and execution. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
@@ -80,17 +84,33 @@ requirements. [Command index](README.md).
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
+  `--semantic-diagnostics` selects #1107's common semantic-error catalogue: exact Clang messages and columns,
+  valid twins and a later syntax error, through both corpus paths and both driver paths. The default constraint
+  suite includes it too. `c_check_semantic_diagnostic.c` spells the retained names, types, converted case values
+  and decoded static-assert messages only on failure; corrected carets leave publication order unchanged.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
+  compares original GNU `noderef` placement, propagation, conversion,
+  address-cancellation and unevaluated-expression fixtures with pinned Clang
+  in GNU C17 and C23. It checks complete diagnostic lines and notes through
+  scalar, ordinary and poisoned deferred-reader paths, plus `-Werror=noderef`.
+  Aggregate cases cover arrays, nested designators, anonymous records,
+  overlapping union alternatives, atomic pointer elements, compound literals
+  and GNU range initialization, including preservation and removal of marks.
+  Each body has at most one warned dereference because Clang's delayed warning
+  order for multiple accesses is unstable across invocations.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
   including scheduling and output materialization. `docs/c-checker.md`
-  records the actual contract and the remaining declaration/initializer,
-  control-flow, corpus and downstream integration still needed
-  for #133; this module does not establish whole-compiler semantic coverage.
+  records the checker contract, declaration/initializer and control-flow
+  integration, constraint catalogue, corpus qualification and measurements
+  completed for #133. [Stage 4 acceptance](../type-checking-ssa.md) connects
+  that evidence to the typed-stream and SSA consumers; expression checking
+  alone does not establish whole-compiler semantic coverage.
 - `src/buster/compiler/c_check_request.c` is one request's configuration
   (#1057): the code generation, instrumentation and layout options the
   driver refuses (`check_request_scan`, `check_request_refusal`, among them

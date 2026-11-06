@@ -2251,8 +2251,8 @@ static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* 
         const bool counted = test->expression_acted[code] != 0 || test->expression_left[code] != 0;
         // The classes whose actions leave valid code to the walk by design: a K&R unit's or a constexpr object's
         // identifiers, a function's name, a label's address, sizeof or alignof, and K&R calls. An initializer's
-        // assignment, a builtin's token and an intrinsic's call are the walk's class (check_input_expression_fold), and
-        // a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
+        // assignment is its own class, a builtin's token and an intrinsic's call the walk's (check_input_expression_fold),
+        // and a statement expression's terminators are the terminators' action's. The others' actions leave a token only where
         // a child has no value or the walk refuses the token (their guard keeps the walk's refusal), and a list's takes
         // every token; DROP's tokens never reach an action.
         const bool declines = code == CHECK_INPUT_CODE_IDENTIFIER || code == CHECK_INPUT_CODE_LITERAL || code == CHECK_INPUT_CODE_PREFIX ||
@@ -6180,6 +6180,7 @@ static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
+static void check_test_semantic_diagnostics(CheckTest* test, const char* clang);
 static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang);
 static void check_test_undeclared(CheckTest* test, const char* clang);
 
@@ -6207,6 +6208,7 @@ static int run_checker_tests(int argc, char** argv)
     bool requests = false;
     bool sizeof_only = false;
     bool transitions_only = false;
+    bool semantic_diagnostics = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6274,6 +6276,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             requests = true;
         }
+        else if (strcmp(argv[i], "--semantic-diagnostics") == 0)
+        {
+            semantic_diagnostics = true;
+        }
         else if (strcmp(argv[i], "--transitions") == 0)
         {
             transitions_only = true;
@@ -6303,16 +6309,20 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || semantic_diagnostics || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && transitions_only)
+        if (initialized && semantic_diagnostics)
+        {
+            check_test_semantic_diagnostics(&test, clang);
+        }
+        else if (initialized && transitions_only)
         {
             check_test_transitions(&test);
         }
@@ -6627,6 +6637,7 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_identifier_leaves(&test);
                 check_test_literal_values(&test);
+                check_test_expression_flush(&test);
             }
             if (check_test_takes())
             {
