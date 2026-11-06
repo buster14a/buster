@@ -110,8 +110,14 @@ command that fails every run;
 with `-g`, the executables by `--lanes` 1 and 8, poisoned and by each path the
 same bytes, and each unit's `-c -g` object its own alone. With `--corpus DIR`
 it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
-each alone, and with `--generate DIR` it writes a program of synth's shape
-(512 units of 200 functions by default) for measurements, and tests nothing.
+each alone. DIR may be relative to the command's working directory; it is
+resolved before compiler children change to their output directories. At least
+one file must compile alone: an empty or all-failing corpus is a failed test,
+even when the failures match. The default suite checks relative and absolute
+paths on a mix of valid and invalid files, and rejects empty, all-invalid,
+missing and non-directory corpora. With `--generate DIR` it writes a program
+of synth's shape (512 units of 200 functions by default) for measurements,
+and tests nothing.
 [docs/translation-units.md](../../docs/translation-units.md) has the design and the
 measurements. The end-to-end single- and multi-unit contract, with the
 mixed-tier and actual command-team receipts, is

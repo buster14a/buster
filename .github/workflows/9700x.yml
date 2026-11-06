@@ -485,6 +485,23 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
+      - name: Preserve failed source SSA comparison inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ssa-source-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-O${{ matrix.optimization }}-shard${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ssa-source-*/**/*.c
+            /tmp/ssa-source-*/**/*.log
+            /tmp/ssa-source-*/**/*.out
+            /tmp/ssa-source-*/**/output
+            ${{ runner.temp }}/ssa-source-*/**/*.c
+            ${{ runner.temp }}/ssa-source-*/**/*.log
+            ${{ runner.temp }}/ssa-source-*/**/*.out
+            ${{ runner.temp }}/ssa-source-*/**/output
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Compile main.c alone under TSan or MSan
         # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
         # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the
@@ -1925,11 +1942,11 @@ jobs:
           # SQLite 3.53.2's test/speedtest1.c (#136's) and Lua 5.4.8's release, by their hashes.
           inputs="$RUNNER_TEMP/tier1-programs"
           mkdir -p "$inputs"
-          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
-            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
-          curl --fail --location --retry 3 --output "$inputs/lua-5.4.8.tar.gz" https://www.lua.org/ftp/lua-5.4.8.tar.gz
-          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" \
-            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz" | sha256sum --check
+          bash tools/ci/cached-download.sh \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c \
+            b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c"
+          bash tools/ci/cached-download.sh https://www.lua.org/ftp/lua-5.4.8.tar.gz \
+            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz"
           tar -xzf "$inputs/lua-5.4.8.tar.gz" -C "$inputs"
           # tcc as measure-compile's step pins it.
           tcc="$(command -v tcc)"

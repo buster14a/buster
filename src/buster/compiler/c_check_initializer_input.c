@@ -19,6 +19,7 @@ struct CheckInitializers
     uint32_t* warning_tokens;
     uint32_t warning_count;
     CheckInitStatus status;
+    TypeId failed_type;
     uint32_t token;
     uint32_t completion;
 };
@@ -220,6 +221,19 @@ static bool check_init_warning_collector(CheckInitWarningCollector* collector, C
     return valid;
 }
 
+static void check_initializers_noderef(CheckInitWarningSink* warnings, const CheckInput* input, uint32_t declaration)
+{
+    if (warnings != NULL)
+    {
+        warnings->noderef = (CheckNoderefInitializer){
+            .values = input->noderef_values,
+            .root = check_input_noderef_at(input, declaration),
+            .members = input->noderef_members,
+            .member_count = input->noderef_member_count,
+        };
+    }
+}
+
 // The warnings' tokens the collector added to its sink from `first` on, in token order: the tokens it saw, 64 at a time
 // (the scalar path takes every token), where it added any.
 static void check_init_warning_order(CheckInitWarningCollector* collector, uint32_t first, bool scalar)
@@ -248,6 +262,7 @@ typedef struct CheckInitDiagnostic CheckInitDiagnostic;
 struct CheckInitDiagnostic
 {
     CheckInitStatus status;
+    TypeId failed_type;
     uint32_t token;
     uint32_t completion;
     uint32_t warning_count;
@@ -379,6 +394,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         if (eligible)
         {
             CheckInitializer plan = { 0 };
+            check_initializers_noderef(warnings, input, declaration);
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
@@ -397,6 +413,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             else if (!accepted && plan.status != CHECK_INIT_CHECK_FAILED && plan.failed_token < result->token)
             {
                 result->status = plan.status;
+                result->failed_type = plan.failed_type;
                 result->token = plan.failed_token;
                 result->completion = end;
             }
@@ -528,6 +545,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         }
         else
         {
+            check_initializers_noderef(&warnings, input, token);
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                       input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
                                       check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
@@ -545,6 +563,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         else
         {
             result->status = plan->status;
+            result->failed_type = plan->failed_type;
             result->token = plan->failed_token;
             result->completion = check_sparse_get(input->initializer_ends, token);
 
@@ -560,10 +579,11 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
     else
     {
         const CheckInitStatus status = result->status;
+        const TypeId failed_type = result->failed_type;
         const uint32_t token = result->token;
         const uint32_t completion = result->completion;
         arena_pop_to(output, output_mark);
-        *result = (CheckInitializers){ .status = status, .token = token, .completion = completion };
+        *result = (CheckInitializers){ .status = status, .failed_type = failed_type, .token = token, .completion = completion };
         if (semantic != NULL)
         {
             if (semantic->arena != NULL)

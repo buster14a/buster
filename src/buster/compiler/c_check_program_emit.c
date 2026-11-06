@@ -723,6 +723,8 @@ struct CheckEmitBody
     CheckProgramStatus status;
     uint32_t token;
     const char* reason;
+    // Only a failed frame verification retains its verdict, until the calling thread reports it in source order.
+    const EmittedVerdict* frame_verdict;
 };
 
 // A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
@@ -863,19 +865,23 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 // room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
 // their control flow too (emitted_verify_frames: but an assembly template's code, the user's, and a rule a form
 // x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
-// (unwind_tier0, which reads them alone), its frame must be the same CFI. A frame past the events' 32-bit offsets
-// (EMITTED_FRAME_LIMIT, #1149) or code past 2 GB is unsupported, not an internal error; no room is a resource failure,
-// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason.
-static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
-                                                   Arena* scratch, UnwindFunction* frame, const char** reason)
+// (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
+// internal error; no room is a resource failure,
+// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason. Where
+// provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never printed on a lane.
+static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
+                                                           Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
 {
+    if (failed != NULL)
+    {
+        *failed = (EmittedVerdict){ 0 };
+    }
     const char* const mismatch = "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
     const uint32_t frame_status = code->frame_status;
     CheckProgramStatus status = frame_status == EMITTED_FRAME_MEMORY ? CHECK_PROGRAM_RESOURCE :
-                                frame_status == EMITTED_FRAME_LIMIT || length > INT32_MAX ? CHECK_PROGRAM_UNSUPPORTED :
+                                length > INT32_MAX ? CHECK_PROGRAM_UNSUPPORTED :
                                 frame_status == EMITTED_FRAME_UNDESCRIBED ? CHECK_PROGRAM_BACKEND : CHECK_PROGRAM_OK;
     *reason = status == CHECK_PROGRAM_RESOURCE ? "no room for a function's frame events" :
-              frame_status == EMITTED_FRAME_LIMIT ? "a frame within 56 bytes of 2 GB, past the 32-bit offsets of its unwind events (#1149)" :
               status == CHECK_PROGRAM_UNSUPPORTED ? "a function of 2 GB of code or more, past its unwind table's offsets" :
               status != CHECK_PROGRAM_OK ? mismatch : 0;
     if (status == CHECK_PROGRAM_OK)
@@ -891,6 +897,10 @@ static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint
         // stands, as Tier 0's analyzer below leaves it.
         const EmittedVerdict verdict = emitted_verify_frames(code, scratch);
         const bool stands = verdict.error == EMITTED_VERIFY_OK || verdict.error == EMITTED_VERIFY_UNPROVEN;
+        if (!stands && failed != NULL)
+        {
+            *failed = verdict;
+        }
         status = stands ? status : verdict.error == EMITTED_VERIFY_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
         *reason = stands ? 0 : verdict.error == EMITTED_VERIFY_MEMORY ? "no room to verify a function's frame events" :
                                                                         "internal compiler error: a function's frame events aren't its code's";
@@ -913,6 +923,63 @@ static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint
         *reason = same == EMITTED_SAME ? 0 : same == EMITTED_SAME_MEMORY ? "no room to compare a function's unwind table with Tier 0's analyzer's" : mismatch;
     }
     return status;
+}
+
+// The status-only entry point used by the frame checks; compilation retains failures for source-order reporting.
+static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar,
+                                                                           EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason)
+{
+    return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
+}
+
+// A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
+// fields identify the exact record; the resolved width is what the frame verifier uses to clobber saved slots.
+static void check_program_emit_frame_record(const EmittedCode* code, uint32_t body, uint32_t index)
+{
+    const X86Instruction* record = &code->records[index];
+    const X86Effects* effects = x86_effects(record->form);
+    const X86FormDescription* description = x86_form_description(record->form);
+    int64_t target = -1;
+    for (uint32_t k = 0; k < code->branch_count; k += 1)
+    {
+        target = code->branches[k] == index ? code->targets[k] : target;
+    }
+    fprintf(stderr, "frame-record: body=%u record=%u form=%u mnemonic=%s reg=%u rm=%u index=%u mode=%u vvvv=%u decorations=%u immediate=%d displacement=%d width=%u target=%" PRId64 "\n",
+            body, index, record->form, description->mnemonic, record->reg, record->rm, record->index, record->mode, record->vvvv, record->decorations,
+            record->immediate, record->displacement, effects->width, target);
+}
+
+static void check_program_emit_frame_failure(const EmittedCode* code, uint32_t body, const EmittedVerdict* failed)
+{
+    static const char* const rules[] = { "none", "cfa", "same", "offset", "register" };
+    const uint32_t count = code->count;
+    const uint32_t frames = code->frame_count;
+    fprintf(stderr, "frame-verifier: body=%u error=%u record=%u/%u event=%u/%u rule=%s reg=%u holder=%u expected=%" PRId64 " actual=%" PRId64 " actual_unknown=%u\n",
+            body, failed->error, failed->record, count, failed->event, frames, rules[failed->rule], failed->reg, failed->holder, failed->expected, failed->actual,
+            failed->actual == BUSTER_EMITTED_UNKNOWN);
+    const uint32_t prologue = count < 12 ? count : 12;
+    for (uint32_t i = 0; i < prologue; i += 1)
+    {
+        check_program_emit_frame_record(code, body, i);
+    }
+    const uint32_t at = failed->record < count ? failed->record : count;
+    const uint32_t first = at > 4 ? at - 4 : 0;
+    const uint32_t end = at < count ? at + 1 : count;
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        if (i >= prologue)
+        {
+            check_program_emit_frame_record(code, body, i);
+        }
+    }
+    const uint32_t event = failed->event < frames ? failed->event : 0;
+    const uint32_t event_first = event > 2 ? event - 2 : 0;
+    for (uint32_t k = event_first; k < frames && k - event_first < 5; k += 1)
+    {
+        const EmissionFrameEvent* frame = &code->frames[k];
+        fprintf(stderr, "frame-event: body=%u event=%u boundary=%u side=%u kind=%u reg=%u value=%" PRId64 "\n",
+                body, k, frame->at.boundary, frame->at.side, frame->kind, frame->reg, frame->value);
+    }
 }
 
 // Body `b`'s code after its code generator (Tier 0's or Tier 1's), on its lane (`lane`): branch sizing, encoding into
@@ -949,6 +1016,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     // A failure past the encoding is the backend's, but where a frame's room ran out.
     CheckProgramStatus failure = CHECK_PROGRAM_BACKEND;
+    EmittedVerdict frame_verdict = { 0 };
     if (valid && run->verify && x86_validate(code->records, code->count) != code->count)
     {
         body->status = CHECK_PROGRAM_BACKEND;
@@ -983,7 +1051,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // frame its producer couldn't describe is the compiler's own failure; and with --verify, so are events its
             // records don't establish.
             const char* reason = 0;
-            failure = check_program_emit_frame(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason);
+            failure = check_program_emit_frame_checked(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
             valid = failure == CHECK_PROGRAM_OK;
             failure = valid ? CHECK_PROGRAM_BACKEND : failure;
             body->reason = valid ? body->reason : reason;
@@ -997,7 +1065,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             body->length = (uint64_t)length;
             for (uint32_t k = 0; k < code->label_count; k += 1)
             {
-                body->label_offsets[k] = code->label_records[k] < code->count ? offsets[code->label_records[k]] : UINT32_MAX;
+                // An optimized-away label has no control-flow target. Keep its symbol's existing entry placeholder
+                // and index; only that explicit sentinel is accepted without a record in the emitted function.
+                const uint32_t record = code->label_records[k];
+                body->label_offsets[k] = record == UINT32_MAX ? 0 : record < code->count ? offsets[record] : UINT32_MAX;
             }
             // A template's label may be its code's end.
             for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
@@ -1017,6 +1088,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         arena_pop_to(bytes, before);
     }
     arena_pop_to(scratch, work_mark);
+    if (frame_verdict.error != EMITTED_VERIFY_OK && frame_verdict.error != EMITTED_VERIFY_MEMORY)
+    {
+        // Offsets and verification scratch are gone; this small failure record survives until source-order emission.
+        // A diagnostic allocation failure must not replace the original compiler failure.
+        EmittedVerdict* retained = BUSTER_ARENA_PUSH_ARRAY(scratch, EmittedVerdict, 1);
+        if (retained != NULL)
+        {
+            *retained = frame_verdict;
+            body->frame_verdict = retained;
+        }
+    }
     check_clock_lap(run->stage_clock, CHECK_STAGE_CODE_ATOMS);
     return valid;
 }
@@ -2764,6 +2846,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
+                    if (symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SELECTANY)
+                    {
+                        // Weak binding alone cannot give a selectany definition COMDAT's section and relocation
+                        // selection. Keep syntax checking independent of this object-writer boundary.
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "a 'selectany' definition requiring ELF COMDAT section groups";
+                        result->token = attribute->first;
+                        valid = false;
+                    }
                     // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
                     // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
                     // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).
@@ -3523,6 +3614,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint8_t alignment = source_body && alignments[symbol] > 5 ? alignments[symbol] - 1 : 4;
         const uint64_t work_mark = scratch->length;
         CheckEmitBody* body = source_body ? run.bodies + b : &helper_body;
+        EmittedVerdict helper_verdict = { 0 };
         // An asm template's code: a naked function's or an asm statement's helper's, whose labels are defined below.
         const bool assembly = source_body ? asms->naked != 0 && asms->naked[b].planned : helpers->items[b - count].assembly != 0;
         // A template that takes directives is an assembled unit of its own (check_program_emit_asm_unit), not records.
@@ -3621,7 +3713,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 if (encodes && unwind)
                 {
                     const char* reason = 0;
-                    failure = check_program_emit_frame(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason);
+                    failure = check_program_emit_frame_checked(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
+                    body->frame_verdict = helper_verdict.error != EMITTED_VERIFY_OK ? &helper_verdict : NULL;
                     encodes = failure == CHECK_PROGRAM_OK;
                     failure = encodes ? CHECK_PROGRAM_BACKEND : failure;
                     body->reason = encodes ? body->reason : reason;
@@ -3641,6 +3734,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         if (body->status != CHECK_PROGRAM_OK)
         {
+            if (body->status == CHECK_PROGRAM_BACKEND && body->frame_verdict != NULL)
+            {
+                check_program_emit_frame_failure(code, b, body->frame_verdict);
+            }
             result->status = body->status;
             result->reason = body->reason != NULL ? body->reason : result->reason;
             result->token = body->status == CHECK_PROGRAM_RESOURCE ? result->token : body->token;
@@ -3667,7 +3764,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
                 }
             }
-            // Each label at its first record's offset, after branch sizing: the program's definition.
+            // Each label at its resolved offset, after branch sizing, including an absent label's entry placeholder.
             for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
             {
                 valid = labels < result->lowered.label_symbol_count && body->label_offsets[k] != UINT32_MAX &&
@@ -4050,7 +4147,11 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             const bool restricted = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
                                     check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
                                     check_program_section_prefix(name, ".llvm.");
-            const uint8_t placed = class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
+            const bool loader = check_input_attribute_of(check_input_attributes_at(program->input, placement->token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+            // LLVM's undefined initializer has read-only section kind when explicitly placed. Named BSS/TLS families
+            // still impose their own kind; ordinary loader definitions without a placement keep their default BSS.
+            const uint8_t placed = loader && !bss && !tdata && !tbss && class == BUSTER_LINK_CLASS_BSS ? BUSTER_LINK_CLASS_RODATA :
+                                   class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
             const bool fits = restricted ? false :
                               bss ? class == BUSTER_LINK_CLASS_BSS :
                               tdata ? class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS :

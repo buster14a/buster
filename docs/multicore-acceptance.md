@@ -115,6 +115,37 @@ acceptance; the guide's verified control, whose processes' statuses and
 outputs are checked in every run, replaces it. Their owning issues retain those
 decisions and evidence requirements.
 
+## Reproducible native campaign
+
+The [external campaign and host commands](https://github.com/buster14a/buster-performance/tree/32dbd4ce088ced111be3f1e167817d82aea6008d/docs/measurements/multicore-149)
+provide the remaining acceptance procedure. That revision was audited against
+compiler commit `d9442df0dde83b9701b6ff7487f8916641736a84`; pin one qualified
+compiler revision and executable when collecting all three curves.
+
+The preparer verifies the frozen corpus and emits exact inputs, arguments,
+dependency hashes and expected outputs for SQLite, the generated 512-file,
+200-function case, and 1,309 selected musl C files. Architecture replacements
+determine the musl cohort; failed compiles never remove files from it. This is
+the ordinary C cohort, with its assembly replacements and CRT/dynamic-loader
+scope explicitly recorded in the external guide.
+
+The controller runs outside an already-held host lock and reacquires it for
+each compiler process. It rotates lane counts 1 through 8, keeps a separately
+labeled CPU-2 control, and records normal wall-clock samples separately from
+stage-instrumented diagnostics. Each sample must exit successfully, produce
+fresh nonempty objects identical to the one-lane reference, and retain the
+same compiler, inputs, environment and host power policy. The fixed CPU 0–7
+mask is process affinity; the source driver does not pin individual lanes.
+The one-lane diagnostic supplies the serial-stage lower bound and its Amdahl
+model, while observed speedups and effective serial fractions remain separate.
+
+The [hosted qualification](https://github.com/buster14a/buster-performance/actions/runs/42136707987)
+checks the tools in plain and ASan/UBSan builds, including failed, signaled,
+timed-out and malformed stand-ins and preparation against the real frozen
+corpus. It supplies no native compiler timings. The complete same-revision
+9700X campaign and published measurement record are still pending; this tool
+revision alone does not satisfy the parent issue's acceptance.
+
 ## Provenance
 
 `tests/driver/multicore.c`, its generated fixtures and this guide are original

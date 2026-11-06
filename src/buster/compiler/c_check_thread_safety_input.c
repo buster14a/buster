@@ -25,13 +25,20 @@ static bool check_input_thread_name(CheckInputReader* reader, uint32_t parameter
     const bool member = previous == PARSE_KIND_PERIOD || previous == PARSE_KIND_ARROW;
     const bool tag = previous == PARSE_KIND_STRUCT || previous == PARSE_KIND_ENUM;
     const bool builtin = spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0;
-    bool parameter = false;
-    for (uint32_t named = parameters; !parameter && named != BUSTER_CHECK_NONE; named = check_sparse_get(reader->parameter_next, named))
+    uint32_t declaration = BUSTER_CHECK_NONE;
+    for (uint32_t named = parameters; declaration == BUSTER_CHECK_NONE && named != BUSTER_CHECK_NONE; named = check_sparse_get(reader->parameter_next, named))
     {
-        parameter = parser->tokens.names[named] == name;
+        declaration = parser->tokens.names[named] == name ? named : BUSTER_CHECK_NONE;
     }
-    return member || tag || builtin || parameter || c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) != 0 ||
-           (frames != NULL && check_input_counted_member(reader->types, frames, depth, members, member_count, name) != BUSTER_CHECK_NONE);
+    const uint32_t field = declaration == BUSTER_CHECK_NONE && frames != NULL ?
+                           check_input_counted_member(reader->types, frames, depth, members, member_count, name) : BUSTER_CHECK_NONE;
+    declaration = field != BUSTER_CHECK_NONE ? members[field].token : declaration;
+    if (!member && !tag && declaration != BUSTER_CHECK_NONE)
+    {
+        reader->output->declarations[token] = declaration;
+        reader->declared_types[token] = field != BUSTER_CHECK_NONE ? members[field].member.type : reader->declared_types[declaration];
+    }
+    return member || tag || builtin || declaration != BUSTER_CHECK_NONE || c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) != 0;
 }
 
 // The end of an attribute's argument that starts at `first`, before `end`: its top level's next comma, or `end`.
@@ -55,22 +62,39 @@ static uint32_t check_input_thread_argument_end(const Parser* parser, uint32_t f
 // the function's scope or after the declaration): the first that names nothing is clang's error at it, which stops the
 // declaration. `parameters` is a function's declaration's own, or BUSTER_CHECK_NONE; `frames` is the member's struct's, or
 // NULL off a member (whose earlier members clang's parser finds in the struct's scope).
-static bool check_input_thread_names(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t parameters, const CheckTagFrame* frames,
+static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t parameters, const CheckTagFrame* frames,
                                      uint32_t depth, const CheckTagMember* members, uint32_t member_count)
 {
     const Parser* parser = reader->parser;
     uint32_t undeclared = BUSTER_CHECK_NONE;
+    bool valid = true;
     const uint32_t scoped = BUSTER_CHECK_ARGUMENTS_FUNCTION_SCOPE | BUSTER_CHECK_ARGUMENTS_LATE | BUSTER_CHECK_ARGUMENTS_LATE_EXPERIMENTAL;
     const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
-    for (uint32_t i = 0; undeclared == BUSTER_CHECK_NONE && attributes != NULL && i < attributes->count; i += 1)
+    for (uint32_t i = 0; valid && undeclared == BUSTER_CHECK_NONE && attributes != NULL && i < attributes->count; i += 1)
     {
-        const CheckInputAttribute* attribute = attributes->records + i;
+        CheckInputAttribute* attribute = attributes->records + i;
         const bool kept = !attribute->ignored && !attribute->subject_ignored;
         const bool thread = attribute->kind == CHECK_ATTRIBUTE_THREAD_SAFETY && kept;
         for (uint32_t token = attribute->argument_first; thread && undeclared == BUSTER_CHECK_NONE && token < attribute->argument_end; token += 1)
         {
             const bool identifier = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
             undeclared = identifier && !check_input_thread_name(reader, parameters, frames, depth, members, member_count, token) ? token : BUSTER_CHECK_NONE;
+        }
+        if (thread && undeclared == BUSTER_CHECK_NONE && attribute->argument_count != 0 && attribute->expression_types == NULL)
+        {
+            attribute->expression_types = BUSTER_ARENA_PUSH_ARRAY(reader->arena, TypeId, attribute->argument_count);
+            valid = attribute->expression_types != NULL;
+            reader->output->resource |= !valid;
+            uint32_t index = 0;
+            for (uint32_t argument = attribute->argument_first; valid && argument < attribute->argument_end && index < attribute->argument_count; index += 1)
+            {
+                const uint32_t stop = check_input_thread_argument_end(parser, argument, attribute->argument_end);
+                CheckValue value = { 0 };
+                bool call_failure = false;
+                valid = check_input_attribute_expression(reader, attributes, attribute, argument, stop, true, &value, &call_failure);
+                attribute->expression_types[index] = valid ? value.type : 0;
+                argument = stop + 1;
+            }
         }
         const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept;
         const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(check_input_attribute_name(reader, attribute->name)) : NULL;
@@ -107,37 +131,195 @@ static bool check_input_thread_names(CheckInputReader* reader, const CheckInputA
     {
         check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
     }
-    return undeclared == BUSTER_CHECK_NONE;
+    return valid && undeclared == BUSTER_CHECK_NONE;
 }
 
 
-// Whether an argument of one token (`token`, before `end`) is no int or bool, as clang's isIntOrBool decides of a literal or
-// of a variable's or an enumerator's name: of a string literal, a floating one, or a name of another type. Any longer
-// argument is taken as one: its type isn't worked out here.
-static bool check_input_thread_not_int(CheckInputReader* reader, uint32_t token, uint32_t end)
+// Whether the first checked expression has no integer or boolean type. Parentheses, casts, arithmetic and calls have
+// already gone through the same actions as a declaration's other expressions.
+static bool check_input_thread_not_int(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    const Parser* parser = reader->parser;
-    const uint8_t kind = parser->tokens.kinds[token];
-    TypeId type = 0;
-    // A string literal's type is an array's.
-    const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING;
-    if (token + 1 == end && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER))
-    {
-        CheckLiteral literal;
-        check_input_literal(reader, token, &literal);
-        type = literal.valid ? check_input_literal_value(reader, token, literal).type : 0;
-    }
-    else if (token + 1 == end && kind == PARSE_KIND_IDENTIFIER)
-    {
-        const uint32_t binding = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]);
-        const uint32_t declaration = binding != 0 ? reader->bindings.declaration[binding - 1] : BUSTER_CHECK_NONE;
-        type = declaration < parser->tokens.count ? reader->declared_types[declaration] : 0;
-    }
+    const TypeId type = attribute->expression_types != NULL ? attribute->expression_types[0] : 0;
     uint32_t width = 0;
     bool is_signed = false;
     const TypeId plain = type != 0 ? type_unqualified(type_strip_aligned(reader->types, type)) : 0;
     const bool enumerated = plain != 0 && type_kind(reader->types, plain) == BUSTER_TYPE_KIND_ENUM;
-    return string || (plain != 0 && !enumerated && !check_action_integer_type(reader->types, plain, &width, &is_signed));
+    return plain != 0 && !enumerated && !check_action_integer_type(reader->types, plain, &width, &is_signed);
+}
+
+static bool check_input_thread_marked(CheckInputReader* reader, const CheckInputAttributes* attributes)
+{
+    bool marked = false;
+    for (uint32_t i = 0; !marked && attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const String8 name = check_input_attribute_name(reader, attribute->name);
+        marked = !attribute->ignored && !attribute->subject_ignored && attribute->kind == CHECK_ATTRIBUTE_THREAD_SAFETY &&
+                 (check_input_attribute_equal(name, "capability") || check_input_attribute_equal(name, "shared_capability") || check_input_attribute_equal(name, "lockable"));
+    }
+    return marked;
+}
+
+// Capability is attached to a declaration, not to a structural type ID: a typedef of int must not mark every int.
+// Named typedefs use their exact spelling declaration. Records use the sparse attributed-token index, so an anonymous
+// record and an earlier tag hidden in the current scope are found without a second name lookup or dense token scan.
+static bool check_input_thread_capability(CheckInputReader* reader, TypeId type, uint32_t spelling, uint32_t before)
+{
+    const Parser* parser = reader->parser;
+    bool marked = spelling != 0 && spelling < parser->tokens.count &&
+                  check_input_thread_marked(reader, check_input_attributes_at(reader->output, spelling));
+    TypeId record = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    record = record != 0 && type_kind(reader->types, record) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(reader->types, type_element(reader->types, record)) : record;
+    const uint8_t kind = record != 0 ? type_kind(reader->types, record) : 0;
+    const bool tagged = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    marked |= tagged && !type_is_complete(reader->types, record);
+    const CheckSparseWide attributes = reader->output->attributes;
+    const bool scalar = parser->options.scalar;
+    const uint32_t end = before < parser->tokens.count ? before : parser->tokens.count;
+    for (uint32_t first = tagged && !marked ? check_input_attributed_next(attributes, 0, end, scalar) : end;
+         !marked && first < end; first = check_input_attributed_next(attributes, first + 16, end, scalar))
+    {
+        for (uint32_t selected = check_input_attributed_group(attributes, first, end, scalar); !marked && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            marked = type_unqualified(reader->tag_types[token]) == type_unqualified(record) &&
+                     check_input_thread_marked(reader, check_input_attributes_at(reader->output, token));
+        }
+    }
+    return marked;
+}
+
+static uint32_t check_input_thread_spelling(const CheckInputReader* reader, uint32_t first)
+{
+    const uint32_t declaration = first < reader->parser->tokens.count ? reader->output->declarations[first] : BUSTER_CHECK_NONE;
+    return declaration < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, declaration) : 0;
+}
+
+// The annotation language also accepts boolean combinations and address/dereference operators over capability
+// expressions. The C expression has already been checked; walk these original tokens without recursive AST visits.
+static bool check_input_thread_capability_expression(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    bool valid = true;
+    bool operand = false;
+    for (uint32_t token = first; valid && token < end; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_L_PAREN && token + 1 < end && check_input_attribute_type_start(reader, token + 1))
+        {
+            const uint32_t close = parser->tree.parents[token];
+            valid = close > token && close < end;
+            token = valid ? close : token;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER)
+        {
+            const TypeId type = reader->declared_types[token];
+            valid = type != 0 && check_input_thread_capability(reader, type, check_input_thread_spelling(reader, token), first);
+            operand = true;
+        }
+        else
+        {
+            valid = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_EXCLAIM || kind == PARSE_KIND_AMP ||
+                    kind == PARSE_KIND_STAR || kind == PARSE_KIND_AMPAMP || kind == PARSE_KIND_PIPEPIPE;
+        }
+    }
+    return valid && operand;
+}
+
+static void check_input_thread_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind, TypeId type, uint32_t spelling)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t scope = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+    const CheckWarningEvent event = {
+        .id = CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES,
+        .kind = kind,
+        .token = attribute->first,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = attribute->first,
+        .payload = { .name = attribute->name, .token = spelling, .first_type = type,
+                     .data = scope | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+    };
+    check_input_warning_event(reader, &event, NULL, 0);
+}
+
+static void check_input_thread_warnings(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t declaration, TypeId type, uint8_t flags)
+{
+    const Parser* parser = reader->parser;
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    const bool order = check_input_attribute_equal(name, "acquired_after") || check_input_attribute_equal(name, "acquired_before");
+    const bool pointer = check_input_attribute_equal(name, "pt_guarded_by") || check_input_attribute_equal(name, "pt_guarded_var");
+    const bool locks = (flags & (BUSTER_CHECK_THREAD_INDEXED | BUSTER_CHECK_THREAD_TRYLOCK)) != 0 ||
+                       check_input_attribute_equal(name, "requires_capability") || check_input_attribute_equal(name, "requires_shared_capability") ||
+                       check_input_attribute_equal(name, "exclusive_locks_required") || check_input_attribute_equal(name, "shared_locks_required") ||
+                       check_input_attribute_equal(name, "locks_excluded");
+    const bool guarded = check_input_attribute_equal(name, "guarded_by") || check_input_attribute_equal(name, "pt_guarded_by") ||
+                         check_input_attribute_equal(name, "lock_returned") || order;
+    const bool subject = (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0;
+    const TypeId plain = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    const uint8_t kind = plain != 0 ? type_kind(reader->types, plain) : 0;
+    const bool function_pointer = kind == BUSTER_TYPE_KIND_POINTER && type_kind(reader->types, type_element(reader->types, plain)) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool requires = check_input_attribute_equal(name, "requires_capability") || check_input_attribute_equal(name, "requires_shared_capability") ||
+                          check_input_attribute_equal(name, "exclusive_locks_required") || check_input_attribute_equal(name, "shared_locks_required") ||
+                          check_input_attribute_equal(name, "locks_excluded");
+    const bool invalid_subject = locks && !subject && !function_pointer;
+    const bool invalid_context = order && !check_input_thread_capability(reader, type, 0, attribute->first);
+    if (invalid_subject)
+    {
+        const bool parameter = (declaration & BUSTER_CHECK_SUBJECT_PARAMETER) != 0 && requires;
+        check_input_thread_warning(reader, attribute, parameter ? CHECK_WARNING_EVENT_THREAD_PARAMETER : CHECK_WARNING_EVENT_THREAD_FUNCTION_POINTER,
+                                   0, (declaration & BUSTER_CHECK_SUBJECT_FIELD) != 0);
+    }
+    if (invalid_context)
+    {
+        check_input_thread_warning(reader, attribute, CHECK_WARNING_EVENT_THREAD_CONTEXT, 0, 0);
+    }
+    const uint32_t skip = (flags & BUSTER_CHECK_THREAD_TRYLOCK) != 0 ? 1u : 0u;
+    uint32_t parameters = 0;
+    const TypeId* parameter_types = type != 0 && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(reader->types, type, &parameters) : NULL;
+    if (!invalid_subject && locks && attribute->argument_count == skip)
+    {
+        check_input_thread_warning(reader, attribute, CHECK_WARNING_EVENT_THREAD_METHOD, 0, 0);
+    }
+    for (uint32_t argument = attribute->argument_first, index = 0; !invalid_subject && !invalid_context && (locks || guarded) && argument < attribute->argument_end; index += 1)
+    {
+        const uint32_t stop = check_input_thread_argument_end(parser, argument, attribute->argument_end);
+        if (index >= skip && attribute->expression_types != NULL)
+        {
+            TypeId argument_type = attribute->expression_types[index];
+            uint32_t spelling = check_input_thread_spelling(reader, argument);
+            String8 string = { 0 };
+            const bool literal = parser->tokens.kinds[argument] == PARSE_KIND_STRING && check_input_attribute_string(reader, argument, stop, &string);
+            if (literal && string.length != 0 && !(string.length == 1 && string.pointer[0] == '*'))
+            {
+                check_input_thread_warning(reader, attribute, CHECK_WARNING_EVENT_THREAD_ARGUMENT, 0, 0);
+            }
+            if (!literal && stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_NUMBER &&
+                (flags & BUSTER_CHECK_THREAD_INDEXED) != 0 && parameter_types != NULL)
+            {
+                CheckLiteral number;
+                check_input_literal(reader, argument, &number);
+                const CheckValue value = number.valid ? check_input_literal_value(reader, argument, number) : (CheckValue){ 0 };
+                if (value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer != 0 && value.integer <= parameters)
+                {
+                    argument_type = parameter_types[value.integer - 1];
+                    spelling = 0;
+                }
+            }
+            if (!literal && !check_input_thread_capability(reader, argument_type, spelling, attribute->first) &&
+                !check_input_thread_capability_expression(reader, argument, stop))
+            {
+                check_input_thread_warning(reader, attribute, CHECK_WARNING_EVENT_THREAD_CAPABILITY, argument_type, spelling);
+            }
+        }
+        argument = stop + 1;
+    }
+    const bool incomplete = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && !type_is_complete(reader->types, plain);
+    if (pointer && kind != BUSTER_TYPE_KIND_POINTER && !incomplete)
+    {
+        check_input_thread_warning(reader, attribute, CHECK_WARNING_EVENT_THREAD_POINTER, type, 0);
+    }
 }
 
 // A thread-safety attribute's handler's checks past its subject and count (#147), each an error that stops the
@@ -164,7 +346,7 @@ static bool check_input_thread_attribute(CheckInputReader* reader, const CheckIn
         }
         valid = false;
     }
-    else if ((flags & BUSTER_CHECK_THREAD_TRYLOCK) != 0 && arguments && check_input_thread_not_int(reader, first, check_input_thread_argument_end(parser, first, end)))
+    else if ((flags & BUSTER_CHECK_THREAD_TRYLOCK) != 0 && arguments && check_input_thread_not_int(reader, attribute))
     {
         check_input_report(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL);
         valid = false;
@@ -197,6 +379,10 @@ static bool check_input_thread_attribute(CheckInputReader* reader, const CheckIn
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS, failed | parameters << 16);
             valid = false;
         }
+    }
+    if (valid)
+    {
+        check_input_thread_warnings(reader, attribute, declaration, type, flags);
     }
     return valid;
 }

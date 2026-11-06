@@ -15,6 +15,17 @@ if(NOT DEFINED CMAKE_DEFAULT_BUILD_TYPE)
     set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
 endif()
 
+# The flags are the build description's alone. Clear the cache before project() enables C and compiles/links its
+# probes: clearing normal variables afterwards is too late for CFLAGS, LDFLAGS or flags from -D/the existing cache.
+# Defining every entry also prevents CMake's defaults (Release's -DNDEBUG among them) from being initialized.
+# Compiler identification reads CFLAGS itself when CMAKE_C_FLAGS is empty, even with that cache entry defined.
+set(ENV{CFLAGS} "")
+set(ENV{LDFLAGS} "")
+foreach(suffix "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set(CMAKE_C_FLAGS${suffix} "" CACHE STRING "Unused: the build description supplies the C flags" FORCE)
+    set(CMAKE_EXE_LINKER_FLAGS${suffix} "" CACHE STRING "Unused: the build description supplies the linker flags" FORCE)
+endforeach()
+
 project(buster LANGUAGES C)
 
 if(NOT CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
@@ -69,15 +80,9 @@ execute_process(COMMAND "${CMAKE_C_COMPILER}" --version OUTPUT_VARIABLE compiler
 string(REGEX MATCH "^[^\n]*" compiler_version "${compiler_version}")
 file(WRITE "${CMAKE_BINARY_DIR}/buster-toolchain.txt" "clang ${CMAKE_C_COMPILER} (${compiler_file}): ${compiler_version}\n")
 
-# The flags are the description's alone: CMake's defaults (Release's -DNDEBUG among them), CFLAGS and LDFLAGS, which
-# CMake would read once and keep, take no part. The flags' only differences from a direct clang command are the
-# build's mechanics: CMake's depfile options and CMAKE_INTDIR, a definition no source reads, the include directory's
-# absolute path, and -fmacro-prefix-map, which keeps __FILE__ relative to the source directory, as it is when clang
-# runs from there (assert's messages).
-foreach(suffix "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
-    set(CMAKE_C_FLAGS${suffix} "")
-    set(CMAKE_EXE_LINKER_FLAGS${suffix} "")
-endforeach()
+# The flags' only differences from a direct clang command are the build's mechanics: CMake's depfile options and
+# CMAKE_INTDIR, a definition no source reads, the include directory's absolute path, and -fmacro-prefix-map, which
+# keeps __FILE__ relative to the source directory, as it is when clang runs from there (assert's messages).
 # Nor does the link take CMake's additions: no RPATH for the baseline runtime's libraries, which the executable has
 # never had, and no linker depfile (--dependency-file), which CMake probes on the default linker rather than the one
 # BUSTER_LINKER selects. The link's inputs are the objects and the files given by path, which CMake tracks itself.
