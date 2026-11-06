@@ -20,6 +20,11 @@ struct CheckDriverDefaultWarningFixture
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        .name = "return flow conservative no-fallthrough and reachable fallthrough",
+        .source = "int a(int c){if(c)return 1;return 2;}int b(int c){if(c)return 1;}int d(void){while(1){}}_Noreturn void r(void){while(1){}}\n",
+        .warnings = 1,
+    },
+    {
         .name = "floating literal file and local initializers",
         .source = "int a=1.5;\nint f(void){int b=2.5;return b;}\n",
         .warnings = 2,

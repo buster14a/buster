@@ -2603,6 +2603,12 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         entries[i].kind = CHECK_CONTROL_END;
                     }
                 }
+                // The warning walk only removes edges by folding conditions or recognizing terminal calls.
+                // If the conservative first walk cannot fall through, it cannot produce a fall-off warning.
+                if (!falls)
+                {
+                    break;
+                }
             }
             else
             {
