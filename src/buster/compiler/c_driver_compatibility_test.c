@@ -253,7 +253,7 @@ static void cc_compat_long_depfiles(CCCompatibilityTest* test)
     }
 }
 
-#ifndef BUSTER_DRIVER_COMPAT_STANDALONE
+#if !defined(BUSTER_DRIVER_COMPAT_STANDALONE) && !defined(BUSTER_DRIVER_MIXED_STANDALONE)
 // Force the exact random suffix ABCDEF in the name comparison: neither destination may equal its chosen temporary,
 // regardless of what mkstemp draws. Then force a real close/write failure after creation with RLIMIT_FSIZE.
 static void cc_compat_publication_failure(CCCompatibilityTest* test)
@@ -446,7 +446,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         const char* const mmd[] = { "-MMD", "-MFjoined.d", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MMD with joined -MF", NULL, mmd, "joined.d");
         cc_compat_long_depfiles(&test);
-#ifndef BUSTER_DRIVER_COMPAT_STANDALONE
+#if !defined(BUSTER_DRIVER_COMPAT_STANDALONE) && !defined(BUSTER_DRIVER_MIXED_STANDALONE)
         cc_compat_publication_failure(&test);
 #endif
         const char* const ep[] = { "-E", "-MD", "-P", "a.c", "-o", "out/a.i", NULL };
