@@ -2156,6 +2156,9 @@ static bool check_input_type_argument(CheckInputReader* reader, const CheckInput
     return check_input_attribute_equal(name, "vec_type_hint") || check_input_attribute_equal(name, "preferred_type");
 }
 
+static const CheckInputFactRow* check_input_attribute_gnu_fact(CheckInputReader* reader, uint32_t name);
+static const CheckInputArgumentsRow* check_input_attribute_gnu_arguments(CheckInputReader* reader, uint32_t name);
+
 // clang's parser's reading of attributes it applies nothing of (#147): a free-standing declaration's specifiers' (clang's
 // ParsedFreeStandingDeclSpec), and a bare tag declaration's after its name. Of each GNU list's items and each alignment
 // specifier's argument from `first` to `end` (a tag's tokens skipped, CheckInputReader.tag_ends), only what clang's parser
@@ -2192,9 +2195,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const uint32_t arguments_first = argued ? k + 2 : BUSTER_CHECK_NONE;
                 const uint32_t arguments_end = argued ? parser->tree.parents[k + 1] : BUSTER_CHECK_NONE;
                 k = comma ? k + 1 : argued ? arguments_end + 1 : k + 1;
-                const String8 spelled = !comma ? check_input_attribute_name(reader, parser->tokens.names[name]) : (String8){ 0 };
-                const CheckInputArgumentsRow* row = gnu && !comma ? check_input_arguments_row(spelled) : NULL;
-                const bool known = gnu && !comma && check_input_fact_row((String8){ "", 0 }, spelled, false, false) != NULL;
+                const CheckInputArgumentsRow* row = gnu && !comma ? check_input_attribute_gnu_arguments(reader, parser->tokens.names[name]) : NULL;
+                const bool known = gnu && !comma && check_input_attribute_gnu_fact(reader, parser->tokens.names[name]) != NULL;
                 const uint32_t flags = row != NULL ? row->flags : 0;
                 const uint32_t strings = row != NULL ? row->strings : 0;
                 const bool typed = (flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 || (alignas && arguments_first < arguments_end &&
@@ -2283,7 +2285,7 @@ static void check_input_attribute_gcc_position(CheckInputReader* reader, const C
     {
         const CheckInputAttribute* attribute = attributes->records + i;
         const CheckInputFactRow* fact = attribute->standard || attribute->keyword ? NULL :
-                                        check_input_fact_row((String8){ "", 0 }, check_input_attribute_name(reader, attribute->name), false, false);
+                                        check_input_attribute_gnu_fact(reader, attribute->name);
         if (fact != NULL && (fact->flags & BUSTER_CHECK_FACT_GCC) != 0)
         {
             const CheckWarningEvent event =
@@ -2369,6 +2371,70 @@ static bool check_input_attribute_clang_knows(String8 scope, String8 name, bool 
         }
     }
     return result;
+}
+
+_Static_assert(BUSTER_ARRAY_LENGTH(check_input_attribute_rules) < UINT16_MAX && BUSTER_ARRAY_LENGTH(check_input_fact_gnu) < UINT16_MAX &&
+                   BUSTER_ARRAY_LENGTH(check_input_arguments_rows) < UINT16_MAX,
+               "a GNU name's rows are 16-bit indices");
+
+// The rows of the GNU attribute name `name` (an IdentId, as check_input_attribute_name reads it): its rule's, its facts', its
+// subjects' and its arguments' rows and whether clang knows it, each what its lookup gives a GNU spelling, which no scope
+// changes. They are kept by the name in the reader's slots (CheckInputReader.gnu_rows), as a unit's attributes repeat a
+// few names: glibc's headers give most of sqlite3.c's prototypes __nothrow__, __leaf__ and __nonnull__, and the lookups'
+// binary searches, a string comparison a step, took 1.3 ms of its -c on the 9700X (#1489). A slot another name takes
+// is looked up again.
+static const CheckInputGnuRows* check_input_attribute_gnu_rows(CheckInputReader* reader, uint32_t name)
+{
+    CheckInputGnuRows* slot = reader->gnu_rows + ((name * UINT32_C(0x9e3779b1)) >> (32 - BUSTER_CHECK_GNU_ROW_BITS));
+    if (slot->key != name + 1)
+    {
+        const String8 text = check_input_attribute_name(reader, name);
+        // A calling convention's keyword (`__cdecl`) is spelled with its underscores (check_input_attribute_read_item).
+        const bool keyword = name >= C_NAME_CDECL && name <= C_NAME_VECTORCALL && reader->pp != NULL && text.length + 2 == reader->pp->table->spans[name].length;
+        const String8 spelled = keyword ? (String8){ text.pointer - 2, text.length + 2 } : text;
+        uint16_t rule = 0;
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(check_input_attribute_rules) && rule == 0; r += 1)
+        {
+            rule = check_input_attribute_equal(text, check_input_attribute_rules[r].name) ? (uint16_t)(r + 1) : 0;
+        }
+        const CheckInputFactRow* fact = check_input_fact_row((String8){ "", 0 }, text, false, false);
+        const CheckInputArgumentsRow* arguments = check_input_arguments_row(text);
+        *slot = (CheckInputGnuRows){
+            .key = name + 1,
+            .rule = rule,
+            .fact = fact != NULL ? (uint16_t)(fact - check_input_fact_gnu + 1) : 0,
+            .arguments = arguments != NULL ? (uint16_t)(arguments - check_input_arguments_rows + 1) : 0,
+            .known = check_input_attribute_clang_knows((String8){ "", 0 }, spelled, false, false),
+            .subject = check_input_subject_row((String8){ "", 0 }, text, false, false),
+        };
+    }
+    return slot;
+}
+
+// A GNU attribute name's facts' row (check_input_fact_row's), or null.
+static const CheckInputFactRow* check_input_attribute_gnu_fact(CheckInputReader* reader, uint32_t name)
+{
+    const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, name);
+    return rows->fact != 0 ? check_input_fact_gnu + rows->fact - 1 : NULL;
+}
+
+// A GNU attribute name's arguments' row (check_input_arguments_row's), or null.
+static const CheckInputArgumentsRow* check_input_attribute_gnu_arguments(CheckInputReader* reader, uint32_t name)
+{
+    const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, name);
+    return rows->arguments != 0 ? check_input_arguments_rows + rows->arguments - 1 : NULL;
+}
+
+// An attribute's subjects' row (check_input_subject_row's): a GNU one's by its name's slot.
+static const CheckInputSubjectRow* check_input_attribute_subject_of(CheckInputReader* reader, String8 scope, uint32_t name, bool scoped, bool standard)
+{
+    return standard ? check_input_subject_row(scope, check_input_attribute_name(reader, name), scoped, standard) : check_input_attribute_gnu_rows(reader, name)->subject;
+}
+
+// An attribute's facts' row (check_input_fact_row's): a GNU one's by its name's slot.
+static const CheckInputFactRow* check_input_attribute_fact_of(CheckInputReader* reader, String8 scope, uint32_t name, bool scoped, bool standard)
+{
+    return standard ? check_input_fact_row(scope, check_input_attribute_name(reader, name), scoped, standard) : check_input_attribute_gnu_fact(reader, name);
 }
 
 // clang's warning at `__clang__`'s expansion where a C23 attribute's scope or name goes (#147), which the parser made the
@@ -2803,14 +2869,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     {
         attribute.name = parser->tokens.names[i++];
         const String8 name = check_input_attribute_name(reader, attribute.name);
-        const CheckInputAttributeRule* rule = 0;
-        for (uint32_t r = 0; namespace_known && r < BUSTER_ARRAY_LENGTH(check_input_attribute_rules) && rule == 0; r += 1)
-        {
-            if (check_input_attribute_equal(name, check_input_attribute_rules[r].name))
-            {
-                rule = &check_input_attribute_rules[r];
-            }
-        }
+        // The name's rows, a GNU spelling's, whose rule is any spelling's of the name.
+        const CheckInputGnuRows* rows = check_input_attribute_gnu_rows(reader, attribute.name);
+        const CheckInputAttributeRule* rule = namespace_known && rows->rule != 0 ? check_input_attribute_rules + rows->rule - 1 : 0;
         if (rule != 0 && standard && !scoped)
         {
             const bool standard_name = check_input_attribute_equal(name, "deprecated") || check_input_attribute_equal(name, "fallthrough") ||
@@ -2844,7 +2905,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const String8 written = check_input_attribute_name(reader, attribute.name);
         const bool keyword = attribute.name >= C_NAME_CDECL && attribute.name <= C_NAME_VECTORCALL && written.length + 2 == reader->pp->table->spans[attribute.name].length;
         const String8 spelled = keyword ? (String8){ written.pointer - 2, written.length + 2 } : written;
-        const bool known = valid && check_input_attribute_clang_knows(scope, spelled, scoped, standard);
+        const bool known = valid && (standard ? check_input_attribute_clang_knows(scope, spelled, scoped, standard) : rows->known);
         // A C23 attribute of a declaration (no type's) in a type's place (check_input_standard_place, clang's
         // processTypeAttrs): a gnu:: one after a declarator chunk, clang's warning that it is ignored, keeping nothing of
         // it; any other there, or any after the specifiers, its error.
@@ -2866,15 +2927,15 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // identifier argument of one whose identifiers all are); then an argument it reads as an unevaluated string literal
         // that is none is its error at the argument. One whose arguments clang parses its own way (availability's and the
         // like) is its own.
-        const CheckInputFactRow* parsed = standard ? fact : known ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        const CheckInputFactRow* parsed = standard ? fact : known ? check_input_attribute_gnu_fact(reader, attribute.name) : NULL;
         // One of no C subject (#147, check_input_attribute_generic).
-        const CheckInputSubjectRow* subject_row = known ? check_input_subject_row(scope, name, scoped, standard) : NULL;
+        const CheckInputSubjectRow* subject_row = known ? check_input_attribute_subject_of(reader, scope, attribute.name, scoped, standard) : NULL;
         const bool subjectless = subject_row != NULL && subject_row->subjects == 0;
         const bool custom = parsed != NULL && (parsed->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0;
         // The compatibility conditions are retained, not evaluated here. Their expression-form messages are
         // validated by their own schema below, after peeling parentheses, rather than the eager literal pass.
         const bool condition = rule != NULL && rule->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS;
-        const CheckInputArgumentsRow* arguments = valid && known && !custom && !condition ? check_input_arguments_row(name) : NULL;
+        const CheckInputArgumentsRow* arguments = valid && known && !custom && !condition ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t index = 0;
@@ -2979,7 +3040,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_GCC_COMPAT, CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE);
         }
         // A GNU attribute of a declaration in a type name: clang ignores it with its warning, keeping nothing (#147).
-        const CheckInputFactRow* gnu_fact = known && !standard ? check_input_fact_row((String8){ "", 0 }, name, false, false) : NULL;
+        const CheckInputFactRow* gnu_fact = known && !standard ? check_input_attribute_gnu_fact(reader, attribute.name) : NULL;
         // The facts of one this checker has no rule for (#147), which decide how clang takes it.
         const CheckInputFactRow* generic_fact = known && rule == 0 ? (standard ? fact : gnu_fact) : NULL;
         const bool type_name = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 && check_input_attribute_in_type_name(parser, attribute.first);
@@ -3021,7 +3082,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // An argument count other than clang's is its error, worded as clang's (#147). cleanup's is checked after its
             // subject's already (check_input_cleanup_declaration).
             uint32_t bound = 0;
-            const CheckInputFactRow* counted = standard ? fact : check_input_fact_row((String8){ "", 0 }, name, false, false);
+            const CheckInputFactRow* counted = standard ? fact : check_input_attribute_gnu_fact(reader, attribute.name);
             const uint32_t count = check_input_attribute_count(parser, &attribute);
             uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION ||
                                   rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY ? BUSTER_CHECK_COUNT_NONE :
@@ -5179,7 +5240,7 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             continue;
         }
         const CheckInputSubjectRow* row = attribute->keyword || overflow || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
-                                          check_input_subject_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+                                          check_input_attribute_subject_of(reader, scope, attribute->name, scoped, attribute->standard);
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
         attribute->subject_ignored = false;
@@ -5597,7 +5658,7 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
     const Parser* parser = reader->parser;
     const bool scoped = attribute->standard && attribute->first != attribute->name_token;
     const String8 scope = scoped ? check_input_attribute_name(reader, parser->tokens.names[attribute->first]) : (String8){ "", 0 };
-    const CheckInputFactRow* fact = excluded ? NULL : check_input_fact_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+    const CheckInputFactRow* fact = excluded ? NULL : check_input_attribute_fact_of(reader, scope, attribute->name, scoped, attribute->standard);
     return !excluded && (unsigned)kind < 128 && !(fact != NULL && (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0);
 }
 
@@ -5896,8 +5957,8 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         // ignores with its subject's warning before reading its arguments (check_input_attribute_subjects).
         const bool scoped = attribute->standard && attribute->first != attribute->name_token;
         const CheckInputSubjectRow* row = attribute->keyword || prototyped ? NULL :
-            check_input_subject_row(scoped ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]) : (String8){ "", 0 },
-                                    check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+            check_input_attribute_subject_of(reader, scoped ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]) : (String8){ "", 0 },
+                                             attribute->name, scoped, attribute->standard);
         if (row != NULL && (row->subjects & (BUSTER_CHECK_SUBJECT_PROTOTYPED | BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_LIKE)) == BUSTER_CHECK_SUBJECT_PROTOTYPED)
         {
             continue;
