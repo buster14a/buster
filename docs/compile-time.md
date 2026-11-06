@@ -958,6 +958,40 @@ What the peaks still hold for little, after this:
 - **The stream's conversions**, 32 bytes a node, 10 MB from `check-expressions`
   through the backend, where a leaf's is its type.
 
+### Huge pages held for under a megabyte (#672)
+
+Each mapping's resident memory at the compile's peak, on this repository's VM
+with the arenas' huge pages (`BUSTER_HUGE_PAGES=1`) and without them
+(`BUSTER_HUGE_PAGES=0`), at main `ec5f0f6b`: 297.0 MB against 228.0 MB. Every
+arena's mapping was logged with its call stack and matched to
+`/proc/self/smaps` at each `--time-stages` mark ([the
+record](https://github.com/buster14a/buster-performance/tree/bc07aad4fd01b54bf7a00c332e29b21a939551a0/docs/measurements/page-policy-672-2026-11-06),
+`diag/`). The checker's three arenas hold 38 MB of the 69 MB difference (the
+driver's arena 27 MB, its output arena 7.8 MB, its scratch 3.5 MB), which
+#628 follows. Four arenas outside the checker each took a huge page or two for
+under a megabyte:
+
+| arena | huge pages | base pages |
+| --- | ---: | ---: |
+| the type table's index (`check_driver_unit`) | 2,112 KB | 128 KB |
+| the file cache's records arena (`file_cache_arenas`) | 2,112 KB | 268 KB |
+| the file cache's bytes arena | 2,112 KB | 376 KB |
+| the thread's scratch (`scratch_begin`) | 4,160 KB | 1,048 KB |
+
+The thread's scratch took two: a large file's windowed preparation
+(`pp_prepare_windows`) pushes three arrays of a word for every 64 of its
+bytes, 3.5 MB for `sqlite3.c`, and touches each one's start. These now start
+with base pages: the index's first 4 MB (`BUSTER_TYPE_INDEX_SMALL_BYTES`,
+65,536 buckets), the two file cache arenas' first 2 MB
+(`BUSTER_FILE_CACHE_SMALL_BYTES`) and the scratch's first 4 MB
+(`BUSTER_SCRATCH_ARENA_SMALL_BYTES`). On the VM the peak falls from 296.8 to
+288.3 MB, for 386 more faults, with the object the same bytes. On the 9700X an
+experiment build of the change, whose worktree's source the record keeps as
+captured after the runs, peaked
+alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
+medians were 138.7 against 139.9 ms, from three unpaired runs each, which
+establish no difference in time.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved

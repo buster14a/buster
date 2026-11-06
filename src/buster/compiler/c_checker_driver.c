@@ -4115,11 +4115,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         {
             // The table's columns in base pages: each has room for every type the unit could make, far apart, of which
             // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
-            // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
+            // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528). The index's first
+            // BUSTER_TYPE_INDEX_SMALL_BYTES too, which hold a unit's buckets but the largest's: sqlite3.c's take 128 KB,
+            // where the index's first huge page took 2 MB (#672).
             const uint64_t type_bytes = type_capacity_bytes(capacity);
+            const uint64_t index_bytes = type_index_capacity_bytes(capacity);
             const bool fail_types = check_driver_test_failed_types != NULL && strcmp(path, check_driver_test_failed_types) == 0;
             type_arena = !fail_types ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
-            index_arena = !fail_types ? arena_reserve(type_index_capacity_bytes(capacity)) : (Arena){ 0 };
+            index_arena = !fail_types ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
             ready = !fail_types && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
             if (!ready)
             {
@@ -4805,6 +4808,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     if (time_stages)
     {
         check_clock_start(&clock_storage);
+        clock_storage.pages_busy = arena_pages_busy;
     }
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
