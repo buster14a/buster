@@ -179,6 +179,8 @@ are also linker inputs, with a warning; the foreign reader diagnoses their
 actual format. `-x c`, `-x assembler` and `-x assembler-with-cpp` override the
 suffix for following inputs only; `-x none` restores suffix inference. Joined
 `-xLANG` works too. Stdin requires an explicit language at that operand.
+A non-regular C or preprocessed-assembly source (`/dev/null`, a FIFO, `/dev/fd/N`)
+is read to EOF once, like stdin. Include probes still refuse those files.
 
 C-only commands retain the existing direct path. Mixed commands compile C and
 assembly on the unit scheduler's lanes, retain their ELF objects in memory,
