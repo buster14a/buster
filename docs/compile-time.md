@@ -2166,11 +2166,18 @@ the kernel's setting in force:
 
   They now test `x86_semantics_initialized` first, as the other routes do.
   Their objects are unchanged, and an executable that isn't baked builds the
-  tables once, as before. On the VM, in two rounds against `main`'s build:
-  - `-c foo.s` takes 2.40 and 2.57 ms with 675 faults, against 2.64 and
-    2.89 ms with 716;
-  - a link of a C file and `foo.s` takes 4.18 and 4.39 ms with 1,202 faults,
-    against 4.49 and 4.63 ms with 1,243.
+  tables once, as before. Two rounds of `measure-compile --runs 41`, CPU 2,
+  against the build before:
+  - on the 9700X, at `ec5f0f6b`, where the two files are `main`'s:
+    - `-c foo.s` takes 0.479 and 0.476 ms with 230 faults, against 0.546 ms
+      with 269, 13% less;
+    - a link of a C file and `foo.s` takes 1.181 and 1.193 ms with 529
+      faults, against 1.268 and 1.283 ms with 568;
+  - on the VM:
+    - `-c foo.s` takes 2.40 and 2.57 ms with 675 faults, against 2.64 and
+      2.89 ms with 716;
+    - the link takes 4.18 and 4.39 ms with 1,202 faults, against 4.49 and
+      4.63 ms with 1,243.
 - **Under the VM's own default** (huge pages off), the baked executable's
   `backend-setup` is the same, 0.007 to 0.009 ms. c-testsuite's programs take
   3.21 and 3.34 ms there, against 5.55 and 5.74 ms built.
