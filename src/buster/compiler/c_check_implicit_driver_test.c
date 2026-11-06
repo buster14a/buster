@@ -364,8 +364,186 @@ static void check_test_driver_common_exhaustion(CheckTest* test, const char* exe
     unlink(path);
 }
 
+// #1349's direct reading of a self-read candidate: an identifier spelled `name` whose previous token is not `.` or `->`.
+static uint32_t check_test_common_candidate_reference(const uint8_t* kinds, const uint32_t* names, uint32_t name, uint32_t begin, uint32_t end)
+{
+    uint32_t result = end;
+    for (uint32_t at = end; at > begin; at -= 1)
+    {
+        const uint32_t token = at - 1;
+        const uint8_t before = token > 0 ? kinds[token - 1] : PARSE_KIND_COMMA;
+        if (kinds[token] == PARSE_KIND_IDENTIFIER && names[token] == name && before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW)
+        {
+            result = token;
+        }
+    }
+    return result;
+}
+
+// check_common_self_candidate's AVX-512 blocks against its scalar twin and the direct reading, on random streams that
+// end at a protected page: every start and end near the tail, block edges, members across a block edge, and walks of
+// every candidate the way the brace scan takes them.
+static void check_test_common_self_candidates(CheckTest* test)
+{
+    static const uint8_t alphabet[] = { PARSE_KIND_IDENTIFIER, PARSE_KIND_IDENTIFIER, PARSE_KIND_IDENTIFIER, PARSE_KIND_PERIOD,
+                                        PARSE_KIND_ARROW, PARSE_KIND_COMMA, PARSE_KIND_NUMBER, PARSE_KIND_L_BRACE };
+    enum { capacity = 640 };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* kind_map = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* name_map = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool ready = kind_map != MAP_FAILED && name_map != MAP_FAILED && page >= capacity * sizeof(uint32_t);
+    ready = ready && mprotect(kind_map + page, page, PROT_NONE) == 0 && mprotect(name_map + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "self-read candidates have protected kind and name tails");
+    const uint32_t name = 7;
+    bool same = true;
+    bool walked = true;
+    uint64_t found = 0;
+    for (uint32_t trial = 0; ready && trial < 2000; trial += 1)
+    {
+        const uint32_t length = 1 + check_test_random(test) % (trial % 3 == 0 ? 140 : capacity);
+        uint8_t* kinds = kind_map + page - length;
+        uint32_t* names = (uint32_t*)(name_map + page) - length;
+        // Sparse trials leave whole blocks without a candidate; dense ones put several in a block.
+        const uint32_t odds = trial % 4 == 0 ? 96 : 3;
+        for (uint32_t at = 0; at < length; at += 1)
+        {
+            kinds[at] = alphabet[check_test_random(test) % BUSTER_ARRAY_LENGTH(alphabet)];
+            names[at] = kinds[at] != PARSE_KIND_IDENTIFIER ? 0 : check_test_random(test) % odds == 0 ? name : 5 + check_test_random(test) % 2;
+        }
+        for (uint32_t query = 0; same && query < 24; query += 1)
+        {
+            const uint32_t edge = 64 * (check_test_random(test) % (length / 64 + 1));
+            uint32_t begin = query % 3 == 0 ? edge : check_test_random(test) % (length + 1);
+            begin = begin + query % 2 <= length ? begin + query % 2 : begin;
+            const uint32_t end = query % 4 == 0 ? length : begin + check_test_random(test) % (length - begin + 1);
+            const uint32_t expected = check_test_common_candidate_reference(kinds, names, name, begin, end);
+            const uint32_t vector = check_common_self_candidate(kinds, names, name, begin, end, true);
+            const uint32_t scalar = check_common_self_candidate(kinds, names, name, begin, end, false);
+            same = vector == expected && scalar == expected;
+        }
+        uint32_t vector_count = 0;
+        uint32_t scalar_count = 0;
+        uint64_t vector_sum = 0;
+        uint64_t scalar_sum = 0;
+        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length, true); at < length;
+             at = check_common_self_candidate(kinds, names, name, at + 1, length, true))
+        {
+            vector_count += 1;
+            vector_sum += (uint64_t)at * 2654435761u + vector_count;
+        }
+        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length, false); at < length;
+             at = check_common_self_candidate(kinds, names, name, at + 1, length, false))
+        {
+            scalar_count += 1;
+            scalar_sum += (uint64_t)at * 2654435761u + scalar_count;
+        }
+        walked = walked && vector_count == scalar_count && vector_sum == scalar_sum;
+        found += vector_count;
+    }
+    // A member's name straddling a block edge: `.` is lane 63 of the first block and the name lane 0 of the next.
+    bool carried = ready;
+    if (ready)
+    {
+        uint8_t* kinds = kind_map + page - 130;
+        uint32_t* names = (uint32_t*)(name_map + page) - 130;
+        memset(kinds, PARSE_KIND_COMMA, 130);
+        memset(names, 0, 130 * sizeof(uint32_t));
+        kinds[63] = PARSE_KIND_PERIOD;
+        kinds[64] = PARSE_KIND_IDENTIFIER;
+        names[64] = name;
+        kinds[127] = PARSE_KIND_ARROW;
+        kinds[128] = PARSE_KIND_IDENTIFIER;
+        names[128] = name;
+        kinds[129] = PARSE_KIND_IDENTIFIER;
+        names[129] = name;
+        for (uint32_t begin = 0; carried && begin <= 130; begin += 1)
+        {
+            const uint32_t expected = begin <= 129 ? 129 : 130;
+            carried = check_common_self_candidate(kinds, names, name, begin, 130, true) == expected &&
+                      check_common_self_candidate(kinds, names, name, begin, 130, false) == expected;
+        }
+    }
+    check_test_expect(test, same, "self-read candidates: SIMD blocks, scalar twin and the direct reading agree on every range");
+    check_test_expect(test, walked && found > 1000, "self-read candidates: both walks visit the same candidates");
+    check_test_expect(test, carried, "self-read candidates: a member operator before a block edge carries into the next block");
+    if (kind_map != MAP_FAILED)
+    {
+        munmap(kind_map, page * 2);
+    }
+    if (name_map != MAP_FAILED)
+    {
+        munmap(name_map, page * 2);
+    }
+}
+
+// check_common_sizeof_operand's memoized climbs against the plain climb, on random parent forests (each parent after
+// its token, or a root by itself, by BUSTER_CHECK_NONE or out of range) and on random functional graphs with cycles.
+// The queries share one memo in a random order, as a unit's brace scans do, and every memoized answer is the plain one.
+static void check_test_common_sizeof_memo(CheckTest* test)
+{
+    enum { capacity = 700 };
+    uint8_t roles[capacity];
+    uint32_t parents[capacity];
+    uint8_t known[capacity];
+    bool same = true;
+    bool memoized = true;
+    uint32_t inside = 0;
+    uint32_t outside = 0;
+    for (uint32_t trial = 0; trial < 600; trial += 1)
+    {
+        const uint32_t count = 1 + check_test_random(test) % capacity;
+        const bool cyclic = trial % 5 == 4;
+        const uint32_t reach = trial % 3 == 0 ? 3 : 48;
+        for (uint32_t t = 0; t < count; t += 1)
+        {
+            const uint32_t pick = check_test_random(test) % 24;
+            const uint32_t room = count - t - 1;
+            if (cyclic)
+            {
+                parents[t] = pick == 0 ? t : check_test_random(test) % count;
+            }
+            else if (room == 0 || pick == 0)
+            {
+                parents[t] = t;
+            }
+            else if (pick == 1)
+            {
+                parents[t] = BUSTER_CHECK_NONE;
+            }
+            else if (pick == 2)
+            {
+                parents[t] = count + check_test_random(test) % 4;
+            }
+            else
+            {
+                parents[t] = t + 1 + check_test_random(test) % (room < reach ? room : reach);
+            }
+            const uint32_t role = check_test_random(test) % (trial % 2 == 0 ? 20 : 120);
+            roles[t] = role == 0 ? PARSE_ROLE_OPEN_SIZEOF : role == 1 ? PARSE_ROLE_CLOSE_SIZEOF : (uint8_t)(role % PARSE_ROLE_COUNT);
+        }
+        memset(known, 0, count);
+        for (uint32_t query = 0; same && query < count * 2; query += 1)
+        {
+            const uint32_t token = check_test_random(test) % (count + 2);
+            const bool plain = check_common_sizeof_operand(roles, parents, count, NULL, token);
+            same = check_common_sizeof_operand(roles, parents, count, known, token) == plain;
+            inside += plain;
+            outside += !plain;
+        }
+        for (uint32_t t = 0; memoized && t < count; t += 1)
+        {
+            const bool plain = check_common_sizeof_operand(roles, parents, count, NULL, t);
+            memoized = known[t] == 0 || known[t] == (plain ? 2 : 1);
+        }
+    }
+    check_test_expect(test, same, "sizeof operands: memoized climbs answer as the plain climb on forests and cycles");
+    check_test_expect(test, memoized && inside > 1000 && outside > 1000, "sizeof operands: every memoized answer is the plain climb's");
+}
+
 static void check_test_driver_common_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_common_self_candidates(test);
+    check_test_common_sizeof_memo(test);
     static const char defaults[] =
         "#include <stdio.h>\n#include <string.h>\nenum E { A, B, C };\n"
         "int *f(void) { int a = 1; return &a; }\n"
@@ -744,6 +922,28 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int p(void) { int x = { x && 1 }; return x; }\n"
         "int q(void) { int x = (x = x); return x; }\n"
         "int r(void) { int x; x = (x); x; return 0; }\n";
+    // #1349: the brace scan's candidates, at and across its 64-token blocks: sizeof and __alignof__ operands, members
+    // after `.` and `->` (one straddling a block edge), statement expressions, and a later declarator's initializer.
+    static const char self_init_scan[] =
+        "struct P { int x; int y; };\n"
+        "int a(void) { int x = { sizeof(x) + x }; return x; }\n"
+        "int b(void) { int x = { (int)sizeof x }; return x; }\n"
+        "int c(void) { struct P p = { 1, 2 }; int x = { p.x }; return x; }\n"
+        "int d(struct P *q) { int x = { q->x }; return x; }\n"
+        "int e(void) { int x = { ({ int y = { x }; y; }) }; return x; }\n"
+        "int f(void) { int x = { __alignof__(x) + x }; return x; }\n"
+        "int g(void) { int x = { sizeof(int[sizeof(x)]) + 0 }; return x; }\n"
+        "int i(void) { int x = { 0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x }; return x; }\n"
+        "int j(void) { int x = { 0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x }; return x; }\n"
+        "int k(void) { int x = { (0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x) }; return x; }\n"
+        "int l(void) { struct P p = { 1, 2 }; int x = { (0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+p.x) }; return x; }\n"
+        "int m(void) { struct P p = { 1, 2 }; int x = { (0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+p.x+x) }; return x; }\n"
+        "int n(void) { int x = { 0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x+x }; return x; }\n"
+        "int o(void) { int x = { sizeof(0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+0+x) + x }; return x; }\n"
+        "int p(void) { struct P x = { .x = 1, .y = x.x }; return x.y; }\n"
+        "int q(void) { int *x = { &x[0] }; return x != 0; }\n"
+        "int r(void) { int x = { 0 }, y = { x }; return x + y; }\n"
+        "int s(void) { int y = { y + sizeof(y) }; return y; }\n";
     static const char format_shadowed[] =
         "void f(void (*printf)(const char *, ...)) { printf(\"%d\", \"x\"); }\n"
         "int printf(const char *, ...);\n"
@@ -870,6 +1070,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { format_argument_order, { "-Wall", NULL, NULL, NULL } },
         { comma_statements, { "-Wall", "-Wextra", NULL, NULL } },
         { self_init_edges, { "-Wall", NULL, NULL, NULL } },
+        { self_init_scan, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
         { format_shadowed, { "-Wall", NULL, NULL, NULL } },
