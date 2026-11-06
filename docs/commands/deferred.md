@@ -53,12 +53,13 @@ timing requests retain the original complete-unit expression walk.
 publication times. `expressions` remains elapsed wall time; the detailed
 `expressions.work.*` fields sum work across lanes, rather than elapsed time.
 
-The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
-(and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
-of the bodies' tokens beyond the larger of the largest body's and twice the
-second largest's, no more than its lanes or the bodies: a lane's copy of the
-reader, which grows with the top level, and its wake-up must be paid for by its
-share of the walks. The calling thread cuts the bodies into parts before the
+The reader runs one lane per `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (and one per
+`BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens) of the
+bodies' tokens beyond the larger of the largest body's and twice the second
+largest's, at least one and no more than its lanes or the bodies: a lane's copy
+of the reader, which grows with the top level, and its wake-up must be paid for
+by its share of the walks, and a second lane needs two shares, since it also
+puts the merge's pass and the post-merge rounds on lanes (#447). The calling thread cuts the bodies into parts before the
 lanes start (`parts_by_cost`), stably promotes the part containing the largest
 body, and reads that part at once as the first lane. The others, woken for the
 bodies, take the rest in the remaining cost order from the counter

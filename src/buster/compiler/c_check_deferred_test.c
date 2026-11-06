@@ -13,9 +13,9 @@
 // which, in a large unit, check_input_run's arena of rare columns is base pages or huge: #764, #847; where more than one
 // lane reads a unit that isn't large, the lanes claiming the arena's regions before their first writes), its reader be copied by
 // one of them at least and by no more (#432's review), and its parts be as many as a group of them cuts. Each fixture
-// is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
-// BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
-// the bodies' tokens beyond the larger of the largest body's and twice the second largest's), and eight of bodies of
+// is read again on 8 lanes by the reader's rule of how many (one lane per BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per
+// BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of the bodies' tokens beyond the larger of the
+// largest body's and twice the second largest's, and at least one), and eight of bodies of
 // known tokens are read by the rule alone, as they are and with every unit large (CheckDeferred.base_page_tokens): on
 // each side of a second lane and of an
 // eighth, beside a largest body, which the first lane reads itself, and beside a second largest, which a woken lane
@@ -1000,14 +1000,15 @@ static uint64_t check_deferred_test_lane_tokens(uint64_t top)
     return BUSTER_CHECK_DEFERRED_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
 }
 
-// The lanes a unit's bodies run on, written again from the rule: one, and one more per check_deferred_test_lane_tokens
-// of their tokens beyond the larger of the largest body's and twice the second largest's, or with `every` as many as
+// The lanes a unit's bodies run on, written again from the rule: one per check_deferred_test_lane_tokens of their tokens
+// beyond the larger of the largest body's and twice the second largest's, and at least one, or with `every` as many as
 // there are lanes; and no more than `lanes` or the bodies, none without bodies.
 static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t top, uint64_t largest, uint64_t second, uint64_t lanes, bool every)
 {
     const uint64_t path = largest > second * 2 ? largest : second * 2;
     const uint64_t beyond = tokens > path ? tokens - path : 0;
-    const uint64_t wanted = every ? lanes : 1 + beyond / check_deferred_test_lane_tokens(top);
+    const uint64_t shares = beyond / check_deferred_test_lane_tokens(top);
+    const uint64_t wanted = every ? lanes : shares > 1 ? shares : 1;
     const uint64_t most = bodies < lanes ? bodies : lanes;
     return wanted < most ? wanted : most;
 }
@@ -1016,11 +1017,12 @@ static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint
 // (check_deferred_test_lane_tokens): `bodies` functions of empty statements, whose bodies
 // have N tokens each from their opening brace to their closing one, but the first `first` times as many, the second
 // `second` times as many, and the last `fewer` fewer; and the lanes the rule gives them on 8. Bodies of N: a second lane
-// needs N tokens beyond twice the second largest body's, and an eighth seven times as many, each with a token fewer too.
-// A largest body of four times N, which the first lane reads itself, beside one of N, and of a token fewer: the second
-// lane its tokens beyond the largest body's pay for (#448's rule, which counted the largest body twice, took one). A
-// largest body of three times N beside one of twice N, whose woken lane reads it in about four times N's time, and one
-// of N and of a token fewer: the third lane its tokens beyond four times N pay for.
+// needs twice N tokens beyond twice the second largest body's (#447: one lane per N, and at least one), and an eighth
+// eight times as many, each with a token fewer too. A largest body of four times N, which the first lane reads itself,
+// beside two of N, and of a token fewer: the second lane its tokens beyond the largest body's pay for (#448's rule, which
+// counted the largest body twice, took one). A largest body of three times N beside one of twice N, whose woken lane
+// reads it in about four times N's time, and two of N and of a token fewer: the third lane its tokens beyond four times
+// N pay for. The grouped-part cases' 53 tokens a body give 2 lanes at 127 to 129 bodies and 6 at 511 to 513.
 typedef struct CheckDeferredSize CheckDeferredSize;
 struct CheckDeferredSize
 {
@@ -1037,20 +1039,20 @@ struct CheckDeferredSize
 
 static const CheckDeferredSize check_deferred_sizes[] =
 {
-    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1, 0 },
-    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2, 0 },
-    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7, 0 },
-    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8, 0 },
-    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1, 0 },
-    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2, 0 },
-    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2, 0 },
-    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3, 0 },
-    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 18 },
-    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 18 },
-    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 18 },
+    { "lane-tokens-below-two-lanes", 4, 1, 1, 1, 1, 0 },
+    { "lane-tokens-two-lanes", 4, 1, 1, 0, 2, 0 },
+    { "lane-tokens-below-eight-lanes", 10, 1, 1, 1, 7, 0 },
+    { "lane-tokens-eight-lanes", 10, 1, 1, 0, 8, 0 },
+    { "lane-tokens-large-body-below-two-lanes", 3, 4, 1, 1, 1, 0 },
+    { "lane-tokens-large-body-two-lanes", 3, 4, 1, 0, 2, 0 },
+    { "lane-tokens-second-body-below-three-lanes", 4, 3, 2, 1, 2, 0 },
+    { "lane-tokens-second-body-three-lanes", 4, 3, 2, 0, 3, 0 },
+    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 53 },
+    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 53 },
+    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 53 },
+    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 53 },
+    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 53 },
+    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 53 },
 };
 
 // A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the

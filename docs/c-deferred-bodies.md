@@ -52,15 +52,18 @@ serial finishing. Success and retry return it exactly once.
 2. **The file scope's history.** `c_environment_build` (#319's index,
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
-3. **The lanes.** The reader runs one lane, and one more per
-   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (1,024), and one more per
-   `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (4) of the top level's
-   tokens, of the bodies' tokens beyond their critical path: the larger of the
-   largest body, which the first lane reads itself, and twice the second
-   largest, which a woken lane reads at about half the first lane's speed. It
-   runs no more lanes than it is given or than bodies. A lane costs its copy of
-   the reader, which grows with the top level, and its wake-up, which its share
-   of the walks must pay for ("How many lanes", below).
+3. **The lanes.** The reader runs one lane per
+   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (3,072), and one more per
+   `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (3) of the top level's
+   tokens, of the bodies' tokens beyond their critical path, and at least one:
+   the critical path is the larger of the largest body, which the first lane
+   reads itself, and twice the second largest, which a woken lane reads at
+   about half the first lane's speed. It runs no more lanes than it is given or
+   than bodies. A lane costs its copy of the reader, which grows with the top
+   level, and its wake-up, which its share of the walks must pay for. A second
+   lane needs two shares, since it also puts the merge's pass and the
+   post-merge rounds on lanes ("How many lanes", below, and "The rule after the
+   post-merge rounds (#447)").
    `CheckDeferred.every_lane` runs every lane the bodies can take, as the tests
    and `test-checker-corpus` do.
 
@@ -582,6 +585,18 @@ out. `--cpus` pins the command to the
 first CPU, where the parse, source order and the top level run, and its lanes
 to the list. The measurements before "How many lanes" were made with the three
 rotating orders.
+
+Since #447 it also reports each reading's absolute median in whole
+nanoseconds (`absolute:`: the parse, source order and both deferred readings).
+With `--raw` it adds every pass's unrounded samples, with the readings' order
+in that pass and the lanes the second deferred reading ran on and copied the
+reader on. With `--rss` it adds each reading's peak resident set and its growth
+over the reading's start (`resident:`). These come from `/proc/self/status`'s
+`VmHWM` and `VmRSS`, with the peak reset through `/proc/self/clear_refs`
+before the reading, outside its time. Without `--cold`, a reading's growth is
+what it faulted in beyond the pages earlier readings left in the caller's
+arenas. With `--cold`, every reading starts from fresh caller arenas, and the
+growth is all it touched.
 
 One active lane uses the existing `lane_run_cold(1, ..., NULL)` utility. It
 starts no worker, makes no affinity calls, and saves/resets/restores the
