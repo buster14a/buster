@@ -5867,6 +5867,32 @@ static uint32_t tier0_preserve_records(const Tier0Function* function, bool store
     return moves + (store && moves != 0 ? 1 : 0);
 }
 
+// The k-th move of a preserving frame's block (#147, tier0_emit_preserve), of its `vectors` (a bit per vector register)
+// of `vector_bytes` each and its mask registers of `mask_bytes` each (or none), the block at `block` bytes from rbp: with
+// `store` the prologue's, else the epilogue's load back. The k-th kept vector register in its numbers' order, or past
+// them mask register k less their count, in its slot: the vector registers' from the block's start, then the masks', 8
+// bytes each. Exactly the record the emission writes, with no decoration (an opmask's partial store or load): the frame
+// reader compares each move with it whole (unwind_tier0_frame_tails), so that only these are described as saves and
+// reloads.
+static X86Instruction tier0_preserve_move(uint32_t vectors, uint32_t vector_bytes, uint32_t mask_bytes, int32_t block, uint32_t k, bool store)
+{
+    const uint32_t vector_count = (uint32_t)__builtin_popcount(vectors);
+    const bool vector = k < vector_count;
+    // The k-th set bit's register: the bits below it cleared.
+    uint32_t remaining = vectors;
+    for (uint32_t skipped = 0; vector && skipped < k; skipped += 1)
+    {
+        remaining &= remaining - 1;
+    }
+    const uint32_t vector_form = vector_bytes == 64 ? (store ? X86_FORM_VMOVDQU64_ZM512_Z : X86_FORM_VMOVDQU64_Z_ZM512) :
+                                 vector_bytes == 32 ? (store ? X86_FORM_VMOVDQU_YM256_Y : X86_FORM_VMOVDQU_Y_YM256) :
+                                                      (store ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOVUPS_X_XM);
+    const uint32_t mask_form = mask_bytes == 8 ? (store ? X86_FORM_KMOVQ_M64_K : X86_FORM_KMOVQ_K_M64) : (store ? X86_FORM_KMOVW_M16_K : X86_FORM_KMOVW_K_M16);
+    const uint32_t reg = vector ? (uint32_t)__builtin_ctz(remaining) : k - vector_count;
+    const int32_t slot = block + (int32_t)(vector ? k * vector_bytes : vector_count * vector_bytes + 8 * (k - vector_count));
+    return tier0_instruction(vector ? vector_form : mask_form, (uint8_t)reg, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, slot, 0);
+}
+
 // A preserving function's vector and mask registers (#147, Tier0Function.preserve_vectors and preserve_mask_bytes), each
 // whole, in their slots of its preserve block, right below the pushes (Tier0Frame.preserve_bytes), from rbp: the saved
 // vector registers in their numbers' order, then k0 to k7, 8 bytes each, every slot one's, so that a probed frame's
@@ -5880,7 +5906,6 @@ static uint32_t tier0_preserve_records(const Tier0Function* function, bool store
 static __attribute__((noinline, cold)) void tier0_emit_preserve(const Tier0Function* function, const Tier0Frame* frame, bool store, Tier0Writer* writer)
 {
     const uint32_t vectors = tier0_preserved_vectors(function);
-    const uint32_t bytes = function->preserve_vector_bytes;
     // The block's start from rbp: past the pushes after rbp's.
     const int32_t block = -(int32_t)(8 * (frame->pushes - 1) + frame->preserve_bytes);
     if (store)
@@ -5888,24 +5913,10 @@ static __attribute__((noinline, cold)) void tier0_emit_preserve(const Tier0Funct
         const uint32_t form = tier0_immediate_form(X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, frame->preserve_bytes);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->preserve_bytes));
     }
-    const uint32_t vector_form = bytes == 64 ? (store ? X86_FORM_VMOVDQU64_ZM512_Z : X86_FORM_VMOVDQU64_Z_ZM512) :
-                                 bytes == 32 ? (store ? X86_FORM_VMOVDQU_YM256_Y : X86_FORM_VMOVDQU_Y_YM256) :
-                                               (store ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOVUPS_X_XM);
-    const uint32_t mask_form = function->preserve_mask_bytes == 8 ? (store ? X86_FORM_KMOVQ_M64_K : X86_FORM_KMOVQ_K_M64) :
-                                                                    (store ? X86_FORM_KMOVW_M16_K : X86_FORM_KMOVW_K_M16);
-    int32_t slot = block;
-    for (uint32_t r = 0; r < 32; r += 1)
+    const uint32_t moves = tier0_preserve_moves(vectors, function->preserve_mask_bytes);
+    for (uint32_t k = 0; k < moves; k += 1)
     {
-        if ((vectors & 1u << r) != 0)
-        {
-            tier0_put(writer, tier0_instruction(vector_form, (uint8_t)r, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, slot, 0));
-            slot += (int32_t)bytes;
-        }
-    }
-    for (uint32_t k = 0; function->preserve_mask_bytes != 0 && k < BUSTER_TIER0_PRESERVE_MASKS; k += 1)
-    {
-        tier0_put(writer, tier0_instruction(mask_form, (uint8_t)k, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, slot, 0));
-        slot += 8;
+        tier0_put(writer, tier0_preserve_move(vectors, function->preserve_vector_bytes, function->preserve_mask_bytes, block, k, store));
     }
 }
 

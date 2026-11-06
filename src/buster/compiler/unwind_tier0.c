@@ -452,7 +452,7 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     // tier0_frame_events anchors them before branch sizing: `size` is then the record count.
     if (code == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 || (eh && (!pointer || open)) ||
         ((preserved != 0 || block != 0) && (!pointer || open || eh || code->tail_count != 0 || (preserved & ~UNWIND_TIER0_PRESERVABLE) != 0)) ||
-        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
+        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue + (block != 0 ? stores : 0) > code->count || size == 0 || (final_offsets != 0 && final_offsets[0] != 0) ||
         (final_offsets == 0 && size != code->count))
     {
         error = UNWIND_ERROR_INVALID;
@@ -506,13 +506,18 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
     }
     if (records != 0 && error == UNWIND_OK && block != 0)
     {
-        // The block's sub, then its stores, each from rbp.
+        // The block's sub, then its stores, and its loads right before the epilogue's release: each the very record
+        // tier0_emit_preserve writes, whole, so that a decorated (an opmask's partial) or otherwise different move isn't
+        // described as the register's save or reload.
         uint32_t amount = 0;
         error = unwind_tier0_adjustment(&records[at], true, &amount) && amount == block ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        const int32_t start = -(int32_t)(8 * (pushes + kept) + block);
+        const uint32_t loads = code->count - epilogue - stores;
         for (uint32_t k = 0; error == UNWIND_OK && k < stores; k += 1)
         {
-            const X86Instruction* store = &records[at + 1 + k];
-            error = store->rm == X86_REGISTER_RBP && store->mode == BUSTER_X86_MEMORY_BASE ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            const X86Instruction store = tier0_preserve_move(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes, start, k, true);
+            const X86Instruction load = tier0_preserve_move(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes, start, k, false);
+            error = memcmp(&records[at + 1 + k], &store, sizeof(store)) == 0 && memcmp(&records[loads + k], &load, sizeof(load)) == 0 ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
         }
         at += blocked;
     }

@@ -974,8 +974,10 @@ teardowns and saves know nothing of the kept registers, and the producer refuses
 Tier 0 (`ir_lower_typed_target_path`).
 
 **The unwind tables.** With the frame pointer, none of the kept registers' moves is a transition.
-`unwind_tier0_frame_tails` checks the pushes, the block's sub and stores and the pops in place, from
+`unwind_tier0_frame_tails` checks the pushes, the block's sub, stores and loads, and the pops in place, from
 `Tier0Code.frame_preserved`, `frame_preserve_vectors`, `frame_preserve_vector_bytes` and `frame_preserve_mask_bytes`.
+It compares each store and load whole with the record `tier0_emit_preserve` writes (`tier0_preserve_move`). A move under
+an opmask, or with any other operand, saves or reloads only part of the register, and leaves the frame undescribed.
 The emission describes every kept register at every boundary (`emitted_tier0_preserve_rows`), since the CIE's
 `same_value` rules cover the callee-saved registers alone:
 
@@ -987,7 +989,9 @@ The emission describes every kept register at every boundary (`emitted_tier0_pre
 LLVM describes its spills the same way. libgcc's unwinder and GDB read no vector register's rule. The general registers'
 rules are proved by the frame verifier's fixpoint (`--verify`, `emitted_verify_frames`), and the vector and mask
 registers' by `emitted_verify_saved_vectors`: each slot's rule right after the store of that register into that slot
-from rbp, with the CFA at rbp plus 16, and each caller's value at the entry or right after the load back.
+from rbp, with the CFA at rbp plus 16, and each caller's value at the entry or right after the load back. Each move
+must be whole (`emitted_saved_vector_move`): one of the emitter's forms, without a segment override, opmask, zeroing,
+index, vvvv or immediate.
 
 **Tests.**
 
@@ -995,7 +999,10 @@ from rbp, with the CFA at rbp plus 16, and each caller's value at the entry or r
   - every register set (`preserve_most`'s, `preserve_all`'s with 16 and 32 bytes, and every register with 64 bytes and
     the masks) in frames of each size, alignment (a realigned frame's) and probing;
   - the rules' completeness at every boundary, the verifier's proof, and the mutants it refutes;
-  - a hand-written frame whose wrong vector rules are refuted.
+  - each frame's first and last block stores and loads changed: under an opmask (merging or zeroing), with a vvvv, an
+    index or an immediate, through FS, or 8 bytes off (`emitted_test_preserve_moves`). The reader refuses each, the
+    adapter leaves it undescribed, and the verifier refutes the frame's rules over it;
+  - a hand-written frame whose wrong vector rules are refuted, and its zmm twin's masked stores and loads.
 - `test-checker-driver`'s `check_test_driver_preserving_frames` runs both paths' code, built with `--verify`, from a
   harness clang builds. Every register the convention keeps but the result's must come back, and so must rsp. A callee's
   `_Unwind_Backtrace` must recover the caller's general registers through the frame with `_Unwind_GetGR`. The runs cover:

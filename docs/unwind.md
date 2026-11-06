@@ -89,15 +89,18 @@ A preserving frame (#147, `Tier0Code.frame_preserved`, the Tier 0 guide's
 after the callee-saved ones, then reserves a block below them and stores its
 vector and mask registers there. The release steps over the block and the
 caller-saved registers are popped first. The reader checks each push, the
-block's sub and stores, and each pop in place. None is a transition, since rbp
-holds the CFA.
+block's sub, and each pop in place. It also compares each store and load
+whole with the emitter's record (`tier0_preserve_move`), so that a masked,
+partial move isn't described as a save. None is a transition, since rbp holds
+the CFA.
 
 The emission gives every kept register a rule at every boundary
 (`emitted_tier0_preserve_rows`): `same_value` from the entry, its slot after
 its save, and `same_value` after its reload. The row checker admits DWARF's
 vector and mask registers (17 to 32, 67 to 82, 118 to 125) for slots and
 caller's values, never `DW_CFA_restore` or another register's. The verifier
-proves their rules by their stores and loads (`emitted_verify_saved_vectors`).
+proves their rules by their whole, undecorated stores and loads
+(`emitted_verify_saved_vectors`).
 Such a frame has no tail calls and no `eh_return`.
 
 ### Tail calls (#147)

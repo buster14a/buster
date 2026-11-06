@@ -449,12 +449,66 @@ static bool emitted_test_preserve_complete(const EmittedCode* emitted, const Tie
     return complete;
 }
 
+// A preserving frame's block moves changed one at a time (#147, the review of #1558): its first and last stores and its
+// first and last loads (tier0_emit_preserve's), each under an opmask (merging or zeroing: a partial move), with a vvvv,
+// an index or an immediate the form doesn't have, through FS, or a slot 8 bytes off. None is the frame's: the fixed
+// reader refuses it (unwind_tier0_frame_tails compares each move whole), so the adapter doesn't describe it; and the
+// verifier refutes the frame's own events over it (emitted_saved_vector_move).
+static void emitted_test_preserve_moves(EmittedTest* test, const Tier0Code* code, const EmittedCode* emitted, uint64_t id)
+{
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    const uint32_t kept = (uint32_t)__builtin_popcount(code->frame_preserved);
+    const bool block = tier0_preserve_block_bytes(code->frame_preserve_vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes) != 0;
+    const uint32_t moves = block ? tier0_preserve_moves(code->frame_preserve_vectors, code->frame_preserve_mask_bytes) : 0;
+    // The records: rbp's push and mov, the pushes, the block's sub and its stores; its loads right before the epilogue's
+    // release, its pops, rbp's and the ret.
+    const uint32_t stored = 2 + pushes + kept + 1;
+    const uint32_t loaded = code->count - 3 - pushes - kept - moves;
+    const uint32_t positions[4] = { stored, stored + moves - 1, loaded, loaded + moves - 1 };
+    Arena* arena = &test->arena;
+    const uint64_t mark = arena->length;
+    X86Instruction* records = moves != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, code->count) : 0;
+    for (uint32_t p = 0; records != 0 && p < 4; p += 1)
+    {
+        for (uint32_t m = 0; m < 8; m += 1)
+        {
+            memcpy(records, code->records, code->count * sizeof(X86Instruction));
+            X86Instruction* move = &records[positions[p]];
+            move->decorations = m == 0 ? 1 : m == 1 ? BUSTER_X86_DECORATION_ZEROING | 1 : move->decorations;
+            move->vvvv = m == 2 ? 1 : move->vvvv;
+            move->index = m == 3 ? X86_REGISTER_RCX : move->index;
+            move->immediate = m == 4 ? 1 : move->immediate;
+            move->form = (uint16_t)(m == 5 ? move->form + BUSTER_X86_FORM_FS : move->form);
+            move->displacement = m == 6 ? move->displacement + 8 : move->displacement;
+            move->decorations = m == 7 ? 7 : move->decorations;
+            Tier0Code mutant = *code;
+            mutant.records = records;
+            const uint64_t mutant_id = id * 64 + p * 8 + m;
+            UnwindFunction fixed;
+            emitted_test_expect(test, unwind_tier0_frame_tails(&mutant, 0, mutant.count, &fixed, 0) != UNWIND_OK,
+                                "the fixed reader refuses a preserving frame's changed block move", mutant_id);
+            const uint64_t inner = arena->length;
+            const EmittedCode adapted = emitted_from_tier0(&mutant, true, false, false, arena);
+            emitted_test_expect(test, adapted.frame_status == EMITTED_FRAME_UNDESCRIBED, "Tier 0's adapter doesn't describe a preserving frame's changed block move",
+                                mutant_id);
+            arena_pop_to(arena, inner);
+            EmittedCode verified = *emitted;
+            verified.records = records;
+            const EmittedVerdict verdict = emitted_verify_frames(&verified, arena);
+            emitted_test_expect(test, verdict.error == EMITTED_VERIFY_REFUTED && verdict.record == positions[p] + 1,
+                                "the verifier refutes a preserving frame's rule over its changed block move", mutant_id);
+        }
+    }
+    arena_pop_to(arena, mark);
+}
+
 // Tier 0's preserving frames (#147, Tier0Function.preserve_general and the rest), each convention's registers (preserve_most's,
 // preserve_all's of 16 and 32 bytes, and every register's of 64 bytes with the masks, no_caller_saved_registers' set) in a
 // function of one address-taken object of each size (below a page, past one) and alignment (16, 64: a realigned frame),
 // probed and not. Both paths compile the same code; the fixed reader takes its frame; its events resolve, describe every
 // kept register at every boundary (emitted_test_preserve_complete) and are its records' (emitted_verify_frames, the vector
-// and mask rules by emitted_verify_saved_vectors); and their mutants aren't.
+// and mask rules by emitted_verify_saved_vectors); and their mutants aren't, nor is a frame whose block moves are
+// changed (emitted_test_preserve_moves).
 static void emitted_test_tier0_preserving(EmittedTest* test)
 {
     static const uint32_t sizes[] = { 100, BUSTER_TIER0_PAGE_BYTES + 904 };
@@ -532,6 +586,7 @@ static void emitted_test_tier0_preserving(EmittedTest* test)
                         const EmittedVerdict verdict = emitted_verify_frames(&emitted, arena);
                         emitted_test_expect(test, verdict.error == EMITTED_VERIFY_OK, "a preserving frame's events are its records'", id);
                         emitted_test_mutants(test, &emitted, 6, id);
+                        emitted_test_preserve_moves(test, &code, &emitted, id);
                         test->tier0_functions += 1;
                     }
                     arena_pop_to(arena, mark);
@@ -764,34 +819,47 @@ static void emitted_test_counterexamples(EmittedTest* test)
     // A preserving frame's vector register (#147, emitted_verify_saved_vectors): xmm3 stored into its slot below rbp and
     // loaded back, its rules its caller's value at the entry, the slot's right after the store and its own after the load.
     // Each mutant (another slot, the rule before the store, its own value before the load, another register's store) is
-    // refuted at its rule's boundary.
-    const X86Instruction reserve = { .form = X86_FORM_SUB_RM64_IMM8, .rm = X86_REGISTER_RSP, .immediate = 16 };
-    const X86Instruction store = { .form = X86_FORM_MOVUPS_XM_X, .reg = 3, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -16 };
-    const X86Instruction load = { .form = X86_FORM_MOVUPS_X_XM, .reg = 3, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -16 };
+    // refuted at its rule's boundary. Then zmm3's, whole (vmovdqu64) and proved, and its mutants: a store or a load under
+    // an opmask, merging or zeroing, moves only some of the register, and is refuted as its save or reload.
     const X86Instruction release = tier1_frame_emit_register(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP);
-    const X86Instruction other = { .form = X86_FORM_MOVUPS_XM_X, .reg = 4, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -16 };
-    for (uint32_t m = 0; m < 5; m += 1)
+    for (uint32_t m = 0; m < 10; m += 1)
     {
-        X86Instruction preserving[] = { push_rbp, pointer, reserve, m == 4 ? other : store, load, release, pop_rbp, ret };
+        const bool wide = m >= 5;
+        const int32_t displacement = wide ? -64 : -16;
+        const X86Instruction reserve = { .form = X86_FORM_SUB_RM64_IMM8, .rm = X86_REGISTER_RSP, .immediate = -displacement };
+        X86Instruction store = { .form = wide ? X86_FORM_VMOVDQU64_ZM512_Z : X86_FORM_MOVUPS_XM_X, .reg = 3, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE,
+                                 .displacement = displacement };
+        X86Instruction load = { .form = wide ? X86_FORM_VMOVDQU64_Z_ZM512 : X86_FORM_MOVUPS_X_XM, .reg = 3, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE,
+                                .displacement = displacement };
+        store.reg = m == 4 ? 4 : store.reg;
+        store.decorations = m == 6 ? 1 : m == 8 ? BUSTER_X86_DECORATION_ZEROING | 1 : 0;
+        load.decorations = m == 7 ? 1 : m == 9 ? BUSTER_X86_DECORATION_ZEROING | 1 : 0;
+        X86Instruction preserving[] = { push_rbp, pointer, reserve, store, load, release, pop_rbp, ret };
         EmissionFrameEvent preserving_events[] = {
             { .at = { .boundary = 0 }, .kind = EMISSION_FRAME_SAME_VALUE, .reg = 20 },
             { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
             { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_OFFSET, .reg = BUSTER_EMISSION_X86_RBP, .value = -16 },
             { .at = { .boundary = 2 }, .kind = EMISSION_FRAME_CFA, .reg = BUSTER_EMISSION_X86_RBP, .value = 16 },
-            { .at = { .boundary = m == 2 ? 3u : 4u }, .kind = EMISSION_FRAME_OFFSET, .reg = 20, .value = m == 1 ? -48 : -32 },
+            { .at = { .boundary = m == 2 ? 3u : 4u }, .kind = EMISSION_FRAME_OFFSET, .reg = 20, .value = m == 1 ? -48 : displacement - 16 },
             { .at = { .boundary = m == 3 ? 4u : 5u }, .kind = EMISSION_FRAME_SAME_VALUE, .reg = 20 },
             { .at = { .boundary = 7 }, .kind = EMISSION_FRAME_CFA, .reg = BUSTER_EMISSION_X86_RSP, .value = 8 },
             { .at = { .boundary = 7 }, .kind = EMISSION_FRAME_RESTORE, .reg = BUSTER_EMISSION_X86_RBP },
         };
-        static const uint32_t refuted_at[] = { 0, 4, 3, 4, 4 };
+        static const uint32_t refuted_at[] = { 0, 4, 3, 4, 4, 0, 4, 5, 4, 5 };
         static const char* const checks[] = {
             "a preserving frame's vector register's rules are proved by its store and load",
             "a vector register's slot other than its store's is refuted",
             "a vector register's slot before its store is refuted",
             "a vector register's own value before its load is refuted",
             "a vector register's slot that another register's store fills is refuted",
+            "a preserving frame's zmm register's rules are proved by its whole store and load",
+            "a zmm register's slot after a store under an opmask is refuted",
+            "a zmm register's own value after a load under an opmask is refuted",
+            "a zmm register's slot after a zeroing store under an opmask is refuted",
+            "a zmm register's own value after a zeroing load under an opmask is refuted",
         };
-        emitted_test_verify_case(test, preserving, 8, 0, 0, 0, preserving_events, BUSTER_ARRAY_LENGTH(preserving_events), m == 0 ? EMITTED_VERIFY_OK : EMITTED_VERIFY_REFUTED,
+        const bool proved = m == 0 || m == 5;
+        emitted_test_verify_case(test, preserving, 8, 0, 0, 0, preserving_events, BUSTER_ARRAY_LENGTH(preserving_events), proved ? EMITTED_VERIFY_OK : EMITTED_VERIFY_REFUTED,
                                  refuted_at[m], checks[m], 10 + m);
     }
     const X86Instruction bound = tier1_frame_emit_register(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R11);

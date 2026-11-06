@@ -945,22 +945,28 @@ static EmittedVerdict emitted_failed_rule(const EmittedRules* rules, const Emitt
 // both hold from the record after it: a layout's padding between them executes nothing. An assembly template's code
 // isn't the compiler's: its caller doesn't verify it. Scalar: this runs with --verify and in the tests, off the
 // compile's path. Its memory, the leaders' states and two words per record, from `scratch`, is given back.
-// The DWARF number of the vector or mask register `record` moves between it and a preserving frame's slot (#147,
-// tier0_emit_preserve's forms): a store into the slot with `store`, else a load back from it; UINT32_MAX for any other.
+// The DWARF number of the vector or mask register `record` moves whole between it and a preserving frame's slot at
+// [rbp + displacement] (#147, tier0_emit_preserve's forms): a store into the slot with `store`, else a load back from it;
+// UINT32_MAX for any other. Whole: the form exactly one of those, with no segment override or fixup, in its encoding's
+// registers (xmm16 to xmm31 an EVEX form's alone), its address rbp's alone, and no other operand: no opmask, zeroing or
+// rounding (EVEX's decorations, an opmask's store or load partial), index, vvvv or immediate.
 static uint32_t emitted_saved_vector_move(const X86Instruction* record, bool store)
 {
     const uint32_t form = record->form;
-    const bool vector = store ? form == X86_FORM_MOVUPS_XM_X || form == X86_FORM_VMOVDQU_YM256_Y || form == X86_FORM_VMOVDQU64_ZM512_Z :
-                                form == X86_FORM_MOVUPS_X_XM || form == X86_FORM_VMOVDQU_Y_YM256 || form == X86_FORM_VMOVDQU64_Z_ZM512;
+    const bool legacy = store ? form == X86_FORM_MOVUPS_XM_X || form == X86_FORM_VMOVDQU_YM256_Y : form == X86_FORM_MOVUPS_X_XM || form == X86_FORM_VMOVDQU_Y_YM256;
+    const bool evex = store ? form == X86_FORM_VMOVDQU64_ZM512_Z : form == X86_FORM_VMOVDQU64_Z_ZM512;
     const bool mask = store ? form == X86_FORM_KMOVQ_M64_K || form == X86_FORM_KMOVW_M16_K : form == X86_FORM_KMOVQ_K_M64 || form == X86_FORM_KMOVW_K_M16;
     const uint32_t reg = record->reg;
-    return vector && reg < 32 ? (reg < 16 ? 17 + reg : 67 + (reg - 16)) : mask && reg < 8 ? 118 + reg : UINT32_MAX;
+    const bool whole = record->rm == X86_REGISTER_RBP && record->mode == BUSTER_X86_MEMORY_BASE && record->index == 0 && record->vvvv == 0 && record->decorations == 0 &&
+                       record->immediate == 0;
+    const bool vector = whole && ((legacy && reg < 16) || (evex && reg < 32));
+    return vector ? (reg < 16 ? 17 + reg : 67 + (reg - 16)) : whole && mask && reg < 8 ? 118 + reg : UINT32_MAX;
 }
 
 // A vector or mask register's rules (#147, a preserving frame's: emitted_tier0_preserve_rows), which the fixpoint below
-// doesn't follow, proved by the records at their boundaries: a slot's rule right after the store of that register into
-// that slot from rbp, the CFA rbp's plus 16 by then; and its caller's value at the entry, or right after its load back
-// from the slot its rule named. The frame keeps rbp and the slots past the body's places (tier0_layout_frame).
+// doesn't follow, proved by the records at their boundaries: a slot's rule right after the whole store of that register
+// into that slot from rbp (emitted_saved_vector_move: a masked one is no save), the CFA rbp's plus 16 by then; and its
+// caller's value at the entry, or right after its whole load back from the slot its rule named. The frame keeps rbp and the slots past the body's places (tier0_layout_frame).
 static EmittedVerdict emitted_verify_saved_vectors(const EmittedCode* code)
 {
     EmittedVerdict verdict = { .error = EMITTED_VERIFY_OK, .event = code->frame_count };
@@ -979,16 +985,15 @@ static EmittedVerdict emitted_verify_saved_vectors(const EmittedCode* code)
         if (emission_x86_saved_vector(event->reg) && kind != EMISSION_FRAME_CFA && kind != EMISSION_FRAME_CFA_OFFSET)
         {
             const X86Instruction* record = boundary != 0 && boundary <= code->count ? &code->records[boundary - 1] : NULL;
-            const bool slot = record != NULL && record->rm == X86_REGISTER_RBP && record->mode == BUSTER_X86_MEMORY_BASE;
             bool proved = false;
             if (kind == EMISSION_FRAME_OFFSET)
             {
-                proved = framed && slot && emitted_saved_vector_move(record, true) == event->reg && record->displacement == event->value + 16;
+                proved = framed && record != NULL && emitted_saved_vector_move(record, true) == event->reg && record->displacement == event->value + 16;
                 slots[event->reg] = event->value;
             }
             else if (kind == EMISSION_FRAME_SAME_VALUE)
             {
-                proved = boundary == 0 || (slot && emitted_saved_vector_move(record, false) == event->reg && slots[event->reg] != BUSTER_EMITTED_UNKNOWN &&
+                proved = boundary == 0 || (record != NULL && emitted_saved_vector_move(record, false) == event->reg && slots[event->reg] != BUSTER_EMITTED_UNKNOWN &&
                                            record->displacement == slots[event->reg] + 16);
             }
             verdict = proved ? verdict : (EmittedVerdict){ .error = EMITTED_VERIFY_REFUTED, .record = boundary, .event = e };
