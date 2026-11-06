@@ -438,7 +438,7 @@ boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
-- `benchmark-floors, test-floors-input` — `floors_benchmark.c` — [guide](docs/commands/floors.md).
+- `benchmark-floors, test-floors-input` — [guide](docs/commands/floors.md).
 - `test-foreign, benchmark-foreign` — `foreign.c` — [guide](docs/commands/foreign.md).
 - `test-foreign-corpus` — `foreign_corpus_test.c` — [guide](docs/commands/foreign-corpus.md).
 - `link-foreign (DWARF)` — `foreign_debug.c` — [guide](docs/commands/foreign-debug.md).
