@@ -4197,7 +4197,9 @@ they do per token where little of it was per declaration or expression:
   operators, operands and calls, and the names of the builtin constants, the
   varargs, `transparent_union`, `overloadable`, `_Generic` and
   `__builtin_choose_expr`) in one pass, 64 tokens' kinds and roles and 16
-  tokens' names at a time. The same pass writes each token's syntax bits
+  tokens' names at a time. It compares 16 names with each sought name only
+  where a filter of those names in two registers (`CheckInputFilter`) passes
+  one of them, which few tokens' names do (#529). The same pass writes each token's syntax bits
   (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
