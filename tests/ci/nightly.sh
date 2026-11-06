@@ -19,6 +19,13 @@ expect_line() { grep -Fx -- "$2" "$1" > /dev/null || { cat "$1" >&2; fail "$3"; 
 expect_match() { grep -E -- "$2" "$1" > /dev/null || { cat "$1" >&2; fail "$3"; }; }
 expect_no_match() { if grep -E -- "$2" "$1" > /dev/null; then cat "$1" >&2; fail "$3"; fi; }
 
+for binary in "$work/nightly" "$work/nightly-sanitize"; do
+    "$binary" worker-window < tools/ci/nightly.c > "$work/worker-current.tsv"
+    expect_line "$work/worker-current.tsv" $'worker-window\t2\t8' 'the source reader recognizes the actual current worker'
+    printf 'unknown historical source\n' | "$binary" worker-window > "$work/worker-unknown.tsv"
+    expect_line "$work/worker-unknown.tsv" $'worker-window\t-\t-' 'unrecognized historical source stays unknown'
+done
+
 # The fake `gh`: each endpoint answers from $FIXTURES, or with nothing found; every call is logged.
 mkdir "$work/bin" "$work/fixtures"
 cat > "$work/bin/gh" <<'SH'
@@ -166,7 +173,7 @@ mkdir -p "$history/tools/ci" "$history/src" "$history/docs"
 echo root > "$history/README.md"
 git -C "$history" add -A
 commit_at 1793700000 commit -q -m root
-echo tool > "$history/tools/ci/nightly.c"
+printf '#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7\n' > "$history/tools/ci/nightly.c"
 git -C "$history" add -A
 commit_at 1793700100 commit -q -m epoch
 epoch=$(git -C "$history" rev-parse HEAD)
@@ -186,6 +193,8 @@ git -C "$history" add -A
 commit_at 1793700500 commit -q -m docs
 docs=$(git -C "$history" rev-parse HEAD)
 echo code > "$history/src/c.c"
+# The later state has the widened window; old commits keep their own worker declarations.
+printf '#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8\n' > "$history/tools/ci/nightly.c"
 git -C "$history" add -A
 commit_at 1793700600 commit -q -m code
 head=$(git -C "$history" rev-parse HEAD)
@@ -535,6 +544,9 @@ handed() { sed -n 's/^pending=//p' "$GITHUB_OUTPUT"; }
 rm -f "$fixtures/runs-head-"*.json
 GITHUB_RUN_ID=9100 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') run_coordinator "$work/dry" prepare dry-run
 expect_line "$work/dry/states.tsv" "state	$epoch	$(git -C "$history" rev-parse "$epoch^1")	1793700100" 'the epoch is the first state'
+expect_line "$work/dry/states.tsv" $'worker-window\t4\t7' 'historical workers retain their 04:00-07:00 declaration'
+expect_line "$work/dry/states.tsv" $'worker-window\t2\t8' 'later workers declare the expanded window'
+test "$(find "$work/dry/worker-windows" -name '*.tsv' | wc -l)" -eq 2 || fail 'worker metadata is cached once per source blob'
 expect_no_match "$work/dry/states.tsv" "$inside" 'a merged branch'"'"'s own commits are not states'
 expect_match "$work/dry/report.md" '\| not-required \| 1 \|' 'the documentation change needs nothing'
 expect_match "$work/dry/plan.tsv" "^would-dispatch	snapshot	defer	$head	20261104\.9100\.1\.defer	$head$" 'the dry run would prepare the snapshot'
@@ -912,4 +924,45 @@ git -C "$history" -c push.negotiate=false push -q "$remote" main
 GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/moved" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
 expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, pending compaction, the prepare-to-window handoff and a pin that main moved past checked\n'
+
+# A mixed old/new backlog after the daily snapshot completed: early and late steps skip old workers, while an inside
+# step admits the oldest. A new job rebuilds the same windows from Git, independently of its pending handoff.
+export FIXTURES="$work/worker-fixtures"
+fixtures=$FIXTURES
+mkdir -p "$fixtures" "$work/worker-ledger"
+{
+    printf '# buster-nightly-ledger 1\ncycle\t2026-11-04\t%s\t9800\t%s\n' "$later" "$(madrid '2026-11-03 22:10')"
+    for state in "$epoch" "$merge" "$head"; do
+        case "$state" in "$epoch") run=9811 ;; "$merge") run=9812 ;; "$head") run=9813 ;; esac
+        printf 'run\t%s\t1\t%s\tpush\tpush\t-\t1793701000\t1793702000\tok\tskip\ttargeted\tdeferred\t-\t-\t-\n' "$run" "$state"
+    done
+    printf 'run\t9814\t1\t%s\tworkflow_dispatch\tsnapshot\t20261104.9800.1.defer\t1793740200\t1793743800\tok\tskip\tfull\tdeferred\t-\t-\t-\n' "$later"
+    printf 'run\t9815\t1\t%s\tworkflow_dispatch\tsnapshot\t20261104.9800.2.admit\t1793754000\t1793754300\tok\tadmit\tfull\tcomplete\t-\t-\t-\n' "$later"
+} > "$work/worker-ledger/ledger.tsv"
+(cd "$work/worker-ledger" && zip -q "$fixtures/artifact-98001.zip" ledger.tsv)
+printf '{"artifacts":[{"id":98001,"name":"nightly-ledger-prepare-1","expired":false}]}\n' > "$fixtures/artifacts-9800.json"
+: > "$fixtures/calls.log"
+early=$(madrid '2026-11-04 02:10')
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$early NIGHTLY_STARTED=$((early - 20700)) NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-early" window run
+expect_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$head -f purpose=backlog -f hardware=admit" 'a later worker can use the added early hours'
+expect_no_match "$fixtures/calls.log" "--ref nightly/($epoch|$merge) .*hardware=admit" 'the old 04:00 workers are never admitted early'
+expect_match "$work/worker-early/report.md" 'worker window 04:00-07:00 Europe/Madrid' 'the report explains the old workers still pending'
+expect_line "$GITHUB_OUTPUT" 'continue=reachable' 'a job that hands over does so normally with worker constraints'
+worker_handoff=$(handed)
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$((early + 60)) NIGHTLY_SEQUENCE=20001 NIGHTLY_PENDING=$worker_handoff run_coordinator "$work/worker-continued" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'the continuation duplicates no pending hardware dispatch'
+cmp "$work/worker-early/states.tsv" "$work/worker-continued/states.tsv" || fail 'the continuation rebuilds exactly the same immutable worker windows'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 04:00') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-open" window run
+expect_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$epoch -f purpose=backlog -f hardware=admit" 'at 04:00 the oldest worker becomes eligible'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 07:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-late" window run
+expect_match "$fixtures/calls.log" "^workflow run .*--ref nightly/$head -f purpose=backlog -f hardware=admit" 'a later worker can use the added late hour'
+expect_no_match "$fixtures/calls.log" "--ref nightly/($epoch|$merge) .*hardware=admit" 'the old workers are never admitted after their cutoff'
+expect_match "$work/worker-late/ledger.tsv" "^run.*$epoch.*targeted.deferred" 'skipping a closed worker does not mark its coverage complete'
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 07:36') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-cutoff" window run
+expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'no new worker bypasses the global bound and 08:00 cutoff'
+
+printf 'nightly glue: evidence, records, first-parent states, the ledger, worker windows, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, pending compaction, the prepare-to-window handoff and a pin that main moved past checked\n'
