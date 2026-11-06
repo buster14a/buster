@@ -84,6 +84,14 @@ take in lanes. It refuses a frame its records aren't (`UNSUPPORTED`), invalid
 inputs (`INVALID`) and sizes past the format's (`LIMIT`), each leaving the
 descriptor alone.
 
+A preserving frame (#147, `Tier0Code.frame_preserved`, the Tier 0 guide's
+"Preserving frames") has a frame pointer and pushes caller-saved registers
+after the callee-saved ones, popping them first after the release. The reader
+checks each push and pop in place. None is a transition, since rbp holds the
+CFA. The emission adds a row for each one's save after its push and restores
+its rule after its pop (`emitted_tier0_preserve_rows`). Such a frame has no
+tail calls and no `eh_return`.
+
 ### Tail calls (#147)
 
 A function with tail calls (clang's `musttail`, the Tier 0 guide's "Tail calls")

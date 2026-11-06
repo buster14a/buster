@@ -612,6 +612,21 @@ struct Tier0Function
     // tier0_emit_stack), so that no frame or allocation steps over a guard page. Tier 1's frame takes it too
     // (BUSTER_TIER1_FRAME_PROBE_STACK).
     bool probe_stack;
+    // The registers the function keeps for its caller past System V's callee-saved ones (#147, #1447): preserve_most's
+    // and preserve_all's (and no_caller_saved_registers', as clang's x86 handlers keep them), but those its result returns
+    // in, which the caller reads (tier0_preserved_general, tier0_preserved_vectors). `preserve_general` has a bit per
+    // general register of Tier 0's register set among the caller-saved ones (BUSTER_TIER0_GENERAL_CALLER_SAVED), each
+    // pushed after the callee-saved ones and popped before them. `preserve_vectors` keeps vector registers 0 to it less 1
+    // (0, 16 or 32), `preserve_vector_bytes` of each (16, 32 or 64: an XMM's, a YMM's or a ZMM's, which the function's
+    // instruction set must have), and `preserve_mask_bytes` the mask registers k0 to k7 (0, 2 for AVX-512F's kmovw or 8
+    // for AVX-512BW's kmovq): each stored into the frame's preserve area right after the prologue's reservation and
+    // loaded back before the epilogue's release (tier0_emit_preserve). Such a frame has a frame pointer
+    // (tier0_kept_pointer), so that the pushes past rbp's are no transitions of the unwind tables, and no eh_return, tail
+    // call or __builtin_setjmp, whose teardowns and frames know nothing of these (tier0_frame_input_valid).
+    uint16_t preserve_general;
+    uint8_t preserve_vectors;
+    uint8_t preserve_vector_bytes;
+    uint8_t preserve_mask_bytes;
 };
 
 #define BUSTER_TIER0_LIFETIME_END 0x80000000u
@@ -632,6 +647,7 @@ static bool tier0_is_object(const Tier0Function* function, uint64_t local)
 
 static bool tier0_parameters_valid(const Tier0Function* function);
 static bool tier0_aggregates_valid(const Tier0Function* function);
+static bool tier0_preserve_valid(const Tier0Function* function);
 
 // The optional frame descriptors are checked even when unused. The typed stream itself retains tier0_validate's
 // valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata: the
@@ -661,7 +677,7 @@ static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Functio
         }
     }
     valid = valid && ((incoming == 0 && function->local_sizes == 0) || tier0_parameters_valid(function));
-    return valid && tier0_aggregates_valid(function);
+    return valid && tier0_preserve_valid(function) && tier0_aggregates_valid(function);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -758,6 +774,10 @@ struct Tier0Code
     // Whether the frame is an eh_return function's (Tier0Frame.eh_return): rdx and rax pushed after the callee-saved
     // registers, and its tail calls' teardowns those of __builtin_eh_return (tier0_emit_tail).
     bool frame_eh_return;
+    // A preserving function's general registers (#147, Tier0Frame.preserved): pushed after the callee-saved ones in their
+    // numbers' order, with a frame pointer, and popped first; its vector and mask registers' moves are its body's to the
+    // unwind tables, after the prologue and before the epilogue's release.
+    uint32_t frame_preserved;
     Tier0Error error;
     uint32_t node;
 };
@@ -898,7 +918,8 @@ static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
 };
 
 // A register set: a bit per general register (bits 0 to 15) and per XMM register (bits 16 to 31).
-#define BUSTER_TIER0_XMM(n) (16 + (n))
+#define BUSTER_TIER0_GENERAL_REGISTERS 16
+#define BUSTER_TIER0_XMM(n) (BUSTER_TIER0_GENERAL_REGISTERS + (n))
 #define BUSTER_TIER0_GENERAL_CALLER_SAVED                                                                              \
     (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |               \
      1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 |                \
@@ -915,6 +936,26 @@ static const uint8_t tier0_callee_saved[BUSTER_TIER0_CALLEE_SAVED] = {
     (1u << X86_REGISTER_RDI | 1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX |               \
      1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10 | 0xffu << BUSTER_TIER0_XMM(0))
 #define BUSTER_TIER0_RESULT_REGISTERS (1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 3u << BUSTER_TIER0_XMM(0))
+
+// A preserving frame's metadata (Tier0Function.preserve_general and the rest): caller-saved general registers, whole vector
+// registers of a width their count allows (32 of them only as ZMM's), the mask registers' widths, and none of the frames
+// whose teardowns and saves don't know them: eh_return's, tail calls', __builtin_setjmp's.
+static bool tier0_preserve_valid(const Tier0Function* function)
+{
+    const uint32_t vectors = function->preserve_vectors;
+    const uint32_t bytes = function->preserve_vector_bytes;
+    const uint32_t masks = function->preserve_mask_bytes;
+    const bool preserving = function->preserve_general != 0 || vectors != 0 || masks != 0;
+    const bool widths = (vectors == 0 && bytes == 0) || (vectors == 16 && (bytes == 16 || bytes == 32 || bytes == 64)) || (vectors == 32 && bytes == 64);
+    return (function->preserve_general & ~BUSTER_TIER0_GENERAL_CALLER_SAVED) == 0 && widths && (masks == 0 || masks == 2 || masks == 8) &&
+           (!preserving || (!function->eh_return && !function->returns_twice && function->call_tails == 0));
+}
+
+// Whether the function keeps registers for its caller past System V's callee-saved ones (Tier0Function.preserve_general).
+static bool tier0_preserving(const Tier0Function* function)
+{
+    return function->preserve_general != 0 || function->preserve_vectors != 0 || function->preserve_mask_bytes != 0;
+}
 
 // The condition codes, as the encoder's Jcc and SETcc rows number them (their 4-bit tttn field).
 #define BUSTER_TIER0_CC_B 2
@@ -1095,6 +1136,36 @@ struct Tier0Part
 static uint8_t tier0_abi_register(uint8_t reg)
 {
     return (uint8_t)((reg & BUSTER_ABI_REGISTER_VECTOR) != 0 ? BUSTER_TIER0_XMM(reg & 0x1f) : reg);
+}
+
+// The registers the function's result returns in, in Tier 0's register set: rax for one through a hidden pointer, whose
+// address it returns there, and each register part's but an x87 register's.
+static uint32_t tier0_result_set(const Tier0Function* function)
+{
+    const AbiReturn result = function->result;
+    uint32_t set = result.kind == BUSTER_ABI_RESULT_MEMORY ? 1u << X86_REGISTER_RAX : 0;
+    for (uint32_t k = 0; result.kind == BUSTER_ABI_RESULT_REGISTERS && k < BUSTER_ABI_RESULT_PARTS; k += 1)
+    {
+        const uint8_t reg = result.registers[k];
+        // BUSTER_ABI_REGISTER_NONE has the x87 bit too.
+        set |= (reg & BUSTER_ABI_REGISTER_X87) == 0 ? 1u << tier0_abi_register(reg) : 0;
+    }
+    return set;
+}
+
+// The general registers a preserving function pushes for its caller (Tier0Function.preserve_general): all but its result's.
+static uint32_t tier0_preserved_general(const Tier0Function* function)
+{
+    return function->preserve_general != 0 ? function->preserve_general & ~tier0_result_set(function) : 0;
+}
+
+// The vector registers a preserving function stores for its caller (Tier0Function.preserve_vectors), a bit per register
+// (0 to 31): all but its result's.
+static uint32_t tier0_preserved_vectors(const Tier0Function* function)
+{
+    const uint32_t count = function->preserve_vectors;
+    const uint32_t all = count == 32 ? UINT32_MAX : (1u << count) - 1;
+    return count != 0 ? all & ~(tier0_result_set(function) >> BUSTER_TIER0_XMM(0)) : 0;
 }
 
 // The parts of an aggregate of `size` bytes in two registers (a location's, or a result's first two), registers[k]
@@ -4088,10 +4159,17 @@ struct Tier0Frame
     // Whether the function calls __builtin_eh_return (#148, Tier0Function.eh_return): `pushes` counts rdx's and rax's,
     // pushed after the callee-saved registers, which its ordinary teardown steps over and its eh_return's pops.
     bool eh_return;
+    // A preserving function's (#147, Tier0Function.preserve_general): the general registers it pushes after the
+    // callee-saved ones (tier0_preserved_general), which `pushes` counts, and its vector and mask registers' slots in the
+    // frame from `preserve_area` (tier0_emit_preserve).
+    uint32_t preserved;
+    uint32_t preserve_area;
 };
 
 // A memory class's slot: 16 bytes for each integer depth, of which an x87 value takes 10 and a 128-bit integer 16.
 #define BUSTER_TIER0_MEMORY_SLOT_BYTES 16
+// The mask registers a preserving frame keeps (Tier0Function.preserve_mask_bytes): k0 to k7.
+#define BUSTER_TIER0_PRESERVE_MASKS 8
 // A vector's slot: 64 bytes for each integer depth, of which a VECTOR value takes its bytes from the first.
 #define BUSTER_TIER0_VECTOR_SLOT_BYTES 64
 // A mask's slot: 8 bytes for each depth of the mask stack, which a mask fills whole, zeros past its bytes.
@@ -4125,10 +4203,12 @@ static bool tier0_value_object(const Tier0Function* function, uint64_t local, ui
 
 // Whether a frame that neither moves rsp nor is realigned keeps a frame pointer all the same (#177): where the options
 // ask for one (Tier0Function.frame_pointer), every frame's, or with the leaf rule one whose function `calls`; and an
-// eh_return function's (#148, Tier0Function.eh_return), from which its unwinding finds the CFA.
+// eh_return function's (#148, Tier0Function.eh_return), from which its unwinding finds the CFA; and a preserving
+// function's (#147, Tier0Function.preserve_general), whose pushes past rbp's are then no transitions of its unwind tables.
 static bool tier0_kept_pointer(const Tier0Function* function, bool calls)
 {
-    return function->eh_return || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
+    return function->eh_return || tier0_preserving(function) || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL ||
+           (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
 }
 
 // The frame's registers, once selection knows whether the entries move rsp (`moves`) and whether the options keep a
@@ -4607,9 +4687,11 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     {
         frame->saved |= tier0_callee_saved[c] != X86_REGISTER_RBP || !frame->pointer ? 1u << c : 0;
     }
-    // The frame pointer's push, first, counts with the others.
+    // The frame pointer's push, first, counts with the others, and so do a preserving function's (#147), last.
     frame->eh_return = function->eh_return;
-    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u) + (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0u);
+    frame->preserved = tier0_preserved_general(function);
+    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u) + (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0u) +
+                    (uint32_t)__builtin_popcount(frame->preserved);
 }
 
 // The frame's offsets and size, and the memory homes' displacements: the outgoing arguments at rsp, then the call
@@ -4773,6 +4855,14 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         valid = valid && offset <= INT32_MAX;
         frame->variadic_area = valid ? (uint32_t)offset : 0;
         offset += BUSTER_ABI_SAVE_AREA_BYTES;
+    }
+    // A preserving function's vector and mask registers (#147, tier0_emit_preserve): a slot of the vectors' bytes for each
+    // register it may keep, and 8 bytes for each mask register.
+    if (function->preserve_vectors != 0 || function->preserve_mask_bytes != 0)
+    {
+        valid = valid && offset <= INT32_MAX;
+        frame->preserve_area = valid ? (uint32_t)offset : 0;
+        offset += (uint64_t)function->preserve_vectors * function->preserve_vector_bytes + (function->preserve_mask_bytes != 0 ? 8 * BUSTER_TIER0_PRESERVE_MASKS : 0);
     }
     for (uint32_t l = 0; l < function->local_count && !BUSTER_VECTOR_PATH(vector); l += 1)
     {
@@ -5755,6 +5845,45 @@ static uint32_t tier0_tail_clobbers(const Tier0Function* function, uint32_t i)
     return function->calls[call].result.kind == BUSTER_ABI_RESULT_MEMORY ? BUSTER_TIER0_TAIL_CLOBBERS : 0;
 }
 
+// How many records tier0_emit_preserve writes: a move for each vector register a preserving function keeps
+// (tier0_preserved_vectors) and for each mask register.
+static uint32_t tier0_preserve_records(const Tier0Function* function)
+{
+    return function->preserve_vectors != 0 || function->preserve_mask_bytes != 0 ?
+               (uint32_t)__builtin_popcount(tier0_preserved_vectors(function)) + (function->preserve_mask_bytes != 0 ? BUSTER_TIER0_PRESERVE_MASKS : 0) : 0;
+}
+
+// A preserving function's vector and mask registers (#147, Tier0Function.preserve_vectors and preserve_mask_bytes), each
+// whole, into its slot of the frame's preserve area (Tier0Frame.preserve_area: vector register r's r times the vectors'
+// bytes on, the masks' 8 bytes each past them) at the frame's base: stored (`store`) after the prologue's reservation and
+// realignment, before any parameter moves, or loaded back after the epilogue's result loads (which write none of them)
+// and before its release. The moves take any address, the frame keeping 16 bytes' alignment alone: movups, AVX's vmovdqu
+// or AVX-512F's vmovdqu64, and kmovw or kmovq. Out of line and cold, as tier0_emit_realignment is: the prologue and the
+// epilogue call it for a preserving frame alone, so that the ordinary frame keeps its code.
+static __attribute__((noinline, cold)) void tier0_emit_preserve(const Tier0Function* function, const Tier0Frame* frame, bool store, Tier0Writer* writer)
+{
+    const uint32_t vectors = tier0_preserved_vectors(function);
+    const uint32_t bytes = function->preserve_vector_bytes;
+    const uint32_t vector_form = bytes == 64 ? (store ? X86_FORM_VMOVDQU64_ZM512_Z : X86_FORM_VMOVDQU64_Z_ZM512) :
+                                 bytes == 32 ? (store ? X86_FORM_VMOVDQU_YM256_Y : X86_FORM_VMOVDQU_Y_YM256) :
+                                               (store ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOVUPS_X_XM);
+    const uint32_t mask_form = function->preserve_mask_bytes == 8 ? (store ? X86_FORM_KMOVQ_M64_K : X86_FORM_KMOVQ_K_M64) :
+                                                                    (store ? X86_FORM_KMOVW_M16_K : X86_FORM_KMOVW_K_M16);
+    for (uint32_t r = 0; r < 32; r += 1)
+    {
+        if ((vectors & 1u << r) != 0)
+        {
+            const int64_t displacement = (int64_t)frame->preserve_area + (int64_t)r * bytes + frame->bias;
+            tier0_put(writer, tier0_instruction(vector_form, (uint8_t)r, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)displacement, 0));
+        }
+    }
+    for (uint32_t k = 0; function->preserve_mask_bytes != 0 && k < BUSTER_TIER0_PRESERVE_MASKS; k += 1)
+    {
+        const int64_t displacement = (int64_t)frame->preserve_area + (int64_t)function->preserve_vectors * bytes + 8 * (int64_t)k + frame->bias;
+        tier0_put(writer, tier0_instruction(mask_form, (uint8_t)k, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)displacement, 0));
+    }
+}
+
 // The frame released (with a frame pointer, rsp back from rbp, past what the body allocated, or the reservation added
 // back) and the saved registers popped, rbp last with a frame pointer: the epilogue's before its ret, and a tail call's
 // before its jump (tier0_emit_tail). An eh_return function's (Tier0Frame.eh_return) steps over rax's and rdx's slots,
@@ -5772,6 +5901,14 @@ static void tier0_emit_teardown(const Tier0Frame* frame, bool unwinding, Tier0Wr
     {
         const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
+    }
+    // A preserving function's general registers (#147, Tier0Frame.preserved), pushed last: no eh_return function's.
+    for (uint32_t r = BUSTER_TIER0_GENERAL_REGISTERS; frame->preserved != 0 && r > 0; r -= 1)
+    {
+        if ((frame->preserved & 1u << (r - 1)) != 0)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, (uint8_t)(r - 1), 0, 0, 0));
+        }
     }
     if (frame->eh_return && unwinding)
     {
@@ -8950,6 +9087,14 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
         tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RDX, 0, 0, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, X86_REGISTER_RAX, 0, 0, 0));
     }
+    // A preserving function's general registers (#147, Tier0Frame.preserved), in their numbers' order.
+    for (uint32_t r = 0; frame->preserved != 0 && r < BUSTER_TIER0_GENERAL_REGISTERS; r += 1)
+    {
+        if ((frame->preserved & 1u << r) != 0)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_PUSH_R64, 0, (uint8_t)r, 0, 0, 0));
+        }
+    }
     // The reservation, after every push: probed (#177), or a sub.
     if (tier0_probes_reservation(frame->probe, frame->size, frame->alignment_log2, frame->pointer))
     {
@@ -8963,6 +9108,11 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     if (frame->alignment_log2 != 0)
     {
         tier0_emit_realignment(frame, writer);
+    }
+    // A preserving function's vector and mask registers, before any move writes one (#147).
+    if (function->preserve_vectors != 0 || function->preserve_mask_bytes != 0)
+    {
+        tier0_emit_preserve(function, frame, true, writer);
     }
     if (function->incoming_variadic != 0)
     {
@@ -9056,7 +9206,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
 static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references)
 {
     uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + tier0_reservation_records(frame->probe, frame->size, frame->alignment_log2, frame->pointer) +
-                     tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0);
+                     tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0) + tier0_preserve_records(function);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -9146,7 +9296,8 @@ static bool tier0_x87_returns(const Tier0Function* function)
 }
 
 // The epilogue: an aggregate result's registers loaded (tier0_load_result), or a long double's st0 from slot 0, while the
-// frame they may be in (and what the body allocated) is still there; then the frame released (with a frame pointer, rsp
+// frame they may be in (and what the body allocated) is still there; a preserving function's vector and mask registers
+// loaded back (tier0_emit_preserve); then the frame released (with a frame pointer, rsp
 // back from rbp, past what the body allocated), the saved registers popped (and rbp last: tier0_emit_teardown), ret.
 static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame* frame, Tier0Writer* writer)
 {
@@ -9158,15 +9309,21 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_put(writer, tier0_memory_slot(X86_FORM_FLD_M80, frame, 0, 0));
     }
+    // A preserving function's vector and mask registers loaded back (#147), none of them the result's.
+    if (function->preserve_vectors != 0 || function->preserve_mask_bytes != 0)
+    {
+        tier0_emit_preserve(function, frame, false, writer);
+    }
     tier0_emit_teardown(frame, false, writer);
     tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
-// How many records tier0_emit_epilogue writes, without writing them: the result's loads (tier0_result_records), the
-// frame's release (an add, or with a frame pointer the lea or mov), the pops (tier0_count_teardown) and the ret.
+// How many records tier0_emit_epilogue writes, without writing them: the result's loads (tier0_result_records), a
+// preserving function's loads (tier0_preserve_records), the frame's release (an add, or with a frame pointer the lea or
+// mov), the pops (tier0_count_teardown) and the ret.
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
-    const uint32_t records = tier0_count_teardown(frame) + 1;
+    const uint32_t records = tier0_count_teardown(frame) + 1 + tier0_preserve_records(function);
     return records + (function->result_size != 0 ? tier0_result_records(function) : frame->x87_result ? 1 : 0);
 }
 
@@ -10371,6 +10528,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         code->frame_base = frame.based;
         code->frame_probe = frame.probe;
         code->frame_eh_return = frame.eh_return;
+        code->frame_preserved = frame.preserved;
     }
     return error;
 }
@@ -11224,7 +11382,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
     }
     else if (!tier0_frame_input_valid(function) || !tier0_calls_valid(function) || !tier0_parameters_valid(function))
     {
-        tier0_reject(&validator, 0, "invalid incoming variadic metadata, address-only local role, call or parameter location, or aggregate metadata");
+        tier0_reject(&validator, 0, "invalid incoming variadic metadata, address-only local role, call or parameter location, aggregate metadata or preserved registers");
     }
     else
     {

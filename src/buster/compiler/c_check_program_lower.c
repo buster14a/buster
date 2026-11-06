@@ -918,9 +918,10 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
 // A function type's calling convention that the backend doesn't compile, named for the diagnostic, or NULL for
 // System V's (#137, #147): clang 23 compiles ms_abi, vectorcall, regcall and preserve_none on x86-64 Linux with their
 // own argument registers, and preserve_most and preserve_all with System V's arguments but more registers preserved by
-// the callee. A definition of any of them is refused, and so is a call through any but the last two, whose callees
-// keep whatever a System V caller expects. `call` is whether the type is a call's callee's rather than a definition's.
-static const char* check_lower_convention(const TypeTable* types, TypeId function, bool call)
+// the callee. A definition or a call of any of the first four is refused. The last two's definitions keep their
+// registers with Tier 0's preserving frame (check_lower_preserve), and their calls are System V's, whose callees keep
+// whatever a System V caller expects. The same for a definition's type and a call's callee's.
+static const char* check_lower_convention(const TypeTable* types, TypeId function)
 {
     const TypeFunctionABI convention = type_function_abi_kind(types, function);
     const char* result = NULL;
@@ -930,13 +931,32 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
         case TYPE_FUNCTION_ABI_VECTOR: result = "functions of the vectorcall calling convention"; break;
         case TYPE_FUNCTION_ABI_REG: result = "functions of the regcall calling convention"; break;
         case TYPE_FUNCTION_ABI_PRESERVE_NONE: result = "functions of the preserve_none calling convention"; break;
-        case TYPE_FUNCTION_ABI_PRESERVE_MOST: result = call ? NULL : "functions of the preserve_most calling convention"; break;
-        case TYPE_FUNCTION_ABI_PRESERVE_ALL: result = call ? NULL : "functions of the preserve_all calling convention"; break;
+        case TYPE_FUNCTION_ABI_PRESERVE_MOST:
+        case TYPE_FUNCTION_ABI_PRESERVE_ALL:
         case TYPE_FUNCTION_ABI_SYSV:
         case TYPE_FUNCTION_ABI_COUNT:
         case TYPE_FUNCTION_ABI_INVALID: break;
     }
     return result;
+}
+
+// The registers a definition of `function`'s type keeps for its caller past System V's callee-saved ones (#147,
+// Tier0Function.preserve_general and the rest), as LLVM's x86-64 frames of clang's conventions keep them, on the
+// function's instruction set `target` (its features, CheckProgramTarget's): preserve_most's general registers, rax, rcx,
+// rdx, rsi, rdi and r8 to r10 (CSR_64_RT_MostRegs past CSR_64's); preserve_all's with xmm0 to xmm15, whole YMMs with AVX
+// (CSR_64_RT_AllRegs and its _AVX, which AVX-512 keeps too). Tier 0 leaves out the result's registers, which LLVM's
+// return lowering takes out of the set. Nothing for another convention.
+static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, Tier0Function* output)
+{
+    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    const bool most = convention == TYPE_FUNCTION_ABI_PRESERVE_MOST;
+    const bool all = convention == TYPE_FUNCTION_ABI_PRESERVE_ALL;
+    const uint16_t general = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |
+                                        1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10);
+    output->preserve_general = most || all ? general : 0;
+    output->preserve_vectors = all ? 16 : 0;
+    output->preserve_vector_bytes = all ? ((target & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16) : 0;
+    output->preserve_mask_bytes = 0;
 }
 
 // A vector type's bytes, where Tier 0 takes its values (BUSTER_TYPED_CLASS_VECTOR): GNU C's and Clang's extended
@@ -5804,7 +5824,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     CheckLowerAbi* abi = writer->abi;
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
     // its address, and its bytes go where abi_assign puts them), after the callee's calling convention.
-    const char* passed = check_lower_convention(types, type, true);
+    const char* passed = check_lower_convention(types, type);
     // A plain call: a source call whose parameters and arguments are all plain scalars (check_lower_plain_scalar), none a
     // transparent union's, and whose result is one or void, which passes every check below and records its arguments by
     // their packed classes and facts alone, on the vector path (#1048: 0.05 ms of sqlite3.c's lowering on the 9700X,
@@ -14159,7 +14179,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // the address each return gives (Tier0Function.result_size).
         const bool aggregate_result = check_lower_aggregate(writer, result);
         const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
-        const char* convention = bare ? NULL : check_lower_convention(types, type, false);
+        const char* convention = bare ? NULL : check_lower_convention(types, type);
         if (body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS)
         {
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
@@ -14632,6 +14652,18 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->unwind_init = writer->unwind_init;
         function->returns_twice = writer->returns_twice;
         function->eh_return = writer->eh_return;
+        // A preserving convention's registers (#147), which Tier 0's frame keeps but for a tail call's, __builtin_eh_return's
+        // or __builtin_setjmp's frame, whose teardowns and saves know nothing of them.
+        if (!bare)
+        {
+            check_lower_preserve(types, type, writer->target.features, function);
+        }
+        if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
+        {
+            check_lower_unsupported(writer, writer->eh_return ? "__builtin_eh_return in a function of the preserve_most or preserve_all calling convention" :
+                                            writer->returns_twice ? "__builtin_setjmp in a function of the preserve_most or preserve_all calling convention" :
+                                                                    "musttail calls in a function of the preserve_most or preserve_all calling convention");
+        }
         function->vectors = writer->vectors;
         function->masks = writer->masks;
         if (writer->vectors)

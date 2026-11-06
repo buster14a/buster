@@ -938,6 +938,56 @@ is compiled by both paths, encoded by both encoders and run from a driver, and t
 
 What the probe returns must reach the driver, through the hidden pointer too.
 
+## Preserving frames (#147)
+
+A function that keeps registers for its caller past System V's callee-saved ones (clang's `preserve_most` and
+`preserve_all`, [the calling convention guide](calling-convention.md#other-calling-conventions)) names them in its
+`Tier0Function`. Without them, nothing in the frame changes:
+
+- `preserve_general` has a bit per caller-saved general register to keep;
+- `preserve_vectors` keeps vector registers 0 to it less 1 (0, 16 or 32), `preserve_vector_bytes` of each (16, 32 or 64);
+- `preserve_mask_bytes` keeps k0 to k7 (0, 2 or 8 bytes each).
+
+Tier 0 leaves out the result's registers (`tier0_result_set`): rax for a hidden pointer's result, and each register
+part's. The frame (`tier0_kept_pointer` keeps a frame pointer for it):
+
+1. **The prologue** pushes rbp and points it at the push, then the callee-saved registers, then the kept general registers
+   in their numbers' order (`Tier0Frame.preserved`, counted in `pushes`). After the reservation and any realignment, and
+   before the variadic save area's stores and the parameters' moves, it stores each kept vector register whole into the
+   frame's preserve area (`Tier0Frame.preserve_area`, after the variadic save area: register r at r times the bytes,
+   the masks past them), at the frame's base (`tier0_emit_preserve`). The moves are movups, vmovdqu or vmovdqu64, and
+   kmovw or kmovq, which take any address, so the frame keeps its 16 bytes' alignment.
+2. **The epilogue** loads the result's registers, then the kept vector and mask registers back. The teardown then pops the
+   kept general registers first, then the callee-saved ones and rbp.
+
+The set is the convention's whole set, not the registers the body touches. Tier 0's register set covers the general
+registers and xmm0 to xmm15 alone, and nothing has checked a template's scratch caller-saved registers against
+`Tier0Frame.clobbers`. These conventions are rare. A leaf `preserve_most` function pays seven pushes and pops.
+
+`tier0_preserve_valid` refuses a callee-saved register, a vector width the count doesn't allow (32 registers only as
+ZMMs), a mask width other than 2 or 8, and a preserving frame with `eh_return`, tail calls or `returns_twice`. Their
+teardowns and saves know nothing of the kept registers, and the producer refuses such functions by name. `test-tier0`'s
+"aggregate errors" break each rule once, and both compile paths must refuse the metadata. Tier 1 leaves the function to
+Tier 0 (`ir_lower_typed_target_path`).
+
+**The unwind tables.** With the frame pointer, the kept registers' pushes and pops are no transitions
+(`unwind_tier0_frame_tails` checks them in place, `Tier0Code.frame_preserved`). Each one's save is a row at the boundary
+after its push, at its slot's offset from the CFA, and its rule is restored after its pop
+(`emitted_tier0_preserve_rows`), as LLVM's CFI has them. The vector and mask registers' moves are the body's to the
+tables. Debuggers and unwinders don't read them.
+
+`test-checker-driver`'s `check_test_driver_preserving_frames` runs both paths' code from a harness clang builds: every
+register the convention keeps but the result's must come back, and so must rsp. The runs cover:
+
+- results in a register, in two, in xmm0 and none;
+- calls;
+- a variable-length array, which moves rsp, so the epilogue's loads are from the frame base;
+- an object aligned to 64 (a realigned frame);
+- variadic arguments;
+- a backtrace from a callee.
+
+They run on x86-64, with probes, frame pointers and `-g`, and on x86-64-v3, where `preserve_all` keeps whole YMMs.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the

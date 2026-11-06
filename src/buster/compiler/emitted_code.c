@@ -150,7 +150,8 @@ static __attribute__((unused)) EmittedVerdict emitted_verify_frames(const Emitte
 // without a frame pointer has, and so never an eh_return function's.
 static uint64_t emitted_tier0_frame_room(const Tier0Code* code)
 {
-    return 31 + 18 * (uint64_t)code->tail_count + (code->frame_eh_return ? 4 + 2 * (uint64_t)code->tail_count : 0) + 2;
+    return 31 + 18 * (uint64_t)code->tail_count + (code->frame_eh_return ? 4 + 2 * (uint64_t)code->tail_count : 0) + 2 +
+           2 * (uint64_t)__builtin_popcount(code->frame_preserved);
 }
 
 // A row into rows sorted by their offsets, after those at its offset or before (room for it). Returns the count.
@@ -214,6 +215,37 @@ static uint32_t emitted_tier0_eh_rows(const Tier0Code* code, EmissionFrameRow* r
             const uint32_t release_end = jump - 1 - pushes;
             count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 1, .kind = EMISSION_FRAME_RESTORE });
             count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = release_end, .reg = 0, .kind = EMISSION_FRAME_RESTORE });
+        }
+    }
+    return count;
+}
+
+// A preserving function's frame (#147, Tier0Code.frame_preserved): its general registers' saves, which its prologue
+// pushes after the callee-saved ones in their numbers' order and which no fixed descriptor describes, into its fixed
+// shape's `count` rows (room for emitted_tier0_frame_room's more), each at the boundary after its push, its slot's offset
+// from the CFA past rbp's and the callee-saved registers' (as LLVM's CFI has them for preserve_most's frame), and each
+// rule restored at the boundary after its pop, which the epilogue's release comes right before, in the reverse order.
+// The frame has a frame pointer, so neither moves the CFA, and no tail call or eh_return (unwind_tier0_frame_tails).
+// Returns the rows' count.
+static uint32_t emitted_tier0_preserve_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
+{
+    // DWARF's numbers of the general registers, by the encoder's.
+    static const uint8_t dwarf[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+    uint32_t pushed = 0;
+    for (uint32_t r = 0; r < 16; r += 1)
+    {
+        if ((code->frame_preserved & (1u << r)) != 0)
+        {
+            // Record boundaries (emitted_from_tier0's rows are before branch sizing): rbp's push and mov, the pushes.
+            const uint32_t boundary = 2 + pushes + pushed + 1;
+            const int32_t offset = -(int32_t)(16 + 8 * (pushes + pushed + 1));
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = boundary, .value = offset, .reg = dwarf[r], .kind = EMISSION_FRAME_OFFSET });
+            // The boundary after its pop: the callee-saved registers' pops, rbp's and the ret follow, and the preserved ones
+            // pushed after it are popped before it.
+            const uint32_t popped = code->count - (pushes + 1 + 1) - pushed;
+            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = popped, .reg = dwarf[r], .kind = EMISSION_FRAME_RESTORE });
+            pushed += 1;
         }
     }
     return count;
@@ -304,6 +336,10 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
         result.frame_status = !eh || (count + 4 + 2 * (uint64_t)code->tail_count <= room && count >= 3 + (uint32_t)__builtin_popcount(code->frame_saved)) ? result.frame_status :
                                                                                                                                                         EMITTED_FRAME_UNDESCRIBED;
         count = eh && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_eh_rows(code, rows, count) : count;
+        // A preserving function's general registers (#147), never an eh_return function's.
+        const uint32_t kept = (uint32_t)__builtin_popcount(code->frame_preserved);
+        result.frame_status = kept == 0 || count + 2 * (uint64_t)kept <= room ? result.frame_status : EMITTED_FRAME_UNDESCRIBED;
+        count = kept != 0 && result.frame_status == EMITTED_FRAME_DESCRIBED ? emitted_tier0_preserve_rows(code, rows, count) : count;
         for (uint32_t i = 0; result.frame_status == EMITTED_FRAME_DESCRIBED && i < count; i += 1)
         {
             events[i] = (EmissionFrameEvent){
