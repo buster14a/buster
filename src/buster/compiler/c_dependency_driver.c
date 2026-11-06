@@ -345,9 +345,8 @@ static bool driver_read_fd(Arena* arena, int fd, String8* source, const char* la
     }
     if (result)
     {
-        static char empty[1];
         arena_pop_to(arena, mark + length);
-        first = length == 0 ? empty : first;
+        first = length == 0 ? "" : first;
         *source = (String8){ .pointer = first, .length = length };
     }
     else
