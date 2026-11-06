@@ -2461,73 +2461,57 @@ static bool check_common_literal_contexts(const CheckGraph* graph, const Parser*
     return valid;
 }
 
-// Whether check_common_own may warn at `node`, or its comma stages run there, by what they test first: a constant that an
-// initialization, an assignment, a conversion or a call's argument converts, a self-assignment's two names, a constant
-// index, or a comma the source writes.
-static bool check_common_own_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node, bool self_assign)
+// The ordinary and conversion walks both inspect assignment-conversion edges. Read each edge once and
+// retain both reach bits: integer constants can also feed the ordinary walk; floating constants and
+// conditional/comma sources are candidates only for the conversion walk.
+static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGraph* graph, const CheckStream* stream,
+                                           uint32_t node, bool self_assign)
 {
     const CheckOp op = graph->ops[node];
-    bool result = false;
+    bool own = false;
+    bool conversion = false;
     if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
     {
-        const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
-        const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
         const uint32_t left = graph->operand0[node];
         const uint32_t right = graph->operand1[node];
-        result = (source < graph->count && check_common_integer_constant(stream, source) && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-                  (flags & BUSTER_CHECK_CONVERT_CAST) == 0) ||
-                 (self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
-                  graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE);
+        const uint32_t source = op == CHECK_OP_ASSIGN ? right : left;
+        const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
+        if (source < graph->count && source < stream->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+            (flags & BUSTER_CHECK_CONVERT_CAST) == 0)
+        {
+            const CheckConstantKind constant = check_stream_constant_kind(stream, source);
+            own = constant == CHECK_CONSTANT_INTEGER;
+            conversion = constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source);
+        }
+        own |= self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
+               graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
     }
     else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
     {
         const uint32_t offset = graph->argument_offsets[node];
-        for (uint32_t i = 0; !result && i < graph->argument_counts[node]; i += 1)
+        for (uint32_t i = 0; !(own && conversion) && i < graph->argument_counts[node]; i += 1)
         {
-            const uint32_t argument = graph->argument_nodes[offset + i];
+            const uint32_t source = graph->argument_nodes[offset + i];
             const uint32_t flags = stream->argument_conversions[offset + i].flags;
-            result = argument < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
-                     check_common_integer_constant(stream, argument);
+            if (source < graph->count && source < stream->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+                (flags & BUSTER_CHECK_CONVERT_CAST) == 0)
+            {
+                const CheckConstantKind constant = check_stream_constant_kind(stream, source);
+                own |= constant == CHECK_CONSTANT_INTEGER;
+                conversion |= constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source);
+            }
         }
     }
     else if (op == CHECK_OP_SUBSCRIPT)
     {
-        result = check_common_integer_constant(stream, graph->operand1[node]);
+        own = check_common_integer_constant(stream, graph->operand1[node]);
     }
     else if (op == CHECK_OP_COMMA)
     {
         const uint32_t token = graph->tokens[node];
-        result = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_COMMA;
+        own = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_COMMA;
     }
-    return result;
-}
-
-// The conversion walk can report only assignment conversions whose source is constant or branches into arms.
-// Calls hold those conversions on argument edges rather than on their node.
-static bool check_common_conversion_candidate(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
-{
-    const CheckOp op = graph->ops[node];
-    bool result = false;
-    if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
-    {
-        const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
-        const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
-        result = source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-                 (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
-                 (check_stream_constant_kind(stream, source) != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source));
-    }
-    else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
-    {
-        const uint32_t offset = graph->argument_offsets[node];
-        for (uint32_t i = 0; !result && i < graph->argument_counts[node]; i += 1)
-        {
-            const uint32_t source = graph->argument_nodes[offset + i];
-            const uint32_t flags = stream->argument_conversions[offset + i].flags;
-            result = source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-                     (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
-                     (check_stream_constant_kind(stream, source) != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source));
-        }
-    }
+    const uint8_t result = (uint8_t)((own ? BUSTER_CHECK_REACH_TREE : 0u) | (conversion ? BUSTER_CHECK_REACH_CONVERSION : 0u));
     return result;
 }
 
@@ -2540,10 +2524,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const CheckOp op = graph->ops[node];
     const bool division = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, graph->operand1[node]);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    const bool conversion = check_common_conversion_candidate(graph, stream, node);
-    const uint8_t result = (uint8_t)((check_common_own_candidate(parser, graph, stream, node, enabled->self_assign) ? BUSTER_CHECK_REACH_TREE : 0u) |
-                                     (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
-                                     (conversion ? BUSTER_CHECK_REACH_CONVERSION : 0u));
+    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, node, enabled->self_assign) |
+                                     (division ? BUSTER_CHECK_REACH_DIVISION : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u));
     return result;
 }
 
