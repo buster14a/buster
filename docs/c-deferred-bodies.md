@@ -543,7 +543,8 @@ c-testsuite, SQLite and Lua.
 ## Measurements
 
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [--every-lane] [--warm] [--cold] [preprocessor options] file...` preprocesses each
+LIST] [--every-lane] [--warm] [--cold] [--base-page-tokens N] [--raw] [--rss]
+[preprocessor options] file...` preprocesses each
 file once, then per pass parses it and checks it by source order's `check_input`
 and by the deferred reader on one lane and on up to `--lanes` (8), in their six
 orders, one a pass in turn: in any six passes in a row, each reading comes
