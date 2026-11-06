@@ -4717,7 +4717,8 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     // BUSTER_HUGE_PAGES (#1109, arena_page_policy), each case with this process's own setting, which the child inherits,
     // as the system's or off: "0" turns transparent huge pages off for the process; "1" leaves them as the system has
     // them, even where the process that started it had them off; without it, they are off on a virtual machine (CPUID's
-    // hypervisor bit), which the child must decide itself, and elsewhere as the process that started it had them.
+    // hypervisor bit), which the child must decide itself, and elsewhere as the process that started it had them, unless
+    // the host was busy when the child started (#672, arena_host_busy), which only the child sees: then "busy".
     const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
     char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
     const int pages_own = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
@@ -4745,7 +4746,10 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                 (pages_cases[c].setting != NULL ? setenv("BUSTER_HUGE_PAGES", pages_cases[c].setting, 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
         const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
         const char* expected = pages_cases[c].off ? "\ntime-process\thuge-pages\toff\n" : "\ntime-process\thuge-pages\tsystem\n";
-        paged = pages_status == 0 && text != NULL && strstr(text, expected) != NULL;
+        // Without the variable, on a host that isn't virtual and with them on, the child may have found it busy.
+        const bool busy_allowed = pages_cases[c].setting == NULL && !pages_cases[c].off && pages_cases[c].inherited == 0;
+        paged = pages_status == 0 && text != NULL &&
+                (strstr(text, expected) != NULL || (busy_allowed && strstr(text, "\ntime-process\thuge-pages\tbusy\n") != NULL));
         free(text);
         text = NULL;
     }
@@ -4753,11 +4757,12 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
     free(pages_copy);
     printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
-                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES");
+                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES, or off on a busy host");
     check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
                                                      "on this virtual machine they are off without it" :
                                                      "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
-                                                     "on this machine, not virtual, they are as the process's parent had them without it");
+                                                     "on this machine, not virtual, they are as the process's parent had them without it, or off where it "
+                                                     "found the host busy");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };

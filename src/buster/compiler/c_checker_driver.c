@@ -4805,6 +4805,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     if (time_stages)
     {
         check_clock_start(&clock_storage);
+        clock_storage.pages_busy = arena_pages_busy;
     }
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);

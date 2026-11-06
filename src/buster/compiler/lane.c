@@ -236,10 +236,20 @@ static _Thread_local ArenaPool* arena_pool;
 static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
 // The process's pages (#1109), set once at its start, before any arena is reserved: on a virtual machine (CPUID's
 // hypervisor bit), transparent huge pages off for the whole process (PR_SET_THP_DISABLE, which MADV_HUGEPAGE doesn't
-// override, and which the processes it starts inherit), so that the arenas take base pages. `setting`,
+// override, and which the processes it starts inherit), so that the arenas take base pages; off too on a busy host,
+// whose tasks runnable at the start are at least a quarter of its CPUs online (#672: arena_host_busy). `setting`,
 // BUSTER_HUGE_PAGES's value, decides instead when it is "0" (off) or "1" (on, as the arenas ask, even where the process
 // that started this one turned them off). Elsewhere the process keeps what it was started with.
 static __attribute__((unused)) void arena_page_policy(const char* setting);
+// Whether arena_page_policy turned huge pages off because the host was busy (#672), which --time-stages reports. Set
+// once, before the process starts any thread; main.c's units share it.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern bool arena_pages_busy;
+#elif defined(BUSTER_UNIT)
+bool arena_pages_busy;
+#else
+static bool arena_pages_busy;
+#endif
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
 // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
@@ -682,10 +692,60 @@ static Arena arena_reserve(uint64_t capacity)
     return arena_reserve_small(capacity, BUSTER_ARENA_SMALL_BYTES);
 }
 
+// A busy host is one whose tasks runnable now, this process's among them (/proc/loadavg's fourth field's first number),
+// are at least 1/BUSTER_ARENA_BUSY_SHARE of its CPUs online, and two or more.
+#define BUSTER_ARENA_BUSY_SHARE 4
+
+// The tasks runnable that `length` bytes of /proc/loadavg say ("LOAD1 LOAD5 LOAD15 RUNNABLE/TASKS LAST": the digits
+// before the slash), at most UINT32_MAX; 0 for text that doesn't say.
+static uint64_t arena_loadavg_runnable(const char* text, uint64_t length)
+{
+    const char* slash = length > 0 ? memchr(text, '/', length) : 0;
+    const char* digits = slash;
+    while (digits != 0 && digits > text && digits[-1] >= '0' && digits[-1] <= '9')
+    {
+        digits -= 1;
+    }
+    uint64_t runnable = 0;
+    for (const char* digit = digits; digit != 0 && digit < slash; digit += 1)
+    {
+        runnable = runnable * 10 + (uint64_t)(*digit - '0');
+        runnable = runnable < UINT32_MAX ? runnable : UINT32_MAX;
+    }
+    return runnable;
+}
+
+// Whether the host is busy: other processes run beside this one on enough of its cores that their memory traffic, not
+// their faults, bounds what each does (#672). Independent compiles of the frozen sqlite3.c on the 9700X, one per core
+// (8 cores, 15 CPUs online): on 8 they ran 15.6% faster with base pages than with huge pages (269.7 against 233.2 MB/s
+// of source; 15% fewer user cycles, 6% fewer kernel cycles though 11 times the faults), as fast on 4, and slower on 2
+// and 1 (11% and 16%). A huge page's first touch clears 2 MB at once, which an arena may use little of, and which the
+// other cores' traffic can evict before the arena writes it; a base page is cleared as it is first written. Reads two
+// small files, the second only where more than this process runs.
+static bool arena_host_busy(void)
+{
+    bool result = false;
+    char text[128];
+    const int file = open("/proc/loadavg", O_RDONLY | O_CLOEXEC);
+    const ssize_t length = file >= 0 ? read(file, text, sizeof(text)) : -1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    const uint64_t runnable = length > 0 ? arena_loadavg_runnable(text, (uint64_t)length) : 0;
+    if (runnable >= 2)
+    {
+        const long online = sysconf(_SC_NPROCESSORS_ONLN);
+        result = online > 0 && runnable * BUSTER_ARENA_BUSY_SHARE >= (uint64_t)online;
+    }
+    return result;
+}
+
 // A huge page's first touch on a virtual machine made the host back all of it, whatever the arena used of it: on #1109's
 // 4-core VM a fault took about 1 ms, and the C driver's checking of main.c ran 2 to 4 times as long as with base pages, a
 // small unit 30% longer at the median and up to 7 times at the tail. On the 9700X a huge page clears in about 40 µs, and
-// a large unit's arenas fill theirs (docs/translation-units.md, "Memory").
+// a large unit's arenas fill theirs (docs/translation-units.md, "Memory"), but not where the other cores are busy
+// (arena_host_busy). A process started with them off keeps them off.
 static void arena_page_policy(const char* setting)
 {
     uint32_t eax = 0;
@@ -695,7 +755,8 @@ static void arena_page_policy(const char* setting)
     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
     const bool off = setting != 0 && strcmp(setting, "0") == 0;
     const bool on = setting != 0 && strcmp(setting, "1") == 0;
-    if (off || (virtual_machine && !on))
+    arena_pages_busy = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 0 && arena_host_busy();
+    if (off || arena_pages_busy || (virtual_machine && !on))
     {
         prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
     }

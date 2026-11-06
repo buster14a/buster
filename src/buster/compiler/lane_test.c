@@ -498,6 +498,28 @@ static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
 
+    // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+    static const struct
+    {
+        const char* text;
+        uint64_t runnable;
+    } loads[] = {
+        { "0.52 0.58 0.59 8/1234 56789\n", 8 },
+        { "12.00 9.50 7.25 1/987 4321\n", 1 },
+        { "0.00 0.00 0.00 15/15 1", 15 },
+        { "0.00 0.00 0.00 99999999999/5 1\n", UINT32_MAX },
+        { "0.00 0.00 0.00 /5 1\n", 0 },
+        { "no slash here\n", 0 },
+        { "", 0 },
+    };
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(loads); i += 1)
+    {
+        lane_test_expect(&tally, arena_loadavg_runnable(loads[i].text, strlen(loads[i].text)) == loads[i].runnable,
+                         "/proc/loadavg's runnable tasks were misread");
+    }
+    // Text cut before the slash says nothing.
+    lane_test_expect(&tally, arena_loadavg_runnable(loads[0].text, 15) == 0, "/proc/loadavg cut before its slash was read");
+
     // Every power-of-two alignment, each after a 1-byte push that leaves the arena misaligned.
     Arena arena = arena_reserve(64ull << 20);
     lane_test_expect(&tally, arena.base != 0 && arena.capacity == 64ull << 20, "a 64 MB arena couldn't be reserved");

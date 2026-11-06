@@ -581,6 +581,38 @@ backed ahead and cheap. `--time-stages` reports which (`huge-pages`).
 GitHub's hosted runners are virtual machines, so the hosted correctness
 jobs run with base pages.
 
+### Huge pages on a busy host (#672)
+
+Those measurements ran one compile at a time. With the other cores busy, it
+goes the other way again. Independent `-c` compiles of the frozen
+`sqlite3.c` on the 9700X, `--lanes 1`, one process pinned to each physical
+core, at main `ec5f0f6b`, medians of 5 rotating rounds:
+
+| compiles at once | huge pages | base pages (`BUSTER_HUGE_PAGES=0`) |
+| ---: | ---: | ---: |
+| 1 | 67.0 MB/s | 56.4 MB/s |
+| 2 | 117.8 MB/s | 104.8 MB/s |
+| 4 | 184.0 MB/s | 184.4 MB/s |
+| 8 | 233.2 MB/s | 269.7 MB/s |
+
+On 8 compiles, base pages take 15% fewer user cycles per compile and 6%
+fewer kernel cycles, though they fault 11 times as often. The 8 compiles
+fill the memory's bandwidth (#672's records), and two effects fit the
+counters; the counters don't separate them:
+- **Clearing.** A huge page's first touch clears all 2 MB at once, of which
+  the arena may use little: one compile peaks at 294 MB in huge pages and at
+  225 MB in base pages.
+- **Locality.** The other cores' traffic can evict what was cleared before
+  the arena writes it. A base page is cleared as it is first written.
+
+So `arena_page_policy` also turns huge pages off where the host is busy when
+the process starts (`arena_host_busy`): its tasks runnable then
+(`/proc/loadavg`), this process's among them, are two or more and at least
+a quarter of its CPUs online, four of the 9700X's 15. A compile alone, as
+the 9700X job's `measure-compile` runs it, keeps them. A process started
+with them off keeps them off, and `BUSTER_HUGE_PAGES` decides instead where
+it is set. `--time-stages` reports `busy` for this case.
+
 ## The link
 
 A unit that links keeps its link (`check_units_keep`): its code and data as
