@@ -195,12 +195,14 @@ static bool check_input_statement_attribute_name(String8 name)
     return result;
 }
 
-// Whether the attributes from `first` to `after` are GNU ones of clang's statement attributes alone, by their names: each
-// item of a list starts right after its opener or after a comma among its items.
+// Whether the attributes from `first` to `after` are GNU ones of clang's statement attributes alone, by their names, and
+// at least one (clang's HaveAttrs: empty lists, `__attribute__(())`, leave a declaration's): each item of a list starts
+// right after its opener or after a comma among its items.
 static bool check_input_statement_attribute_names(CheckInputReader* reader, uint32_t first, uint32_t after)
 {
     const Parser* parser = reader->parser;
     bool result = true;
+    bool named = false;
     uint32_t items = BUSTER_CHECK_NONE;
     for (uint32_t token = first; result && token < after; token += 1)
     {
@@ -213,9 +215,10 @@ static bool check_input_statement_attribute_names(CheckInputReader* reader, uint
         if (result && item && kind != PARSE_KIND_COMMA && role != PARSE_ROLE_CLOSE_ATTRIBUTE_LIST)
         {
             result = parser->tokens.names[token] != 0 && check_input_statement_attribute_name(check_input_attribute_name(reader, parser->tokens.names[token]));
+            named = true;
         }
     }
-    return result;
+    return result && named;
 }
 
 // The arm of the selection (a _Generic or a __builtin_choose_expr) at `keyword` whose `)` is `close` that its evaluation
@@ -933,17 +936,22 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     }
     const bool free_standing = after < count && next == PARSE_KIND_SEMI && declaration_specifier;
     const bool empty = after < count && next == PARSE_KIND_SEMI && !free_standing;
-    // GNU attributes among them make it a declaration unless each is one of clang's statement attributes; C23's alone
-    // leave it to what follows (#147's `[[x]] y += 1;`), as the parser reads them (parse_scalar_attributed_statement).
+    // GNU attributes among them make it a declaration unless each is one of clang's statement attributes, or they follow a
+    // control statement's head (an if's, a loop's, a switch's condition, else, do), where C allows no declaration, or come
+    // before a label's name; C23's alone leave it to what follows (#147's `[[x]] y += 1;`), as the parser reads them
+    // (parse_scalar_block_attribute_end, parse_scalar_attributed_statement).
     bool gnu = false;
     for (uint32_t token = first; token < after; token += 1)
     {
         gnu |= parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE;
     }
+    const uint8_t before = first != 0 ? parser->tree.roles[first - 1] : PARSE_ROLE_NONE;
+    const bool head = before == PARSE_ROLE_CLOSE_CONDITION || before == PARSE_ROLE_CLOSE_FOR || before == PARSE_ROLE_ELSE || before == PARSE_ROLE_DO;
+    const bool labelled = next == PARSE_KIND_IDENTIFIER && after + 1 < count && parser->tree.roles[after + 1] == PARSE_ROLE_LABEL;
     const bool expression = after < count && !empty && !free_standing && !keyword && !check_input_declaration_after(parser, after) &&
-                            (!gnu || check_input_statement_attribute_names(reader, first, after));
+                            (!gnu || head || labelled || check_input_statement_attribute_names(reader, first, after));
     // Before a label's name, the statement's attributes are its label's.
-    const bool named = expression && next == PARSE_KIND_IDENTIFIER && after + 1 < count && parser->tree.roles[after + 1] == PARSE_ROLE_LABEL;
+    const bool named = expression && labelled;
     if (label)
     {
         uint32_t end = first;
