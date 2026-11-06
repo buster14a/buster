@@ -168,6 +168,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .arguments = arguments,
             .argument_count = count,
             .destination_type = destination_type,
+            .fp_evaluation_type = check_action_fp_evaluation_type(context.fp_environment),
             .node = closing,
             .context = context,
             .allow_gnu_index_ice = reader->parser->language.gnu,
@@ -266,6 +267,19 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         }
     }
     reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
+    if (input->diagnosed != NULL && input->diagnosed->diagnostic == CHECK_DIAG_NONE && result.diagnostic == CHECK_DIAG_ARGUMENT_COUNT &&
+        builtin > CBUILTIN_NONE && builtin < CBUILTIN_COUNT)
+    {
+        *input->diagnosed = (CheckConstantFailure)
+        {
+            .diagnostic = result.diagnostic,
+            .op = CHECK_OP_CALL,
+            .token = closing,
+            .callee = BUSTER_CHECK_NONE,
+            .expected = check_builtin_overflow(builtin) ? 3u : 1u,
+            .actual = count,
+        };
+    }
     check_input_warning_add_at(reader, closing, result.warnings, closing + 1u);
     *value = result.value;
     value->flags = check_value_source_flags(family, value->flags);

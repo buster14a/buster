@@ -14,6 +14,7 @@ struct CheckDriverDefaultWarningFixture
     uint32_t errors;
     uint32_t notes;
     bool c23;
+    bool compare_warning_text;
 };
 
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
@@ -123,6 +124,11 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     {
         .name = "short-circuited and conditional call literals remain source checks",
         .source = "int g(int);int f(void){return 0&&g(1.5);}int h(void){return 1?0:g(2.5);}\n",
+        .warnings = 2,
+    },
+    {
+        .name = "conditional call arms retain literal conversions",
+        .source = "int f(int); void h(int c){c ? f(1.5) : f(2.5);}\n",
         .warnings = 2,
     },
     {
@@ -496,6 +502,10 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "__private_extern__ int x=7;\n__private_extern__ int f(void){return x;}\n",
     },
     {
+        .name = "private extern direct initializer after attribute",
+        .source = "__private_extern__ int x __attribute__((unused)) (3);\n",
+    },
+    {
         .name = "private extern thread local declaration",
         .source = "__private_extern__ __thread int x;\n",
         .warnings = 1,
@@ -527,6 +537,39 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     {
         .name = "private extern source policy",
         .source = "#pragma clang diagnostic ignored \"-Wprivate-extern\"\n__private_extern__ int x;\n",
+    },
+    {
+        .name = "nondecimal literal conversion bit patterns and lossy controls",
+        .source = "#define X 0xe2\n"
+                  "signed char take(signed char x) { return x; }\n"
+                  "signed char small(void) { return (0xff); }\n"
+                  "signed char large(void) { return 0x100; }\n"
+                  "signed char single=0xff, overflow=0x1ff;\n"
+                  "signed char values[8]; short s;\n"
+                  "void f(void) { values[0]=0xe2; values[1]=(0342); values[2]=0b11100010; values[3]=X; s=0xffff; take(0x80); }\n"
+                  "void hex_loss(void) { values[4]=0x100; }\n"
+                  "void dec_loss(void) { values[5]=226; }\n"
+                  "void calc_loss(void) { values[6]=0xe2+0; }\n"
+                  "void unary_loss(void) { values[7]=+0xe2; }\n"
+                  "void short_loss(void) { s=65535; }\n"
+                  "void call_loss(void) { take(0x180); }\n",
+        .warnings = 8,
+        .c23 = true,
+    },
+    {
+        .name = "nondecimal conversion with unsigned plain char",
+        .source = "char c; signed char s; short h; void f(void) { c=0xe2; s=(0Xff); h=0177777; s=0x100; }\n",
+        .options = { "-funsigned-char" },
+        .warnings = 1,
+    },
+    {
+        // Clang points at the cast, while the existing checker points at its literal. Compare the complete
+        // warning text and severity, apart from that independent location discrepancy.
+        .name = "explicit cast does not receive literal exemption",
+        .source = "signed char s; void f(void) { s=(int)0xff; }\n",
+        .options = { "-funsigned-char" },
+        .warnings = 1,
+        .compare_warning_text = true,
     },
     {
         .name = "nonliteral integer zero pointer conversion",
@@ -880,7 +923,13 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
                         const int status = check_test_driver_spawn(arguments, &actual);
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
                                  fixture->name, policy, mode, lanes[lane], scalar != 0 ? "scalar" : "vector");
-                        const bool same = status == oracle && actual != NULL && strcmp(actual, expected) == 0;
+                        const char* expected_text = fixture->compare_warning_text ? strstr(expected, "warning: ") : NULL;
+                        expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
+                        const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
+                                                  strstr(actual != NULL ? actual : "", policy == 1 ? "error: " : "warning: ") : NULL;
+                        const bool diagnostics_match = expected_text != NULL ? actual_text != NULL && strcmp(actual_text, expected_text) == 0 :
+                                                       actual != NULL && strcmp(actual, expected) == 0;
+                        const bool same = status == oracle && diagnostics_match;
                         check_test_expect(test, same, description);
                         if (!same && !mismatch_printed)
                         {

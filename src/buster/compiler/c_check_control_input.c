@@ -899,8 +899,8 @@ static void check_input_asm_statement_attributes(CheckInputReader* reader, uint3
 // they are C23's alone or GNU ones of clang's statement attributes alone, which the parser then reads as a statement's
 // (check_input_statement_attribute_names). A null statement's are recorded at its `;` for fallthrough's consumer, and a
 // return's musttail for c_check_musttail.c and check_program. GNU attributes right after a named label are the label's
-// (check_input_label_attributes); C23's there are the statement's. Outside a function a null statement's attributes are
-// refused as a declaration's.
+// (check_input_label_attributes); C23's there are the statement's. At file scope an attribute-only null declaration
+// remains for check_input_declaration, which ignores GNU lists and checks C23 subjects.
 static void check_input_statement_attributes(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -957,10 +957,6 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     else if (named && body)
     {
         check_input_label_attributes(reader, first, after);
-    }
-    else if (empty && !body)
-    {
-        check_input_report(reader, first, CHECK_INPUT_DECLARATION);
     }
     else if (body && next == PARSE_KIND_ASM)
     {

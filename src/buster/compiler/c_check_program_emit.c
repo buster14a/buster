@@ -61,6 +61,9 @@ struct CheckProgramCode
     // (check_program_sections); none in a unit without one.
     SymbolId* retained_symbols;
     uint32_t retained_count;
+    // selectany definitions are weak symbols whose atoms and relocations form COMDAT groups of their names.
+    SymbolId* selectany_symbols;
+    uint32_t selectany_count;
     // The atoms of templates that take directives (CheckProgramAsm.unit), which the body loop publishes: each one's
     // section, with the file-scope assembly's, for -c's object.
     AtomId* unit_atoms;
@@ -182,7 +185,8 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
     rows->counts = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-    return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
+    rows->values = fits ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBody, (uint64_t)count + 1) : 0;
+    return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0 && rows->values != 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -713,6 +717,8 @@ struct CheckEmitBody
 {
     uint8_t* bytes;
     uint64_t length;
+    CheckDebugValueSpan* debug_spans;
+    uint32_t debug_span_count;
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
     uint32_t* asm_offsets;
@@ -723,6 +729,8 @@ struct CheckEmitBody
     CheckProgramStatus status;
     uint32_t token;
     const char* reason;
+    // Only a failed frame verification retains its verdict, until the calling thread reports it in source order.
+    const EmittedVerdict* frame_verdict;
 };
 
 // A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
@@ -865,10 +873,15 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 // x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
 // (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
 // internal error; no room is a resource failure,
-// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason.
-static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
-                                                   Arena* scratch, UnwindFunction* frame, const char** reason)
+// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason. Where
+// provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never printed on a lane.
+static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
+                                                           Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
 {
+    if (failed != NULL)
+    {
+        *failed = (EmittedVerdict){ 0 };
+    }
     const char* const mismatch = "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
     const uint32_t frame_status = code->frame_status;
     CheckProgramStatus status = frame_status == EMITTED_FRAME_MEMORY ? CHECK_PROGRAM_RESOURCE :
@@ -890,6 +903,10 @@ static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint
         // stands, as Tier 0's analyzer below leaves it.
         const EmittedVerdict verdict = emitted_verify_frames(code, scratch);
         const bool stands = verdict.error == EMITTED_VERIFY_OK || verdict.error == EMITTED_VERIFY_UNPROVEN;
+        if (!stands && failed != NULL)
+        {
+            *failed = verdict;
+        }
         status = stands ? status : verdict.error == EMITTED_VERIFY_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
         *reason = stands ? 0 : verdict.error == EMITTED_VERIFY_MEMORY ? "no room to verify a function's frame events" :
                                                                         "internal compiler error: a function's frame events aren't its code's";
@@ -912,6 +929,63 @@ static CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint
         *reason = same == EMITTED_SAME ? 0 : same == EMITTED_SAME_MEMORY ? "no room to compare a function's unwind table with Tier 0's analyzer's" : mismatch;
     }
     return status;
+}
+
+// The status-only entry point used by the frame checks; compilation retains failures for source-order reporting.
+static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar,
+                                                                           EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason)
+{
+    return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
+}
+
+// A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
+// fields identify the exact record; the resolved width is what the frame verifier uses to clobber saved slots.
+static void check_program_emit_frame_record(const EmittedCode* code, uint32_t body, uint32_t index)
+{
+    const X86Instruction* record = &code->records[index];
+    const X86Effects* effects = x86_effects(record->form);
+    const X86FormDescription* description = x86_form_description(record->form);
+    int64_t target = -1;
+    for (uint32_t k = 0; k < code->branch_count; k += 1)
+    {
+        target = code->branches[k] == index ? code->targets[k] : target;
+    }
+    fprintf(stderr, "frame-record: body=%u record=%u form=%u mnemonic=%s reg=%u rm=%u index=%u mode=%u vvvv=%u decorations=%u immediate=%d displacement=%d width=%u target=%" PRId64 "\n",
+            body, index, record->form, description->mnemonic, record->reg, record->rm, record->index, record->mode, record->vvvv, record->decorations,
+            record->immediate, record->displacement, effects->width, target);
+}
+
+static void check_program_emit_frame_failure(const EmittedCode* code, uint32_t body, const EmittedVerdict* failed)
+{
+    static const char* const rules[] = { "none", "cfa", "same", "offset", "register" };
+    const uint32_t count = code->count;
+    const uint32_t frames = code->frame_count;
+    fprintf(stderr, "frame-verifier: body=%u error=%u record=%u/%u event=%u/%u rule=%s reg=%u holder=%u expected=%" PRId64 " actual=%" PRId64 " actual_unknown=%u\n",
+            body, failed->error, failed->record, count, failed->event, frames, rules[failed->rule], failed->reg, failed->holder, failed->expected, failed->actual,
+            failed->actual == BUSTER_EMITTED_UNKNOWN);
+    const uint32_t prologue = count < 12 ? count : 12;
+    for (uint32_t i = 0; i < prologue; i += 1)
+    {
+        check_program_emit_frame_record(code, body, i);
+    }
+    const uint32_t at = failed->record < count ? failed->record : count;
+    const uint32_t first = at > 4 ? at - 4 : 0;
+    const uint32_t end = at < count ? at + 1 : count;
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        if (i >= prologue)
+        {
+            check_program_emit_frame_record(code, body, i);
+        }
+    }
+    const uint32_t event = failed->event < frames ? failed->event : 0;
+    const uint32_t event_first = event > 2 ? event - 2 : 0;
+    for (uint32_t k = event_first; k < frames && k - event_first < 5; k += 1)
+    {
+        const EmissionFrameEvent* frame = &code->frames[k];
+        fprintf(stderr, "frame-event: body=%u event=%u boundary=%u side=%u kind=%u reg=%u value=%" PRId64 "\n",
+                body, k, frame->at.boundary, frame->at.side, frame->kind, frame->reg, frame->value);
+    }
 }
 
 // Body `b`'s code after its code generator (Tier 0's or Tier 1's), on its lane (`lane`): branch sizing, encoding into
@@ -937,17 +1011,19 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     // Its frame's rows (#1056, emitted_unwind), which the tables read once the lanes are done.
     EmissionFrameRow* frame_rows = run->unwind && code->frame_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionFrameRow, code->frame_count) : 0;
+    body->debug_spans = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugValueSpan, (uint64_t)code->source_count + 1) : NULL;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0)) &&
+                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     // A failure past the encoding is the backend's, but where a frame's room ran out.
     CheckProgramStatus failure = CHECK_PROGRAM_BACKEND;
+    EmittedVerdict frame_verdict = { 0 };
     if (valid && run->verify && x86_validate(code->records, code->count) != code->count)
     {
         body->status = CHECK_PROGRAM_BACKEND;
@@ -973,6 +1049,24 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // The rows' own failure: no room (a lane's, which the emission retries on one lane) or the protocol's refusal.
             valid = check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar, scratch);
             failure = valid ? failure : body->status;
+            if (valid)
+            {
+                CheckDebugValueSpan* spans = body->debug_spans;
+                const Tier0Function* function = run->lowered->functions + b;
+                const uint32_t* tokens = run->lowered->entry_tokens[b];
+                for (uint32_t e = 0; valid && e < code->source_count; e += 1)
+                {
+                    // Tail-call entries include frame teardown. Omit that whole entry, rather than extend a home
+                    // over instructions which have restored its register or moved its stack base.
+                    const bool tail = code->local_homes != NULL && function->kinds[e] == BUSTER_TYPED_TAIL_CALL;
+                    const uint32_t begin = offsets[code->source_records[e]];
+                    const uint32_t end = offsets[code->source_records[e + 1]];
+                    if (!tail && begin < end)
+                    {
+                        spans[body->debug_span_count++] = (CheckDebugValueSpan){ .begin = begin, .end = end, .token = check_debug_origin_token(code->source_origins, tokens, e, program->bodies[b].declaration) };
+                    }
+                }
+            }
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
         if (valid && run->unwind)
@@ -982,7 +1076,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // frame its producer couldn't describe is the compiler's own failure; and with --verify, so are events its
             // records don't establish.
             const char* reason = 0;
-            failure = check_program_emit_frame(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason);
+            failure = check_program_emit_frame_checked(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
             valid = failure == CHECK_PROGRAM_OK;
             failure = valid ? CHECK_PROGRAM_BACKEND : failure;
             body->reason = valid ? body->reason : reason;
@@ -996,7 +1090,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             body->length = (uint64_t)length;
             for (uint32_t k = 0; k < code->label_count; k += 1)
             {
-                body->label_offsets[k] = code->label_records[k] < code->count ? offsets[code->label_records[k]] : UINT32_MAX;
+                // An optimized-away label has no control-flow target. Keep its symbol's existing entry placeholder
+                // and index; only that explicit sentinel is accepted without a record in the emitted function.
+                const uint32_t record = code->label_records[k];
+                body->label_offsets[k] = record == UINT32_MAX ? 0 : record < code->count ? offsets[record] : UINT32_MAX;
             }
             // A template's label may be its code's end.
             for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
@@ -1016,6 +1113,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         arena_pop_to(bytes, before);
     }
     arena_pop_to(scratch, work_mark);
+    if (frame_verdict.error != EMITTED_VERIFY_OK && frame_verdict.error != EMITTED_VERIFY_MEMORY)
+    {
+        // Offsets and verification scratch are gone; this small failure record survives until source-order emission.
+        // A diagnostic allocation failure must not replace the original compiler failure.
+        EmittedVerdict* retained = BUSTER_ARENA_PUSH_ARRAY(scratch, EmittedVerdict, 1);
+        if (retained != NULL)
+        {
+            *retained = frame_verdict;
+            body->frame_verdict = retained;
+        }
+    }
     check_clock_lap(run->stage_clock, CHECK_STAGE_CODE_ATOMS);
     return valid;
 }
@@ -1056,6 +1164,8 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
 // A loader_uninitialized declaration (#147): a definition that clang's code gives common linkage where a tentative one
 // would have it, made weak for its initializer that isn't zero (EmitGlobalVarDefinition).
 #define BUSTER_CHECK_EMIT_COMMON_LOADER 0x20u
+// A selectany definition uses weak binding and a COMDAT section, never a common symbol.
+#define BUSTER_CHECK_EMIT_SELECTANY 0x40u
 
 // The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
 // tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
@@ -2686,6 +2796,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // others' bits (check_program_emit_commons).
     uint8_t* commons = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     bool common = false;
+    bool selecting = false;
     valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0 &&
             commons != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
@@ -2763,6 +2874,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
+                    if (symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SELECTANY && defined[object])
+                    {
+                        // The weak definition's whole section, including its relocations, is selected by name.
+                        // A declaration without a definition remains an ordinary external reference.
+                        weak[symbol] = 1;
+                        commons[symbol] |= BUSTER_CHECK_EMIT_SELECTANY;
+                        selecting = true;
+                    }
                     // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
                     // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
                     // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).
@@ -2792,6 +2911,30 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 }
             }
         }
+        // A late redefine_extname keeps the declaration's asm-label fact, but an earlier emitted reference may have
+        // fixed its original name already. Only the selection's compact live references can decide that; syntax
+        // checking and deferred bodies must not guess from an earlier occurrence of the identifier alone.
+        const CheckInputSymbolPragmas* symbol_pragmas = input->symbol_pragmas;
+        for (uint32_t i = 0; valid && symbol_pragmas != NULL && i < symbol_pragmas->count; i += 1)
+        {
+            const CheckInputSymbolPragma* record = symbol_pragmas->records + i;
+            const uint32_t object = record->declaration < input->token_count ? input->objects[record->declaration] : 0;
+            const SymbolId symbol = object < program->object_count ? program->object_symbols[object] : 0;
+            if (record->after_use && symbol != 0)
+            {
+                if (program->symbol_pragma_originals == NULL)
+                {
+                    result->status = CHECK_PROGRAM_UNSUPPORTED;
+                    result->reason = "source-time symbol renaming without an emission selection";
+                    result->token = record->token;
+                    valid = false;
+                }
+                else if (program->symbol_pragma_originals[i])
+                {
+                    symbol_names[symbol] = (String8){ 0 };
+                }
+            }
+        }
         // GNU's alias, ifunc and weakref attributes (#147): each entry's own symbol, and its name where it is a weakref's,
         // a weak reference to its target's name; a weakref's target's undefined symbol is weak where the unit refers to it
         // through weakrefs alone (BUSTER_CHECK_PROGRAM_ALIAS_WEAK). An alias or ifunc clang's code generation refuses (the
@@ -2815,6 +2958,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 symbol_aliases[symbol] = k + 1;
                 symbol_names[symbol] = alias->kind == CHECK_PROGRAM_WEAKREF ? alias->target : symbol_names[symbol];
+                // An alias has its base's atom, so selectany changes its binding alone. It must not allocate an
+                // empty COMDAT group before check_program_define_aliases places it in the base's section.
+                commons[symbol] &= (uint8_t)~BUSTER_CHECK_EMIT_SELECTANY;
             }
             const SymbolId target = alias->kind == CHECK_PROGRAM_WEAKREF && alias->target_object != 0 ? program->object_symbols[alias->target_object] : 0;
             weak[target] |= target != 0 && (state & BUSTER_CHECK_PROGRAM_ALIAS_WEAK) != 0 && !defined[alias->target_object];
@@ -2881,20 +3027,27 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             valid = false;
         }
     }
-    // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
-    // retain attribute for the counting pass to look for.
+    // The retained and selectany symbols (#147), for check_program_sections, in symbol order; the usual unit pays
+    // for neither counting pass nor output column.
     uint32_t retained_count = 0;
-    for (uint32_t s = 1; valid && retaining && s <= program->symbol_count; s += 1)
+    uint32_t selectany_count = 0;
+    for (uint32_t s = 1; valid && (retaining || selecting) && s <= program->symbol_count; s += 1)
     {
         retained_count += retained[s];
+        selectany_count += (commons[s] & BUSTER_CHECK_EMIT_SELECTANY) != 0;
     }
     result->retained_symbols = valid && retained_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, retained_count) : 0;
-    valid = valid && (retained_count == 0 || result->retained_symbols != 0);
-    for (uint32_t s = 1; valid && retained_count != 0 && s <= program->symbol_count; s += 1)
+    result->selectany_symbols = valid && selectany_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, selectany_count) : 0;
+    valid = valid && (retained_count == 0 || result->retained_symbols != 0) && (selectany_count == 0 || result->selectany_symbols != 0);
+    for (uint32_t s = 1; valid && (retained_count != 0 || selectany_count != 0) && s <= program->symbol_count; s += 1)
     {
         if (retained[s])
         {
             result->retained_symbols[result->retained_count++] = s;
+        }
+        if ((commons[s] & BUSTER_CHECK_EMIT_SELECTANY) != 0)
+        {
+            result->selectany_symbols[result->selectany_count++] = s;
         }
     }
     // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
@@ -2919,6 +3072,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 mangle_scratch = scratch_begin(scratch);
             }
             mangling.internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1;
+            mangling.object_size_compat = candidate->object_sizes != NULL;
             const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
                                                                mangle_scratch.arena, &symbol_names[symbol]);
             valid = status == CHECK_MANGLE_OK;
@@ -2986,6 +3140,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && rows != NULL)
     {
         valid = check_program_emit_reserve_rows(rows, result->lowered.entries, count, output);
+        rows->link = &result->link;
         for (uint32_t b = 0; valid && b < encoded; b += 1)
         {
             const CheckEmitBody* body = run.bodies + b;
@@ -2993,6 +3148,36 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             rows->counts[b] = body->row_count;
             rows->sizes[b] = (uint32_t)body->length;
             rows->bodies[b] = body->body_offset;
+            const EmittedCode* code = run.codes + b;
+            CheckDebugBody* value = rows->values + b;
+            *value = (CheckDebugBody){ 0 };
+            const uint32_t locals = result->lowered.functions[b].local_count;
+            CheckDebugBinding* bindings = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding, (uint64_t)locals + 1);
+            Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
+            uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)locals + 1);
+            CheckDebugValueSpan* spans = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugValueSpan, (uint64_t)body->debug_span_count + 1);
+            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL;
+            if (valid)
+            {
+                if (locals != 0)
+                {
+                    memcpy(bindings, result->lowered.debug_bindings[b], (uint64_t)locals * sizeof(*bindings));
+                    if (code->local_homes != NULL && code->local_count == locals)
+                    {
+                        memcpy(homes, code->local_homes, (uint64_t)locals * sizeof(*homes));
+                    }
+                    else
+                    {
+                        memset(homes, 0, (uint64_t)locals * sizeof(*homes));
+                    }
+                    memcpy(classes, result->lowered.functions[b].local_classes, locals);
+                }
+                if (body->debug_span_count != 0)
+                {
+                    memcpy(spans, body->debug_spans, (uint64_t)body->debug_span_count * sizeof(*spans));
+                }
+                *value = (CheckDebugBody){ .bindings = bindings, .homes = homes, .classes = classes, .spans = spans, .local_count = locals, .span_count = body->debug_span_count };
+            }
             if (body->row_count != 0)
             {
                 memcpy(rows->offsets + rows->count, body->row_offsets, (uint64_t)body->row_count * sizeof(uint32_t));
@@ -3217,7 +3402,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // Weak where a weak attribute makes it so, or a weakref's target that the unit doesn't define is referred to
             // through weakrefs alone (#147), whatever linkage its own declarations give it (the reader refuses weak on
             // one of internal linkage).
-            flags = kind | (check_input_linkage(program->input->declaration_bits, declaration) != 2 && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
+            const bool private_size_wrapper = check_program_object_size_inline(program->input, declaration);
+            flags = kind | ((check_input_linkage(program->input->declaration_bits, declaration) != 2 || private_size_wrapper) && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
                             weak[s + 1]                                      ? BUSTER_LINK_SYMBOL_WEAK :
                                                                                BUSTER_LINK_SYMBOL_GLOBAL);
             if (check_input_linkage(program->input->declaration_bits, declaration) == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
@@ -3520,6 +3706,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint8_t alignment = source_body && alignments[symbol] > 5 ? alignments[symbol] - 1 : 4;
         const uint64_t work_mark = scratch->length;
         CheckEmitBody* body = source_body ? run.bodies + b : &helper_body;
+        EmittedVerdict helper_verdict = { 0 };
         // An asm template's code: a naked function's or an asm statement's helper's, whose labels are defined below.
         const bool assembly = source_body ? asms->naked != 0 && asms->naked[b].planned : helpers->items[b - count].assembly != 0;
         // A template that takes directives is an assembled unit of its own (check_program_emit_asm_unit), not records.
@@ -3618,7 +3805,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 if (encodes && unwind)
                 {
                     const char* reason = 0;
-                    failure = check_program_emit_frame(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason);
+                    failure = check_program_emit_frame_checked(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
+                    body->frame_verdict = helper_verdict.error != EMITTED_VERIFY_OK ? &helper_verdict : NULL;
                     encodes = failure == CHECK_PROGRAM_OK;
                     failure = encodes ? CHECK_PROGRAM_BACKEND : failure;
                     body->reason = encodes ? body->reason : reason;
@@ -3638,6 +3826,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         if (body->status != CHECK_PROGRAM_OK)
         {
+            if (body->status == CHECK_PROGRAM_BACKEND && body->frame_verdict != NULL)
+            {
+                check_program_emit_frame_failure(code, b, body->frame_verdict);
+            }
             result->status = body->status;
             result->reason = body->reason != NULL ? body->reason : result->reason;
             result->token = body->status == CHECK_PROGRAM_RESOURCE ? result->token : body->token;
@@ -3664,7 +3856,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
                 }
             }
-            // Each label at its first record's offset, after branch sizing: the program's definition.
+            // Each label at its resolved offset, after branch sizing, including an absent label's entry placeholder.
             for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
             {
                 valid = labels < result->lowered.label_symbol_count && body->label_offsets[k] != UINT32_MAX &&
@@ -3987,7 +4179,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     *table = 0;
     bool valid = true;
     if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0 ||
-        program->cfstring_count != 0)
+        program->cfstring_count != 0 || code->selectany_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -4047,7 +4239,11 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             const bool restricted = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
                                     check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
                                     check_program_section_prefix(name, ".llvm.");
-            const uint8_t placed = class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
+            const bool loader = check_input_attribute_of(check_input_attributes_at(program->input, placement->token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+            // LLVM's undefined initializer has read-only section kind when explicitly placed. Named BSS/TLS families
+            // still impose their own kind; ordinary loader definitions without a placement keep their default BSS.
+            const uint8_t placed = loader && !bss && !tdata && !tbss && class == BUSTER_LINK_CLASS_BSS ? BUSTER_LINK_CLASS_RODATA :
+                                   class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
             const bool fits = restricted ? false :
                               bss ? class == BUSTER_LINK_CLASS_BSS :
                               tdata ? class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS :
@@ -4110,12 +4306,31 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 valid = link_set_atom_section(link, atom, descriptors[atom].name);
             }
         }
-        // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
+        // Retained and selectany definitions (#147) need their named section or one of their own, their
         // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
-        // getELFSectionNameForGlobal), of its class's type and flags.
-        for (uint32_t r = 0; valid && refused == BUSTER_CHECK_NONE && r < code->retained_count; r += 1)
+        // getELFSectionNameForGlobal), of its class's type and flags. Retain adds SHF_GNU_RETAIN; selectany supplies the
+        // group signature, which also makes otherwise equal explicit section names distinct between groups.
+        const uint32_t previous_groups = link->groups.count != 0 ? link->groups.count : 1;
+        const uint64_t group_count = (uint64_t)previous_groups + code->selectany_count;
+        LinkGroup* groups = valid && code->selectany_count != 0 && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
+        uint32_t* memberships = groups != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, link->atoms.count) : NULL;
+        valid = valid && (code->selectany_count == 0 || (groups != NULL && memberships != NULL));
+        code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+        if (valid && groups != NULL)
         {
-            const SymbolId symbol = code->retained_symbols[r];
+            memset(groups, 0, group_count * sizeof(LinkGroup));
+            memset(memberships, 0, (uint64_t)link->atoms.count * sizeof(uint32_t));
+            if (link->groups.count != 0)
+            {
+                memcpy(groups, link->groups.data, (uint64_t)link->groups.count * sizeof(LinkGroup));
+                memcpy(memberships, link->groups.atom_groups, (uint64_t)link->groups.atom_count * sizeof(uint32_t));
+            }
+        }
+        const uint64_t unique_count = (uint64_t)code->retained_count + code->selectany_count;
+        for (uint64_t r = 0; valid && refused == BUSTER_CHECK_NONE && r < unique_count; r += 1)
+        {
+            const bool selectany = r >= code->retained_count;
+            const SymbolId symbol = selectany ? code->selectany_symbols[r - code->retained_count] : code->retained_symbols[r];
             const AtomId atom = link->symbols.atom[symbol];
             const NameId name = link->symbols.name[symbol];
             const ObjectSectionFormat* format = atom != 0 ? &object_class_sections[link->atoms.class[atom]] : NULL;
@@ -4134,8 +4349,18 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             }
             if (valid && format != NULL)
             {
-                descriptors[atom].flags |= SHF_GNU_RETAIN;
+                descriptors[atom].flags |= selectany ? SHF_GROUP : SHF_GNU_RETAIN;
+                if (selectany)
+                {
+                    const uint32_t group = previous_groups + (uint32_t)(r - code->retained_count);
+                    groups[group] = (LinkGroup){ .name = name, .signature = symbol, .unit = link->atoms.unit[atom], .flags = BUSTER_LINK_GROUP_COMDAT };
+                    memberships[atom] = group;
+                }
             }
+        }
+        if (valid && refused == BUSTER_CHECK_NONE && groups != NULL)
+        {
+            link->groups = (LinkGroups){ .data = groups, .atom_groups = memberships, .count = (uint32_t)group_count, .atom_count = link->atoms.count };
         }
         if (valid && refused != BUSTER_CHECK_NONE)
         {

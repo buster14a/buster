@@ -657,11 +657,14 @@ the digit) as clang does (`c_check_declspec.c`,
 `c_check_literal_diagnostic.c`); a constant before a unit's first syntax
 error, which only the parse reached, is checked before the parse's errors are
 printed, so that its error is clang's first. The checker takes what clang
-takes there: C2y's `0o17` (in `#if` too), and GNU's designator without its `=`,
-with the values clang gives, whatever begins the value. What stays out:
-`1.5q`, as every `__float128` constant (`__float128 z = 1.5;` is "not a
-constant expression" to the checker), and GNU's `member: value` designator,
-which the checker doesn't support yet.
+takes there: C2y's `0o17` (in `#if` too), GNU's array designator without its `=`,
+and its old-style `member: value` field designator (#1251), with the values clang
+gives, whatever begins the value. The old field spelling uses the same member
+selection, positional continuation, constant evaluation and override history as
+`.member = value`; an unknown field names the selected record in its diagnostic.
+Quad-precision `q`/`Q` literals are accepted on supported glibc hosts only when
+their binary128 values are exactly representable by the checker's x87 storage;
+wider values and unsupported hosts remain refused (#1250).
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or

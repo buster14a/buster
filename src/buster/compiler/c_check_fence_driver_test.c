@@ -581,8 +581,11 @@ static void check_test_driver_asm_unwind(CheckTest* test, const char* executable
                                   "    const int outer = frames();\n"
                                   "    int inner = 0;\n"
                                   "    const int result = placed(5, &inner);\n"
+                                  "    unsigned x = 40, low, high;\n"
+                                  "    __asm__(\"rep bsfl %1,%0\" : \"=r\"(low) : \"r\"(x) : \"cc\");\n"
+                                  "    __asm__(\"rep bsrl %1,%0\" : \"=r\"(high) : \"r\"(x) : \"cc\");\n"
                                   "    printf(\"outer=%d inner=%d result=%d\\n\", outer, inner, result);\n"
-                                  "    return 0;\n"
+                                  "    return low != 3 || (high != 5 && high != 26);\n"
                                   "}\n";
     char source[512];
     char output[512];
@@ -603,7 +606,9 @@ static void check_test_driver_asm_unwind(CheckTest* test, const char* executable
         if (tier1)
         {
             arguments[count++] = "--tier1";
+            arguments[count++] = "--tier1-refusals";
         }
+        arguments[count++] = "-march=x86-64";
         arguments[count++] = "-o";
         arguments[count++] = output;
         arguments[count++] = source;
@@ -614,6 +619,7 @@ static void check_test_driver_asm_unwind(CheckTest* test, const char* executable
         {
             fprintf(stderr, "%s", text);
         }
+        const bool taken = !tier1 || (text != NULL && strstr(text, "tier1-refused\tmain\t") == NULL);
         free(text);
         char captured[128] = { 0 };
         const bool ran = status == 0 && check_test_driver_capture(output, captured, sizeof(captured));
@@ -624,7 +630,7 @@ static void check_test_driver_asm_unwind(CheckTest* test, const char* executable
         char message[256];
         snprintf(message, sizeof(message), "asm unwind (%s path%s): backtrace through the placed statements' function counts %d frames, main %d; result %d",
                  scalar ? "scalar" : "vector", tier1 ? ", --tier1" : "", inner, outer, result);
-        check_test_expect(test, read && outer > 1 && inner == outer + 1 && result == 31, message);
+        check_test_expect(test, taken && read && outer > 1 && inner == outer + 1 && result == 31, message);
         unlink(output);
     }
     unlink(source);

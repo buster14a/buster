@@ -68,11 +68,12 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                 "redefinition of '%.*s' with a different type: %.*s vs %.*s", (int)name.length, name.pointer,
                 (int)current.length, current.pointer, (int)prior.length, prior.pointer);
         }
-        else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_STATIC)
+        else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_NON_STATIC)
         {
             const char* format = report->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
                                  report->detail == CHECK_REDECLARATION_PARAMETER ? "redefinition of parameter '%.*s'" :
                                  report->detail == CHECK_REDECLARATION_STATIC ? "static declaration of '%.*s' follows non-static declaration" :
+                                 report->detail == CHECK_REDECLARATION_NON_STATIC ? "non-static declaration of '%.*s' follows static declaration" :
                                  "redefinition of '%.*s'";
             result = check_warning_text(scratch, format, (int)name.length, name.pointer);
         }

@@ -13,6 +13,8 @@ static uint32_t check_test_pragma_diagnostics(const char* text, const char* grou
     return count;
 }
 
+#include "c_check_fp_eval_driver_test.c"
+
 static void check_test_driver_pragma_system(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char header_text[] = "#pragma buster_header\n#define PRAGMA_FROM_HEADER _Pragma(\"buster_macro\")\n";
@@ -76,6 +78,8 @@ static void check_test_driver_pragma_execution(CheckTest* test, const char* exec
 {
     static const char source_text[] =
         "#pragma ident \"tooling\"\n#pragma GCC push_options\n#pragma GCC optimize(\"O3\")\n"
+        "#pragma scalar_storage_order big-endian\n#pragma GCC target(\"avx2\")\n"
+        "#pragma data_seg(\"ignored_data\")\n#pragma code_seg(\"ignored_code\")\n#pragma fenv_access(on)\n"
         "#pragma comment(lib, \"m\")\nint main(void){int sum=0;\n#pragma omp parallel for\n"
         "for(int i=0;i<4;i++)sum+=i;return sum!=6;}\n#pragma GCC pop_options\n";
     char source[512];
@@ -118,8 +122,506 @@ static void check_test_driver_pragma_execution(CheckTest* test, const char* exec
     unlink(preprocessed);
 }
 
+static void check_test_driver_fp_pragma_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] =
+    {
+        "#pragma float_control(precise, off)\n#pragma float_control(except, on)\nint value;\n",
+        "#pragma float_control(precise, off)\n#pragma STDC FENV_ACCESS ON\nint value;\n",
+        "#pragma float_control(except, on)\n#pragma float_control(precise, off)\nint value;\n",
+        "#pragma STDC FENV_ACCESS ON\n#pragma float_control(except, off)\n#pragma float_control(precise, off)\nint value;\n",
+        "#pragma clang fp reciprocal(on)\n#pragma float_control(except, on)\nint value;\n",
+        "int main(void){\n#pragma float_control(push)\nreturn 0;}\n",
+    };
+    char source[512];
+    snprintf(source, sizeof(source), "%s/fp-pragma-error.c", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        const bool written = parse_test_write(source, sources[c], strlen(sources[c]));
+        char* expected = NULL;
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[5] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int result = written ? check_test_driver_spawn(arguments, &actual) : -1;
+            const uint64_t length = expected != NULL ? strcspn(expected, "\n") : 0;
+            const bool same = oracle == 1 && result == 1 && expected != NULL && actual != NULL && length != 0 &&
+                              strcspn(actual, "\n") == length && memcmp(actual, expected, length) == 0;
+            check_test_expect(test, same, "FP precision, exception and stack errors match Clang's message and source location");
+            if (!same)
+            {
+                fprintf(stderr, "FP pragma case %u scalar %u: Clang %d (%s), checker %d (%s)\n", c, scalar,
+                        oracle, expected != NULL ? expected : "", result, actual != NULL ? actual : "");
+            }
+            free(actual);
+        }
+        free(expected);
+    }
+    unlink(source);
+}
+
+static void check_test_driver_symbol_pragma_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] = {
+        "#pragma weak missing\nint value;\n",
+        "int value;\n#pragma weak missing\n",
+        "#pragma weak missing\n",
+        "#pragma weak value\nstatic int value=7;\nint read_value(void){return value;}\n",
+        "static int value;\n#pragma weak value\nint read_value(void){return value;}\n",
+        "#pragma weak value\ntypedef int value;\n",
+        "typedef int value;\n#pragma weak value\n",
+        "#pragma redefine_extname value renamed\nstatic int value=7;\nint read_value(void){return value;}\n",
+        "static int value=7;\n#pragma redefine_extname value renamed\nint read_value(void){return value;}\n",
+        "#pragma redefine_extname function renamed\nstatic int function(void){return 7;}\nint read_value(void){return function();}\n",
+        "#pragma weak\nint value;\n",
+        "#pragma weak alias=\nint value;\n",
+        "#pragma weak value trailing\nint value;\n",
+        "#pragma weak int\nint value;\n",
+        "#pragma redefine_extname value\nint value;\n",
+        "#pragma redefine_extname value \"renamed\"\nint value;\n",
+        "#pragma redefine_extname value renamed trailing\nint value;\n",
+        "#pragma clang diagnostic ignored \"-Wignored-pragmas\"\n#pragma weak\nint value;\n",
+        "#pragma clang diagnostic ignored \"-Wpragmas\"\n#pragma redefine_extname value renamed\nstatic int value;\n",
+        "#define TARGET absent\n#pragma weak TARGET\nint value;\n",
+    };
+    char path[512];
+    snprintf(path, sizeof(path), "%s/symbol-pragma-warning.c", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        const bool written = parse_test_write(path, sources[c], strlen(sources[c]));
+        check_test_expect(test, written, "symbol pragma warning fixture is written");
+        for (uint32_t mode = 0; written && mode < 3; mode += 1)
+        {
+            char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", path,
+                                  mode == 1 ? "-Werror" : mode == 2 ? "-w" : NULL, NULL, NULL };
+            char* expected = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &expected);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                arguments[0] = (char*)executable;
+                arguments[mode != 0 ? 6 : 5] = scalar != 0 ? "--scalar" : NULL;
+                char* actual = NULL;
+                const int result = check_test_driver_spawn(arguments, &actual);
+                const uint64_t length = expected != NULL ? strcspn(expected, "\n") : 0;
+                const uint64_t observed = actual != NULL ? strcspn(actual, "\n") : 0;
+                const bool same = oracle == result && length == observed && (length == 0 || memcmp(actual, expected, length) == 0);
+                check_test_expect(test, same, "symbol pragma warnings match Clang's source, spelling and warning controls");
+                if (!same)
+                {
+                    fprintf(stderr, "symbol pragma warning %u mode %u scalar %u: Clang %d (%s), checker %d (%s)\n", c, mode, scalar,
+                            oracle, expected != NULL ? expected : "", result, actual != NULL ? actual : "");
+                }
+                free(actual);
+            }
+            free(expected);
+        }
+    }
+    unlink(path);
+}
+
+static void check_test_driver_symbol_pragma_objects(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "#define SOURCE weak_data\n#pragma weak SOURCE\nint weak_data=4;\n"
+        "#pragma weak weak_function\nint weak_function(void){return 3;}\n"
+        "int weak_tentative;\n#pragma weak weak_tentative\n"
+        "#pragma weak weak_constant\nconst int weak_constant=5;\n"
+        "#pragma weak weak_tls\n_Thread_local int weak_tls=6;\n"
+        "extern int weak_after_reference;\nint read_weak(void){return weak_after_reference;}\n"
+        "#pragma weak weak_after_reference\nint weak_after_reference=7;\n"
+        "extern int weak_missing(void);\n#pragma weak weak_missing\nint read_missing(void){return weak_missing ? weak_missing() : -1;}\n"
+        "int strong_after=8;\n#pragma weak strong_after\nint strong_function(void){return 8;}\n#pragma weak strong_function\n"
+        "#define DEST renamed\n#pragma redefine_extname original DEST\nint original=9;\n"
+        "int original_function(void);\n#pragma redefine_extname original_function renamed_function\nint original_function(void){return 10;}\n"
+        "int rename_tentative;\n#pragma redefine_extname rename_tentative renamed_tentative\n"
+        "int defined_before=11;\n#pragma redefine_extname defined_before not_emitted\n"
+        "#pragma redefine_extname first_pending first_name\n#pragma redefine_extname first_pending second_name\nint first_pending=12;\n"
+        "#pragma redefine_extname explicit_name not_chosen\nint explicit_name asm(\"chosen\")=13;\n"
+        "extern int prior_asm asm(\"chosen_prior\");\n#pragma redefine_extname prior_asm not_prior\nint prior_asm=14;\n"
+        "extern int late_value_17;\n"
+        "int late_use_17(void){return late_value_17;}\n"
+        "#pragma redefine_extname late_value_17 late_renamed_17\n"
+        "int late_value_17=7;\n"
+        "extern int late_value_18;\n"
+        "int late_use_18(void){if(0)return late_value_18; return 1;}\n"
+        "#pragma redefine_extname late_value_18 late_renamed_18\n"
+        "int late_value_18=7;\n"
+        "extern int late_value_19;\n"
+        "int late_use_19(void){return 1; return late_value_19;}\n"
+        "#pragma redefine_extname late_value_19 late_renamed_19\n"
+        "int late_value_19=7;\n"
+        "extern int late_value_20;\n"
+        "int late_use_20(void){return sizeof(late_value_20);}\n"
+        "#pragma redefine_extname late_value_20 late_renamed_20\n"
+        "int late_value_20=7;\n"
+        "extern int late_value_21;\n"
+        "static int late_use_21(void){return late_value_21;}\n"
+        "#pragma redefine_extname late_value_21 late_renamed_21\n"
+        "int late_value_21=7;\n"
+        "extern int late_value_22;\n"
+        "inline int late_use_22(void){return late_value_22;}\n"
+        "#pragma redefine_extname late_value_22 late_renamed_22\n"
+        "int late_value_22=7;\n"
+        "extern int late_value_23;\n"
+        "static int late_use_23(void){return late_value_23;}\n"
+        "#pragma redefine_extname late_value_23 late_renamed_23\n"
+        "int late_value_23=7;\n"
+        "int late_caller_23(void){return late_use_23();}\n"
+        "extern int late_value_24;\n"
+        "static int late_use_24(void){return late_value_24;}\n"
+        "int late_caller_24(void){return late_use_24();}\n"
+        "#pragma redefine_extname late_value_24 late_renamed_24\n"
+        "int late_value_24=7;\n"
+        "extern int late_value_25;\n"
+        "int *late_pointer_25=&late_value_25;\n"
+        "#pragma redefine_extname late_value_25 late_renamed_25\n"
+        "int late_value_25=7;\n"
+        "extern int late_value_26;\n"
+        "int late_use_26(void){return _Generic(0,int:1,default:late_value_26);}\n"
+        "#pragma redefine_extname late_value_26 late_renamed_26\n"
+        "int late_value_26=7;\n"
+        "extern int late_value_27;\n"
+        "int late_use_27(void){return 0 ? late_value_27 : 1;}\n"
+        "#pragma redefine_extname late_value_27 late_renamed_27\n"
+        "int late_value_27=7;\n"
+        "extern int late_value_28;\n"
+        "int late_use_28(int c){if(c)return late_value_28; return 1;}\n"
+        "#pragma redefine_extname late_value_28 late_renamed_28\n"
+        "int late_value_28=7;\n"
+        "extern int late_value_29;\n"
+        "int late_use_29(void){return 0 && late_value_29;}\n"
+        "#pragma redefine_extname late_value_29 late_renamed_29\n"
+        "int late_value_29=7;\n"
+        "extern int late_value_30;\n"
+        "int late_use_30(void){return 1 || late_value_30;}\n"
+        "#pragma redefine_extname late_value_30 late_renamed_30\n"
+        "int late_value_30=7;\n"
+        "extern int late_value_31;\n"
+        "int late_use_31(int x){switch(1){case 2:return late_value_31;default:return x;}}\n"
+        "#pragma redefine_extname late_value_31 late_renamed_31\n"
+        "int late_value_31=7;\n"
+        "int late_target_32(void);\n"
+        "int late_use_32(void){return late_target_32();}\n"
+        "#pragma redefine_extname late_target_32 late_renamed_32\n"
+        "int late_target_32(void){return 7;}\n"
+        "extern int late_value_33;\n"
+        "int late_use_33(void){int x=late_value_33;\n"
+        "#pragma redefine_extname late_value_33 late_renamed_33\n"
+        "return x;}\n"
+        "int late_value_33=7;\n"
+        "extern int late_value_34;\n"
+        "static int *late_pointer_34=&late_value_34;\n"
+        "#pragma redefine_extname late_value_34 late_renamed_34\n"
+        "int late_value_34=7;\n"
+        "int late_use_34(void){return *late_pointer_34;}\n"
+        "extern int late_value_35;\n"
+        "static int *late_pointer_35=&late_value_35;\n"
+        "int late_use_35(void){return *late_pointer_35;}\n"
+        "#pragma redefine_extname late_value_35 late_renamed_35\n"
+        "int late_value_35=7;\n"
+        "extern int late_value_36;\n"
+        "static int *late_pointer_36 __attribute__((used))=&late_value_36;\n"
+        "#pragma redefine_extname late_value_36 late_renamed_36\n"
+        "int late_value_36=7;\n"
+        "extern int late_value_37;\n"
+        "int late_use_37(void){static int *late_pointer_37=&late_value_37;return *late_pointer_37;}\n"
+        "#pragma redefine_extname late_value_37 late_renamed_37\n"
+        "int late_value_37=7;\n"
+        "extern int late_value_38;\n"
+        "static int late_use_38(void){static int *late_pointer_38=&late_value_38;return *late_pointer_38;}\n"
+        "int late_caller_38(void){return late_use_38();}\n"
+        "#pragma redefine_extname late_value_38 late_renamed_38\n"
+        "int late_value_38=7;\n"
+        "extern int late_value_39;\n"
+        "extern inline int late_use_39(void){return late_value_39;}\n"
+        "#pragma redefine_extname late_value_39 late_renamed_39\n"
+        "int late_value_39=7;\n"
+        "extern int late_value_40;\n"
+        "static int late_use_40(void) __attribute__((used));\n"
+        "static int late_use_40(void){return late_value_40;}\n"
+        "#pragma redefine_extname late_value_40 late_renamed_40\n"
+        "int late_value_40=7;\n"
+        "extern int late_value_41;\n"
+        "int *late_pointer_41;\n"
+        "int late_use_41(void){late_pointer_41=&late_value_41;return 1;}\n"
+        "#pragma redefine_extname late_value_41 late_renamed_41\n"
+        "int late_value_41=7;\n"
+        "extern int late_value_42;\n"
+        "static int *late_pointer_42=&late_value_42;\n"
+        "int **late_external_42=&late_pointer_42;\n"
+        "#pragma redefine_extname late_value_42 late_renamed_42\n"
+        "int late_value_42=7;\n"
+        "extern int late_value_43;\n"
+        "int late_use_43(void){return 1; label:return late_value_43;}\n"
+        "#pragma redefine_extname late_value_43 late_renamed_43\n"
+        "int late_value_43=7;\n"
+        "extern int late_value_44;\n"
+        "int late_use_44(void){goto end; return late_value_44; end:return 1;}\n"
+        "#pragma redefine_extname late_value_44 late_renamed_44\n"
+        "int late_value_44=7;\n"
+        "extern int late_value_45;\n"
+        "int late_use_45(void){while(0)return late_value_45; return 1;}\n"
+        "#pragma redefine_extname late_value_45 late_renamed_45\n"
+        "int late_value_45=7;\n"
+        "extern int late_value_46;\n"
+        "int late_use_46(void){for(;0;)return late_value_46; return 1;}\n"
+        "#pragma redefine_extname late_value_46 late_renamed_46\n"
+        "int late_value_46=7;\n"
+        "extern int late_value_47;\n"
+        "int late_use_47(void){if(1)return 1; return late_value_47;}\n"
+        "#pragma redefine_extname late_value_47 late_renamed_47\n"
+        "int late_value_47=7;\n"
+        "extern int late_value_48;\n"
+        "void late_terminal_48(void) __attribute__((noreturn));\n"
+        "int late_use_48(void){late_terminal_48(); return late_value_48;}\n"
+        "#pragma redefine_extname late_value_48 late_renamed_48\n"
+        "int late_value_48=7;\n"
+        "void late_terminal_48(void){for(;;){}}\n"
+        "extern int late_value_49;\n"
+        "int late_use_49(void){return 1; static int *late_pointer_49=&late_value_49; return *late_pointer_49;}\n"
+        "#pragma redefine_extname late_value_49 late_renamed_49\n"
+        "int late_value_49=7;\n"
+        "extern int late_value_50;\n"
+        "int late_use_50(void){goto end; label:return late_value_50; end:return 1;}\n"
+        "#pragma redefine_extname late_value_50 late_renamed_50\n"
+        "int late_value_50=7;\n"
+        "extern int late_value_51;\n"
+        "int late_use_51(void){do {break; return late_value_51;}while(0);return 1;}\n"
+        "#pragma redefine_extname late_value_51 late_renamed_51\n"
+        "int late_value_51=7;\n"
+        "extern int late_value_52;\n"
+        "int late_use_52(int x){switch(1){case 2:return late_value_52;default:return x;}}\n"
+        "#pragma redefine_extname late_value_52 late_renamed_52\n"
+        "int late_value_52=7;\n"
+        "extern int late_value_53;\n"
+        "int late_use_53(void){if(0){label:return late_value_53;}return 1;}\n"
+        "#pragma redefine_extname late_value_53 late_renamed_53\n"
+        "int late_value_53=7;\n"
+        "extern int late_value_54;\n"
+        "int late_use_54(void){return 0?({label:late_value_54;}):1;}\n"
+        "#pragma redefine_extname late_value_54 late_renamed_54\n"
+        "int late_value_54=7;\n"
+        "extern int late_value_55;\n"
+        "int late_use_55(void){for(;;){} return late_value_55;}\n"
+        "#pragma redefine_extname late_value_55 late_renamed_55\n"
+        "int late_value_55=7;\n"
+        "extern int late_value_56;\n"
+        "int late_use_56(void){__builtin_trap(); return late_value_56;}\n"
+        "#pragma redefine_extname late_value_56 late_renamed_56\n"
+        "int late_value_56=7;\n"
+        "extern int late_value_57;\n"
+        "void late_stop_57(int) __attribute__((overloadable,noreturn));\n"
+        "void late_stop_57(double) __attribute__((overloadable));\n"
+        "int late_use_57(void){late_stop_57(1);return late_value_57;}\n"
+        "#pragma redefine_extname late_value_57 late_renamed_57\n"
+        "int late_value_57=7;\n"
+        "__attribute__((overloadable,noreturn)) void late_stop_57(int x){for(;;){}}\n"
+        "__attribute__((overloadable)) void late_stop_57(double x){}\n"
+        "extern int late_value_58;\n"
+        "void late_stop_58(int) __attribute__((overloadable));\n"
+        "void late_stop_58(double) __attribute__((overloadable,noreturn));\n"
+        "int late_use_58(void){late_stop_58(1);return late_value_58;}\n"
+        "#pragma redefine_extname late_value_58 late_renamed_58\n"
+        "int late_value_58=7;\n"
+        "__attribute__((overloadable)) void late_stop_58(int x){}\n"
+        "__attribute__((overloadable,noreturn)) void late_stop_58(double x){for(;;){}}\n"
+        "extern int late_value_59;\n"
+        "extern void abort(void);\n"
+        "int late_use_59(void){abort();return late_value_59;}\n"
+        "#pragma redefine_extname late_value_59 late_renamed_59\n"
+        "int late_value_59=7;\n"
+        "int main(void){return weak_data+weak_function()+original+weak_constant+weak_tls;}\n";
+    static const char strong[] = "int weak_data=40; int weak_function(void){return 30;} const int weak_constant=20; _Thread_local int weak_tls=30;\n";
+    static const char* const names[] = {
+        "weak_data", "weak_function", "weak_tentative", "weak_constant", "weak_tls", "weak_after_reference", "weak_missing",
+        "strong_after", "strong_function", "renamed", "renamed_function", "renamed_tentative", "defined_before", "first_name", "chosen", "chosen_prior",
+        "late_value_17",
+        "late_renamed_18",
+        "late_renamed_19",
+        "late_renamed_20",
+        "late_renamed_21",
+        "late_renamed_22",
+        "late_renamed_23",
+        "late_renamed_24",
+        "late_value_25",
+        "late_renamed_26",
+        "late_renamed_27",
+        "late_value_28",
+        "late_renamed_29",
+        "late_renamed_30",
+        "late_renamed_31",
+        "late_target_32",
+        "late_renamed_33",
+        "late_renamed_34",
+        "late_renamed_35",
+        "late_value_36",
+        "late_value_37",
+        "late_renamed_38",
+        "late_value_39",
+        "late_value_40",
+        "late_value_41",
+        "late_renamed_42",
+        "late_value_43",
+        "late_renamed_44",
+        "late_value_45",
+        "late_value_46",
+        "late_renamed_47",
+        "late_renamed_48",
+        "late_value_49",
+        "late_value_50",
+        "late_renamed_51",
+        "late_renamed_52",
+        "late_value_53",
+        "late_value_54",
+        "late_renamed_55",
+        "late_value_56",
+        "late_renamed_57",
+        "late_value_58",
+        "late_renamed_59",
+    };
+    static const char* const absent[] = {
+        "original", "original_function", "rename_tentative", "not_emitted", "second_name", "not_chosen", "not_prior",
+        "late_renamed_17",
+        "late_value_18",
+        "late_value_19",
+        "late_value_20",
+        "late_value_21",
+        "late_value_22",
+        "late_value_23",
+        "late_value_24",
+        "late_renamed_25",
+        "late_value_26",
+        "late_value_27",
+        "late_renamed_28",
+        "late_value_29",
+        "late_value_30",
+        "late_value_31",
+        "late_renamed_32",
+        "late_value_33",
+        "late_value_34",
+        "late_value_35",
+        "late_renamed_36",
+        "late_renamed_37",
+        "late_value_38",
+        "late_renamed_39",
+        "late_renamed_40",
+        "late_renamed_41",
+        "late_value_42",
+        "late_renamed_43",
+        "late_value_44",
+        "late_renamed_45",
+        "late_renamed_46",
+        "late_value_47",
+        "late_value_48",
+        "late_renamed_49",
+        "late_renamed_50",
+        "late_value_51",
+        "late_value_52",
+        "late_renamed_53",
+        "late_renamed_54",
+        "late_value_55",
+        "late_renamed_56",
+        "late_value_57",
+        "late_renamed_58",
+        "late_value_59",
+    };
+    char path[512];
+    char strong_path[512];
+    char strong_object[512];
+    char objects[5][512] = { { 0 } };
+    char binary[512];
+    snprintf(path, sizeof(path), "%s/symbol-pragmas.c", directory);
+    snprintf(strong_path, sizeof(strong_path), "%s/symbol-pragmas-strong.c", directory);
+    snprintf(strong_object, sizeof(strong_object), "%s/symbol-pragmas-strong.o", directory);
+    snprintf(binary, sizeof(binary), "%s/symbol-pragmas-run", directory);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1) && parse_test_write(strong_path, strong, sizeof(strong) - 1);
+    char* text = NULL;
+    char* strong_arguments[] = { (char*)clang, "-std=gnu17", "-c", strong_path, "-o", strong_object, NULL };
+    const bool override = written && check_test_driver_spawn(strong_arguments, &text) == 0;
+    check_test_expect(test, override, "symbol pragma strong override fixture compiles");
+    free(text);
+    for (uint32_t producer = 0; written && producer < BUSTER_ARRAY_LENGTH(objects); producer += 1)
+    {
+        snprintf(objects[producer], sizeof(objects[producer]), "%s/symbol-pragmas-%u.o", directory, producer);
+        char* arguments[16] = { (char*)(producer == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[producer] };
+        uint32_t count = 7;
+        if (producer != 0)
+        {
+            arguments[count++] = "--lanes";
+            arguments[count++] = producer < 3 ? "1" : "3";
+        }
+        if (producer >= 3)
+        {
+            arguments[count++] = "--poison-arenas";
+        }
+        if (producer == 2 || producer == 4)
+        {
+            arguments[count++] = "--scalar";
+        }
+        arguments[count] = NULL;
+        text = NULL;
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        check_test_expect(test, compiled, "symbol pragmas compile through Clang and both checker paths");
+        if (!compiled)
+        {
+            fprintf(stderr, "symbol pragma producer %u: %s\n", producer, text != NULL ? text : "");
+        }
+        free(text);
+        for (uint32_t n = 0; compiled && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+        {
+            uint16_t ours = 0;
+            uint16_t theirs = 0;
+            const bool same = check_test_visibility_symbol(objects[producer], names[n], &ours) &&
+                              check_test_visibility_symbol(objects[0], names[n], &theirs) && ours == theirs;
+            check_test_expect(test, same, names[n]);
+        }
+        for (uint32_t n = 0; compiled && n < BUSTER_ARRAY_LENGTH(absent); n += 1)
+        {
+            uint16_t flags = 0;
+            check_test_expect(test, !check_test_visibility_symbol(objects[producer], absent[n], &flags), "symbol renaming emits only the selected name");
+        }
+        for (uint32_t replaced = 0; compiled && override && replaced < 2; replaced += 1)
+        {
+            char* link[] = { (char*)clang, objects[producer], "-o", binary, replaced != 0 ? strong_object : NULL, NULL };
+            text = NULL;
+            const bool linked = check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char* run[] = { binary, NULL };
+            text = NULL;
+            const int status = linked ? check_test_driver_spawn(run, &text) : -1;
+            check_test_expect(test, linked && status == (replaced != 0 ? 129 : 27), "pragma weak definitions yield to external strong definitions while renamed references link");
+            free(text);
+        }
+    }
+    for (uint32_t i = 2; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[i]),
+                          "symbol pragma scalar/vector and poisoned multi-lane objects match byte for byte");
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        unlink(objects[i]);
+    }
+    unlink(path);
+    unlink(strong_path);
+    unlink(strong_object);
+    unlink(binary);
+}
+
 static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    static const char target_ignored[] =
+        "#pragma scalar_storage_order big-endian\n#pragma GCC scalar_storage_order little-endian\n"
+        "#pragma GCC target(\"avx2\")\n#pragma section(\"unused\", read, write)\n"
+        "#pragma code_seg(\"unused\")\n#pragma data_seg(\"unused\")\n#pragma bss_seg(\"unused\")\n"
+        "#pragma const_seg(\"unused\")\n#pragma init_seg(user)\n#pragma fenv_access(on)\n"
+        "int main(void){int result=0;\n#pragma fenv_access(off)\nreturn result;}\n";
+    static const char target_malformed[] =
+        "#pragma scalar_storage_order invalid\n#pragma GCC target(\n#pragma section(\n"
+        "#pragma data_seg(42)\n#pragma fenv_access(ON) trailing\nint main(void){return 0;}\n";
     static const struct
     {
         const char* source;
@@ -136,6 +638,19 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wall", "-Wno-pragmas", NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Werror=unknown-pragmas", "-Wno-error=unknown-pragmas", NULL },
         { "#pragma buster_unknown\nint main(void){return 0;}\n", "-Wno-unknown-pragmas", "-Wpragmas", NULL },
+        { target_ignored, NULL, NULL, NULL },
+        { target_ignored, "-Wall", NULL, NULL },
+        { target_ignored, "-Werror=unknown-pragmas", NULL, NULL },
+        { target_ignored, "-Werror=unknown-pragmas", "-w", NULL },
+        { target_malformed, "-Wunknown-pragmas", NULL, NULL },
+        { target_malformed, "-Werror=unknown-pragmas", NULL, NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", NULL, NULL, NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", "-Wno-ignored-pragmas", "-Werror", NULL },
+        { "#pragma float_control(pop)\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", "-w", NULL },
+        { "#pragma clang diagnostic ignored \"-Wignored-pragmas\"\n#pragma float_control(pop)\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
+        { "#pragma float_control(precise, off, push)\n#pragma float_control(pop)\n#pragma float_control(except, on)\nint main(void){return 0;}\n", "-Wall", "-Werror", NULL },
+        { "#pragma clang fp contract(off) reassociate(on) reciprocal(on) exceptions(maytrap)\nint main(void){return 0;}\n", "-Wall", "-Werror", NULL },
         { "#pragma ident \"tooling\"\n#pragma GCC push_options\n#pragma GCC optimize(\"O3\")\n#pragma GCC ivdep\n#pragma GCC pop_options\nint main(void){return 0;}\n", "-Wall", NULL, NULL },
         { "#pragma clang buster_unknown\n#pragma GCC buster_unknown\n#pragma STDC buster_unknown\nint main(void){return 0;}\n", NULL, NULL, NULL },
         { "#pragma clang buster_unknown\n#pragma GCC buster_unknown\n#pragma STDC buster_unknown\nint main(void){return 0;}\n", "-Werror=pragmas", NULL, NULL },
@@ -224,12 +739,9 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        { "#pragma redefine_extname old new trailing\nint old;\n", "redefine_extname", NULL, NULL, NULL },
-        { "#pragma scalar_storage_order big-endian\nint object;\n", "scalar_storage_order", NULL, NULL, NULL },
-        { "#pragma weak missing\nint object;\n", "weak", NULL, NULL, NULL },
+        { "#pragma weak alias = target\nint target;\n", "weak", NULL, NULL, NULL },
         { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
-        { "#pragma ms_struct on\nint object;\n", "ms_struct", NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
@@ -307,6 +819,12 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     }
     check_test_driver_pragma_system(test, clang, executable, directory);
     check_test_driver_pragma_execution(test, executable, directory);
+    check_test_driver_fp_pragma_errors(test, clang, executable, directory);
+    check_test_driver_fp_evaluation(test, clang, executable, directory);
+    check_test_driver_symbol_pragma_diagnostics(test, clang, executable, directory);
+    check_test_driver_symbol_pragma_objects(test, clang, executable, directory);
+    check_test_driver_ms_diagnostics(test, clang, executable, directory);
+    check_test_driver_ms_abi(test, clang, executable, directory);
     unlink(source);
     unlink(object);
 }

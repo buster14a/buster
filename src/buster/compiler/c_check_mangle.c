@@ -28,6 +28,7 @@ struct CheckMangleSource
     Arena* output;
     bool scalar;
     bool internal;
+    bool object_size_compat;
     // Built only when a selected signature contains a named tag. Local/anonymous tags need lexical ABI names that
     // the type table alone cannot supply; never confuse one with a file-scope tag of the same spelling.
     uint8_t* global_tags;
@@ -385,6 +386,12 @@ static CheckMangleStatus check_mangle_name(CheckMangleSource* source, TypeId fun
                 writer.aligned_substitution |= (types->types.flags[type_index(task.type)] & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
             }
         }
+    }
+    if (writer.status == CHECK_MANGLE_OK && source->object_size_compat)
+    {
+        // The unchecked wrapper has an ordinary C ABI. Keep it distinct from both the plain overload and
+        // Clang's hidden-size ABI, including when another translation unit uses the same system header.
+        check_mangle_text(&writer, ".__buster_object_size");
     }
     if (writer.status == CHECK_MANGLE_OK)
     {

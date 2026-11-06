@@ -25,6 +25,13 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             item = true;
             token += 1;
         }
+        else if (item && check_init_old_style_designator(parser, token, end))
+        {
+            reader->ignored[token] = true;
+            reader->initializers[token + 1] = 2;
+            item = false;
+            token += 2;
+        }
         else if (item && kind == PARSE_KIND_PERIOD)
         {
             valid = token + 1 < end && parser->tokens.kinds[token + 1] == PARSE_KIND_IDENTIFIER;
@@ -77,7 +84,8 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             const uint8_t* embed = parse_embed_bytes(parser, token, &embed_length);
             if (embed != NULL && token > begin && token + 1 < end &&
                 (parser->tokens.kinds[token - 1] == PARSE_KIND_L_BRACE || parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA ||
-                 parser->tokens.kinds[token - 1] == PARSE_KIND_EQUAL) &&
+                 parser->tokens.kinds[token - 1] == PARSE_KIND_EQUAL ||
+                 (token >= begin + 2 && check_init_old_style_designator(parser, token - 2, end))) &&
                 (parser->tokens.kinds[token + 1] == PARSE_KIND_COMMA || parser->tokens.kinds[token + 1] == PARSE_KIND_R_BRACE))
             {
                 reader->initializers[token] = 3;
@@ -122,6 +130,11 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
 {
     const bool compact = check_input_literal_table_prepare(reader, assignment);
     const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment));
+    if (valid)
+    {
+        const uint32_t declaration = reader->initializer_declarations[assignment];
+        check_input_noderef_set(reader->output, assignment, check_input_noderef_at(reader->output, declaration));
+    }
     return valid;
 }
 
@@ -187,6 +200,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     CheckValue value = { 0 };
     uint32_t failed = BUSTER_CHECK_NONE;
     const bool evaluated = self == BUSTER_CHECK_NONE && check_input_evaluate_cached_at(reader, begin, end, &value, &failed);
+    const CheckNoderefType* noderef = evaluated ? check_input_noderef_value(reader, value.type, reader->constant_noderef) : NULL;
     TypeId result = 0;
     if (self != BUSTER_CHECK_NONE)
     {
@@ -266,6 +280,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             result = deduced_declarator ? deduced : type_qualify(types, deduced, type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
             reader->declared_types[declaration] = result;
             reader->query_types[assignment] = result;
+            check_input_noderef_set(reader->output, declaration, noderef);
+            check_input_noderef_set(reader->output, assignment, noderef);
             reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
             if (check_input_linkage(reader->declaration_bits, declaration) != 0)
             {
@@ -521,14 +537,21 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
         {
             uint32_t failed = begin;
             CheckInitStatus status = CHECK_INIT_OK;
+            TypeId failed_type = 0;
             // The casts in the initializer have their types already, at their `)`s: it finishes at its end.
             valid = check_initializer_infer_array(reader->types, parser, reader->pp->table, type, begin, end, reader->designator_indices,
                                                   reader->designator_valid, reader->declared_types, reader->query_types, reader->scratch, &type,
-                                                  &failed, &status);
+                                                  &failed, &status, &failed_type);
             reader->output->resource |= status == CHECK_INIT_RESOURCE;
             if (!valid)
             {
-                check_input_report(reader, failed, CHECK_INPUT_DECLARATION);
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, failed, status == CHECK_INIT_MEMBER ? CHECK_INPUT_INITIALIZER_MEMBER : CHECK_INPUT_DECLARATION);
+                if (reader->output->report_count > before && status == CHECK_INIT_MEMBER)
+                {
+                    reader->output->reports[before].type = failed_type;
+                    reader->output->reports[before].completion = end;
+                }
             }
         }
         if (valid)

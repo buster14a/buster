@@ -11,6 +11,7 @@ typedef enum CheckRedeclarationKind
     CHECK_REDECLARATION_DEFINITION,
     CHECK_REDECLARATION_PARAMETER,
     CHECK_REDECLARATION_STATIC,
+    CHECK_REDECLARATION_NON_STATIC,
 } CheckRedeclarationKind;
 
 static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t token, uint32_t previous,
@@ -35,9 +36,21 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
         const bool function = kind == C_BINDING_FUNCTION;
         if (same_kind && same_tls && (object || function))
         {
-            if (linkage == 1 && earlier_linkage == 2)
+            if (object && compatible == TYPE_ANSWER_NO)
+            {
+                detail = CHECK_REDECLARATION_OBJECT_TYPE;
+            }
+            else if (function && compatible == TYPE_ANSWER_NO && linkage == 2 && earlier_linkage == 1)
+            {
+                detail = CHECK_REDECLARATION_FUNCTION_TYPE;
+            }
+            else if (linkage == 1 && earlier_linkage == 2)
             {
                 detail = CHECK_REDECLARATION_STATIC;
+            }
+            else if (linkage == 2 && earlier_linkage == 1)
+            {
+                detail = CHECK_REDECLARATION_NON_STATIC;
             }
             else if (linkage == earlier_linkage)
             {
@@ -51,7 +64,8 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
                     noted = definition != 0 ? definition - 1 : previous;
                 }
             }
-            const bool defined = definition != 0 || (object && check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE)) ||
+            const bool defined = (definition != 0 && (noted != previous || definition == previous + 1)) ||
+                                 (object && check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE)) ||
                                  (object && earlier_linkage == 0);
             note_kind = defined ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
         }

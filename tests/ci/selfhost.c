@@ -5,6 +5,67 @@
 #include "../../tools/ci/selfhost.c"
 #undef main
 #include <signal.h>
+#include <sys/prctl.h>
+
+static void mock_timeout_descendant(bool ignore_parent)
+{
+    struct sigaction action = {0};
+    action.sa_handler = ignore_parent ? SIG_IGN : SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, NULL) != 0)
+    {
+        fail("cannot set mock parent signal disposition");
+    }
+    // Backstops are independent of the gate, including when a broken gate abandons us.
+    alarm(30);
+    int ready[2];
+    if (pipe(ready) != 0)
+    {
+        fail("cannot create descendant readiness pipe");
+    }
+    pid_t child = fork();
+    if (child < 0)
+    {
+        fail("cannot fork mock descendant");
+    }
+    if (child == 0)
+    {
+        close(ready[0]);
+        action.sa_handler = SIG_IGN;
+        if (sigaction(SIGTERM, &action, NULL) != 0)
+        {
+            _exit(99);
+        }
+        alarm(30);
+        FILE *file = open_file("descendant.pid", "wx");
+        fprintf(file, "%ld\n", (long)getpid());
+        close_file(file);
+        if (write(ready[1], "R", 1) != 1)
+        {
+            _exit(99);
+        }
+        close(ready[1]);
+    }
+    else
+    {
+        close(ready[1]);
+        char byte = 0;
+        ssize_t count;
+        do
+        {
+            count = read(ready[0], &byte, 1);
+        } while (count < 0 && errno == EINTR);
+        close(ready[0]);
+        if (count != 1 || byte != 'R')
+        {
+            fail("mock descendant did not become ready");
+        }
+    }
+    for (;;)
+    {
+        pause();
+    }
+}
 
 static bool has_argument(int argc, char **argv, const char *argument)
 {
@@ -108,6 +169,10 @@ static int mock(int argc, char **argv)
             {
                 sleep(30);
                 result = 17;
+            }
+            else if (!probe && strncmp(fault, "timeout-descendant-", 19) == 0)
+            {
+                mock_timeout_descendant(strcmp(fault, "timeout-descendant-parent-ignores") == 0);
             }
             else if ((!probe && strcmp(fault, "missing-object") == 0) || (probe && stage2 && strcmp(fault, "missing-probe") == 0) || (probe && stage2 && !object && strcmp(fault, "missing-exe") == 0))
             {
@@ -213,6 +278,59 @@ static void verify_probes(const char *directory)
     }
 }
 
+static void verify_timeout_descendant(const char *directory)
+{
+    char *pid_path = format_path("%s/descendant.pid", directory);
+    FILE *file = open_file(pid_path, "r");
+    long recorded = 0;
+    if (fscanf(file, "%ld", &recorded) != 1 || recorded <= 0 || (long)(pid_t)recorded != recorded)
+    {
+        fail("invalid mock descendant PID");
+    }
+    close_file(file);
+    pid_t child = (pid_t)recorded;
+    int status = 0;
+    pid_t waited;
+    uint64_t deadline = now_ns() + 1000000000ull;
+    do
+    {
+        waited = waitpid(child, &status, WNOHANG);
+        if (waited < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (waited != 0)
+        {
+            break;
+        }
+        struct timespec pause = {0, (long)BUSTER_SELFHOST_POLL_NS};
+        nanosleep(&pause, NULL);
+    } while (now_ns() < deadline);
+    bool survived = waited == 0;
+    if (survived)
+    {
+        // waitpid established that this is our unreaped, adopted child: its PID cannot be reused.
+        kill(child, SIGKILL);
+        wait_child(child);
+    }
+    if (survived || waited != child || !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL)
+    {
+        fail("timeout left a live descendant or failed to kill it: %s", pid_path);
+    }
+    char *timings = format_path("%s/output with spaces/timings.tsv", directory);
+    file = open_file(timings, "r");
+    char row[512];
+    bool rows = fgets(row, sizeof(row), file) != NULL && fgets(row, sizeof(row), file) != NULL;
+    char *code = rows ? strrchr(row, '\t') : NULL;
+    if (!code || strcmp(code, "\t124\n") != 0)
+    {
+        fail("descendant timeout did not retain status 124");
+    }
+    close_file(file);
+    free(timings);
+    free(pid_path);
+}
+
 int main(int argc, char **argv)
 {
     int result = 0;
@@ -234,6 +352,11 @@ int main(int argc, char **argv)
             fail("cannot create test workspace");
         }
         printf("Self-host harness test artifacts: %s\n", root);
+        // Own and reap orphaned mock descendants without signalling arbitrary recorded PIDs.
+        if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0)
+        {
+            fail("cannot become the test child subreaper");
+        }
         verify_probes(root);
         char *bin = format_path("%s/bin with spaces", root);
         make_directory(bin);
@@ -249,6 +372,8 @@ int main(int argc, char **argv)
             "compile",
             "signal",
             "timeout",
+            "timeout-descendant-parent-ignores",
+            "timeout-descendant-parent-exits",
             "missing-object",
             "empty-object",
             "link",
@@ -332,7 +457,7 @@ int main(int argc, char **argv)
                 {
                     make_directory("output with spaces");
                 }
-                char *arguments[] = {"selfhost", executable, "sources.argv", "flags.argv", "output with spaces", strcmp(fault, "timeout") == 0 ? "1" : "10", NULL};
+                char *arguments[] = {"selfhost", executable, "sources.argv", "flags.argv", "output with spaces", strncmp(fault, "timeout", 7) == 0 ? "1" : "10", NULL};
                 if (strcmp(fault, "bad-timeout") == 0)
                 {
                     arguments[5] = "0";
@@ -341,6 +466,10 @@ int main(int argc, char **argv)
                 _exit(99);
             }
             int status = wait_child(child);
+            if (strncmp(fault, "timeout-descendant-", 19) == 0)
+            {
+                verify_timeout_descendant(directory);
+            }
             bool success = strcmp(fault, "pass") == 0;
             char *pass = format_path("%s/output with spaces/PASS", directory);
             struct stat information;

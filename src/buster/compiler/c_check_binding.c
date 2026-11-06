@@ -112,27 +112,6 @@ static bool check_input_parameter_marks(const CheckInput* input, const Parser* p
     return valid;
 }
 
-// A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on a
-// prototype covers the definition that follows it.
-static bool check_input_unused_marked_chain(const CheckInput* input, const CBindings* events, uint32_t event, uint32_t kind)
-{
-    bool marked = false;
-    uint32_t at = event + 1;
-    for (uint32_t steps = 0; !marked && at != 0 && steps < events->count; steps += 1)
-    {
-        const uint32_t previous = events->previous[at - 1];
-        if (previous == 0 || events->operation[previous - 1] != C_BINDING_DECLARE || events->key[previous - 1] != events->key[event] ||
-            events->depth[previous - 1] != events->depth[event])
-        {
-            break;
-        }
-        const uint32_t token = events->declaration[previous - 1];
-        marked = token < input->token_count && check_input_unused_suppressed(input, token, kind);
-        at = previous;
-    }
-    return marked;
-}
-
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. The declaration's own body decides the completion, as clang reports it after the function.
 static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* parameters,
@@ -144,12 +123,17 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     const uint32_t count = parser->tokens.count;
     uint32_t* chain_first = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
     uint32_t* chain_definition = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count);
-    bool valid = chain_first != NULL && chain_definition != NULL;
+    // A declaration inherits an earlier declaration's unused/used mark, as clang's redeclarations do: an attribute on
+    // a prototype covers the definition that follows it. Carried along the chain in one pass (#1351), not walked back
+    // from each declaration. Only objects' and functions' marks are read: any other kind is suppressed by itself.
+    uint8_t* chain_marked = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
+    bool valid = chain_first != NULL && chain_definition != NULL && chain_marked != NULL;
     if (valid)
     {
         memset(chain_definition, 0, (uint64_t)events->count * sizeof(uint32_t));
         for (uint32_t event = 0; event < events->count; event += 1)
         {
+            chain_marked[event] = 0;
             if (events->operation[event] != C_BINDING_DECLARE)
             {
                 continue;
@@ -158,6 +142,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             const bool linked = previous != 0 && previous <= events->count && events->operation[previous - 1] == C_BINDING_DECLARE &&
                                 events->key[previous - 1] == events->key[event] && events->depth[previous - 1] == events->depth[event];
             chain_first[event] = linked ? chain_first[previous - 1] : event;
+            chain_marked[event] = linked && (chain_marked[previous - 1] != 0 || check_input_unused_suppressed(output, events->declaration[previous - 1], C_BINDING_OBJECT));
         }
         for (uint32_t event = 0; valid && event < events->count; event += 1)
         {
@@ -185,7 +170,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool declaration_used = parameter || local ? used_tokens[token] != 0 : used[event] != 0;
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
-                              !check_input_unused_marked_chain(output, events, event, kind) && main_file &&
+                              chain_marked[event] == 0 && main_file &&
                               (parameter || local || (token < count && check_input_linkage(output->declaration_bits, token) == 1));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
