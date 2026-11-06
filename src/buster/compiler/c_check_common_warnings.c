@@ -2326,6 +2326,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                             check_common_conversion_warning_at(parser, pp, input, stream, types, spell, root, &value, part->conversion.type, completion,
                                                                evaluated == NULL || evaluated[root] != 0, scratch);
                         }
+                        // A plan part can also have a graph parent, such as its declaration's discard wrapper.
+                        // Its nested conversions still belong immediately after this part's target conversion;
+                        // the conversion visit bit prevents the later parent walk from reporting them again.
+                        check_common_emit_push(&emission, root, BUSTER_CHECK_EMIT_CONVERSIONS);
+                        check_common_emit_run(&emission);
                         if (parents[root] == BUSTER_CHECK_NONE && (emitted[root] & BUSTER_CHECK_EMITTED_NODE) == 0)
                         {
                             check_common_emit_root(&emission, root);
@@ -4047,9 +4052,10 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
 // bounds and division checks all stay silent there. The entries whose `node` names a source expression's
 // value — evaluates, returns, branch and switch conditions, indirect jumps, variable bounds and statement
 // results — clear their root here, which keeps the node's whole operand chain unevaluated. Initializer entries
-// name a plan instead of a node, so they clear its part roots and the scalar declaration's conversion root too.
+// name a plan instead of a node. Their part roots and scalar conversion roots also become propagation barriers:
+// a declaration's unreferenced discard wrapper must not make its unreachable initializer evaluated again.
 static bool check_common_unreachable(const CheckProgram* program, const CheckGraph* graph,
-                                     uint8_t* evaluated, Arena* scratch)
+                                     uint8_t* evaluated, uint8_t* blocked, Arena* scratch)
 {
     bool valid = true;
     for (uint32_t b = 0; valid && b < program->body_count; b += 1)
@@ -4087,6 +4093,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
                 if (scalar < graph->count)
                 {
                     evaluated[scalar] = 0;
+                    blocked[scalar] = 1;
                 }
                 const CheckInitializer* plan = program->initializers->plans + entries[i].target;
                 for (uint32_t part = 0; part < plan->count; part += 1)
@@ -4094,6 +4101,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
                     if (plan->parts[part].kind == CHECK_INIT_VALUE && plan->parts[part].node < graph->count)
                     {
                         evaluated[plan->parts[part].node] = 0;
+                        blocked[plan->parts[part].node] = 1;
                     }
                 }
             }
@@ -4170,8 +4178,11 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
             // detached compound-literal initializer roots that no sizeof operand edge reaches either.
             evaluated[node] = referenced[node] == 0 && !check_common_query_suppressed(graph, node) &&
                               (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
+            // The reference classification is finished. Reuse its bytes for unreachable initializer barriers.
+            referenced[node] = 0;
         }
-        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, scratch))
+        const uint8_t* blocked = referenced;
+        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, referenced, scratch))
         {
             result = NULL;
         }
@@ -4208,7 +4219,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
-                if (operands[i] < graph->count && (i >= 32 || (mask & (1u << i)) != 0))
+                if (operands[i] < graph->count && blocked[operands[i]] == 0 && (i >= 32 || (mask & (1u << i)) != 0))
                 {
                     evaluated[operands[i]] = 1;
                 }
@@ -4218,7 +4229,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-                    if (argument < graph->count && (i >= 32 || (mask & (1u << i)) != 0))
+                    if (argument < graph->count && blocked[argument] == 0 && (i >= 32 || (mask & (1u << i)) != 0))
                     {
                         evaluated[argument] = 1;
                     }

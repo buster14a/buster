@@ -5215,6 +5215,16 @@ change, it refused such a declaration by name.
   A member has "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
+- **Ordinary names after GNU attributes.** At a block item, a declaration
+  prefix containing only GNU attributes before an already visible ordinary
+  identifier (`int x; ... __attribute__(()) x = 1;`) reports "expected
+  identifier or '('" at the name. The parser looks up those names, including
+  parameters, enumerators and functions; a vector fallback that needs earlier
+  ordinary declarations requests the complete unit's bindings. An unbound
+  name still takes the implicit-int path. File scope retains Clang 23.1.4's
+  distinct behavior: `int x; __attribute__(()) x = 1;` reports the missing
+  type's implicit-int error in C17. Typedef names, statement attributes and
+  labels keep their respective declaration and statement paths.
 - **Statement attributes' handlers.** As clang's SemaStmtAttr takes them
   (`check_input_statement_attribute_kinds`), each with -Wignored-attributes'
   warning at the statement's first token: GNU's `noinline` and
@@ -5266,10 +5276,6 @@ change, it refused such a declaration by name.
   - An error of an attribute at `__clang__`'s scope that the checker
     refuses comes before clang's warning at the same token, where clang
     gives the warning first.
-  - An ordinary identifier the unit declares, after specifiers of
-    attributes alone (`int x; ... __attribute__(()) x = 1;`), is clang's
-    "expected identifier or '('" at it, which needs a lookup the parser
-    doesn't make: ours is the implicit int's error or "unknown type name".
 - **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
   order and lookups and what each kind of name keeps
   (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
