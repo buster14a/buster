@@ -2677,6 +2677,12 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            "bool of an address before a later pragma weak",
+            "extern int w;\n_Bool b = (_Bool)&w;\n#pragma weak w\n",
+            false,
+            false
+        },
+        {
             "global array initializer",
             "int a[3]; int *p = a;\n",
             false,
