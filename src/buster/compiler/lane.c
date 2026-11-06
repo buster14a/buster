@@ -977,6 +977,11 @@ static void arena_poison(Arena* arena, uint8_t value)
 // from the other. Each is reserved when it is first used.
 #define BUSTER_SCRATCH_ARENA_COUNT 2
 #define BUSTER_SCRATCH_ARENA_CAPACITY (64ull << 30)
+// The base pages each starts with (#672). A thread's temporaries are mostly a few kilobytes, and its larger ones mostly
+// room of which it touches the start: a large file's windowed preparation (pp_prepare_windows) pushes three arrays of a
+// word for every 64 of its bytes, 3.5 MB for sqlite3.c's 9.5 MB, and touches each one's start. In huge pages those took
+// two, 4 MB; in base pages the C driver's scratch holds 1 MB at sqlite3.c's peak.
+#define BUSTER_SCRATCH_ARENA_SMALL_BYTES (4ull << 20)
 
 typedef struct LaneGroup LaneGroup;
 typedef struct LaneTeam LaneTeam;
@@ -1130,7 +1135,7 @@ static Scratch scratch_begin(const Arena* conflict)
     }
     if (arena->base == 0)
     {
-        *arena = arena_reserve(BUSTER_SCRATCH_ARENA_CAPACITY);
+        *arena = arena_reserve_small(BUSTER_SCRATCH_ARENA_CAPACITY, BUSTER_SCRATCH_ARENA_SMALL_BYTES);
     }
     Scratch result = {
         .arena = arena,

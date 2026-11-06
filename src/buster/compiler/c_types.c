@@ -1030,6 +1030,9 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_BUCKET_SLOTS 4
 #define BUSTER_TYPE_BUCKET_BYTES 64
 #define BUSTER_TYPE_INITIAL_BUCKETS 64
+// The index's bytes that the C driver keeps in base pages (arena_reserve_small): 65,536 buckets, room for 196,608 types,
+// far more than a unit makes (sqlite3.c's 3,434 take 128 KB). A larger unit's index grows past them into huge pages.
+#define BUSTER_TYPE_INDEX_SMALL_BYTES (4ull << 20)
 // The types past a copy's own that its index has room for before it grows (type_copy): at most this many, and at most
 // as many as the source's types, but no fewer than the minimum.
 #define BUSTER_TYPE_COPY_INDEX_SLACK 4096

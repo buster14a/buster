@@ -842,6 +842,35 @@ Every round of the 8 has the branch 1.8 to 2.8 ms faster. The peak is 8.1 MB
 lower, of the 12 MB that #1167 bounded for the two changes. Main's own peak had
 risen 4 MB since `b70deb47`, by its changes between.
 
+### Huge pages held for under a megabyte (#672)
+
+Each mapping's resident memory at the compile's peak, on this repository's VM
+with the arenas' huge pages (`BUSTER_HUGE_PAGES=1`) and without them
+(`BUSTER_HUGE_PAGES=0`), at main `ec5f0f6b`: 297.0 MB against 228.0 MB. Every
+arena's mapping was logged with its call stack and matched to
+`/proc/self/smaps` at each `--time-stages` mark ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/page-policy-672-2026-11-06),
+`diag/`). The checker's three arenas hold 38 MB of the 69 MB difference (the
+driver's arena 27 MB, its output arena 7.8 MB, its scratch 3.5 MB), which
+#628 follows. Four arenas outside the checker each took a huge page or two for
+under a megabyte:
+
+| arena | huge pages | base pages |
+| --- | ---: | ---: |
+| the type table's index (`check_driver_unit`) | 2,112 KB | 128 KB |
+| the file cache's records arena (`file_cache_arenas`) | 2,112 KB | 268 KB |
+| the file cache's bytes arena | 2,112 KB | 376 KB |
+| the thread's scratch (`scratch_begin`) | 4,160 KB | 1,048 KB |
+
+The thread's scratch took two: a large file's windowed preparation
+(`pp_prepare_windows`) pushes three arrays of a word for every 64 of its
+bytes, 3.5 MB for `sqlite3.c`, and touches each one's start. These now start
+with base pages: the index's first 4 MB (`BUSTER_TYPE_INDEX_SMALL_BYTES`,
+65,536 buckets), the two file cache arenas' first 2 MB
+(`BUSTER_FILE_CACHE_SMALL_BYTES`) and the scratch's first 4 MB
+(`BUSTER_SCRATCH_ARENA_SMALL_BYTES`). On the VM the peak falls from 296.8 to
+288.3 MB, for 386 more faults, with the object the same bytes.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
