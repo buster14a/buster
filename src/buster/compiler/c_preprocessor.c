@@ -21579,7 +21579,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             const char* value = argument[2] != 0 ? argument + 2 : next;
             i += argument[2] == 0;
             result = value != 0;
-            if (result && argument[1] == 'I')
+            if (result && argument[1] == 'I' && strcmp(value, "-") == 0)
+            {
+                // The obsolete -I- split. Clang rejects it; a directory literally named "-" is -I./- .
+                fprintf(stderr, "error: '-I-' not supported, please use -iquote instead\n");
+                result = false;
+            }
+            else if (result && argument[1] == 'I')
             {
                 include[options->include_directory_count] = value;
                 options->include_directory_count += 1;
