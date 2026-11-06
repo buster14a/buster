@@ -1993,13 +1993,27 @@ The inputs:
 - c-testsuite's 220-program subset.
 
 Each small-file row is `measure-compile --runs 41 --reference tcc -- -c FILE`,
-pinned to CPU 2, in two rounds with the executables' order swapped. Each figure
-is the mean of the two rounds' medians. c-testsuite's rows are each program's
-best of 3 runs, averaged.
+pinned to CPU 2, and gives its median. On the VM there were two rounds, with the
+executables' order swapped, and each figure is the mean of the rounds' medians.
+On the 9700X there was one round, and fewer inputs: runs there waited up to 15
+minutes for the lock behind CI jobs and other sessions. The
+c-testsuite rows give each program's best of 3 runs, averaged over the 220.
 
 **Objects are the same bytes, baked or built,** on both machines: c-testsuite's
 220 programs, `empty.c`, `tiny.c` and `hello.c`, each compiled with `-c` by
 both executables and compared.
+
+On the Ryzen 7 9700X (kernel 6.18, THP `always`, under its lock), built there
+by `build.sh`, with tcc 0.9.28rc. "Disabled" is `PR_SET_THP_DISABLE` on the
+process, as in the sections above:
+
+| input | THP | `backend-setup`, baked | built | wall, baked | built | tcc |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `empty.c` | `always` | 0.004 ms | 0.004 ms | 0.448 ms | 0.481 ms | 0.360 ms |
+| `empty.c` | disabled | 0.004 ms | 0.004 ms | 0.561 ms | 0.598 ms | 0.360 ms |
+| `hello.c` | `always` | 0.003 ms | 0.862 ms (1,136 faults) | 1.364 ms | 2.516 ms | 0.776 ms |
+| `hello.c` | disabled | 0.003 ms | 0.746 ms (1,136 faults) | 1.447 ms | 2.307 ms | 0.769 ms |
+| c-testsuite's 220, mean | `always` | | | 0.964 ms | 1.883 ms | 0.543 ms |
 
 On a 2.1 GHz Xeon VM (4 vCPUs, kernel 6.18, linked by lld), with tcc 0.9.27
 (Ubuntu's). The kernel's setting was switched between `madvise` and `always`.
@@ -2018,20 +2032,29 @@ the kernel's setting in force:
 | c-testsuite's 220, mean | `madvise` | | | 3.06 ms | 5.42 ms | 1.66 ms |
 | c-testsuite's 220, mean | `always` | | | 3.20 ms | 5.63 ms | 1.71 ms |
 
-- **Empty file.** `backend-setup` is the stage clock's boundary alone, 0.01 ms
-  under every page policy. A unit without a selected body
-  initializes nothing (#689), and the baked executable has nothing to
-  initialize.
-- **With a function.** The baked executable's `backend-setup` is 0.01 ms and
-  one or two faults. Building the tables when the process runs costs 2.2 ms
-  and about 1,135 faults on the VM, under `madvise` and `always` alike.
+- **Empty file.** `backend-setup` is the stage clock's boundary alone, under
+  every page policy: 0.004 ms on the 9700X and 0.008 to 0.010 ms on the VM. A
+  unit without a selected body initializes nothing (#689), and the baked
+  executable has nothing to initialize.
+- **With a function.** The baked executable's `backend-setup` is 0.003 ms on
+  the 9700X and 0.008 to 0.009 ms on the VM, with one or two faults. Building the tables
+  when the process runs costs about 1,135 faults on both machines: 0.75 to
+  0.86 ms on the 9700X, and 2.2 ms on the VM under `madvise` and `always` alike.
 - **Under the VM's own default** (huge pages off), the baked executable's
   `backend-setup` is the same, 0.007 to 0.009 ms. c-testsuite's programs take
   3.21 and 3.34 ms there, against 5.55 and 5.74 ms built.
-- **Against tcc.** On the VM, c-testsuite's programs
-  take 1.84 to 1.87 times tcc's time, against 3.3 times built. Before #1027
-  they took 3.5 to 4.3 times.
-- **What remains of a small file isn't the backend.** On the VM, `hello.c`'s
+- **Against tcc.** On the 9700X, c-testsuite's programs take 1.78 times tcc's
+  time, against 3.47 times built, and `hello.c` 1.76 times, against 3.24. On
+  the VM, c-testsuite's take 1.84 to 1.87 times, against 3.3. Before #1027,
+  the 9700X's ratio was 3.5 and the VM's 3.5 to 4.3 ("The backend's tables
+  when a function is emitted", above).
+- **What remains of a small file isn't the backend.** On the 9700X, `hello.c`'s
+  baked stage span is 1.18 ms:
+  - preprocessing `<stdio.h>`, 0.43 ms;
+  - the checker's reader, 0.35 ms;
+  - `setup`, 0.12 ms.
+
+  Outside the span, the process takes another 0.31 ms. On the VM, `hello.c`'s
   baked stage span is 3.8 to 4.5 ms:
   - preprocessing `<stdio.h>`, 1.3 to 1.5 ms;
   - the checker's reader (`check-input`), 1.0 to 1.2 ms;
