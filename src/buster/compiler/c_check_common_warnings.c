@@ -666,7 +666,52 @@ typedef struct CheckCommonEmission
     uint32_t work_capacity;
     uint32_t work_count;
     Arena* scratch;
+    // Each token's subtree's first token (check_common_emission_subtree_start, #1350), built at the first query; null
+    // before it, and after an allocation that failed (which fails the unit), the queries then left to
+    // check_common_subtree_start.
+    uint32_t* subtree_starts;
+    bool subtree_starts_failed;
 } CheckCommonEmission;
+
+// check_common_subtree_start for the emission's queries, from a column of every token's subtree start built once
+// (#1350): a comma chain's k-th left operand is the chain before it, so the binary search's climbs cost O(k log k) a
+// comma. A subtree is a run of tokens and a node's children are in source order, so a node's run starts where its
+// first child's does when that child is before it, and at the node otherwise: one ascending pass fills the column.
+static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emission, uint32_t root)
+{
+    const Parser* parser = emission->parser;
+    const uint32_t count = parser->tokens.count;
+    if (emission->subtree_starts == NULL && !emission->subtree_starts_failed && count != 0)
+    {
+        uint32_t* first = CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count);
+        uint32_t* starts = first != NULL ? CHECK_COMMON_PUSH_ARRAY(emission->scratch, uint32_t, count) : NULL;
+        emission->subtree_starts_failed = starts == NULL;
+        // A failed allocation fails the unit, as every common warning's scratch does; the search stands in until it stops.
+        if (starts == NULL)
+        {
+            check_common_exhausted(emission->pp);
+        }
+        if (starts != NULL)
+        {
+            memset(first, 0xff, (uint64_t)count * sizeof(uint32_t));
+            for (uint32_t token = count; token-- > 0;)
+            {
+                const uint32_t parent = parser->tree.parents[token];
+                if (parent < count && parent != token)
+                {
+                    first[parent] = token;
+                }
+            }
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                starts[token] = first[token] < token ? starts[first[token]] : token;
+            }
+            emission->subtree_starts = starts;
+        }
+    }
+    const uint32_t result = root < count && emission->subtree_starts != NULL ? emission->subtree_starts[root] : check_common_subtree_start(parser, root);
+    return result;
+}
 
 // The worklist frame kinds.
 #define BUSTER_CHECK_EMIT_TREE 0u
@@ -1139,7 +1184,7 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
         }
         left = up;
     }
-    const uint32_t left_start = check_common_subtree_start(parser, left);
+    const uint32_t left_start = check_common_emission_subtree_start(emission, left);
     const uint32_t left_result = check_common_result_root(graph, left_node);
     const bool left_effect = left_node < graph->count ?
                              (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
@@ -1245,7 +1290,7 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         }
         const uint32_t right_result = check_common_result_root(graph, right_node);
         const uint32_t right = right_result < graph->count && graph->tokens[right_result] < count ? graph->tokens[right_result] : comma + 1;
-        const uint32_t right_start = right < count ? check_common_subtree_start(parser, right) : right;
+        const uint32_t right_start = right < count ? check_common_emission_subtree_start(emission, right) : right;
         const bool right_cast = right < count && parser->tree.roles[right] == PARSE_ROLE_CLOSE_CAST;
         const bool right_void = right_cast && check_common_void_cast(parser, pp, input, stream, types, right);
         const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);

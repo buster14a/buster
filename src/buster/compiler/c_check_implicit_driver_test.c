@@ -842,6 +842,14 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int c(void) { int y; (f(), y); return 0; }\n"
         "int d(int x, int y) { x++, y; return 0; }\n"
         "int e(int x, int y) { x, y; return 0; }\n";
+    // Long comma chains, whose left operands' starts come from the emission's subtree-start column (#1350): effect-free
+    // operands among effectful ones at the chain's start, middle and end, parenthesized and not, and nested chains.
+    static const char comma_chains[] =
+        "int f(int);\n"
+        "int a(int x, int y) { return (x, x += 1, y, x += 2, (y), x += 3, y + 1, x += 4, f(x), y, x += 5, x); }\n"
+        "int b(int x, int y) { x += 1, y, x += 2, y, x += 3, (x, y), x += 4, y; return x; }\n"
+        "int c(int x) { return (x += 1, (x += 2, x, x += 3), x * 2, (x, (x, x += 4)), x); }\n"
+        "int d(int x, int y) { for (x = 0, y; x < 4; x++, y, x++) y += x; return (y, x, y); }\n";
     static const char positional_format_edges[] =
         "#include <stdio.h>\n"
         "void a(void) { printf(\"%2$s\\n\", 1, \"x\"); }\n"
@@ -1104,6 +1112,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { brace_initializers, { "-Wall", NULL, NULL, NULL } },
         { format_n_unsigned, { "-Wall", NULL, NULL, NULL } },
         { comma_unparenthesized, { "-Wall", "-Wextra", NULL, NULL } },
+        { comma_chains, { "-Wall", "-Wextra", NULL, NULL } },
         { positional_format_edges, { "-Wall", NULL, NULL, NULL } },
         { format_integer_class, { "-Wall", NULL, NULL, NULL } },
         { format_promoted_arguments, { NULL, NULL, NULL, NULL } },
