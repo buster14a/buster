@@ -702,6 +702,9 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void [[gnu::stdcall]] f(void);\nvoid [[gnu::regparm(2)]] h(void);\n",
         "void [[gnu::regparm(1)]] ordered(int x __attribute__((noinline)));\n",
         "void [[gnu::ms_abi]] ordered(int x [[gnu::unknown]]);\n",
+        "[[gnu::unknown]] void f(int p [[gnu::unknown]]), g(int q [[gnu::unknown]]);\n",
+        "[[gnu::unknown]] int a, b; [[unknown]] int c, d; __attribute__((unknown)) int e, f;\n",
+        "[[__gnu__::unknown]] int a, b [[gnu::unknown]]; [[vendor::unknown]] int c, d;\n",
         "typedef void F(void);\nF [[gnu::stdcall]] k;\n",
         "void [[gnu::ms_abi]] f(void);\nvoid f(void);\n",
         // C23's specifier attribute changes the typedef's function, before an outer declarator adds a different one.

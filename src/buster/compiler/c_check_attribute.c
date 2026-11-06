@@ -274,13 +274,17 @@ struct CheckInputUnknownAttribute
     uint32_t name;
     uint32_t end;
     bool standard;
+    // GNU-scoped C23 unknowns warn once per written attribute, even when a prefix is copied to several declarators.
+    bool single_warning;
+    bool warned;
+    bool* warned_shared;
 };
 
 typedef struct CheckInputAttributes CheckInputAttributes;
 struct CheckInputAttributes
 {
     CheckInputAttribute* records;
-    // Diagnostic-only spellings are separate from the semantic records. Prefix lists replay them per declarator.
+    // Diagnostic-only spellings are separate from semantic records. Prefix copies share one-shot C23 GNU warning state.
     CheckInputUnknownAttribute* unknown_begin;
     CheckInputUnknownAttribute* unknown_end;
     uint32_t count;
@@ -1035,6 +1039,7 @@ static bool check_input_attribute_unknown_append(CheckInputReader* reader, Check
     {
         *record = attribute;
         record->next = NULL;
+        record->warned_shared = attribute.warned_shared != NULL ? attribute.warned_shared : &record->warned;
         if (attributes->unknown_end != NULL)
         {
             attributes->unknown_end->next = record;
@@ -3257,6 +3262,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             {
                 const CheckInputUnknownAttribute diagnostic = {
                     .first = attribute.first, .name_token = attribute.name_token, .name = attribute.name, .end = attribute.end, .standard = attribute.standard,
+                    .single_warning = standard && gnu_scope,
                 };
                 valid = check_input_attribute_unknown_append(reader, attributes, diagnostic);
             }
@@ -5287,7 +5293,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             const CheckInputAttribute attribute = {
                 .first = unknown->first, .name_token = unknown->name_token, .name = unknown->name, .end = unknown->end, .standard = unknown->standard,
             };
-            check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE, CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE);
+            if (!unknown->single_warning || !*unknown->warned_shared)
+            {
+                check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE, CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE);
+                *unknown->warned_shared = true;
+            }
             unknown = unknown->next;
             continue;
         }
