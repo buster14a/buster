@@ -500,6 +500,40 @@ static void oracle_test_empty_path(OracleTest* test)
         }
     }
     char resolved[BUSTER_ORACLE_PATH_BYTES];
+    char alternate[BUSTER_ORACLE_PATH_BYTES + 32];
+    char search[BUSTER_ORACLE_PATH_BYTES + 4];
+    snprintf(alternate, sizeof(alternate), "%s/oracle-path-directory", test->runs[0]);
+    snprintf(search, sizeof(search), ":%s", test->runs[0]);
+    bool skips_directory = ready && mkdir("oracle-path-directory", 0700) == 0 && oracle_test_copy(tool, alternate) && setenv("PATH", search, 1) == 0;
+    skips_directory = skips_directory && oracle_find_tool("oracle-path-directory", resolved, sizeof(resolved)) && strcmp(resolved, alternate) == 0;
+    for (uint32_t mode = 0; mode < 2 && skips_directory; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-directory", 0 };
+        OracleRun run;
+        const bool ran = oracle_test_go(&run, mode == 0 ? &off : &cache, "oracle test: skip directory", arguments, 0, 0);
+        skips_directory = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, "path-tool") == 0;
+        oracle_run_release(&run);
+    }
+    const char identity_script[] = "#!/bin/sh\nprintf '%s' \"$0\"";
+    char cwd[BUSTER_ORACLE_PATH_BYTES];
+    char expected[BUSTER_ORACLE_PATH_BYTES + 32];
+    bool link_spelling = ready && oracle_test_write("oracle-path-argv0", identity_script, sizeof(identity_script) - 1) &&
+                         chmod("oracle-path-argv0", 0755) == 0 && symlink("oracle-path-argv0", "oracle-path-link") == 0 &&
+                         setenv("PATH", "", 1) == 0 && getcwd(cwd, sizeof(cwd)) != 0;
+    if (link_spelling)
+    {
+        const int written = snprintf(expected, sizeof(expected), "%s/./oracle-path-link", cwd);
+        link_spelling = written > 0 && (size_t)written < sizeof(expected);
+    }
+    for (uint32_t mode = 0; mode < 2 && link_spelling; mode += 1)
+    {
+        char* arguments[] = { "oracle-path-link", 0 };
+        OracleRun run = { .cache = mode == 0 ? &off : &cache, .purpose = "oracle test: path symlink", .arguments = arguments,
+                          .directory = test->runs[0] };
+        const bool ran = oracle_run(&run);
+        link_spelling = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0 && run.output != 0 && strcmp(run.output, expected) == 0;
+        oracle_run_release(&run);
+    }
     const bool unset = ready && unsetenv("PATH") == 0 && !oracle_find_tool("oracle-path-tool", resolved, sizeof(resolved)) && oracle_find_tool("sh", resolved, sizeof(resolved));
     const bool restored_path = !ready || (saved != 0 ? setenv("PATH", saved, 1) == 0 : unsetenv("PATH") == 0);
     const bool restored_directory = directory >= 0 && fchdir(directory) == 0;
@@ -509,6 +543,8 @@ static void oracle_test_empty_path(OracleTest* test)
     }
     free(saved);
     oracle_test_expect(test, correct && restored_path && restored_directory, "runs: empty PATH components resolve and execute a tool in the current directory");
+    oracle_test_expect(test, skips_directory, "runs: PATH search skips a directory in favor of a later executable");
+    oracle_test_expect(test, link_spelling, "runs: a changed directory preserves the selected executable's symlink spelling");
     oracle_test_expect(test, unset, "runs: an unset PATH uses the system default rather than the current directory");
 }
 
@@ -3517,7 +3553,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         unlink(test.helper);
     }
     oracle_epoch_end(epoch);
-    static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
+    static const char* const directories[] = { "empty-path/oracle",  "runs/oracle",         "dependencies/oracle", "identities/oracle", "tracing/oracle",
                                                "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",      "replay-large/oracle",
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle",
