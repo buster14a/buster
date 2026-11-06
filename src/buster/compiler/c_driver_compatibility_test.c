@@ -210,6 +210,47 @@ static void cc_compat_failure(CCCompatibilityTest* test, const char* name, const
     cc_compat_release(&run);
 }
 
+// A temporary sibling must not add characters to a destination basename. Exercise both sides of the old 11-byte
+// suffix boundary and the directory's actual limit, then a default .d derived from a maximum-length object name.
+static void cc_compat_long_depfiles(CCCompatibilityTest* test)
+{
+    const long limit = pathconf(test->directory, _PC_NAME_MAX);
+    const bool supported = limit >= 12 && limit < PATH_MAX - 16;
+    cc_compat_expect(test, supported, "query a usable directory component limit");
+    if (supported)
+    {
+        const size_t lengths[] = { (size_t)limit - 11, (size_t)limit - 10, (size_t)limit };
+        char name[PATH_MAX];
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            const size_t prefix = i == 0 ? 0 : 4;
+            memcpy(name, "out/", prefix);
+            memset(name + prefix, 'a' + (int)i, lengths[i]);
+            name[prefix + lengths[i]] = 0;
+            const char* const args[] = { "-M", "-MF", name, "a.c", NULL };
+            cc_compat_oracle(test, "long explicit -MF matches Clang", NULL, args, name);
+            const bool prepared = cc_compat_write(test, name, "old dependency\n");
+            const char* const failure[] = { "-M", "-MF", name, "missing.c", NULL };
+            CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, failure);
+            char* old = cc_compat_read(test, name);
+            cc_compat_expect(test, prepared && run.status != 0 && old != NULL && strcmp(old, "old dependency\n") == 0,
+                             "failure preserves a long existing depfile");
+            free(old);
+            cc_compat_release(&run);
+        }
+        char object[PATH_MAX];
+        char depfile[PATH_MAX];
+        memcpy(object, "out/", 4);
+        memset(object + 4, 'z', (size_t)limit - 2);
+        memcpy(object + 4 + (size_t)limit - 2, ".o", 3);
+        memcpy(depfile, object, 4 + (size_t)limit + 1);
+        depfile[4 + (size_t)limit - 1] = 'd';
+        // Keep the rule target short so Clang's long-line wrapping is not part of this filename test.
+        const char* const args[] = { "-c", "-MMD", "-MT", "unit.o", "a.c", "-o", object, NULL };
+        cc_compat_oracle(test, "maximum-length default .d matches Clang", NULL, args, depfile);
+    }
+}
+
 static bool cc_compat_elf(CCCompatibilityTest* test, const char* name, uint16_t type, bool interpreter)
 {
     char path[PATH_MAX];
@@ -343,6 +384,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         unlink(mode_depfile);
         const char* const mmd[] = { "-MMD", "-MFjoined.d", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MMD with joined -MF", NULL, mmd, "joined.d");
+        cc_compat_long_depfiles(&test);
         const char* const ep[] = { "-E", "-MD", "-P", "a.c", "-o", "out/a.i", NULL };
         cc_compat_oracle(&test, "-E -MD -o produces primary and side dependency", NULL, ep, "out/a.d");
         const char* const mixed[] = { "-MD", "-M", "a.c", NULL };
