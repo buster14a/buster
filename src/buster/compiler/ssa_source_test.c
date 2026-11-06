@@ -939,6 +939,39 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
             .exit_status = 255,
             .passed = true,
         },
+        // Callback registrations and synchronous callbacks are refused before entering libc. Each execution is a
+        // child, and the signal fixture only registers a handler: it never sends a signal, even if refusal regresses.
+        {
+            .name = "host-qsort-callback-refused",
+            .source = "extern void qsort(void *, unsigned long, unsigned long, int (*)(const void *, const void *));\n"
+                      "static int compare(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }\n"
+                      "int main(void) { int a[3] = {3, 1, 2}; qsort(a, 3, sizeof(int), compare); return 0; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .recorded = true,
+            .result = INTERPRETER_NATIVE,
+            .functions = 2,
+        },
+        {
+            .name = "host-atexit-callback-refused",
+            .source = "extern int atexit(void (*)(void)); static void handler(void) {}\n"
+                      "int main(void) { return atexit(handler); }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .recorded = true,
+            .result = INTERPRETER_NATIVE,
+            .functions = 2,
+        },
+        {
+            .name = "host-signal-callback-refused",
+            .source = "typedef void (*Handler)(int); extern Handler signal(int, Handler); static void handler(int s) { (void)s; }\n"
+                      "int main(void) { signal(10, handler); return 0; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .recorded = true,
+            .result = INTERPRETER_NATIVE,
+            .functions = 2,
+        },
         // Aliases (#147) whose names the C library has too: called, through a pointer and read, each must reach the
         // unit's definition, not the library's getpagesize and opterr, in every form.
         {
