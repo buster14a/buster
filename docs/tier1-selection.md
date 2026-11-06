@@ -254,9 +254,12 @@ patterns are:
   (`lea d, [size + alignment - 1]`, `and d, -alignment`, `sub rsp, d`,
   `mov d, rsp`), or with a constant size of up to 1 GB a `sub` of the rounded
   constant (`TIER1_RULE_ALLOCA_IMMEDIATE`); `stack_save` copies rsp and
-  `stack_restore` sets it. The alignment is 16 bytes, or a realigned frame's,
-  which the CFG consumer sets in the holes' `scale`, so that rsp keeps the
-  alignment at every call after an allocation. An allocation and a restore are
+  `stack_restore` sets it. The alignment is the most the function's calls'
+  stack arguments need: 16 bytes, or a 32- or 64-byte vector's or an
+  over-aligned aggregate's. The CFG consumer sets it in the holes' `scale`, so
+  that rsp keeps it at every call after an allocation. An object's own
+  alignment is the frame base's, not rsp's: a frame realigned to a megabyte for
+  an object (#1450) doesn't round each allocation and call area to a megabyte. An allocation and a restore are
   memory barriers: no load folds past either. Every function with one is the CFG
   consumer's, in a dynamic frame (the frame guide's "Frame and prologue rules"):
   a frame pointer, its places rbp's (or r15's in a realigned frame), and each

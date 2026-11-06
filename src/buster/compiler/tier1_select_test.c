@@ -3495,6 +3495,18 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
             tier1_select_test_node(&function, chain + 2, IR_RET, IR_VOID, chain + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
     }
+    if (created && variant == 6)
+    {
+        // Past the frame planner's bound (1 << 30) a slot is no frame object, and its address selects nothing.
+        function.slots[2].alignment = UINT32_C(1) << 31;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            uint32_t failed = BUSTER_IR_NONE;
+            const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed);
+            tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 && scratch->length == 0, "a slot aligned past the frame's bound selects nothing");
+        }
+        function.slots[2].alignment = 8192;
+    }
     uint32_t planned = 0;
     if (created)
     {

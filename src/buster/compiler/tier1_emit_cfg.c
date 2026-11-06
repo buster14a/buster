@@ -329,12 +329,15 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
            (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
 }
 
-// The alignment's log2 that rsp keeps in a dynamic frame (#141): 16 bytes', or a realigned frame's. An allocation rounds
-// its size up to it, and so does each call's outgoing area (tier1_emit_cfg_call_area).
-static uint8_t tier1_emit_cfg_stack_alignment(const Tier1Frame* frame)
+// The alignment's log2 that rsp keeps in a dynamic frame (#141): the most any call's stack arguments need, 16 bytes or a
+// 32- or 64-byte vector's or an over-aligned aggregate's (Tier1EmitPrepared.call_abi), so that every call after an
+// allocation finds its area aligned. An allocation rounds its size up to it, and so does each call's outgoing area
+// (tier1_emit_cfg_call_area). The prologue realigns rsp to the frame's alignment, which includes the calls'; a frame
+// object's own alignment past that is its base register's (rbp or r15), not rsp's, and an IR allocation's address is
+// 16-byte aligned. A frame realigned to a megabyte (#1450) therefore doesn't round each allocation and call to it.
+static uint8_t tier1_emit_cfg_stack_alignment(const Tier1EmitResult* emitted)
 {
-    const uint32_t alignment = frame->alignment > 16 ? frame->alignment : 16;
-    return (uint8_t)__builtin_ctz(alignment);
+    return emitted->prepared.call_abi.stack_alignment_log2 > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? emitted->prepared.call_abi.stack_alignment_log2 : BUSTER_ABI_STACK_ALIGNMENT_LOG2;
 }
 
 // A call's outgoing area in a dynamic frame (Tier1Frame.dynamic_outgoing, #141): its stack bytes rounded up to the
@@ -342,7 +345,7 @@ static uint8_t tier1_emit_cfg_stack_alignment(const Tier1Frame* frame)
 // a call without stack arguments or in a fixed frame, whose area is the frame's own.
 static uint32_t tier1_emit_cfg_call_area(const Tier1EmitResult* emitted, uint32_t stack_bytes)
 {
-    const uint32_t alignment = UINT32_C(1) << tier1_emit_cfg_stack_alignment(&emitted->frame);
+    const uint32_t alignment = UINT32_C(1) << tier1_emit_cfg_stack_alignment(emitted);
     return emitted->frame.dynamic_outgoing && stack_bytes != 0 ? (stack_bytes + alignment - 1) & ~(alignment - 1) : 0;
 }
 
@@ -548,7 +551,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // A call with ABI records (#789): its records' totals, and the alignment its outgoing area needs at rsp, past
             // 16 bytes for an argument on the stack aligned past them (a 32- or 64-byte vector, an over-aligned aggregate).
             // The frame takes the most of them (Tier1FrameRequest.calls): it realigns itself to it, and a dynamic frame
-            // rounds its allocations and calls' areas to it (tier1_emit_cfg_stack_alignment; #1204's review).
+            // rounds its allocations and calls' areas to it (tier1_emit_cfg_stack_alignment; #1204's review, #1450).
             const AbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1].call : 0;
             const uint32_t general = abi != 0 ? abi->integer_registers : places.general;
             const uint32_t vectors = abi != 0 ? abi->vector_registers : places.vector;
@@ -2838,11 +2841,11 @@ static Tier1EmitError tier1_emit_cfg_probed_allocation(const Tier1SelectHoles* h
 }
 
 // A node's holes from `registers`, by node, as the emitter's view has them (#939: the certificate of the code builds them
-// from the allocation's): an allocation rounds to the alignment rsp keeps (#141), a realigned frame's past 16 bytes.
+// from the allocation's): an allocation rounds to the alignment rsp keeps (#141), its calls' past 16 bytes.
 static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const uint8_t* registers, uint32_t node)
 {
     Tier1SelectHoles holes = tier1_select_holes(plan, registers, node);
-    holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(&emitted->frame) : holes.scale;
+    holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(emitted) : holes.scale;
     holes.vex = emitted->prepared.vex;
     holes.avx2 = emitted->prepared.avx2;
     holes.sse = emitted->prepared.sse;

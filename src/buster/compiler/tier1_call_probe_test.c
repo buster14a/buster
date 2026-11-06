@@ -102,8 +102,32 @@ static void tier1_call_probe_capacity(Tier1EmitTest* test, uint32_t area)
     }
 }
 
+// rsp's alignment in a dynamic frame is its calls' (tier1_emit_cfg_stack_alignment): a frame realigned to a megabyte for
+// an object rounds neither its allocations nor its calls' areas to that, but still to a 64-byte vector argument's.
+static void tier1_call_probe_alignment(Tier1EmitTest* test)
+{
+    static const uint8_t calls[] = { 0, 4, 5, 6 };
+    static const uint32_t frames[] = { 16, 4096, 1u << 20 };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(frames); f += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(calls); c += 1)
+        {
+            Tier1EmitResult emitted = { 0 };
+            emitted.frame.alignment = frames[f];
+            emitted.frame.dynamic_outgoing = true;
+            emitted.prepared.call_abi.stack_alignment_log2 = calls[c];
+            const uint32_t expected = calls[c] > 4 ? 1u << calls[c] : 16;
+            tier1_emit_test_expect(test, tier1_emit_cfg_stack_alignment(&emitted) == (uint8_t)__builtin_ctz(expected) &&
+                                   tier1_emit_cfg_call_area(&emitted, 24) == ((24 + expected - 1) & ~(expected - 1)) &&
+                                   tier1_emit_cfg_call_area(&emitted, 0) == 0,
+                                   "a dynamic frame keeps rsp at its calls' alignment, not its objects'");
+        }
+    }
+}
+
 static void tier1_call_probe_tests(Tier1EmitTest* test)
 {
+    tier1_call_probe_alignment(test);
     Tier1FrameExecutionTest native = {
         .allowed = test->allowed,
         .code = mmap(0, 2 * BUSTER_TIER1_FRAME_EXEC_CODE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
