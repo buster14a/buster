@@ -27,7 +27,7 @@ jobs:
           for mode in default all; do
             flags=()
             if [ "$mode" = all ]; then flags=(-Wall -Wextra); fi
-            for case in {0..17}; do
+            for case in {18..23}; do
               echo "CONVERSION MODE=$mode CASE=$case"
               clang -std=gnu17 -fsyntax-only -fno-caret-diagnostics "${flags[@]}" -DCASE="$case" tools/issue1447-conversion-order.c 2>&1
               echo "COMPILE_STATUS=$?"

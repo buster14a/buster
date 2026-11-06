@@ -35,6 +35,18 @@ int f(void){return _Generic(0,int:0,default:(short){65536});}
 int f(void){int a=1?1.5:2.5;return a;}
 #elif CASE == 17
 short f(void){short a=0?65536:65537;return a;}
+#elif CASE == 18
+int f(int);int h(void){return f(1.5)+f(2.5);}
+#elif CASE == 19
+int h(void){int a,b;a=1.5,b=2.5;return a+b;}
+#elif CASE == 20
+int f(int);void h(void){int a[1];(f(1.5)+a[2]),(f(2.5)+a[3]);}
+#elif CASE == 21
+void f(int);void h(void){int a[1];(a[2],f(1.5)),(a[3],f(2.5));}
+#elif CASE == 22
+short f(short);void h(void){f(65536),f(65537);}
+#elif CASE == 23
+int h(void){return 0;short a=65536;int b=1.5;(void)a;(void)b;}
 #else
 #error Select one of the conversion-order cases.
 #endif
