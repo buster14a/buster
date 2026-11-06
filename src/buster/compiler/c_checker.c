@@ -961,11 +961,11 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
 }
 
 // A node of `op` at `token` with operands operand0 to operand2, each NONE or an earlier node, and its columns' defaults: a
-// VALUE node takes the next leaf, which `clear` clears for its maker to fill. Without `clear` its maker writes the whole
-// leaf itself (the reader's coded walk, #1038, whose leaves are written whole, so that each isn't written twice). Always
-// inlined (#880), as profile-guided builds do; hot callers: check_graph_add and check_input_add_columns, once per node.
-static inline __attribute__((always_inline)) uint32_t check_graph_add_node(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
-                                                                           uint32_t operand2, bool clear)
+// VALUE node takes the next leaf, cleared for its maker to fill. The reader's coded walk numbers its nodes into a batch
+// and writes their columns and whole leaves itself (check_input_expression_flush, #1038). Always inlined (#880), as
+// profile-guided builds do; hot caller: check_input_add_node, once per node.
+static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
+                                                                      uint32_t operand2)
 {
     uint32_t result = BUSTER_CHECK_NONE;
     const uint32_t node = graph->count;
@@ -978,7 +978,7 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add_node(Check
         graph->operand2[node] = operand2;
         const bool leaf = op == CHECK_OP_VALUE;
         graph->leaf_slots[node] = leaf ? graph->leaf_count : BUSTER_CHECK_NONE;
-        if (leaf && clear)
+        if (leaf)
         {
             graph->leaves[graph->leaf_count] = (CheckValue){ 0 };
         }
@@ -1006,13 +1006,6 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add_node(Check
         result = node;
     }
     return result;
-}
-
-// Always inlined (#880), as profile-guided builds do; hot caller: check_input_add_node, once per node.
-static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
-                                                                      uint32_t operand2)
-{
-    return check_graph_add_node(graph, op, token, operand0, operand1, operand2, true);
 }
 
 // The operators with an argument list: a call and the builtins'. A bit each from CHECK_OP_CALL on, tested without a
@@ -2021,11 +2014,12 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
     CheckBuiltinX86Result checked;
     check_x86_action(types, call, action, &checked);
     *result = checked.action;
-    // A failed hard immediate constraint makes the call an invalid expression, as clang's is: its value has no type, so an
+    // A failed hard immediate or target constraint makes the call an invalid expression, as clang's is: its value has no type, so an
     // enclosing call or operator inherits the error (check_graph_inherited_error) rather than reports another. Clang checks
     // no call whose arguments hold an error (#1066).
     const bool hard = checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_ICE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_RC ||
-                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SAE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE;
+                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SAE || checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE ||
+                      checked.constraint == CHECK_BUILTIN_X86_CONSTRAINT_TARGET32;
     if (checked.status == CHECK_BUILTIN_X86_ERROR && hard)
     {
         result->value = (CheckValue){ 0 };

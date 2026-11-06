@@ -31,8 +31,8 @@ struct Tier1BursCheck
 // The plan's prerequisites, built here apart from it: each node's block, uses, last user, barriers, canonical answer and
 // depth (a non-phi operand's depth plus one, as the plan orders its choices), and the nodes in levels. Returns whether
 // the function is one the plan reads (operands in range and before their users within a block).
-static bool tier1_burs_check_prepare(const IrFunction* function, Arena* scratch, uint32_t* blocks, uint32_t* uses, uint32_t* users, uint32_t* barriers, uint8_t* canonical,
-                                     uint32_t* level_offsets, uint32_t* level_nodes, uint32_t* maximum_depth)
+static bool tier1_burs_check_prepare(const IrFunction* function, const IrDominance* dominance, Arena* scratch, uint32_t* blocks, uint32_t* uses, uint32_t* users, uint32_t* barriers, uint8_t* canonical, uint16_t* known_bits,
+                                     uint32_t* level_offsets, uint32_t* level_nodes, uint32_t* scope_workspace, uint32_t* maximum_depth)
 {
     const uint32_t count = function->instruction_count;
     uint32_t* depths = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
@@ -88,14 +88,16 @@ static bool tier1_burs_check_prepare(const IrFunction* function, Arena* scratch,
             level_nodes[cursors[depths[node]]++] = node;
         }
         tier1_select_barriers_scalar(function, count, barriers);
-        tier1_select_canonical(function, blocks, canonical);
+        tier1_select_known_bits(function, dominance, blocks, cursors, known_bits, false);
+        tier1_select_canonical(function, blocks, known_bits, canonical, cursors, false);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, cursors, scope_workspace, false);
     }
     return valid;
 }
 
 // Checks `function` (verified, with dominance) into `check`: the twins' classes, children, states and rules, and the
 // candidates of the grammar's classes.
-static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* function, Arena* scratch)
+static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* function, const IrDominance* dominance, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t count = function->instruction_count;
@@ -104,11 +106,12 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     uint32_t* users = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
     uint32_t* barriers = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
     uint8_t* canonical = arena_push_array(scratch, (uint64_t)count + 1, 1, 64);
+    uint16_t* known_bits = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint16_t), 64);
     uint32_t* level_offsets = arena_push_array(scratch, (uint64_t)count + 2, sizeof(uint32_t), 64);
     uint32_t* level_nodes = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
     uint32_t* words = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
     uint32_t* columns[2][4];
-    bool valid = blocks != 0 && uses != 0 && users != 0 && barriers != 0 && canonical != 0 && level_offsets != 0 && level_nodes != 0 && words != 0 && tier1_select_initialize();
+    bool valid = blocks != 0 && uses != 0 && users != 0 && barriers != 0 && canonical != 0 && known_bits != 0 && level_offsets != 0 && level_nodes != 0 && words != 0 && tier1_select_initialize();
     for (uint32_t path = 0; path < 2; path += 1)
     {
         // Classes, children (two columns), states and rules.
@@ -119,7 +122,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         valid = valid && columns[path][0] != 0 && columns[path][1] != 0 && columns[path][2] != 0 && columns[path][3] != 0;
     }
     uint32_t maximum_depth = 0;
-    valid = valid && tier1_burs_check_prepare(function, scratch, blocks, uses, users, barriers, canonical, level_offsets, level_nodes, &maximum_depth);
+    valid = valid && tier1_burs_check_prepare(function, dominance, scratch, blocks, uses, users, barriers, canonical, known_bits, level_offsets, level_nodes, words, &maximum_depth);
     const Tier1SelectForest forest = {
         .function = function,
         .blocks = blocks,
@@ -127,6 +130,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         .costs = 0,
         .barriers = barriers,
         .canonical = canonical,
+        .known_bits = known_bits,
         .vectors = ir_function_has_vectors_path(function, false),
     };
     if (valid)
@@ -161,6 +165,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         .costs = costs,
         .barriers = barriers,
         .canonical = canonical,
+        .known_bits = known_bits,
         .vectors = ir_function_has_vectors_path(function, false),
     };
     for (uint32_t node = 0; valid && node < count; node += 1)
@@ -342,7 +347,7 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
                 IrFunction function = { 0 };
                 if (ir_parse_test_read(path, &source, &text) && ir_parse(text, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify_scalar(&function, &scratch, 0).error == IR_OK)
                 {
-                    tier1_burs_check_function(&check, &function, &scratch);
+                    tier1_burs_check_function(&check, &function, 0, &scratch);
                     files += 1;
                 }
             }
@@ -415,7 +420,7 @@ static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
     uint32_t past = 0;
     if (valid)
     {
-        tier1_burs_check_function(&check, &function, &scratch);
+        tier1_burs_check_function(&check, &function, 0, &scratch);
         for (uint32_t node = 0; node < function.instruction_count; node += 1)
         {
             const bool address = function.op[node] == IR_ADDRESS;

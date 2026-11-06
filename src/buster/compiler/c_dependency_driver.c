@@ -180,6 +180,13 @@ static bool dependency_check_destinations(const DependencyOptions* options, char
 // atomic and leaves an old depfile intact on failure. Stdout is deliberately not transactional, but its failures are
 // reported. The caller, not a unit lane, owns publication. A new depfile gets the mode fopen would give it (0666 and
 // the umask); one replacing a regular file keeps that file's permission bits, as clang's truncation does.
+// The selected template must not produce the destination itself: creating that file would expose partial output
+// before rename. The two templates have equal lengths and disjoint five-byte prefixes for every random suffix.
+static const char* dependency_temporary_template(const char* basename)
+{
+    return strncmp(basename, ".tmp.", 5) == 0 ? ".tmq.XXXXXX" : ".tmp.XXXXXX";
+}
+
 static bool dependency_publish(const DependencyOutput* output, FILE* errors)
 {
     bool result = true;
@@ -210,13 +217,17 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
         }
         else
         {
-            const size_t length = strlen(path);
-            char* temporary = length <= SIZE_MAX - sizeof(".tmp.XXXXXX") ? malloc(length + sizeof(".tmp.XXXXXX")) : NULL;
+            // Keep the temporary in the same directory for atomic rename, without extending the destination's
+            // basename: a valid destination can already use the filesystem's entire component-length limit.
+            const char* slash = strrchr(path, '/');
+            const size_t directory = slash != NULL ? (size_t)(slash - path) + 1 : 0;
+            const char* pattern = dependency_temporary_template(path + directory);
+            char* temporary = directory <= SIZE_MAX - sizeof(".tmp.XXXXXX") ? malloc(directory + sizeof(".tmp.XXXXXX")) : NULL;
             int fd = -1;
             if (temporary != NULL)
             {
-                memcpy(temporary, path, length);
-                memcpy(temporary + length, ".tmp.XXXXXX", sizeof(".tmp.XXXXXX"));
+                memcpy(temporary, path, directory);
+                memcpy(temporary + directory, pattern, sizeof(".tmp.XXXXXX"));
                 fd = mkstemp(temporary);
             }
             // mkstemp makes the file private. Give it the destination's permissions before the rename, from the file
@@ -249,7 +260,7 @@ static bool dependency_publish(const DependencyOutput* output, FILE* errors)
             {
                 close(fd);
             }
-            if (!result && temporary != NULL)
+            if (!result && fd >= 0)
             {
                 unlink(temporary);
             }

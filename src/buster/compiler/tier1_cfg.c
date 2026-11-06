@@ -25,9 +25,11 @@
 //    values times blocks.
 // 3. tier1_allocate, or its scalar twin, assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
-//    to their entry locations (tier1_cfg_entry_location). Those boundary locations are one forward sweep of each
-//    value's intervals (#1399), not a binary search per live value per edge. Emission resolves a position from the
-//    first interval that overlaps its block, when that column fits. tier1_resolve_moves orders each class's moves, breaking a
+//    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
+//    the predecessor block already establishes that slot (tier1_cfg_slot_current, #1216). A changed phi operand still
+//    writes it. Those boundary locations are one forward sweep of each value's intervals (#1399), not a binary search
+//    per live value per edge. Emission resolves a position from the first interval that overlaps its block, when that
+//    column fits. tier1_resolve_moves orders each class's moves, breaking a
 //    cycle with the class's scratch register or, where one of the class's moves goes slot to slot, with the class's
 //    temporary slot; a slot-to-slot move then goes through the scratch register, which holds nothing from one move to
 //    the next. Recomputing a rematerializable value comes last. The moves go at the predecessor's end when it has one
@@ -212,7 +214,7 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR] < 16;
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_MASK] < 8;
     valid = valid && input->block_starts[0] == 0 && input->block_starts[input->block_count] == input->position_count;
-    valid = valid && input->fixed.count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.registers != 0 && input->fixed.classes != 0));
+    valid = valid && input->fixed.count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.classes != 0 && input->fixed.registers != 0));
     for (uint32_t r = 0; valid && r < input->fixed.count; r += 1)
     {
         valid = input->fixed.starts[r] < input->fixed.ends[r] && input->fixed.ends[r] <= input->position_count && input->fixed.classes[r] < BUSTER_TIER1_ALLOCATE_CLASSES;
@@ -432,6 +434,70 @@ static bool tier1_cfg_entry_location_oracle(const Tier1CfgAllocation* result, ui
     return tier1_cfg_entry_location_mode(result, value, entry, location, kind, true);
 }
 
+// Last spill end at each fragment, by value and layout position. The prefix includes earlier pieces of the
+// value's range, so a reload after a fixed-register split keeps the proof. Zero means no spill. This is a linear
+// pass over spilled values and their fragments; edge queries must not rescan fragments for each successor of a
+// dispatch block. A queried unchanged value has a spill destination, so its value is in spill_values. Register-only
+// values need no prefix. Column pointers stay local under -fno-strict-aliasing.
+static void tier1_cfg_spill_prefix(const Tier1CfgAllocation* result, uint32_t* spill_ends)
+{
+    const uint32_t spills = result->allocation.spill_count;
+    const uint32_t* spill_values = result->allocation.spill_values;
+    const uint32_t* value_offsets = result->value_interval_offsets;
+    const uint32_t* fragment_offsets = result->allocation.fragment_offsets;
+    const uint32_t* ends = result->allocation.ends;
+    const uint8_t* kinds = result->allocation.kinds;
+    for (uint32_t s = 0; s < spills; s += 1)
+    {
+        const uint32_t v = spill_values[s];
+        uint32_t end = 0;
+        const uint32_t first = fragment_offsets[value_offsets[v]];
+        const uint32_t last = fragment_offsets[value_offsets[v + 1]];
+        for (uint32_t f = first; f < last; f += 1)
+        {
+            end = kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL ? ends[f] : end;
+            spill_ends[f] = end;
+        }
+    }
+}
+
+// Whether this block already establishes value's own slot before position. A spill in the block, including its
+// incoming slot state, remains current after reloads: an SSA value cannot change inside its block. A spill from an
+// earlier layout block proves nothing. The equality case is a reload at the block's first position in a continuing
+// interval: tier1_cfg_entry_location requires the preceding spill location on every incoming edge. A new interval
+// at that same position has no such contract. The prefix query is logarithmic, like tier1_cfg_location's.
+// Keep this rare proof out of the hot edge helper so the common edge path can be inlined.
+static __attribute__((noinline)) bool tier1_cfg_slot_current(const Tier1CfgAllocation* result, const uint32_t* spill_ends, uint32_t value, uint32_t position, uint32_t block_start)
+{
+    const uint32_t interval = tier1_cfg_interval_at(result, value, position);
+    bool current = false;
+    if (interval != BUSTER_TIER1_CFG_NONE)
+    {
+        const uint32_t* offsets = result->allocation.fragment_offsets;
+        const uint32_t* ends = result->allocation.ends;
+        uint32_t low = offsets[interval];
+        uint32_t high = offsets[interval + 1];
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            if (ends[middle] <= position)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        if (low < offsets[interval + 1])
+        {
+            const uint32_t end = spill_ends[low];
+            current = end > block_start || (end == block_start && result->intervals.starts[interval] < block_start);
+        }
+    }
+    return current;
+}
+
 // A location's class: a register's, a slot's value's, a temporary slot's; BUSTER_TIER1_CFG_NONE for no location.
 static uint32_t tier1_cfg_location_class(const Tier1CfgInput* input, const Tier1CfgAllocation* result, uint32_t location)
 {
@@ -476,6 +542,9 @@ struct Tier1CfgEdge
     uint32_t* carried_at;
     uint32_t* carried_stamps;
     uint32_t stamp;
+    // Ordinary CFG edges only: each fragment's last spill end, and the predecessor's first position.
+    const uint32_t* spill_ends;
+    uint32_t block_start;
 };
 
 static uint8_t tier1_cfg_kind_of_location(uint32_t location)
@@ -493,10 +562,14 @@ static uint8_t tier1_cfg_kind_of_location(uint32_t location)
 }
 
 // Adds the move `carried` needs to take `value`'s place, when the two locations differ and the destination is not a
-// recomputation. A matching pair, or a rematerialized destination, adds nothing.
-static void tier1_cfg_edge_place(const Tier1CfgInput* input, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint8_t from_kind, uint32_t to, uint8_t to_kind)
+// recomputation. A matching pair, a rematerialized destination, or a slot the predecessor already holds, adds nothing.
+static void tier1_cfg_edge_place(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint8_t from_kind, uint32_t to, uint8_t to_kind, uint32_t exit)
 {
-    if (to_kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE && from != to)
+    // A self-phi or an unchanged live-through value need not store a register back to its current slot. A different
+    // phi operand must still write it, even when the phi's old value is present there.
+    const bool current_slot = from_kind == BUSTER_TIER1_ALLOCATE_REGISTER && to_kind == BUSTER_TIER1_ALLOCATE_SPILL && value == carried &&
+                              edge->spill_ends != 0 && tier1_cfg_slot_current(result, edge->spill_ends, value, exit, edge->block_start);
+    if (to_kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE && from != to && !current_slot)
     {
         if (from_kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
         {
@@ -523,12 +596,12 @@ static void tier1_cfg_edge_place(const Tier1CfgInput* input, Tier1CfgEdge* edge,
 
 // One value of an edge successor's entry state whose locations were already resolved. Returns false where either side
 // has no location.
-static bool tier1_cfg_edge_known(const Tier1CfgInput* input, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint32_t to)
+static bool tier1_cfg_edge_known(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint32_t to, uint32_t exit)
 {
     const bool found = from != BUSTER_TIER1_CFG_NONE && to != BUSTER_TIER1_CFG_NONE;
     if (found)
     {
-        tier1_cfg_edge_place(input, edge, value, carried, from, tier1_cfg_kind_of_location(from), to, tier1_cfg_kind_of_location(to));
+        tier1_cfg_edge_place(input, result, edge, value, carried, from, tier1_cfg_kind_of_location(from), to, tier1_cfg_kind_of_location(to), exit);
     }
     return found;
 }
@@ -545,7 +618,7 @@ static bool tier1_cfg_edge_value(const Tier1CfgInput* input, const Tier1CfgAlloc
     const bool found = tier1_cfg_location(result, carried, exit, &from, &from_kind) && tier1_cfg_entry_location(result, value, entry, &to, &to_kind);
     if (found)
     {
-        tier1_cfg_edge_place(input, edge, value, carried, from, from_kind, to, to_kind);
+        tier1_cfg_edge_place(input, result, edge, value, carried, from, from_kind, to, to_kind, exit);
     }
     return found;
 }
@@ -1428,7 +1501,13 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
             widest = entering[target] > widest ? entering[target] : widest;
         }
         ready = ready && bound <= UINT32_MAX;
-        Tier1CfgEdge edge = { 0 };
+        uint32_t* spill_ends = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)candidate.allocation.fragment_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        ready = ready && (spills == 0 || spill_ends != 0);
+        if (ready && spills != 0)
+        {
+            tier1_cfg_spill_prefix(&candidate, spill_ends);
+        }
+        Tier1CfgEdge edge = { .spill_ends = spill_ends };
         uint32_t* staged = ready ? arena_push_array(scratch, (bound + 2) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         uint32_t* sources = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         uint32_t* destinations = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -1458,6 +1537,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             const uint32_t exit = input->block_starts[b + 1] - 1;
+            edge.block_start = input->block_starts[b];
             if (bounds.ready)
             {
                 uint32_t rank = 0;
@@ -1499,7 +1579,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                         {
                             const uint32_t from = bounds.exit_stamp[i] == b + 1 ? bounds.exit_at[i] : BUSTER_TIER1_CFG_NONE;
                             const uint32_t to = bounds.entry_locations[bounds.in_offsets[target] + rank];
-                            ready = tier1_cfg_edge_known(input, &edge, v, v, from, to);
+                            ready = tier1_cfg_edge_known(input, &candidate, &edge, v, v, from, to, exit);
                         }
                         else
                         {
@@ -1524,7 +1604,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                     {
                         const uint32_t id = dense[operand];
                         const uint32_t from = id != BUSTER_TIER1_CFG_NONE && bounds.exit_stamp[id] == b + 1 ? bounds.exit_at[id] : BUSTER_TIER1_CFG_NONE;
-                        ready = tier1_cfg_edge_known(input, &edge, input->phi_values[k], operand, from, bounds.phi_locations[k]);
+                        ready = tier1_cfg_edge_known(input, &candidate, &edge, input->phi_values[k], operand, from, bounds.phi_locations[k], exit);
                     }
                     else
                     {
@@ -1547,6 +1627,8 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         {
             candidate.edge_move_offsets[input->edge_count] = staged_count;
         }
+        // Slot-current elision is for CFG edges only; keep the existing split-move contract unchanged.
+        edge.spill_ends = 0;
         // Each split's moves: from the value's location just before the position to its new piece's.
         for (uint32_t q = 0; ready && q < input->position_count; q += 1)
         {

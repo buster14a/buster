@@ -107,6 +107,15 @@ static bool pp_test_source_feature_matrix(void)
         { "__builtin_ia32_palignr256", true }, { "__builtin_ia32_pblendw128", true }, { "__builtin_ia32_permdi256", true },
         { "__builtin_ia32_pshufd256", true }, { "__builtin_ia32_shufpd", true },
         { "__builtin_ia32_pblendw256", true }, { "__builtin_ia32_pshufd257", false },
+        { "__builtin_ia32_pcmpestri128", true }, { "__builtin_ia32_pcmpestria128", true }, { "__builtin_ia32_pcmpestric128", true },
+        { "__builtin_ia32_pcmpestrio128", true }, { "__builtin_ia32_pcmpestris128", true }, { "__builtin_ia32_pcmpestriz128", true },
+        { "__builtin_ia32_pcmpestrm128", true }, { "__builtin_ia32_pcmpistri128", true }, { "__builtin_ia32_pcmpistria128", true },
+        { "__builtin_ia32_pcmpistric128", true }, { "__builtin_ia32_pcmpistrio128", true }, { "__builtin_ia32_pcmpistris128", true },
+        { "__builtin_ia32_pcmpistriz128", true }, { "__builtin_ia32_pcmpistrm128", true },
+        { "__builtin_ia32_extrqi", true }, { "__builtin_ia32_insertqi", true },
+        { "__builtin_ia32_vcvtps2ph_mask", true }, { "__builtin_ia32_vcvtps2ph256_mask", true }, { "__builtin_ia32_vcvtps2ph512_mask", true },
+        { "__builtin_ia32_readeflags_u32", true }, { "__builtin_ia32_writeeflags_u32", true },
+        { "__builtin_ia32_pcmpistrm128_", false }, { "__builtin_ia32_readeflags_u32_", false },
         // EMMS has both a shared SYSTEM lowering row and a declaration in the frozen source scope.
         { "__builtin_ia32_emms", true }, { "__builtin_ia32_tilezero", false }, { "__rdtscx", false },
     };

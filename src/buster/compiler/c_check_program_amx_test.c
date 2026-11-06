@@ -329,7 +329,7 @@ static void check_test_program_amx_oracle(CheckTest* test, const char* clang)
     for (uint32_t kind = CBUILTIN_X86_HELPER_TILEZERO; valid && kind < CBUILTIN_X86_HELPER_COUNT; kind += 1)
     {
         const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + kind;
-        const CBuiltinX86Helper helper = cbuiltin_x86_helper((CBuiltinX86HelperKind)kind, &output);
+        const CBuiltinX86Helper helper = cbuiltin_x86_helper((CBuiltinX86HelperKind)kind, 0, &output);
         for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(shapes); shape += 1)
         {
             char name[64], failure[128] = { 0 };

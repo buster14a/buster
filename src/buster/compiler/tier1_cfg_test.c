@@ -1425,6 +1425,8 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
     (void)mask_memory_b;
 }
 
+#include "tier1_cfg_spill_test.c"
+
 static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
 {
     uint64_t seed = 140;
@@ -1471,6 +1473,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tally.oracle_mutants = true;
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             tier1_cfg_test_undefined(&tally, &output, &scratch);
+            tier1_cfg_test_current_slots(&tally, &output, &scratch);
             Tier1CfgTestBuilder* builder = arena_push(&work, sizeof(Tier1CfgTestBuilder), _Alignof(Tier1CfgTestBuilder));
             tier1_cfg_test_expect(&tally, builder != 0, "builder memory");
             for (uint64_t sample = 0; builder != 0 && sample < count; sample += 1)

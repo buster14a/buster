@@ -130,6 +130,11 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
 {
     const bool compact = check_input_literal_table_prepare(reader, assignment);
     const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment));
+    if (valid)
+    {
+        const uint32_t declaration = reader->initializer_declarations[assignment];
+        check_input_noderef_set(reader->output, assignment, check_input_noderef_at(reader->output, declaration));
+    }
     return valid;
 }
 
@@ -195,6 +200,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     CheckValue value = { 0 };
     uint32_t failed = BUSTER_CHECK_NONE;
     const bool evaluated = self == BUSTER_CHECK_NONE && check_input_evaluate_cached_at(reader, begin, end, &value, &failed);
+    const CheckNoderefType* noderef = evaluated ? check_input_noderef_value(reader, value.type, reader->constant_noderef) : NULL;
     TypeId result = 0;
     if (self != BUSTER_CHECK_NONE)
     {
@@ -274,6 +280,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             result = deduced_declarator ? deduced : type_qualify(types, deduced, type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
             reader->declared_types[declaration] = result;
             reader->query_types[assignment] = result;
+            check_input_noderef_set(reader->output, declaration, noderef);
+            check_input_noderef_set(reader->output, assignment, noderef);
             reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
             if (check_input_linkage(reader->declaration_bits, declaration) != 0)
             {

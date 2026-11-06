@@ -532,6 +532,8 @@ static void tier1_emit_test_saves_twins(Tier1EmitTest* test)
 #include "tier1_code_certificate_test.c"
 #include "tier1_stack_test.c"
 #include "tier1_float_test.c"
+#include "tier1_induction_test.c"
+#include "tier1_storage_test.c"
 
 // Frame objects' addresses in their users' memory operands (#982): the selected plan's folded loads, stores and
 // addresses take the frame's base register at the object's offset plus the walked displacement, filled at emission as
@@ -1225,6 +1227,15 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_code_certificate_tests(&test);
             tier1_stack_tests(&test);
             tier1_float_tests(&test);
+            tier1_induction_tests(&test);
+            tier1_storage_tests(&test);
+            tier1_storage_phi_tests(&test);
+            tier1_storage_expression_tests(&test);
+            tier1_storage_narrow_arithmetic_tests(&test);
+            tier1_storage_scoped_tests(&test);
+            tier1_storage_loop_state_tests(&test);
+            tier1_storage_midpoint_tests(&test);
+            tier1_storage_parameter_tests(&test);
             tier1_emit_test_overlong(&test);
             printf("tier1 fragment emission: %" PRIu64 " checks, %" PRIu64 " failures; stores=%" PRIu64 " reloads=%" PRIu64 " rematerializations=%" PRIu64 "\n", test.checks, test.failures, test.stores, test.loads, test.copies);
             arena_release(&test.input);

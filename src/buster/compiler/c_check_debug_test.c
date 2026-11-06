@@ -949,7 +949,7 @@ static void check_debug_test_library_main(CheckDebugTestTally* tally, const char
 // gdb's transcript of `commands` on `program`, into `report`.
 static String8 check_debug_test_gdb(const char* program, const char* report, const char* const* commands, uint32_t count, Arena* arena)
 {
-    char* arguments[40] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-ex", (char*)"set debuginfod enabled off" };
+    char* arguments[64] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-ex", (char*)"set debuginfod enabled off" };
     uint32_t used = 5;
     for (uint32_t i = 0; i < count && used + 3 < BUSTER_ARRAY_LENGTH(arguments); i += 1)
     {
@@ -985,7 +985,7 @@ static void check_debug_test_read(CheckDebugTestTally* tally, const char* progra
     const String8 traced = check_debug_test_gdb(program, report, functions, BUSTER_ARRAY_LENGTH(functions), arena);
     const char* scale = traced.pointer != 0 ? strstr(traced.pointer, "Breakpoint 1, scale") : 0;
     const char* header = scale != 0 ? strstr(scale, "Breakpoint 2, header_add") : 0;
-    check_debug_test_expect(tally, scale != 0 && header != 0 && strstr(scale, "dbg_rows.c:6") != 0 && strstr(scale, "main () at") != 0 && strstr(scale, "dbg_rows.c:42") != 0,
+    check_debug_test_expect(tally, scale != 0 && header != 0 && strstr(scale, "dbg_rows.c:6") != 0 && strstr(scale, " in main (") != 0 && strstr(scale, "dbg_rows.c:42") != 0,
                             "gdb stops at a function's breakpoint on its first statement, and its backtrace gives the caller's line", report);
     check_debug_test_expect(tally, header != 0 && strstr(header, "dbg_rows.h:3") != 0 && strstr(header, "dbg_rows.c:43") != 0,
                             "the header's function stops in the header, called from its callee's line (the call's first)", report);
@@ -1210,11 +1210,11 @@ static Elf64_Shdr check_debug_test_section(String8 file, const char* name, bool 
     return result;
 }
 
-// Whether the object's five DWARF sections are the executable's but at their relocations' fields, which hold zero in
+// Whether the object's six DWARF sections are the executable's but at their relocations' fields, which hold zero in
 // the object: -c -g's unit is -g's.
 static bool check_debug_test_same_unit(String8 object, String8 executable)
 {
-    static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists", ".debug_loclists" };
     const ExecutableTestImage image = executable_test_image_of(executable, ET_DYN);
     bool result = image.valid;
     for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(names); s += 1)
@@ -1367,6 +1367,8 @@ static void check_debug_test_unparsed(CheckDebugTestTally* tally, const char* di
 // The unwind tables' checks (c_check_unwind_test.c, after this file).
 static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena);
 
+#include "c_check_debug_values_test.c"
+
 static int run_check_debug_tests(int argc, char** argv)
 {
     CheckDebugTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -1409,6 +1411,7 @@ static int run_check_debug_tests(int argc, char** argv)
     {
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
         check_debug_test_expect(&tally, initialized, "initialize the backend", 0);
+        check_debug_values_test_descriptors(&tally);
         check_debug_test_rows(&tally);
         check_debug_test_keep(&tally);
         check_debug_test_sources(&tally, directory, programs);
@@ -1419,6 +1422,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_test_driver(&tally, directory, &arena);
             check_debug_test_units(&tally, directory, &arena);
             check_debug_test_objects(&tally, directory, &arena);
+            check_debug_values_test(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
             check_unwind_test_driver(&tally, directory, &arena);
         }
