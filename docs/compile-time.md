@@ -645,7 +645,8 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   change, and #592's passes' too. They are sparse columns now (below).
 - **The graph's leaves.** Their 96-byte values take 14 MB for 144,720 leaves, of
   which the identifiers' carry little but a type and an object: columns and
-  payload rows, as the stream's values have, would take about 8 MB less.
+  payload rows, as the stream's values have, would take about 8 MB less. They
+  are 32-byte records now ("The graph's leaves", below).
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
   8.3 MB, written at declarations, most of whose bits would fit one byte. Seven
   of them are one now ("The declaration bits", below).
