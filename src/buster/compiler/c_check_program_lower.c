@@ -234,6 +234,30 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
 #undef BUSTER_CBUILTIN_LIBRARY_CALL
 };
 
+// Each runtime function's name's length and intern hash (intern_hash_bytes's), with which check_lower_prepare looks the
+// names up in every unit's identifiers rather than measure and hash each one there (#442): the same for every unit, and
+// so baked with the backend's tables (#590, baked.c), or made before a unit's lowering (check_program_emit's backend
+// setup, and the units' before their lanes start) by an executable that isn't baked. A lowering that finds them unmade
+// measures and hashes the names itself.
+static BUSTER_BAKED_UNIT uint64_t check_lower_runtime_hashes[CHECK_LOWER_RUNTIMES];
+static BUSTER_BAKED_UNIT uint8_t check_lower_runtime_lengths[CHECK_LOWER_RUNTIMES];
+static BUSTER_BAKED_UNIT bool check_lower_runtime_names_ready;
+
+// Makes check_lower_runtime_hashes and check_lower_runtime_lengths, once: before any lane may read them.
+static bool check_lower_runtime_names_initialize(void)
+{
+    bool valid = true;
+    for (uint32_t r = 0; !check_lower_runtime_names_ready && r < CHECK_LOWER_RUNTIMES; r += 1)
+    {
+        const uint64_t length = strlen(check_lower_runtime_names[r]);
+        valid = valid && length <= UINT8_MAX;
+        check_lower_runtime_lengths[r] = (uint8_t)length;
+        check_lower_runtime_hashes[r] = intern_hash_bytes((const uint8_t*)check_lower_runtime_names[r], length);
+    }
+    check_lower_runtime_names_ready = check_lower_runtime_names_ready || valid;
+    return valid;
+}
+
 // Whether a runtime entry is an object rather than a function: libgcc's CPU model's (#148), whose symbols are data.
 static __attribute__((unused)) bool check_lower_runtime_object(uint32_t runtime)
 {
@@ -13763,13 +13787,17 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         IdentId identifiers[CHECK_LOWER_RUNTIMES];
         uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
         uint32_t spelled = 0;
+        // The names' lengths and hashes, made once (check_lower_runtime_names_ready), so that a unit's lookups are its
+        // table's probes alone.
+        const bool hashed = check_lower_runtime_names_ready;
         for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
         {
             if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
             {
-                const char* name = check_lower_runtime_names[r];
-                const uint32_t length = (uint32_t)strlen(name);
-                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
+                const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
+                const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
+                const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
+                const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
                 identifiers[spelled] = identifier;
                 spelled_runtimes[spelled] = (uint16_t)r;
                 spelled += identifier != 0;

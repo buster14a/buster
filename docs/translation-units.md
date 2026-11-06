@@ -341,7 +341,10 @@ So a units lane does five things:
   and the compile reads nothing in them it didn't write: `--poison-arenas`, a
   test option, overwrites them with a pattern between units (`arena_poison`),
   and `test-check-units` requires every object and executable it makes so to
-  be the one each unit makes alone.
+  be the one each unit makes alone. Since #442 it keeps its functions' lane 0's
+  writer's columns too (`check_program_lanes_settle`, the lanes guide's
+  "Memory"), which `--poison-arenas` overwrites with the others: each unit
+  reserved them again, and faulted in the pages their columns' starts touch.
 - **It pools the arenas its units release** (`arena_pool`, which only the
   units' lanes set): `arena_release` frees an arena's pages with
   `MADV_DONTNEED`, which takes the address space's lock for reading and leaves
