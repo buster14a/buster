@@ -672,7 +672,7 @@ static uint32_t tier1_cert_emitted_use(const Tier1EmitResult* emitted, uint32_t 
 {
     uint32_t where = 0;
     uint8_t kind = 0;
-    const bool found = value != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, value, position, &where, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+    const bool found = value != BUSTER_TIER1_CFG_NONE && tier1_cfg_location_oracle(&emitted->cfg, value, position, &where, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
     return found ? where : UINT32_MAX;
 }
 
@@ -682,7 +682,7 @@ static uint32_t tier1_cert_emitted_definition(const Tier1EmitResult* emitted, ui
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
     const uint32_t value = emitted->node_values[node];
-    const uint32_t interval = value != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_at(cfg, value, position) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t interval = value != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_oracle(cfg, value, position) : BUSTER_TIER1_CFG_NONE;
     const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? cfg->allocation.fragment_offsets[interval] : 0;
     const bool found = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == position && cfg->allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
     return found ? 32 * emitted->cfg_input.classes[value] + cfg->allocation.registers[fragment] : UINT32_MAX;
@@ -3470,7 +3470,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
                         uint8_t kind = 0;
                         int32_t offset = 0;
                         uint32_t location = BUSTER_CERT_NONE;
-                        valid = tier1_cfg_entry_location(cfg, v, entry, &where, &kind);
+                        valid = tier1_cfg_entry_location_oracle(cfg, v, entry, &where, &kind);
                         if (valid && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
                         {
                             location = tier1_cert_emitted_register(&build, v, where);

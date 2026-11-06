@@ -3125,7 +3125,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 transitions.values[f] = node;
             }
             // The blocks whose starts the interval covers.
-            uint32_t b = tier1_cfg_block_of(input, start);
+            uint32_t b = cfg->position_blocks != 0 ? cfg->position_blocks[start] : tier1_cfg_block_of(input, start);
             b += input->block_starts[b] < start ? 1 : 0;
             for (; error == TIER1_EMIT_OK && b < blocks && input->block_starts[b] < cfg->intervals.ends[i]; b += 1)
             {
