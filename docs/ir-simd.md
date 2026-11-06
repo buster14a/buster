@@ -283,8 +283,28 @@ exact feature requirements and mutations of their roles and effects.
 `test-ir-lowering` and `test-ir-interpreter` check execution as described above.
 The existing `tier1-lanes` source fixture now requires zero machine rows where
 its 14 remaining rows were scalar splats, and compares both Tier 1 paths with
-Clang. That assertion is a regression gate; it is not a new measurement of the
-first-party frontend unit's larger machine-row count or of compile throughput.
+Clang. Measured by `--tier1 --tier1-report -march=x86-64-v4` on that unit, main
+`ec5f0f6b` has 14 rows by each path and this change none.
+
+The compiler's own units have no broadcast rows at `-march=znver5`, so the
+splats change none of their counts: `main_unit_frontend.c` keeps its 1,673 rows
+either way and `main_unit_backend.c` its 2,432. The frontend unit's rows are:
+
+| Rows | Kind |
+| ---: | --- |
+| 459 | a comparison into a mask alone (an intrinsic's `vpcmp`, without the expansion the decoder takes) |
+| 450 | masked or element-typed moves |
+| 404 | permutes and shuffles |
+| 87 | conversions and mask moves |
+| 65 | AES rounds |
+| 46 | other integer operations (minimum, maximum, saturation, products' high halves) |
+| 32 | shifts by a scalar, rotates |
+| 10 | ternary logic, tests, blends |
+| 114 | others |
+
+A comparison into a mask alone is the IR's own `vcmp`, so decoding it is the
+next measurable step. Shuffles and conversions need new operations, which the
+full opcode table can only take as `intrinsic` kinds, as the splat does.
 
 ## Lanes: the vectors' element types (#141)
 
