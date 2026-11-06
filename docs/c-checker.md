@@ -1946,7 +1946,8 @@ What the lowering covers past scalars (#145's programs):
   memset calls and 1.9% less text.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
-  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  `memcpy` (#598). The call returns the destination and discards it, which is the
+  interpreter's pointer-result copy (#1550). The image ends at the last explicit value; omitted trailing
   storage is cleared separately. Images with internal holes larger than their
   payload keep the existing writes, avoiding large readonly zero gaps for sparse
   initializers. This preserves checked string truncation,

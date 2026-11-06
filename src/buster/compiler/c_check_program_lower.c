@@ -6573,17 +6573,19 @@ static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRun
 }
 
 // A readonly image and a fresh automatic object's exact range are disjoint. The ordinary call ABI preserves live
-// values and handles external-symbol access; its ignored result needs no temporary or source-level declaration.
+// values and handles external-symbol access. memcpy returns its destination; the result is discarded. A void call
+// is not the interpreter's pointer-result copy, so the memory form of a pooled initializer stops there (#1550).
 static void check_lower_initializer_copy(CheckLowerWriter* writer, uint32_t pool, uint32_t object, uint64_t offset)
 {
     const CheckLowerInitializers* pools = &writer->output->initializers;
     const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG };
-    const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMCPY, BUSTER_TYPE_VOID, arguments, 3, BUSTER_CHECK_NONE);
+    const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMCPY, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
     check_lower_offset(writer, offset);
     check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, pools->symbol_base + pool);
     check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, pools->items[pool].size);
-    check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
+    check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+    check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
 }
 
 // A 128-bit integer's division or remainder (`kind` DIV or MOD, of `class`), which Tier 0 has none for: the call of
