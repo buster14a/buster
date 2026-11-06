@@ -172,6 +172,9 @@ struct CheckProgramOptions
     // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
     // implicit _Atomic object's accesses have no helper to take, and stay the typed stream's.
     uint32_t helper_forms;
+    // The scratch keeps its pages past this pass's columns (no arena_discard): a lane of the C driver's units that will
+    // compile another unit after this one (#777), whose parse and reader would fault the same pages in again.
+    bool keep_scratch;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -3600,8 +3603,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     }
     // The scratch's pages past these columns go back to the kernel (arena_discard, #628): in the C driver they are the
     // parse's and the reader's, which touched 77 MB of sqlite3.c's scratch against these columns' 51, and which this pass
-    // and the backend would otherwise hold while their outputs take pages of their own, through the compile's peak.
-    if (valid)
+    // and the backend would otherwise hold while their outputs take pages of their own, through the compile's peak. A
+    // lane of several units that has another to compile keeps them (CheckProgramOptions.keep_scratch, #777): its next
+    // unit's parse and reader would fault them in again, about 190 faults a unit of synth's shape and 6% of its link's
+    // cycles by one lane on the 9700X.
+    if (valid && !options.keep_scratch)
     {
         arena_discard(scratch);
     }

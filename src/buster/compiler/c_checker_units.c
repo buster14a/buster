@@ -132,6 +132,9 @@ struct CheckUnitsLane
     ArenaPool pool;
     CheckUnitsMemory* memory;
     uint64_t held;
+    // The run whose units the lane takes, which tells its unit's checker whether a unit is left to take
+    // (check_units_remain).
+    const struct CheckUnitsRun* run;
 };
 
 #include "c_driver_mixed.c"
@@ -161,7 +164,18 @@ struct CheckUnitsRun
     // for --shared-parts' and --units-memory's reports.
     uint32_t taking;
     uint32_t kept;
+    // The units the lanes have taken so far (check_units_lane), which reaches `count` once none is left to take
+    // (check_units_remain). A lane counts its unit after taking it, so the count may lag the takes, never lead them.
+    uint32_t started;
 };
+
+// Whether a unit of `lane`'s run is still to be taken: a lane that finishes its unit then takes another, likely this one,
+// whose scratch's pages its unit's checker keeps for it (CheckProgramOptions.keep_scratch, #777). The count may lag a
+// take, which only keeps the pages for longer.
+static bool check_units_remain(const CheckUnitsLane* lane)
+{
+    return lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
+}
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
 // `kept`: its tables, names and atoms' bytes into its arenas, with each record's id as it was; and marks its undefined
@@ -2211,6 +2225,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .helper_forms = command->helper_forms,
         };
         lane->memory = run->memory;
+        lane->run = run;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         if (unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY || unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
@@ -2328,6 +2343,7 @@ static void check_units_lane(void* argument)
     arena_pool = &lane->pool;
     for (uint64_t taken = lane_take(run->count); taken < run->count; taken = lane_take(run->count))
     {
+        __atomic_add_fetch(&run->started, 1, __ATOMIC_RELAXED);
         const Lane group = lane_alone();
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
@@ -2606,6 +2622,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             {
                 if (!units[order[i]].compiled)
                 {
+                    __atomic_add_fetch(&run.started, 1, __ATOMIC_RELAXED);
                     check_units_compile(&run, states, units + order[i]);
                 }
             }
