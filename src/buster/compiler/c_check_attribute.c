@@ -6150,29 +6150,59 @@ static uint32_t check_input_deprecated_key(const CheckInputReader* reader, uint3
     return object != 0 && object - 1 < count ? object - 1 : declared;
 }
 
+// The bracket depth a backward walk has after stepping over a token of `kind` at `depth`.
+static uint32_t check_input_deprecated_enum_depth(uint8_t kind, uint32_t depth)
+{
+    return kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? depth + 1 :
+           (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && depth != 0 ? depth - 1 : depth;
+}
+
 // The tag key (check_input_deprecated_key) of the enum whose body declares the enumerator at `enumerator`: its `{`'s, back
-// past the earlier enumerators, and its keyword's before that; `count` for none.
-static uint32_t check_input_deprecated_enum(const CheckInputReader* reader, uint32_t enumerator)
+// past the earlier enumerators, and its keyword's before that; `count` for none. `enums` keeps each answer plus one by
+// enumerator token (#1354): a walk stops at the nearest earlier enumerator of its body already answered and answers
+// every one it passed. Repeated uses of a flat enum share that walk; nested enum bodies can be traversed again by an
+// enclosing enum's walk.
+static uint32_t check_input_deprecated_enum(const CheckInputReader* reader, uint32_t enumerator, uint32_t* enums)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
+    uint32_t known = enums[enumerator];
     uint32_t i = enumerator;
     uint32_t depth = 0;
-    bool scanning = true;
+    bool scanning = known == 0;
     while (scanning && i > 0)
     {
         i -= 1;
         const uint8_t kind = parser->tokens.kinds[i];
-        scanning = !(kind == PARSE_KIND_L_BRACE && depth == 0);
-        depth = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? depth + 1 :
-                (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && depth != 0 ? depth - 1 : depth;
+        known = depth == 0 && reader->declaration_kinds[i] == C_BINDING_ENUMERATOR ? enums[i] : 0;
+        scanning = known == 0 && !(kind == PARSE_KIND_L_BRACE && depth == 0);
+        depth = check_input_deprecated_enum_depth(kind, depth);
     }
     uint32_t keyword = i;
-    while (!scanning && keyword > 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
+    while (!scanning && known == 0 && keyword > 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
     {
         keyword -= 1;
     }
-    return !scanning && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM ? check_input_deprecated_key(reader, keyword) : count;
+    const uint32_t result = known != 0                                                   ? known - 1 :
+                            !scanning && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM ? check_input_deprecated_key(reader, keyword) :
+                                                                                            count;
+    // The enumerators the walk passed, at its own depth, are the same body's.
+    if (enums[enumerator] == 0)
+    {
+        enums[enumerator] = result + 1;
+        depth = 0;
+        for (uint32_t j = enumerator; j > i + 1;)
+        {
+            j -= 1;
+            const uint8_t kind = parser->tokens.kinds[j];
+            if (depth == 0 && reader->declaration_kinds[j] == C_BINDING_ENUMERATOR)
+            {
+                enums[j] = result + 1;
+            }
+            depth = check_input_deprecated_enum_depth(kind, depth);
+        }
+    }
+    return result;
 }
 
 // The deprecated or unavailable record of `attributes` whose attribute is before `bound`, kept, or null: its first
@@ -6730,6 +6760,7 @@ struct CheckInputDeprecatedPass
     const int32_t* scope_lists;
     const bool* scope_records;
     const uint32_t* tag_keys;
+    uint32_t* enums;
     uint32_t tag_count;
     const uint8_t* contexts;
     const uint32_t* evaluated;
@@ -6791,7 +6822,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, const CheckInpu
     const bool by_enum = use && key < count && marks[key] == 0 && declared < count && reader->declaration_kinds[declared] == C_BINDING_ENUMERATOR;
     if (by_enum)
     {
-        key = check_input_deprecated_enum(reader, declared);
+        key = check_input_deprecated_enum(reader, declared, pass->enums);
     }
     // The declarations a use's marks are by: those up to what its lookup finds, or a tag's (and attributes) before it.
     bool by_tag = tag || by_enum;
@@ -7105,14 +7136,17 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
     // marks by it).
     const uint32_t tag_count = reader->types->tags.count;
     uint32_t* tag_keys = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)tag_count + 1);
+    // Each enumerator's enum key plus one, memoized by its token (#1354).
+    uint32_t* enums = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
     // The vector path's identifiers whose key is marked (check_input_deprecated_marked), a bit a token.
     uint64_t* marked = vector ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)count / 64 + 1) : NULL;
     const bool allocated = marks != NULL && chain != NULL && latest != NULL && member_marks != NULL && scope_levels != NULL && scope_lists != NULL && scope_records != NULL &&
-                           tag_keys != NULL && (!vector || marked != NULL);
+                           tag_keys != NULL && enums != NULL && (!vector || marked != NULL);
     reader->output->resource |= !allocated;
     if (allocated)
     {
         memset(tag_keys, 0, ((uint64_t)tag_count + 1) * sizeof(uint32_t));
+        memset(enums, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         if (vector)
         {
             // The tags' declarations, 64 tokens a mask, in order.
@@ -7203,6 +7237,7 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             .scope_lists = scope_lists,
             .scope_records = scope_records,
             .tag_keys = tag_keys,
+            .enums = enums,
             .tag_count = tag_count,
             .contexts = reader->output->availability_contexts,
             .evaluated = check_input_evaluated_members(reader),

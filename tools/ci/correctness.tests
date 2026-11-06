@@ -50,6 +50,10 @@ unset CPATH C_INCLUDE_PATH
 "$BUSTER_COMPILER" test-files --flat $BUSTER_CORPUS/libc
 == Test the runtime snapshot [8 CPUs]
 "$BUSTER_COMPILER" test-snapshot
+== Test the floors' shared-libc input
+# Discovery and ELF-envelope validation, with real and original synthetic inputs; no timings or CPU pinning.
+# The same entry runs in the plain static builds and the sanitizer builds' dynamic hosts.
+"$BUSTER_COMPILER" test-floors-input
 == Test the per-file jobs on the frozen sqlite3.c [8 CPUs]
 unset CPATH C_INCLUDE_PATH
 "$BUSTER_COMPILER" test-files $BUSTER_CORPUS/sqlite/sqlite3.c

@@ -403,6 +403,7 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     for (uint32_t u = 0; u < count; u += 1)
     {
         const ObjectDebug* own = &units[u].kept.debug;
+        valid = valid && native_debug_extra_valid(own->sections, &own->extra);
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
             sizes[section] += own->sections[section].length;
@@ -475,7 +476,16 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
             NativeDebugAddress address = own->extra.addresses[a];
             address.offset += (uint32_t)bases[BUSTER_OBJECT_DEBUG_INFO];
             address.symbol = described[u][own->function_count + a];
-            extra_addresses[next_address++] = address;
+            if (address.symbol != 0)
+            {
+                extra_addresses[next_address++] = address;
+            }
+            else
+            {
+                // The definition's COMDAT was discarded. Its validated address field becomes a zero tombstone; never
+                // relocate this DIE to an atom that no longer exists or to an unrelated replacement definition.
+                memset(sections[BUSTER_OBJECT_DEBUG_INFO] + address.offset, 0, 8);
+            }
         }
         unit_functions[u] = own->function_count;
         for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
@@ -547,30 +557,6 @@ static uint8_t check_units_common_alignment(const Link* unit, SymbolId symbol)
 {
     const bool common = (unit->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON && unit->symbols.atom[symbol] != 0;
     return common ? unit->atoms.alignment_log2[unit->symbols.atom[symbol]] : 0;
-}
-
-// The merged id of the global name `name` in `unit`'s link, or 0: the symbol exchange's own probe, for a debug
-// address whose unit's definition a COMDAT selection discarded — its DWARF binds the name's surviving definition,
-// as a linker's relocation against the discarded object resolves by name.
-static SymbolId check_units_merge_name(const CheckUnitsUnit* units, const uint32_t* first_unit, const SymbolId* first_symbol,
-                                       const SymbolId* table, uint64_t slots, const Link* unit, NameId name)
-{
-    SymbolId merged = 0;
-    if (name != 0)
-    {
-        uint64_t slot = unit->names.hash[name] & (slots - 1);
-        while (merged == 0 && table[slot] != 0)
-        {
-            const SymbolId candidate = table[slot];
-            const Link* other = &units[first_unit[candidate]].kept.link;
-            const NameId other_name = other->symbols.name[first_symbol[candidate]];
-            const bool same = other->names.hash[other_name] == unit->names.hash[name] && other->names.length[other_name] == unit->names.length[name] &&
-                              memcmp(other->names.bytes[other_name], unit->names.bytes[name], unit->names.length[name]) == 0;
-            merged = same ? candidate : 0;
-            slot = same ? slot : (slot + 1) & (slots - 1);
-        }
-    }
-    return merged;
 }
 
 // The optional COMDAT selection, prepared before symbol resolution. Atom maps hold one-based ordinals of the kept
@@ -916,20 +902,17 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     for (uint32_t u = 0; described != NULL && valid && u < count; u += 1)
     {
         const ObjectDebug* own = &units[u].kept.debug;
-        const Link* unit = &units[u].kept.link;
         described[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)check_units_debug_symbol_count(own) + 1);
         valid = described[u] != NULL;
         for (uint32_t f = 0; valid && f < check_units_debug_symbol_count(own); f += 1)
         {
             const SymbolId s = check_units_debug_symbol(own, f);
-            const SymbolId mapped = maps[u][s];
-            // A definition a COMDAT selection discarded keeps no symbol of its own: its debug address binds the
-            // name's surviving definition, as a linker's relocation against the discarded object resolves by name.
-            const SymbolId merged = mapped != 0 ? mapped : check_units_merge_name(units, first_unit, first_symbol, table, slots, unit, unit->symbols.name[s]);
-            const bool kept = merged != 0 && defining_unit[merged] == u && defining_symbol[merged] == s;
-            const bool named = merged != 0 && mapped == 0;
-            described[u][f] = kept || named ? merged : (SymbolId)(next + replaced);
-            replaced += !kept && !named;
+            const SymbolId merged = maps[u][s];
+            const AtomId atom = units[u].kept.link.symbols.atom[s];
+            const bool discarded = f >= own->function_count && atom != 0 && check_units_selected_atom(&selection, u, atom) == 0;
+            const bool kept = !discarded && merged != 0 && defining_unit[merged] == u && defining_symbol[merged] == s;
+            described[u][f] = discarded ? 0 : kept ? merged : (SymbolId)(next + replaced);
+            replaced += !discarded && !kept;
         }
     }
     // The names no unit defines, for the runtime's room in the link (bind_capacity_needed).
@@ -984,8 +967,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         const uint8_t source = absolute ? BUSTER_LINK_SOURCE_ABSOLUTE : defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE;
         valid = (own == 0 || name != 0) && link_add_symbol(link, name, 0, absolute ? unit->symbols.value[s] : 0, absolute ? unit->symbols.size[s] : 0, flags, source) == m;
     }
-    // The replaced functions' local symbols (`described`), which the units' atoms define; a name-bound debug address
-    // takes a merged id below `next`, which already has its symbol.
+    // The replaced functions' local symbols (`described`), which the units' atoms define.
     for (uint32_t u = 0; described != NULL && valid && u < count; u += 1)
     {
         const Link* unit = &units[u].kept.link;
@@ -994,7 +976,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         {
             const SymbolId s = check_units_debug_symbol(own, f);
             const NameId own_name = unit->symbols.name[s];
-            if (described[u][f] >= next)
+            if (described[u][f] != 0 && described[u][f] != maps[u][s])
             {
                 const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
                 const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
@@ -1058,7 +1040,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         for (uint32_t f = 0; described != NULL && valid && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
         {
             const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
-            if (described[u][f] >= next)
+            if (described[u][f] != 0 && described[u][f] != maps[u][s])
             {
                 valid = link_define_symbol(link, described[u][f], placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
             }
@@ -1293,31 +1275,6 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
         }
     }
     return first_key;
-}
-
-// The merged id of the global name `unit`'s symbol `s` names, or 0, for a debug address whose definition a COMDAT
-// selection discarded: the name's surviving definition in `table` (the selected globals' merged ids by name hash),
-// as a linker's relocation against the discarded object resolves by name.
-static SymbolId check_units_merge_debug_name(const CheckUnitsMerge* merge, uint32_t u, SymbolId s, const SymbolId* table, uint64_t slots)
-{
-    const Link* unit = &merge->units[u].kept.link;
-    const NameId name = unit->symbols.name[s];
-    SymbolId merged = 0;
-    if (name != 0)
-    {
-        uint64_t slot = unit->names.hash[name] & (slots - 1);
-        while (merged == 0 && table[slot] != 0)
-        {
-            const SymbolId candidate = table[slot];
-            const Link* other = &merge->units[merge->source_unit[candidate]].kept.link;
-            const NameId other_name = other->symbols.name[merge->source_symbol[candidate]];
-            const bool same = other->names.hash[other_name] == unit->names.hash[name] && other->names.length[other_name] == unit->names.length[name] &&
-                              memcmp(other->names.bytes[other_name], unit->names.bytes[name], unit->names.length[name]) == 0;
-            merged = same ? candidate : 0;
-            slot = same ? slot : (slot + 1) & (slots - 1);
-        }
-    }
-    return merged;
 }
 
 // A lane of the units' merge (see check_units_merge_lanes' comment); lane 0 sets merge->valid.
@@ -1584,40 +1541,6 @@ static void check_units_merge_lane(void* argument)
     if (lane == 0 && merge->valid)
     {
         const SymbolId next = merge->next;
-        // A debug address of a definition a COMDAT selection discarded binds its name's surviving definition, as a
-        // linker's relocation against the discarded object resolves by name: the selected globals' merged ids by
-        // name hash, built only where groups can discard one.
-        SymbolId* debug_names = NULL;
-        uint64_t debug_slots = 0;
-        if (merge->debug != NULL && merge->selection.symbols != NULL)
-        {
-            debug_slots = 16;
-            while (debug_slots < 2 * (uint64_t)next)
-            {
-                debug_slots *= 2;
-            }
-            debug_names = BUSTER_ARENA_PUSH_ARRAY(merge->scratch, SymbolId, debug_slots);
-            merge->valid = merge->valid && debug_names != NULL;
-            if (debug_names != NULL)
-            {
-                memset(debug_names, 0, debug_slots * sizeof(*debug_names));
-                for (SymbolId m = 1; m < next; m += 1)
-                {
-                    const Link* unit = &units[merge->source_unit[m]].kept.link;
-                    const SymbolId s = merge->source_symbol[m];
-                    const NameId name = check_units_merge_global(unit, s) ? unit->symbols.name[s] : 0;
-                    if (name != 0)
-                    {
-                        uint64_t slot = unit->names.hash[name] & (debug_slots - 1);
-                        while (debug_names[slot] != 0)
-                        {
-                            slot = (slot + 1) & (debug_slots - 1);
-                        }
-                        debug_names[slot] = m;
-                    }
-                }
-            }
-        }
         for (uint32_t u = 0; merge->valid && merge->debug != NULL && u < count; u += 1)
         {
             const ObjectDebug* own = &units[u].kept.debug;
@@ -1626,12 +1549,12 @@ static void check_units_merge_lane(void* argument)
             for (uint32_t f = 0; merge->valid && f < check_units_debug_symbol_count(own); f += 1)
             {
                 const SymbolId s = check_units_debug_symbol(own, f);
-                const SymbolId mapped = merge->maps[u][s];
-                const SymbolId merged = mapped != 0 || debug_names == NULL ? mapped : check_units_merge_debug_name(merge, u, s, debug_names, debug_slots);
-                const bool kept = merged != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
-                const bool named = merged != 0 && mapped == 0;
-                merge->described[u][f] = kept || named ? merged : (SymbolId)(next + merge->replaced);
-                merge->replaced += !kept && !named;
+                const SymbolId merged = merge->maps[u][s];
+                const AtomId atom = units[u].kept.link.symbols.atom[s];
+                const bool discarded = f >= own->function_count && atom != 0 && check_units_selected_atom(&merge->selection, u, atom) == 0;
+                const bool kept = !discarded && merged != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged];
+                merge->described[u][f] = discarded ? 0 : kept ? merged : (SymbolId)(next + merge->replaced);
+                merge->replaced += !discarded && !kept;
             }
         }
         String8* externals = merge->valid ? BUSTER_ARENA_PUSH_ARRAY(merge->scratch, String8, next) : NULL;
@@ -1769,8 +1692,7 @@ static void check_units_merge_lane(void* argument)
             {
                 const SymbolId s = check_units_debug_symbol(own, f);
                 const NameId own_name = unit->symbols.name[s];
-                // A name-bound debug address takes a merged id below merge->next, which already has its symbol.
-                if (merge->described[u][f] >= merge->next)
+                if (merge->described[u][f] != 0 && merge->described[u][f] != merge->maps[u][s])
                 {
                     const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
                     const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
@@ -1888,8 +1810,7 @@ static void check_units_merge_lane(void* argument)
             for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < check_units_debug_symbol_count(&units[u].kept.debug); f += 1)
             {
                 const SymbolId s = check_units_debug_symbol(&units[u].kept.debug, f);
-                // A name-bound debug address keeps its merged id's own definition; only a fresh local defines here.
-                if (merge->described[u][f] >= merge->next)
+                if (merge->described[u][f] != 0 && merge->described[u][f] != map[s])
                 {
                     link->symbols.atom[merge->described[u][f]] = atom_base + check_units_selected_atom(&merge->selection, (uint32_t)u, unit->symbols.atom[s]) - 1;
                     link->symbols.value[merge->described[u][f]] = unit->symbols.value[s];

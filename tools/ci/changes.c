@@ -1267,7 +1267,7 @@ static ChangesResult changes_decide(const ChangesInput* input)
             result.code = !document || text_starts_with(files->items[i], "docs/performance/");
         }
         regfree(&documentation);
-        result.fixed[CHANGES_BASELINES] = changes_files_match("src/buster/compiler/", "link|floors", "_benchmark\\.c", files);
+        result.fixed[CHANGES_BASELINES] = changes_files_match("src/buster/compiler/", "(link|floors)_benchmark\\.c|floors_input\\.c|runtime_paths\\.h", "", files);
         result.fixed[CHANGES_FOREIGN] = changes_files_match("src/buster/compiler/", "foreign_benchmark", "\\.c", files);
         result.fixed[CHANGES_BRANCH_SIZING] = changes_files_match("src/buster/compiler/", "x86_64_encoder|branch_sizing(_benchmark|_generate)?", "\\.c", files);
         // The qualification's inputs: the readers and tools, the schema, and the pages the publisher reads at the
@@ -1709,6 +1709,16 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "baselines",
         .outputs_false = "foreign",
         .measured = "link",
+    },
+    {
+        .name = "the floors' shared-libc discovery",
+        .files = "src/buster/compiler/floors_input.c",
+        .outputs_true = "baselines",
+    },
+    {
+        .name = "the installed runtime search paths",
+        .files = "src/buster/compiler/runtime_paths.h",
+        .outputs_true = "baselines",
     },
     {
         .name = "the foreign linkers' harness",

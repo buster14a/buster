@@ -59,6 +59,13 @@ static const char* const check_test_deprecated_walk_sources[] = {
     "    enum E3 : T { A3 };\n}\nstruct S\n{\n    enum G1 : T { C1 } m1 __attribute__((deprecated)), n1;\n"
     "    enum G2 : T { C2 } m2, n2 __attribute__((deprecated));\n};\nenum __attribute__((deprecated)) K : T { K1 } k;\n"
     "enum L : T { L1 } __attribute__((deprecated)) l;\nenum : T { N } z __attribute__((deprecated)), w;\nenum M : V { M1 } v __attribute__((deprecated));\n",
+    // Memoized enum lookup (#1354) under both sparse and scalar walks, at every block offset: distinguish inner, outer
+    // and neighboring marked bodies, with uses deliberately out of declaration order.
+    "enum __attribute__((deprecated(\"outer\"))) Outer { O0, O1 = sizeof(enum __attribute__((deprecated(\"inner\"))) Inner { I0, I1 }), O2 };\n"
+    "enum __attribute__((deprecated(\"other\"))) Other { P0, P1, P2 };\n"
+    "int f(void) { return O2 + I1 + P2 + O0 + I0 + P0 + O1; }\n",
+    "enum __attribute__((unavailable(\"gone\"))) Gone { U0, U1, U2 };\n"
+    "int h(void) { return U2 + U0 + U1; }\n",
     // Nested scopes, levels and parameter lists around the uses, in blocks, records and calls, and an unmarked unit's
     // declarations around a marked one's.
     "int plain(int a, int b) { return a + b; }\nint old(int a) __attribute__((deprecated(\"new\")));\n"

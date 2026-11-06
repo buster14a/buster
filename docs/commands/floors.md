@@ -6,7 +6,7 @@ requirements. [Command index](README.md).
 
 ## Floors benchmark
 
-`./build/compiler benchmark-floors [--directory PATH] [--cpu N] [--only
+`./build/compiler benchmark-floors [--directory PATH] [--libc PATH] [--cpu N] [--only
 files|threads|calls|memory|teardown] [--size-kb N] [--method NAME]`
 measures what the machine and the kernel charge a linker however it works,
 each figure a median, pinned to `--cpu` (CPU 2):
@@ -21,7 +21,7 @@ each figure a median, pinned to `--cpu` (CPU 2):
   first and then the first other CPUs this process may use, each a contiguous
   share, by `pwrite` (new and in place) and through a shared mapping, starting
   the threads outside the time;
-- calls: what a linker pays per input file, on this process's `libc.so.6`:
+- calls: what a linker pays per input file, on a shared `libc.so.6`:
   `open` and `close`, `stat`, `mmap` and `munmap` with and without touching
   every page, and `pread` of the whole file;
 - memory: 256 MB of anonymous memory touched for the first time with base
@@ -40,6 +40,32 @@ support the last two. `--method` selects `new`, `truncate`, `in-place`,
 threads omit `truncate` and `rename`. Both filters require `--only files`
 or `--only threads`. Use them to release the shared lock between bounded
 measurements; full matrices can take several minutes on btrfs.
+
+### Shared-libc input
+
+The calls section prefers the process's mapped `libc.so.6`. A static host
+executable has no such mapping, so discovery also searches the same installed
+Linux/x86-64 library directories as the linker (`runtime_paths.h`). It checks
+that the selected file is regular, fits the read buffer, and has a little-endian
+x86-64 ELF64 shared-object header before any calls-section samples. The input
+is read and mapped as data; the benchmark does not load or execute its code.
+
+`--libc PATH` selects an explicit input and requires the calls section. A
+missing or invalid explicit input fails instead of silently selecting another
+library. The benchmark reports the selection source, path, byte size, device,
+inode and modification time before sampling, retaining the validated descriptor
+for `pread` and `mmap`. Failed discovery reports its error (including a missing
+input), and call failures preserve their error across cleanup. Short reads are
+errors, not successful samples.
+
+`./build/compiler test-floors-input` tests discovery without timing or CPU
+pinning. It runs on scalar and vector hosts through the correctness inventory:
+the real process's lookup and the installed-directory route without mappings,
+plus original fixtures for mapped preference, explicit selection, absent and
+invalid inputs, path limits, nonregular files and truncated or incompatible ELF
+headers. Plain CI builds exercise the static host; sanitizer builds exercise
+dynamic hosts. Native validation still requires the complete floors command
+on the approved 9700X under its shared lock and within its measurement window.
 
 It exits with status 1 on invalid arguments, differing file bytes, and when a
 call fails: any lane's write or huge-page advice, naming its `errno`, or a

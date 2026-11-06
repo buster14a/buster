@@ -3,7 +3,7 @@
 // LICENSING.md. The floors' benchmark (docs/object-writer-and-linker.md, "The floors"): what the machine and the kernel
 // charge a linker however it works: creating its output, writing one file from several threads, the small calls it
 // makes per input file, faulting and copying memory, and a process's teardown. It takes over the floor programs of the
-// document's appendix. Usage: build/compiler benchmark-floors [--directory PATH] [--cpu N] [--only
+// document's appendix. Usage: build/compiler benchmark-floors [--directory PATH] [--libc PATH] [--cpu N] [--only
 // files|threads|calls|memory|teardown] [--size-kb N] [--method NAME]. The filters require --only files or threads and
 // split a long filesystem matrix into bounded runs under the shared lock. Run it without taskset: it pins itself to --cpu (CPU 2 by
 // default), and a write by N threads to that CPU first, then the first other CPUs this process may use (one per core
@@ -18,7 +18,7 @@
 //     pwrite and through a shared mapping: the open and the sizing on the first thread, then from the threads' release
 //     (they wait at a sync once the file is open: starting them isn't timed) until the last has written, and the unmap
 //     and the close; BUSTER_FLOORS_BENCHMARK_LARGE_RUNS runs with a syncfs after each.
-//   - calls: what a linker pays per input file, on this process's libc.so.6: open and close, stat, mmap and munmap
+//   - calls: what a linker pays per input file, on a shared libc.so.6: open and close, stat, mmap and munmap
 //     without a touch, the same touching every page, and pread of the whole file into memory already touched.
 //   - memory: BUSTER_FLOORS_BENCHMARK_FAULT_BYTES of anonymous memory touched a page at a time for the first time, with
 //     base pages and with MADV_HUGEPAGE; then memcpy, non-temporal stores and memset at each of
@@ -31,6 +31,8 @@
 // 1 if the arguments are invalid, a call fails, or a file differs.
 
 #include "buster/compiler/test_paths.h"
+#include "buster/compiler/floors_input.c"
+#include "buster/compiler/floors_input_test.c"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -586,91 +588,98 @@ static bool floors_benchmark_threads(const char* directory, const uint8_t* sourc
 // ---------------------------------------------------------------------------------------------------------------------
 // Calls
 
-// The path of this process's libc.so.6, from /proc/self/maps, into `path`. False if it isn't there.
-static bool floors_benchmark_libc(char* path, uint64_t capacity)
+static bool floors_benchmark_calls(uint8_t* buffer, uint64_t buffer_size, const char* requested_libc)
 {
-    FILE* maps = fopen("/proc/self/maps", "r");
-    char line[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
-    bool result = false;
-    while (!result && maps != 0 && fgets(line, sizeof(line), maps) != 0)
+    FloorsInput input;
+    int error = floors_input_find(&input, requested_libc, buffer_size);
+    const int file = input.file;
+    const char* const libc = input.path;
+    const uint64_t size = error == 0 ? (uint64_t)input.status.st_size : 0;
+    if (error == 0)
     {
-        const char* name = strchr(line, '/');
-        const char* newline = name != 0 ? strchr(name, '\n') : 0;
-        const uint64_t length = newline != 0 ? (uint64_t)(newline - name) : 0;
-        const uint64_t suffix = sizeof("/libc.so.6") - 1;
-        result = length >= suffix && length < capacity && memcmp(name + length - suffix, "/libc.so.6", suffix) == 0;
-        if (result)
-        {
-            memcpy(path, name, length);
-            path[length] = 0;
-        }
+        printf("Shared-libc input from %s: %s (%llu bytes; device %llu, inode %llu, mtime %lld.%09ld)\n", input.source, libc,
+               (unsigned long long)size, (unsigned long long)input.status.st_dev, (unsigned long long)input.status.st_ino,
+               (long long)input.status.st_mtim.tv_sec, input.status.st_mtim.tv_nsec);
     }
-    if (maps != 0)
-    {
-        fclose(maps);
-    }
-    return result;
-}
-
-static bool floors_benchmark_calls(uint8_t* buffer, uint64_t buffer_size)
-{
-    char libc[BUSTER_FLOORS_BENCHMARK_PATH_BYTES];
-    bool result = floors_benchmark_libc(libc, sizeof(libc));
-    const int file = result ? open(libc, O_RDONLY | O_CLOEXEC) : -1;
-    struct stat status;
-    result = file >= 0 && fstat(file, &status) == 0 && (uint64_t)status.st_size <= buffer_size;
-    const uint64_t size = result ? (uint64_t)status.st_size : 0;
     uint64_t times[5][BUSTER_FLOORS_BENCHMARK_RUNS];
     volatile uint8_t sink = 0;
-    for (uint32_t run = 0; result && run < BUSTER_FLOORS_BENCHMARK_RUNS; run += 1)
+    for (uint32_t run = 0; error == 0 && run < BUSTER_FLOORS_BENCHMARK_RUNS; run += 1)
     {
         uint64_t start = floors_benchmark_now();
-        for (uint32_t i = 0; i < BUSTER_FLOORS_BENCHMARK_CALLS; i += 1)
+        for (uint32_t i = 0; error == 0 && i < BUSTER_FLOORS_BENCHMARK_CALLS; i += 1)
         {
             const int opened = open(libc, O_RDONLY | O_CLOEXEC);
-            result = result && opened >= 0;
-            close(opened);
+            if (opened < 0)
+            {
+                error = errno;
+            }
+            else if (close(opened) != 0)
+            {
+                error = errno;
+            }
         }
         times[0][run] = floors_benchmark_now() - start;
         start = floors_benchmark_now();
-        for (uint32_t i = 0; i < BUSTER_FLOORS_BENCHMARK_CALLS; i += 1)
+        for (uint32_t i = 0; error == 0 && i < BUSTER_FLOORS_BENCHMARK_CALLS; i += 1)
         {
             struct stat found;
-            result = result && stat(libc, &found) == 0;
+            if (stat(libc, &found) != 0)
+            {
+                error = errno;
+            }
         }
         times[1][run] = floors_benchmark_now() - start;
         start = floors_benchmark_now();
-        for (uint32_t i = 0; i < BUSTER_FLOORS_BENCHMARK_CALLS; i += 1)
+        for (uint32_t i = 0; error == 0 && i < BUSTER_FLOORS_BENCHMARK_CALLS; i += 1)
         {
             void* mapped = mmap(0, size, PROT_READ, MAP_PRIVATE, file, 0);
-            result = result && mapped != MAP_FAILED;
-            munmap(mapped, size);
+            if (mapped == MAP_FAILED)
+            {
+                error = errno;
+            }
+            else if (munmap(mapped, size) != 0)
+            {
+                error = errno;
+            }
         }
         times[2][run] = floors_benchmark_now() - start;
         start = floors_benchmark_now();
-        for (uint32_t i = 0; i < BUSTER_FLOORS_BENCHMARK_FILE_CALLS; i += 1)
+        for (uint32_t i = 0; error == 0 && i < BUSTER_FLOORS_BENCHMARK_FILE_CALLS; i += 1)
         {
             const uint8_t* mapped = mmap(0, size, PROT_READ, MAP_PRIVATE, file, 0);
-            result = result && mapped != MAP_FAILED;
-            for (uint64_t offset = 0; result && offset < size; offset += BUSTER_FLOORS_BENCHMARK_PAGE_BYTES)
+            if (mapped == MAP_FAILED)
             {
-                sink += mapped[offset];
+                error = errno;
             }
-            munmap((void*)mapped, size);
+            else
+            {
+                for (uint64_t offset = 0; offset < size; offset += BUSTER_FLOORS_BENCHMARK_PAGE_BYTES)
+                {
+                    sink += mapped[offset];
+                }
+                if (munmap((void*)mapped, size) != 0)
+                {
+                    error = errno;
+                }
+            }
         }
         times[3][run] = floors_benchmark_now() - start;
         start = floors_benchmark_now();
-        for (uint32_t i = 0; i < BUSTER_FLOORS_BENCHMARK_FILE_CALLS; i += 1)
+        for (uint32_t i = 0; error == 0 && i < BUSTER_FLOORS_BENCHMARK_FILE_CALLS; i += 1)
         {
-            result = result && pread(file, buffer, size, 0) == (ssize_t)size;
+            const ssize_t count = pread(file, buffer, size, 0);
+            if (count != (ssize_t)size)
+            {
+                error = count < 0 ? errno : EIO;
+            }
         }
         times[4][run] = floors_benchmark_now() - start;
     }
-    if (file >= 0)
+    if (file >= 0 && close(file) != 0 && error == 0)
     {
-        close(file);
+        error = errno;
     }
-    if (result)
+    if (error == 0)
     {
         const double pages = (double)((size + BUSTER_FLOORS_BENCHMARK_PAGE_BYTES - 1) / BUSTER_FLOORS_BENCHMARK_PAGE_BYTES);
         const double calls = BUSTER_FLOORS_BENCHMARK_CALLS;
@@ -686,9 +695,11 @@ static bool floors_benchmark_calls(uint8_t* buffer, uint64_t buffer_size)
     }
     else
     {
-        printf("  the calls on libc.so.6 failed (%s)\n", strerror(errno));
+        const char* name = file >= 0 ? libc : requested_libc != NULL ? requested_libc : "libc.so.6";
+        fprintf(stderr, "benchmark-floors: %s %s: %s%s\n", file >= 0 ? "calls on" : "cannot find or use shared-libc input", name,
+                strerror(error), file < 0 && requested_libc == NULL ? "; use --libc PATH to select the shared library" : "");
     }
-    return result;
+    return error == 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -883,6 +894,7 @@ int run_floors_benchmark(int argc, char** argv);
 int run_floors_benchmark(int argc, char** argv)
 {
     const char* directory = oracle_temporary_directory();
+    const char* libc = NULL;
     uint32_t sections = (1u << FLOORS_BENCHMARK_SECTIONS) - 1;
     unsigned long long cpu = 2;
     uint64_t selected_size = 0;
@@ -895,6 +907,12 @@ int run_floors_benchmark(int argc, char** argv)
         if (strcmp(argv[i], "--directory") == 0 && has_value)
         {
             directory = argv[i + 1];
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--libc") == 0 && has_value)
+        {
+            libc = argv[i + 1];
+            valid = libc[0] != 0;
             i += 1;
         }
         else if (strcmp(argv[i], "--cpu") == 0 && has_value)
@@ -947,7 +965,7 @@ int run_floors_benchmark(int argc, char** argv)
     }
     const bool files_only = sections == (1u << FLOORS_BENCHMARK_FILES);
     const bool threads_only = sections == (1u << FLOORS_BENCHMARK_THREADS);
-    valid = valid && (!filtered || files_only || threads_only);
+    valid = valid && (!filtered || files_only || threads_only) && (libc == NULL || (sections >> FLOORS_BENCHMARK_CALLS & 1) != 0);
     if (threads_only)
     {
         uint32_t parallel_methods = 0;
@@ -983,7 +1001,8 @@ int run_floors_benchmark(int argc, char** argv)
     bool result = pin && (!sourced || source != 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-floors [--directory PATH] [--cpu N] [--only files|threads|calls|memory|teardown]\n"
+        fprintf(stderr, "usage: benchmark-floors [--directory PATH] [--libc PATH] [--cpu N] [--only files|threads|calls|memory|teardown]\n"
+                        "       --libc requires the calls section; its explicit shared-library input never falls back\n"
                         "       with --only files|threads: [--size-kb 16|256|4096|65536|524288] [--method new|truncate|in-place|rename|mmap|fallocate|huge|fallocate-huge|mmap-in-place]\n"
                         "       threads supports 65536|524288 KB and excludes truncate|rename\n");
     }
@@ -1002,7 +1021,7 @@ int run_floors_benchmark(int argc, char** argv)
     }
     if (result && (sections >> FLOORS_BENCHMARK_CALLS & 1) != 0)
     {
-        result = floors_benchmark_calls(source, BUSTER_FLOORS_BENCHMARK_SOURCE_BYTES);
+        result = floors_benchmark_calls(source, BUSTER_FLOORS_BENCHMARK_SOURCE_BYTES, libc);
     }
     if (result && (sections >> FLOORS_BENCHMARK_MEMORY & 1) != 0)
     {
