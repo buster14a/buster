@@ -1009,6 +1009,15 @@ static inline uint32_t check_graph_leaf_overload_head(const CheckGraph* graph, u
     return check_graph_leaf_head_at(graph, graph->leaf_slots[node]);
 }
 
+// Whether the leaf in slot `slot` is well formed, as the validators require it: its overload set one of the candidates, and
+// a record's row (#628) none or one of the graph's rows, which check_graph_validate_lists bounds by their room and column.
+// A row past them is refused, not read as none.
+static inline bool check_graph_leaf_valid_at(const CheckGraph* graph, uint32_t slot)
+{
+    const bool row = graph->dense_leaves != NULL || graph->leaf_records[slot].row <= graph->leaf_payload_count;
+    return row && check_graph_leaf_head_at(graph, slot) <= graph->overload_candidate_count;
+}
+
 // Writes `value` as the leaf in slot `slot`: its record, and where it has more than a record holds, its whole value as a
 // row, the row the leaf has (`keep`: a leaf a write has made already) or else the graph's next. A leaf's first write
 // (check_graph_set_leaf_at) takes a row only for a value with more, so that a graph's rows are at most its leaves; the
@@ -1419,6 +1428,10 @@ static bool check_graph_recorded_equal(const CheckGraph* graph, const CheckGraph
 static bool check_graph_validate_lists(const CheckGraph* graph)
 {
     bool result = graph->count <= graph->capacity && graph->count <= (1u << 30) && graph->argument_count <= graph->argument_capacity && graph->argument_count <= (1u << 30);
+    // Records' rows (#628): no more than their room, and a column of them where there is any. Each record's row is
+    // checked at its node (check_graph_leaf_valid_at), so that every row a reader takes is a row of the column.
+    result = result && (graph->dense_leaves != NULL || graph->leaf_records == NULL ||
+                        (graph->leaf_payload_count <= graph->leaf_payload_capacity && (graph->leaf_payload_count == 0 || graph->leaf_payloads != NULL)));
     result = result && graph->varargs_count <= graph->varargs_capacity && graph->varargs_count <= graph->count &&
              (graph->varargs_count == 0 || graph->varargs_calls != NULL);
     result = result && graph->builtin_count <= graph->builtin_capacity && graph->builtin_count <= graph->count &&
@@ -1504,7 +1517,7 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     result = result && (op == CHECK_OP_VALUE ? check_graph_has_leaves(graph) && slot == state->leaves && slot < graph->leaf_count : slot == BUSTER_CHECK_NONE);
     if (result && op == CHECK_OP_VALUE)
     {
-        result = check_graph_leaf_head_at(graph, slot) <= graph->overload_candidate_count;
+        result = check_graph_leaf_valid_at(graph, slot);
     }
     result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
     result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
@@ -1667,7 +1680,7 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
         {
             const uint32_t head = check_graph_leaf_head_at(graph, slot);
             const TypeId type = graph->dense_leaves != NULL ? graph->dense_leaves[slot].type : graph->leaf_records[slot].type;
-            heads &= head <= graph->overload_candidate_count;
+            heads &= check_graph_leaf_valid_at(graph, slot);
             reorderable_leaves |= (uint32_t)(head == 0 && check_graph_builtin(type)) << lane;
         }
     }
