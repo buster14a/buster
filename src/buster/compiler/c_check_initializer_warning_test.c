@@ -42,6 +42,24 @@ static const CheckDriverInitWarningFixture check_driver_init_warning_fixtures[] 
         .notes = 1,
     },
     {
+        .name = "old-style field repetition retains override history",
+        .source = "#pragma clang diagnostic ignored \"-Wgnu-designator\"\nstruct S{int x;};struct S value={x:1,x:2};\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "mixed old and modern field repetition",
+        .source = "#pragma clang diagnostic ignored \"-Wgnu-designator\"\nstruct S{int x;};struct S value={.x=1,x:2};\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
+        .name = "old-style union switch targets the member name",
+        .source = "#pragma clang diagnostic ignored \"-Wgnu-designator\"\nunion U{int x,y;};union U value={x:1,y:2};\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
         .name = "repeated array element targets the later value",
         .source = "int value[2]={[0]=1,[0]=2};\n",
         .warnings = 1,
@@ -306,5 +324,54 @@ static void check_test_driver_initializer_warnings(CheckTest* test, const char* 
             }
         }
     }
+    unlink(source);
+}
+
+
+static void check_test_driver_initializer_fields(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const fixtures[] = {
+        "struct T{int x;} t={z:1};\n",
+        "struct T{int x;} t={.z=1};\n",
+        "struct T{int x;} t[]={{z:1}};\n",
+        "struct I{int x;};struct O{int lead;struct I inner;} t={inner:{z:1}};\n",
+        "union U{int x;} u={z:1};\n",
+        "struct {int x;} t={z:1};\n",
+    };
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/initializer-field.c", directory);
+    snprintf(object, sizeof(object), "%s/initializer-field.o", directory);
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    {
+        const bool written = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
+        check_test_expect(test, written, "unknown field initializer fixture is written");
+        for (uint32_t mode = 0; written && mode < 2; mode += 1)
+        {
+            char* arguments[] = { (char*)clang, "-std=gnu17", "-w", "-fno-caret-diagnostics", "-fno-color-diagnostics",
+                                  mode == 0 ? "-fsyntax-only" : "-c", source, "-o", object, NULL, NULL };
+            char* expected = NULL;
+            unlink(object);
+            const int oracle = check_test_driver_spawn(arguments, &expected);
+            const bool ready = oracle == 1 && expected != NULL && strstr(expected, "does not refer to any field in type") != NULL;
+            check_test_expect(test, ready, "Clang rejects the unknown field with its name and actual selected record type");
+            for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+            {
+                arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
+                arguments[9] = scalar != 0 ? "--scalar" : NULL;
+                char* actual = NULL;
+                unlink(object);
+                const int status = check_test_driver_spawn(arguments, &actual);
+                char description[192];
+                snprintf(description, sizeof(description), "unknown initializer field %u mode=%u %s: exact Clang location, member and type",
+                         f, mode, scalar != 0 ? "scalar" : "vector");
+                check_test_expect(test, status == oracle && actual != NULL && strcmp(actual, expected) == 0, description);
+                check_test_expect(test, access(object, F_OK) != 0, "invalid field designator publishes no object");
+                free(actual);
+            }
+            free(expected);
+        }
+    }
+    unlink(object);
     unlink(source);
 }
