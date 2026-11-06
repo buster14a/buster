@@ -275,8 +275,10 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
             {
                 const __m512i constant = check_input_gather_bytes(lanes, token, reader->constant_contexts);
                 const __mmask16 runtime = _mm512_mask_testn_epi32_mask(lanes, constant, constant);
-                const __m512i environments = check_input_gather_bytes(runtime, token, input->fp_environments);
-                _mm_mask_storeu_epi8(graph->fp_environments + node, lanes, _mm512_cvtepi32_epi8(environments));
+                const __m512i environments = check_input_gather_bytes(lanes, token, input->fp_environments);
+                const __m512i access = _mm512_maskz_mov_epi32(runtime, _mm512_set1_epi32(BUSTER_CHECK_FP_ENV_ACCESS));
+                const __m512i mask = _mm512_or_si512(_mm512_set1_epi32(BUSTER_CHECK_FP_EVAL_MASK), access);
+                _mm_mask_storeu_epi8(graph->fp_environments + node, lanes, _mm512_cvtepi32_epi8(_mm512_and_si512(environments, mask)));
             }
         }
         for (; k < count; k += 1)
@@ -306,7 +308,8 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
             }
             if (graph->fp_environments != NULL)
             {
-                graph->fp_environments[node] = reader->constant_contexts[token] == 0 ? input->fp_environments[token] : 0;
+                const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+                graph->fp_environments[node] = input->fp_environments[token] & mask;
             }
         }
         graph->count = base + count;
