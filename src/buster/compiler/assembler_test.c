@@ -129,7 +129,11 @@ static const char asm_test_rep_scans[] =
     "rep bsrw %cx,%ax\nrepe bsrl %ecx,%eax\nrep; bsrq %r9,%r8\n"
     "rep bsfl %fs:8(%rax),%ecx\nrep bsrq target(%rip),%rax\n"
     ".intel_syntax noprefix\nrep bsf ax,cx\nrep bsf eax,ecx\nrep bsf r8,r9\n"
-    "rep bsr ax,cx\nrep bsr eax,ecx\nrep bsr r8,r9\n.att_syntax prefix\n";
+    "rep bsr ax,cx\nrep bsr eax,ecx\nrep bsr r8,r9\n.att_syntax prefix\n"
+    "jmp 1f\n.zero 123\nrep bsfl %ecx,%eax\n1:\n"
+    "jmp 2f\n.zero 124\nrep bsfl %ecx,%eax\n2:\n"
+    "3:\n.zero 122\nrep bsfl %ecx,%eax\njmp 3b\n"
+    "4:\n.zero 123\nrep bsfl %ecx,%eax\njmp 4b\n";
 
 // Every mask move's five operand forms, in both syntaxes. Include k0, k7, extended GPRs, SIB addresses and the
 // exact displacement main.c's naked semantics harness uses. GNU as supplies the independent encoding oracle.
@@ -885,6 +889,19 @@ static AsmCode asm_test_code_pair(AsmTest* test, const char* source, int64_t exp
 
 static void asm_test_code(AsmTest* test)
 {
+    X86Target baseline;
+    const bool parsed = x86_target_parse("x86-64", 6, &baseline);
+    asm_test_check(test, parsed, "inline code: baseline target", 0);
+    if (parsed)
+    {
+        x86_match_initialize(test->index, &baseline);
+        test->architecture = X86_ARCH_BASELINE;
+        const AsmCode scans = asm_test_code_pair(test, "rep bsfl %ecx,%eax\nrep bsrq %rcx,%rax\n", 2, "inline code: baseline rep scans");
+        uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(2)];
+        static const uint8_t expected[] = { 0xf3, 0x0f, 0xbc, 0xc1, 0xf3, 0x48, 0x0f, 0xbd, 0xc1 };
+        const int64_t length = scans.error == 0 ? x86_encode_scalar(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
+        asm_test_check(test, length == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0, "inline code: baseline rep scan bytes", 0);
+    }
     // Every feature, as the C lowering's index has them: a template's instructions are its author's to choose.
     const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
     x86_match_initialize(test->index, &everything);

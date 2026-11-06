@@ -3949,6 +3949,12 @@ static bool asm_branch_grows(uint32_t row)
     return form->relative_bytes == 1 && row + 1 < X86_FORM_COUNT && form[1].relative_bytes == 4 && (form->mnemonic == form[1].mnemonic || strcmp(form->mnemonic, form[1].mnemonic) == 0);
 }
 
+static uint32_t asm_rep_scan_delta(const AsmInstruction* instruction)
+{
+    const bool reverse = x86_match_name(instruction->request.mnemonic, "bsr");
+    return reverse ? X86_FORM_LZCNT_R16_RM16 - X86_FORM_BSR_R16_RM16 : X86_FORM_TZCNT_R16_RM16 - X86_FORM_BSF_R16_RM16;
+}
+
 static void asm_match_instructions(AsmParser* parser)
 {
     for (uint32_t i = 0; i < parser->instruction_count && parser->result.error == 0; i += 1)
@@ -4004,9 +4010,7 @@ static void asm_match_instructions(AsmParser* parser)
             if (instruction->rep_scan)
             {
                 // The scan and count forms have matching widths, operands and segment variants; only F3 is added.
-                const bool reverse = x86_match_name(instruction->request.mnemonic, "bsr");
-                const uint32_t delta = reverse ? X86_FORM_LZCNT_R16_RM16 - X86_FORM_BSR_R16_RM16 : X86_FORM_TZCNT_R16_RM16 - X86_FORM_BSF_R16_RM16;
-                instruction->record.form += delta;
+                instruction->record.form += asm_rep_scan_delta(instruction);
             }
             fragment->size = match.length + instruction->rep_scan;
             const X86FormDescription* form = x86_form_description(instruction->record.form);
@@ -4671,7 +4675,13 @@ static void asm_layout(AsmParser* parser)
                 instruction->record.displacement = (int32_t)distance;
             }
         }
-        if (x86_target_validate(parser->index->allowed, &instruction->record, 1) != 1)
+        X86Instruction target_record = instruction->record;
+        if (instruction->rep_scan)
+        {
+            // The F3 form is encoded as TZCNT/LZCNT, but the source asked for the baseline bit-scan instruction.
+            target_record.form -= asm_rep_scan_delta(instruction);
+        }
+        if (x86_target_validate(parser->index->allowed, &target_record, 1) != 1 || x86_validate(&instruction->record, 1) != 1)
         {
             asm_fail(parser, instruction->location, "resolved instruction is invalid for the target");
         }
