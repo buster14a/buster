@@ -2582,7 +2582,14 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     bool source_contexts = false;
     if (evaluated != NULL)
     {
-        for (uint32_t node = 0; node < graph->count; node += 1)
+        // Only conversion and call nodes can need a literal-only source context. The vector path skips
+        // other operators in batches; the scalar twin visits all nodes and applies the same tests.
+        static const CheckOp context_ops[] = { CHECK_OP_INITIALIZE, CHECK_OP_ASSIGN, CHECK_OP_CONVERT, CHECK_OP_CALL };
+        const CheckCommonOps set = check_common_ops(context_ops, BUSTER_ARRAY_LENGTH(context_ops));
+        const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+        CheckCommonScan scan = { 0 };
+        for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count && !source_contexts;
+             node = check_common_next_op(graph, &set, &scan, vector))
         {
             const CheckOp op = graph->ops[node];
             if (evaluated[node] == 0 && (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT))
