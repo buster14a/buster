@@ -730,12 +730,13 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
     pieces->splits += split;
 }
 
-// Wider values first, so a partial block column keeps the ones whose binary search is deepest (#1399).
+// Wider values first, so a partial block column keeps the ones whose binary search is deepest (#1399). Descending:
+// narrow values' zero keys sort last, where the install loop's `keys[i] != 0` stops.
 static int tier1_cfg_lookup_order(const void* left, const void* right)
 {
     const uint64_t a = *(const uint64_t*)left;
     const uint64_t b = *(const uint64_t*)right;
-    return (a < b) - (a > b);
+    return (a > b) - (a < b);
 }
 
 static uint32_t tier1_cfg_interval_count(const Tier1CfgAllocation* result, uint32_t value)
