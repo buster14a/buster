@@ -1870,7 +1870,7 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
             declarations[i] = check_test_random(test) % 4 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % (count + 2);
         }
         // Every other round labels few objects, as a unit with glibc's headers does, so that the vector kernels' filter
-        // (check_input_asm_filter) leaves most groups of 16 tokens ungathered; the others label a quarter of them.
+        // (check_input_filter_bits) leaves most groups of 16 tokens ungathered; the others label a quarter of them.
         const bool sparse_labels = round % 2 != 0;
         for (uint32_t w = 0; w < object_words; w += 1)
         {
@@ -1907,7 +1907,7 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
             memset(declared, 0xa5, (uint64_t)token_words * sizeof(uint32_t));
             check_input_asm_labelled_tokens(&input, labelled, declared, scalar != 0);
             differences += memcmp(declared, expected_declared, (uint64_t)token_words * sizeof(uint32_t)) != 0;
-            const CheckInputAsmFilter filter = check_input_asm_filter(declared, token_words);
+            const CheckInputFilter filter = check_input_filter_bits(declared, token_words);
             for (uint32_t first = 0; first < count; first += 16)
             {
                 uint32_t mask = 0;

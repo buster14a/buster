@@ -2489,6 +2489,59 @@ BUSTER_INLINE __m512i check_input_prefix_max16(__m512i values)
     return values;
 }
 
+// A filter in registers of a small set of 32-bit values for the reader's vector passes (#529), which test 16 tokens'
+// values against it where they compared each with every member, or gathered each one's bit: `low` has bit v % 512 for
+// each value v of the set, and `high` bit (v / 512) % 512, a 512-value region's. A value with both bits may be in the set,
+// one without either isn't, so that a pass makes its exact tests only for the 16 tokens that have such a value. Values
+// below 2^18, as a unit's token indices and names are, have one region each.
+typedef struct CheckInputFilter CheckInputFilter;
+struct CheckInputFilter
+{
+    __m512i low;
+    __m512i high;
+};
+
+// The filter of the set whose `words` words of 32 bits are `bits` (value v is bit v % 32 of word v / 32): the words'
+// 512-value regions or'ed for `low`, and whether each region has a bit for `high`.
+static CheckInputFilter check_input_filter_bits(const uint32_t* bits, uint32_t words)
+{
+    uint32_t high[16] = { 0 };
+    __m512i low = _mm512_setzero_si512();
+    for (uint32_t first = 0; first < words; first += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, words - first < 16 ? words - first : 16);
+        const __m512i region = _mm512_maskz_loadu_epi32(lanes, bits + first);
+        const uint32_t index = (first / 16) % 512;
+        low = _mm512_or_si512(low, region);
+        high[index / 32] |= (uint32_t)(_mm512_test_epi32_mask(region, region) != 0) << (index % 32);
+    }
+    return (CheckInputFilter){ .low = low, .high = _mm512_loadu_si512(high) };
+}
+
+// The filter of the `count` values `values`.
+static CheckInputFilter check_input_filter_values(const uint32_t* values, uint32_t count)
+{
+    uint32_t low[16] = { 0 };
+    uint32_t high[16] = { 0 };
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        low[(values[i] / 32) % 16] |= UINT32_C(1) << (values[i] % 32);
+        high[(values[i] / 16384) % 16] |= UINT32_C(1) << ((values[i] / 512) % 32);
+    }
+    return (CheckInputFilter){ .low = _mm512_loadu_si512(low), .high = _mm512_loadu_si512(high) };
+}
+
+// Of the 16 values `values`, under `lanes`, those that may be in `filter`'s set: each looks up its two bits with a
+// permute of the filter's words.
+static __mmask16 check_input_filter_test(const CheckInputFilter* filter, __m512i values, __mmask16 lanes)
+{
+    const __m512i bit = _mm512_set1_epi32(31);
+    const __m512i low = _mm512_srlv_epi32(_mm512_permutexvar_epi32(_mm512_srli_epi32(values, 5), filter->low), _mm512_and_si512(values, bit));
+    const __m512i high = _mm512_srlv_epi32(_mm512_permutexvar_epi32(_mm512_srli_epi32(values, 14), filter->high),
+                                           _mm512_and_si512(_mm512_srli_epi32(values, 9), bit));
+    return _mm512_mask_test_epi32_mask(lanes, _mm512_and_si512(low, high), _mm512_set1_epi32(1));
+}
+
 #include "c_check_attribute.c"
 #include "c_check_noderef_input.c"
 static const CheckInputAttribute* check_input_naked_attribute(const CheckInputAttributes* attributes);
@@ -10716,9 +10769,10 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
 // a superset that costs a unit at most the tables. Without roles, every name counts. The vector path keeps the depth
 // of the lists a 64-token block at a time, from the counts of its openings and closings, and the scalar path a token
 // at a time, so that each name's test is one count however deep the tree.
-// The vector path tests 64 tokens' kinds and roles and 16 tokens' names at once, and looks up 64 roles' and kinds'
-// tests in tables (check_input_role_tests); the scalar path, its twin, tests a token at a time. A name of 0 counts no
-// token: tokens without a name have 0. Without roles, every token is marked.
+// The vector path tests 64 tokens' kinds and roles and 16 tokens' names at once, the names against a filter of those it
+// seeks (CheckInputFilter) before it compares the 16 that pass with each, and looks up 64 roles' and kinds' tests in
+// tables (check_input_role_tests); the scalar path, its twin, tests a token at a time. A name of 0 counts no token:
+// tokens without a name have 0. Without roles, every token is marked.
 static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
                                                                               uint32_t name_count, uint8_t* syntax, uint8_t* visits, bool scalar)
 {
@@ -10752,6 +10806,10 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     const __m512i role_tests_high = _mm512_load_si512(check_input_role_tests + 64);
     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
+    // The filter of every name the vector path compares with (CheckInputFilter): the counted names' and the syntax names'.
+    const CheckInputFilter counted = check_input_filter_values(names, name_count);
+    const CheckInputFilter spelled = check_input_filter_values(syntax_names, (uint32_t)BUSTER_ARRAY_LENGTH(syntax_names));
+    const CheckInputFilter name_filter = { .low = _mm512_or_si512(counted.low, spelled.low), .high = _mm512_or_si512(counted.high, spelled.high) };
     uint32_t token = 0;
     // The attribute lists open at the token, signed: a unit whose roles don't pair can't go below zero unseen.
     int64_t attribute_depth = 0;
@@ -10792,15 +10850,27 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             const __mmask16 parts = (__mmask16)_bzhi_u32(UINT32_MAX, length - part < 16 ? length - part : 16);
             const __m512i name = _mm512_maskz_loadu_epi32(parts, token_names + token + part);
             const __mmask16 present = _mm512_mask_test_epi32_mask(parts, name, name);
+            // The names' comparisons, of the 16 tokens whose names the filter passes (#529): the names counted and the
+            // syntax bits' are builtins' and attributes', which few tokens have.
+            const __mmask16 candidates = check_input_filter_test(&name_filter, name, present);
             __mmask16 matched[CHECK_INPUT_COUNT_GROUPS] = { 0 };
-            for (uint32_t i = 0; i < name_count; i += 1)
+            __mmask16 syntax_matched[3] = { 0, 0, 0 };
+            if (candidates != 0)
             {
-                matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)names[i]));
+                for (uint32_t i = 0; i < name_count; i += 1)
+                {
+                    matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)names[i]));
+                }
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
+                {
+                    syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
+                }
             }
             // The span of the builtins of constants the walk works out (check_input_source_builtin_span), one comparison.
             const __mmask16 source = _mm512_mask_cmplt_epu32_mask(present, _mm512_sub_epi32(name, _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_FIRST)),
                                                                   _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_SPAN));
             matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= source;
+            syntax_matched[0] |= source;
             for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
             {
                 result.groups[group] += group != CHECK_INPUT_COUNT_OVERLOADABLE ? (uint32_t)__builtin_popcount(matched[group]) : 0;
@@ -10812,11 +10882,6 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                 const uint32_t lane = part + (uint32_t)__builtin_ctz(bits);
                 const int64_t depth = attribute_depth + __builtin_popcountll(_bzhi_u64(list_opens, lane + 1)) - __builtin_popcountll(_bzhi_u64(list_closes, lane));
                 result.groups[CHECK_INPUT_COUNT_OVERLOADABLE] += roles == 0 || depth > 0;
-            }
-            __mmask16 syntax_matched[3] = { source, 0, 0 };
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
-            {
-                syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
             }
             named |= (uint64_t)syntax_matched[0] << part;
             attributes |= (uint64_t)syntax_matched[1] << part;
