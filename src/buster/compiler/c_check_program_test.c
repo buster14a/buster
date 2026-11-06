@@ -2125,9 +2125,12 @@ static void check_test_program_initializer_facts(CheckTest* test)
     check_test_types_close(&types);
 }
 
+static void check_test_program_clears(CheckTest* test, const char* clang);
+
 static void check_test_program_initializers(CheckTest* test, const char* clang)
 {
     check_test_program_initializer_facts(test);
+    check_test_program_clears(test, clang);
     check_test_program_source(test,
         "struct P{int x,y,z;};int tested(int n){int calls=0;"
         "struct P p={x:++calls,.x=n,y:5,6};"
@@ -2610,6 +2613,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
+#include "c_check_program_clear_test.c"
 #include "c_check_program_folds_test.c"
 #include "c_check_program_fence_test.c"
 #include "c_check_program_atomic_access_test.c"

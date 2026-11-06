@@ -178,7 +178,8 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
                 mapping[node] = added;
                 if (source->ops[node] == CHECK_OP_VALUE)
                 {
-                    *check_graph_leaf_of(graph, added) = *check_graph_leaf_of(source, node);
+                    const CheckValue leaf = check_graph_leaf_value(source, node);
+                    check_graph_set_leaf(graph, added, &leaf);
                 }
                 graph->types[added] = source->types[node];
                 graph->members[added] = source->members[node];

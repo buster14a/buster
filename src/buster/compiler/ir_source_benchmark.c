@@ -67,9 +67,10 @@ struct IrSourceCorpus
     uint64_t promoted_bytes;
     // Each promotion's phis (#134): the vector path's (ssa_ir_promote), then its twin's.
     uint64_t phis[2];
-    // #866's GVN on the lowered IR, run once by each path outside the time: the instructions it removed, its
-    // refinement rounds, key comparisons and collision-budget sort completions.
+    // #866's GVN on the lowered IR, run once by each path outside the time: the instructions it removed, those its
+    // acyclic numbering classed, its refinement rounds, key comparisons and collision-budget completions.
     uint64_t gvn_changed[2];
+    uint64_t gvn_acyclic;
     uint64_t gvn_rounds;
     uint64_t gvn_probes;
     uint64_t gvn_sort_fallbacks;
@@ -223,6 +224,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
             corpus->phis[1] += twin_phis;
             corpus->gvn_changed[0] += gvn.removed;
             corpus->gvn_changed[1] += gvn_twin.removed;
+            corpus->gvn_acyclic += gvn.acyclic;
             corpus->gvn_rounds += gvn.rounds;
             corpus->gvn_probes += gvn.partition_probes;
             corpus->gvn_sort_fallbacks += gvn.partition_sort_fallbacks;
@@ -270,8 +272,8 @@ static void ir_source_bytes(const IrSourceCorpus* corpus)
            (double)corpus->promoted_instructions / tokens, corpus->promoted_bytes, (double)corpus->promoted_bytes / tokens);
     printf("benchmark-ir-source: phis: %" PRIu64 " by promote (%.4f per lowered instruction), %" PRIu64 " by promote-scalar (%.4f)\n", corpus->phis[0],
            (double)corpus->phis[0] / (double)corpus->instructions, corpus->phis[1], (double)corpus->phis[1] / (double)corpus->instructions);
-    printf("benchmark-ir-source: GVN removed %" PRIu64 " instructions by gvn and %" PRIu64 " by gvn-scalar; %" PRIu64 " refinement rounds, %" PRIu64 " key comparisons, %" PRIu64 " collision-budget sort completions\n",
-           corpus->gvn_changed[0], corpus->gvn_changed[1], corpus->gvn_rounds, corpus->gvn_probes, corpus->gvn_sort_fallbacks);
+    printf("benchmark-ir-source: GVN removed %" PRIu64 " instructions by gvn and %" PRIu64 " by gvn-scalar; %" PRIu64 " of %" PRIu64 " numbered acyclic, %" PRIu64 " refinement rounds, %" PRIu64 " key comparisons, %" PRIu64 " collision-budget completions\n",
+           corpus->gvn_changed[0], corpus->gvn_changed[1], corpus->gvn_acyclic, corpus->instructions, corpus->gvn_rounds, corpus->gvn_probes, corpus->gvn_sort_fallbacks);
     // The largest functions, by insertion into a short list sorted by bytes, the first function of equal bytes first.
     uint32_t largest[BUSTER_IR_SOURCE_LARGEST];
     uint32_t kept = 0;
