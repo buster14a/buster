@@ -2475,13 +2475,16 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
         const uint32_t left = graph->operand0[node];
         const uint32_t right = graph->operand1[node];
         const uint32_t source = op == CHECK_OP_ASSIGN ? right : left;
-        const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
-        if (source < graph->count && source < stream->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-            (flags & BUSTER_CHECK_CONVERT_CAST) == 0)
+        if (source < graph->count && source < stream->count)
         {
             const CheckConstantKind constant = check_stream_constant_kind(stream, source);
-            own = constant == CHECK_CONSTANT_INTEGER;
-            conversion = constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source);
+            if (constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source))
+            {
+                const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
+                const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
+                own = assignment && constant == CHECK_CONSTANT_INTEGER;
+                conversion = assignment;
+            }
         }
         own |= self_assign && op == CHECK_OP_ASSIGN && left < graph->count && right < graph->count &&
                graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
@@ -2492,13 +2495,16 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
         for (uint32_t i = 0; !(own && conversion) && i < graph->argument_counts[node]; i += 1)
         {
             const uint32_t source = graph->argument_nodes[offset + i];
-            const uint32_t flags = stream->argument_conversions[offset + i].flags;
-            if (source < graph->count && source < stream->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-                (flags & BUSTER_CHECK_CONVERT_CAST) == 0)
+            if (source < graph->count && source < stream->count)
             {
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
-                own |= constant == CHECK_CONSTANT_INTEGER;
-                conversion |= constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source);
+                if (constant != CHECK_CONSTANT_NONE || check_common_conversion_arms(graph, source))
+                {
+                    const uint32_t flags = stream->argument_conversions[offset + i].flags;
+                    const bool assignment = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0;
+                    own |= assignment && constant == CHECK_CONSTANT_INTEGER;
+                    conversion |= assignment;
+                }
             }
         }
     }
