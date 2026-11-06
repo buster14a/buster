@@ -428,6 +428,8 @@ struct CheckInputReport
     uint32_t pragma;
     // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
     uint32_t completion;
+    // Optional order among a completed declaration's diagnostics, whose locations need not follow that order.
+    uint64_t suborder;
     // The declaration a message located elsewhere names, or a redeclaration's prior declaration, plus one; 0 for none.
     uint32_t subject;
     // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.
@@ -1567,6 +1569,8 @@ struct CheckInputReader
     // The specifiers' attributes of the next declarator run (#147), which check_input_declarator_begin takes into its run
     // (CheckDeclaratorRun.common_attributes) for its type's warnings (check_input_attribute_type_warnings), or 0.
     CheckInputAttributes* declarator_common;
+    // The current complete declarator's end: type and declaration attribute warnings follow its parameters (#147).
+    uint32_t attribute_completion;
     uint32_t declarator_declarations;
     // The prototypes open around the reader's position: a declarator's parameter lists, each a scope a level deeper than
     // the one around it (check_input_declaration_depth).
@@ -2595,8 +2599,9 @@ static bool check_input_attribute_function_typed(CheckInputReader* reader, const
 }
 
 // The "only applies to function types" warning of `attribute` (check_input_attribute_type_warnings and
-// check_input_attribute_function_types), completing at `earliest` where that is no later than after its first token.
-static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, uint32_t name, uint32_t earliest)
+// check_input_attribute_function_types), completing where its declarator's type is ready.
+static void check_input_attribute_function_type_warning(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId type, TypeId declared,
+                                                        uint32_t name, uint32_t position, uint32_t earliest)
 {
     const CheckWarningEvent event =
     {
@@ -2605,8 +2610,8 @@ static void check_input_attribute_function_type_warning(CheckInputReader* reader
         .token = attribute->first,
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = earliest <= attribute->first + 1 ? earliest : attribute->first + 1,
-        .payload = { .first_type = type, .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion = earliest != UINT32_MAX ? earliest : attribute->first + 1,
+        .payload = { .first_type = type, .second_type = declared, .name = attribute->name, .token = position,
                      .data = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0 },
     };
     check_input_warning_event(reader, &event, NULL, 0);
@@ -2640,7 +2645,7 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
             earliest = pass == 0 && !function_type && attribute->first < earliest ? attribute->first : earliest;
             if (pass == 1 && function_type)
             {
-                check_input_attribute_function_type_warning(reader, attribute, type, name, earliest);
+                check_input_attribute_function_type_warning(reader, attribute, type, type, name, name, earliest);
             }
         }
     }
@@ -2648,7 +2653,8 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
 
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
-static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin)
+static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin,
+                                                                              bool replace_wrapped_abi)
 {
     TypeId function = type;
     uint8_t kind = type_kind(reader->types, function);
@@ -2667,7 +2673,7 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(C
     {
         *origin = check_input_attribute_abi_origin(reader, attributes, *origin);
     }
-    return check_input_attribute_abi(reader, attributes, type);
+    return check_input_attribute_abi_with_override(reader, attributes, type, replace_wrapped_abi);
 }
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes);
@@ -3529,7 +3535,8 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
 
 // Specifiers are retained in source order because their inherited base type precedes declarators semantically,
 // although the parser's ordinary postorder puts their nodes after those declarators.
-static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline)
+static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline,
+                                    bool parameter)
 {
     const Parser* parser = reader->parser;
     const uint32_t first = *cursor;
@@ -3924,7 +3931,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     // may have a function specifier, which is its own error (check_input_declaration).
     const bool free_standing = reader->specifier_free_standing && reader->specifier_owner == first;
     const bool typed = base != 0 || integer_seen || longs || shorts || signedness || complex;
-    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing);
+    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing || (parameter && parser->recovered_parameter_types));
     valid &= implicit_int || (saw && typed);
     valid &= longs <= 2 && shorts <= 1 && !(longs && shorts);
     valid &= !*is_typedef || (storage == 0 && (!*is_inline || free_standing) && !thread_local);
@@ -4000,24 +4007,44 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         // (_Alignas against the declarator's type, not the specifiers': check_input_alignas_underaligned.)
         base = check_input_attribute_type(reader, attributes, base, false, true);
-        // A C23 list after the specifiers belongs to their base, before the declarator constructs a function around it.
-        // The ordinary GNU spelling still distributes its function attributes over the completed declarator.
+        // C23 attributes belong to the specifier type, not an enclosing declarator's function.
+        // The ordering pass emits their ignored-type warnings after the parameter list.
         attributes->calling_convention = CHECK_CALL_DEFAULT;
+        bool specifier_abi_applied = false;
         for (uint32_t a = 0; base != 0 && a < attributes->count; a += 1)
         {
             CheckInputAttribute* attribute = attributes->records + a;
-            if (!attribute->ignored && attribute->specifier_type && check_input_attribute_function_typed(reader, attribute) &&
-                type_kind(reader->types, type_strip_aligned(reader->types, base)) != BUSTER_TYPE_KIND_FUNCTION)
+            if (attribute->specifier_type && !attribute->specifier_ignored && !attribute->specifier_applied && !attribute->ignored &&
+                attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value != CHECK_CALL_IGNORED_X86_32)
             {
-                check_input_attribute_function_type_warning(reader, attribute, type_qualify(reader->types, base, qualifiers), BUSTER_CHECK_NONE, attribute->first + 1);
-                attribute->ignored = true;
+                // Apply this C23 attribute while `base` still names the typedef's own function. The completed
+                // declarator may add another function outside it; applying the common list there would change that
+                // outer function instead. Keep the record for diagnostics, but never apply it a second time.
+                CheckInputAttributes single = { .records = attribute, .count = 1, .capacity = 1,
+                                                .calling_convention = (CheckInputCallingConvention)attribute->value };
+                const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, base));
+                const bool wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind);
+                // Clang lets an attribute on a pointer/array typedef replace its pointee's ABI. An attribute on
+                // a function typedef instead conflicts with that function's explicit convention. Two attributes
+                // written in this same specifier list still conflict even for a pointer typedef.
+                abi_origin = wrapped && !specifier_abi_applied ? 0 : abi_origin;
+                base = check_input_declarator_abi(reader, &single, base, &abi_origin, wrapped);
+                if (single.error != CHECK_ATTRIBUTE_ERROR_NONE)
+                {
+                    attributes->error = single.error;
+                    attributes->error_first = single.error_first;
+                    attributes->error_end = single.error_end;
+                }
+                attribute->specifier_applied = base != 0;
+                specifier_abi_applied |= attribute->specifier_applied;
             }
-            if (!attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value != CHECK_CALL_IGNORED_X86_32 &&
-                attributes->calling_convention == CHECK_CALL_DEFAULT)
+            if (!attribute->ignored && !attribute->specifier_ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
+                !attribute->specifier_applied && attribute->value != CHECK_CALL_IGNORED_X86_32 && attributes->calling_convention == CHECK_CALL_DEFAULT)
             {
                 attributes->calling_convention = (CheckInputCallingConvention)attribute->value;
             }
         }
+        valid &= base != 0;
     }
     if (auto_type != BUSTER_CHECK_NONE && valid)
     {
@@ -5026,7 +5053,7 @@ static uint32_t check_input_attribute_group_close(const Parser* parser, uint32_t
 // `base`); then the specifiers' and the trailing ones, which clang diagnoses once the declarator's type is complete, with
 // that type. All complete with the declaration's first attribute (an unknown one's too), so they come before what its
 // attributes' own checks give there (check_input_attribute_subjects), in this order.
-static void check_input_attribute_type_warnings(CheckInputReader* reader, const CheckInputAttributes* common, const CheckInputAttributes* own, TypeId type, uint32_t name,
+static void check_input_attribute_type_warnings(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, TypeId type, uint32_t name,
                                                 uint32_t split, const CheckDeclaratorPart* parts, uint32_t order, TypeId base)
 {
     TypeId function = type;
@@ -5037,20 +5064,25 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         kind = type_kind(reader->types, function);
     }
     const bool applies = kind == BUSTER_TYPE_KIND_FUNCTION;
-    // Where its attributes' own checks complete, after the first's token (an unknown one's warning, which comes at its
-    // token's end, at that token): tied with them, these come first, and after an earlier declarator's.
-    const CheckInputAttributes* lists[2] = { common, own };
-    uint32_t completion = UINT32_MAX;
-    for (uint32_t l = 0; l < 2; l += 1)
+    // Retain the two list facts that the final kernel checks need. Type attributes moved to a function chunk leave a
+    // nonempty list there even though ProcessDeclAttributes ignores their type effects on that later visit.
+    for (uint32_t pass = 0; pass < 2; pass += 1)
     {
-        const CheckInputAttributes* list = lists[l];
-        const uint32_t unknown = list != NULL && list->unknown_first != 0 ? list->unknown_first - 1 : UINT32_MAX;
-        completion = unknown < completion ? unknown : completion;
-        for (uint32_t i = 0; list != NULL && i < list->count; i += 1)
+        CheckInputAttributes* list = pass == 0 ? common : own;
+        if (list != NULL)
         {
-            completion = list->records[i].first + 1 < completion ? list->records[i].first + 1 : completion;
+            list->function_chunk = false;
+            for (uint32_t i = 0; i < list->count; i += 1)
+            {
+                CheckInputAttribute* attribute = list->records + i;
+                attribute->declaration_prefix = pass == 0;
+                list->function_chunk |= applies && !attribute->specifier_ignored && !attribute->specifier_applied &&
+                                        check_input_attribute_function_typed(reader, attribute);
+            }
         }
     }
+    // The declaration's type and then its subject checks complete after every parameter's checks.
+    const uint32_t completion = reader->attribute_completion;
     // Three passes over the lists: where it applies, the specifiers', the trailing ones and the chunks'; where it doesn't,
     // the chunks', the specifiers' and the trailing ones.
     for (uint32_t pass = 0; pass < 3; pass += 1)
@@ -5062,7 +5094,11 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
         {
             const CheckInputAttribute* attribute = list->records + i;
             const bool placed = !attribute->ignored && (specifiers || (chunks ? attribute->first < split : attribute->first >= split));
-            if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
+            if (placed && attribute->specifier_ignored && check_input_attribute_function_typed(reader, attribute))
+            {
+                check_input_attribute_function_type_warning(reader, attribute, base, type, name, split, completion);
+            }
+            else if (placed && applies && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_IGNORED_X86_32 &&
                 !check_input_attribute_kernel(reader, attribute) && list->error == CHECK_ATTRIBUTE_ERROR_NONE && check_input_attribute_pcs_valid(reader, attribute))
             {
                 check_input_attribute_unsupported_at(reader, attribute, completion);
@@ -5086,7 +5122,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, const 
                         here = before ? parts[p].type : here;
                     }
                 }
-                check_input_attribute_function_type_warning(reader, attribute, here, name, completion);
+                check_input_attribute_function_type_warning(reader, attribute, here, type, name, split, completion);
             }
         }
     }
@@ -5292,7 +5328,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     bool is_inline;
                     uint32_t storage;
                     const uint32_t start = i;
-                    const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline);
+                    const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline, true);
                     valid = parameter != 0 && !is_typedef && !is_inline && (storage == 0 || storage == C_NAME_REGISTER);
                     if (valid)
                     {
@@ -5542,13 +5578,14 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
                 if (type != 0)
                 {
+                    reader->attribute_completion = i;
                     // The type's attributes' warnings in clang's order (#147): a parameter's specifiers' are its frame's, a
                     // declaration's its run's.
                     const uint32_t split = frame->name != BUSTER_CHECK_NONE ? frame->name : frame->missing_name;
                     check_input_attribute_type_warnings(reader, frame->parameter ? frame->common_attributes : run->common_attributes, frame->attributes, type,
                                                         frame->name, split, parts, reverse, frame->base);
-                    type = check_input_declarator_abi(reader, frame->common_attributes, type, &abi_origin);
-                    type = check_input_declarator_abi(reader, frame->attributes, type, &abi_origin);
+                    type = check_input_declarator_abi(reader, frame->common_attributes, type, &abi_origin, false);
+                    type = check_input_declarator_abi(reader, frame->attributes, type, &abi_origin, false);
                 }
                 valid = type != 0;
                 const bool alignas_parameter = frame->parameter && ((frame->common_attributes != 0 && frame->common_attributes->has_alignas) ||
@@ -6237,7 +6274,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     bool is_inline;
                     uint32_t storage;
                     frame->member_begin = i;
-                    const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline);
+                    const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline, false);
                     valid = base != 0 && !is_typedef && !is_inline && storage == 0 && !reader->specifier_thread_local;
                     frame->member_base = valid ? base : 0;
                     frame->member_abi_origin = reader->specifier_abi_origin;
@@ -6274,7 +6311,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
                     uint8_t abi_origin = reader->declarator_abi_origin;
                     const CheckNoderefType* noderef = reader->declarator_noderef;
-                    type = check_input_declarator_abi(reader, attributes, type, &abi_origin);
+                    type = check_input_declarator_abi(reader, attributes, type, &abi_origin, false);
                     if (name != BUSTER_CHECK_NONE)
                     {
                         reader->output->explicit_abis[name] = abi_origin;
@@ -6532,7 +6569,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
         uint32_t storage = 0;
         reader->specifier_owner = BUSTER_CHECK_NONE;
         reader->specifier_pending = false;
-        const TypeId base = valid ? check_input_specifiers(reader, &i, body, &is_typedef, &storage, &is_inline) : 0;
+        const TypeId base = valid ? check_input_specifiers(reader, &i, body, &is_typedef, &storage, &is_inline, false) : 0;
         CheckInputAttributes* common = reader->specifier_attributes;
         const CheckNoderefType* base_noderef = reader->specifier_noderef;
         valid = valid && base != 0 && !reader->specifier_pending && !is_typedef && !is_inline && !reader->specifier_thread_local &&
@@ -7241,7 +7278,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_pending = false;
     const bool free_standing = !continuation && check_input_free_standing(parser, first, count);
     reader->specifier_free_standing = free_standing;
-    const TypeId base = !prepared ? 0 : continuation ? reader->declaration_bases[first] : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline);
+    const TypeId base = !prepared ? 0 : continuation ? reader->declaration_bases[first] : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
     reader->specifier_free_standing = false;
     reader->specifier_owner = BUSTER_CHECK_NONE;
     if (reader->specifier_pending)
@@ -7367,7 +7404,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         uint8_t abi_origin = reader->declarator_abi_origin;
         const CheckNoderefType* noderef = reader->declarator_noderef;
         // (The specifiers' function-type attributes have had their warnings with the declarator's, check_input_declarator_step.)
-        type = check_input_declarator_abi(reader, attributes, type, &abi_origin);
+        type = check_input_declarator_abi(reader, attributes, type, &abi_origin, false);
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
         {
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));
@@ -9001,7 +9038,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 bool is_inline;
                 uint32_t storage;
                 const uint32_t reports = reader->output->report_count;
-                TypeId type = check_input_specifiers(reader, &cursor, close, &is_typedef, &storage, &is_inline);
+                TypeId type = check_input_specifiers(reader, &cursor, close, &is_typedef, &storage, &is_inline, false);
                 CheckInputAttributes* specifier_attributes = reader->specifier_attributes;
                 uint32_t name;
                 uint32_t parameters;
