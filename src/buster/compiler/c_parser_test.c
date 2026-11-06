@@ -532,6 +532,18 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int y; void g(void) { y = 1; } struct x { int v; }; void h(void) { y = 2; } void f(void) { __attribute__(()) x = 1; }\n",
       "1:110: must use 'struct' tag to refer to type 'x'", "gnu89", true },
     { "struct x { int v; }; void f(void) { __attribute__(()) x(1); }\n", "1:55: must use 'struct' tag to refer to type 'x'", "c23", true },
+    // A tag a definition's parameter list declares is in scope in its body (C17 6.2.1p4; #1556's review), a block in it
+    // too, behind a parameter of its name none; a prototype's (a declaration's, or a parameter's in the list) ends with
+    // its list, a K&R definition's declarations' with them (clang's), and the body's with the body.
+    { "void f(struct S *p) { __attribute__(()) S = 1; }\n", "1:41: must use 'struct' tag to refer to type 'S'", "gnu89", true },
+    { "void f(struct S { int a; } p) { { __attribute__(()) S = 1; } }\n", "1:53: must use 'struct' tag to refer to type 'S'", 0, true },
+    { "void f(union U *p) { __attribute__(()) U; }\n", "1:40: must use 'union' tag to refer to type 'U'", "c89", true },
+    { "void f(enum E { A } e) { __attribute__(()) E = 1; }\n", "1:44: must use 'enum' tag to refer to type 'E'", "gnu89", true },
+    { "void f(struct S *S) { __attribute__(()) S = 1; }\n", "1:41: expected identifier or '('", "gnu89" },
+    { "int f(a) struct S *a; { __attribute__(()) S = 1; return 0; }\n", "", "c89" },
+    { "void g(struct S *p); void f(void) { __attribute__(()) S = 1; }\n", "", "c89" },
+    { "int f(void (*q)(struct S *r)) { __attribute__(()) S = 1; return 0; }\n", "", "c89" },
+    { "void f(struct S *p) { } void g(void) { __attribute__(()) S = 1; }\n", "", "c89" },
     { "void f(void) { __attribute__(()) x(1); }\n", "1:36: expected parameter declarator", "c23" },
     { "void f(__attribute__((aligned(8))) *p);\n", "1:37: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },

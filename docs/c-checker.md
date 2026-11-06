@@ -5472,7 +5472,10 @@ change, it refused such a declaration by name.
   ordinary identifier (`PARSE_MEANING_DECLARED`) from one it never bound, and
   it keeps the tags in scope (`ParseScalar.tags`), each declaration popped at
   its scope's end with its undo-log entry (the binding trace's, or one of its
-  own).
+  own). A tag a definition's parameter list declares is in scope in its body
+  (C17 6.2.1p4), kept with the parameters and bound again there. A
+  prototype's tag ends with its list, and a K&R definition's declarations'
+  tags end with them, as clang's do.
   The vector path's fallback parses one declaration with the file-scope
   typedef names alone, so a name it never bound there may be a file-scope
   object's or tag's, and the whole unit goes to the scalar parser

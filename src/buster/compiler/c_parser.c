@@ -1497,9 +1497,12 @@ struct ParseScalar
     uint8_t* log_meanings;
     uint32_t log_count;
     // What a definition's parameter list bound, by name and meaning, kept at its `)` for the body that may follow its
-    // declarator, which binds them again (C 6.2.1p4: their scope is the body's, not the rest of the declarator's).
+    // declarator, which binds them again (C 6.2.1p4: their scope is the body's, not the rest of the declarator's); and
+    // for an entry of a tag the list declared (#147, ParseScalar.tags), the tag's kind (0 for none) and name.
     uint32_t* kept_names;
     uint8_t* kept_meanings;
+    uint8_t* kept_tags;
+    uint32_t* kept_tag_names;
     uint32_t kept_count;
     // A K&R definition's parameter declarations' scope, which its body's `{` ends, and the first token of the current one.
     uint32_t body_scope;
@@ -1822,7 +1825,9 @@ BUSTER_INLINE void parse_scalar_restore(ParseScalar* parser, uint32_t mark)
 // A definition's parameter list ends: what it bound since `scope` (its parameters, and the tags and enumerators they
 // declare) is kept, with the meaning each name has now (a K&R list's names as ordinary identifiers, which they are in
 // the body), then unbound, so that what follows in the declarator sees what they hid. A body binds them again
-// (parse_scalar_open_body).
+// (parse_scalar_open_body). A tag the list declares keeps its kind at its entry, as its scope is the body's too (C17
+// 6.2.1p4: only a prototype's ends with the list), so that a name after a block item's GNU attributes finds it
+// (parse_scalar_attribute_name), as clang's does.
 static void parse_scalar_keep_parameters(ParseScalar* parser, uint32_t scope)
 {
     parser->kept_count = 0;
@@ -1832,12 +1837,23 @@ static void parse_scalar_keep_parameters(ParseScalar* parser, uint32_t scope)
         const uint8_t meaning = parser->meanings[name];
         parser->kept_names[parser->kept_count] = name;
         parser->kept_meanings[parser->kept_count] = meaning == PARSE_MEANING_KR_LISTED ? PARSE_MEANING_DECLARED : meaning;
+        parser->kept_tags[parser->kept_count] = 0;
         if (parser->binding_trace != 0 && parser->binding_trace->bindings->valid)
         {
             ParseBindingTrace* trace = parser->binding_trace;
             trace->kept_events[parser->kept_count] = trace->bindings->active[k + trace->builtin_count];
         }
         parser->kept_count += 1;
+    }
+    // The list's tags, each undone as parse_scalar_restore would, the latest first, its kind kept at its entry.
+    while (parser->tag_count > 0 && parser->tag_positions[parser->tag_count - 1] >= scope)
+    {
+        parser->tag_count -= 1;
+        const uint32_t name = parser->tag_names[parser->tag_count];
+        const uint32_t k = parser->tag_positions[parser->tag_count] - scope;
+        parser->kept_tags[k] = parser->tags[name];
+        parser->kept_tag_names[k] = name;
+        parser->tags[name] = parser->tag_hidden[parser->tag_count];
     }
     parse_scalar_restore(parser, scope);
 }
@@ -3658,8 +3674,9 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
 // A tag's name at `token`, whose keyword frame `frame` read (#147, ParseScalar.tags): declared in the current scope where
 // no tag of the name is in scope, or by its definition or a declaration of it alone (`struct x;`), and a use otherwise, as
 // the binding trace takes it (parse_binding_trace_tag), whose undo-log entry of name zero for the declaration then keeps
-// its scope; without the trace, an entry of its own. A tag in a definition's parameter list ends with the list
-// (parse_scalar_keep_parameters keeps the ordinary names alone).
+// its scope; without the trace, an entry of its own. A tag in a definition's parameter list is in scope in its body too
+// (parse_scalar_keep_parameters keeps it, parse_scalar_open_body binds it again); a K&R definition's declarations' tags
+// end with them, as clang's do.
 static void parse_scalar_bind_tag(ParseScalar* parser, uint32_t token, const ParseFrame* frame, bool definition, bool standalone)
 {
     const uint32_t name = parser->names[token];
@@ -3955,7 +3972,19 @@ static void parse_scalar_open_body(ParseScalar* parser, uint32_t i, uint32_t sco
     for (uint32_t k = 0; k < parser->kept_count; k += 1)
     {
         parse_binding_trace_rebind(parser, k);
+        const uint32_t entry = parser->log_count;
         parse_scalar_bind_name(parser, parser->kept_names[k], parser->kept_meanings[k]);
+        // A tag the parameter list declared (parse_scalar_keep_parameters), in scope again with its entry.
+        const uint8_t tag = parser->kept_tags[k];
+        if (tag != 0)
+        {
+            const uint32_t name = parser->kept_tag_names[k];
+            parser->tag_positions[parser->tag_count] = entry;
+            parser->tag_names[parser->tag_count] = name;
+            parser->tag_hidden[parser->tag_count] = parser->tags[name];
+            parser->tag_count += 1;
+            parser->tags[name] = tag;
+        }
     }
     parse_binding_trace_labels(parser, i);
     parser->kept_count = 0;
@@ -5806,6 +5835,8 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         .log_count = 0,
         .kept_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
         .kept_meanings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots),
+        .kept_tags = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots),
+        .kept_tag_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
         .kept_count = 0,
         .body_scope = BUSTER_PARSE_NONE,
         .kr_declaration = BUSTER_PARSE_NONE,
@@ -5831,7 +5862,7 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         .binding_trace = trace,
     };
     if (parser.frames == 0 || parser.candidates == 0 || parser.waiting == 0 || parser.log_names == 0 || parser.log_meanings == 0 || parser.kept_names == 0 ||
-        parser.kept_meanings == 0 || parser.statements == 0 || parser.brackets == 0 || parser.tags == 0 || parser.tag_positions == 0 || parser.tag_names == 0 ||
+        parser.kept_meanings == 0 || parser.kept_tags == 0 || parser.kept_tag_names == 0 || parser.statements == 0 || parser.brackets == 0 || parser.tags == 0 || parser.tag_positions == 0 || parser.tag_names == 0 ||
         parser.tag_hidden == 0)
     {
         result.out_of_memory = true;
