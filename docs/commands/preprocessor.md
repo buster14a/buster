@@ -31,6 +31,9 @@ requirements. [Command index](README.md).
   they have, so their `#include_next` reaches the C library's), and
   `-nobuiltininc` leaves out the compiler's headers, whichever they are.
   `-I-` is rejected (`please use -iquote instead`); a directory named `-` is `-I./-`.
+  A newline in `-D` is kept out of the directive and warned about. An `-include`
+  path containing `"` or a newline is not pasted into `#include "..."`.
+  `-E -fpreprocessed` is rejected; a `.i` input is already preprocessed.
   `docs/c-preprocessor.md` explains the design, the `clang -E`
   oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
   (`main.c` includes it; `./build/compiler test-preprocessor` runs them),
