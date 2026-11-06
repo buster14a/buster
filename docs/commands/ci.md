@@ -141,6 +141,11 @@ there at a time, so everything takes one lock:
 
   The objects must be the same bytes. It takes about 90 s
   (`docs/c-checker.md`, "The per-node machinery").
+  The one unbuildable base `8b1e14b089f462d09e5cfb9a0c44a9806f86422f` needs the #1518 weak-pragma build fix in its
+  temporary comparison worktree (`tools/ci/checker-baseline.sh`). The step reports the exact SHA and full patch, so
+  its measurements are explicitly against the repaired base. Other bases are unmodified and their build failures
+  still fail the job. `tests/ci/checker-baseline.sh` checks the pinned SHA, clean preimage, patch context, disclosure,
+  unrelated bases and failure propagation before PR hardware admission.
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
   before it decides, and fails the job (so that `test` runs everything) when

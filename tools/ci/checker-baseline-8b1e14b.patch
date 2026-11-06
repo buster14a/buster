@@ -1,0 +1,14 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -4268,7 +4268,9 @@ static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint3
+     bool weak = false;
+     for (uint32_t i = 0; !weak && i < count; i += 1)
+     {
+-        weak = pragmas->records[i].replacement == 0 && pragmas->records[i].name == name && pragmas->records[i].token <= use;
++        const CheckInputSymbolPragma* record = pragmas->records + i;
++        weak = record->kind == CHECK_SYMBOL_PRAGMA_WEAK && record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->name == name &&
++               record->token <= use;
+     }
+     return weak;
+ }
