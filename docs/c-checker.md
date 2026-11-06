@@ -5452,6 +5452,29 @@ change, it refused such a declaration by name.
   name, but a member's "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
+- **A name after a block item's GNU attributes.** Clang's statement reader
+  asks Sema what an identifier is before it reads a declaration
+  (`TryAnnotateName`), and a name of no type is an annotation token no
+  declarator starts with. So where GNU attributes make a block item a
+  declaration, an identifier there that names an object, a function, an
+  enumerator or a parameter in scope, or one before `(` (which clang declares
+  implicitly as a function), is its "expected identifier or '('", in every
+  standard (`int x; void f(void) { __attribute__(()) x = 1; }`); an undeclared
+  one is an implicit int's declarator, which C89 takes. The parser decides it
+  (`parse_scalar_attribute_name`): its bindings tell a name it bound as an
+  ordinary identifier (`PARSE_MEANING_DECLARED`) from one it never bound.
+  The vector path's fallback parses one declaration with the file-scope
+  typedef names alone, so a name it never bound there may be a file-scope
+  object's, and the whole unit goes to the scalar parser
+  (`ParseScalarResult.undecided`), which has every earlier declaration. An
+  empty list (`__attribute__(())`) is a declaration's, as clang's needs an
+  attribute to read a statement; after a control statement's head (`if
+  (1) __attribute__((unused)) x = 1;`, where C has no declaration) and before
+  a label's name they are a statement's, in the checker as in the parser
+  (`check_input_statement_attributes`). Not modelled: clang's typo
+  correction of an undeclared name (its "did you mean" and then this error),
+  a builtin's name without a call, and the "call to undeclared function"
+  error clang gives before this one in C99 and later.
 - **Statement attributes' handlers.** As clang's SemaStmtAttr takes them
   (`check_input_statement_attribute_kinds`), each with -Wignored-attributes'
   warning at the statement's first token: GNU's `noinline` and
@@ -5503,10 +5526,6 @@ change, it refused such a declaration by name.
   - An error of an attribute at `__clang__`'s scope that the checker
     refuses comes before clang's warning at the same token, where clang
     gives the warning first.
-  - An ordinary identifier the unit declares, after specifiers of
-    attributes alone (`int x; ... __attribute__(()) x = 1;`), is clang's
-    "expected identifier or '('" at it, which needs a lookup the parser
-    doesn't make: ours is the implicit int's error or "unknown type name".
 - **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
   order and lookups and what each kind of name keeps
   (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
@@ -5518,7 +5537,10 @@ change, it refused such a declaration by name.
   misspellings of every spelling, made by a fixed generator
   (`check_test_driver_attribute_typos`). It also asks clang every listed
   spelling again (`check_test_driver_unknown_attributes`). `test-parser`'s
-  snippets cover the statement and declaration forms against clang.
+  snippets cover the statement and declaration forms against clang, and
+  `check_test_driver_block_attributes` (`c_check_block_attribute_driver_test.c`)
+  the whole output, by both paths, of names after a block item's GNU
+  attributes, under C89, gnu89, gnu17 and gnu23.
 
 The vocabulary is regenerated where clang's changes, from the installed
 `clang` and its `libclang-cpp`, in a scratch directory:

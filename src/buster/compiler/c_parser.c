@@ -1374,7 +1374,10 @@ struct ParseFrame
 
 // What a name is bound as: an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
 // ordinary identifiers as far as parsing goes: one in the list being read, a definition's parameter its declarations
-// haven't declared yet, and one they have.
+// haven't declared yet, and one they have. PARSE_MEANING_ORDINARY is no binding the parse has seen (what a declarator
+// binds as an ordinary identifier, ParseFrame.name_meaning, before parse_scalar_bind makes it PARSE_MEANING_DECLARED):
+// clang's lookup at a block item's GNU attributes tells a declared name from an undeclared one
+// (parse_scalar_attribute_name).
 typedef enum ParseMeaning
 {
     PARSE_MEANING_ORDINARY,
@@ -1382,6 +1385,7 @@ typedef enum ParseMeaning
     PARSE_MEANING_KR_LISTED,
     PARSE_MEANING_KR_PARAMETER,
     PARSE_MEANING_KR_DECLARED,
+    PARSE_MEANING_DECLARED,
 } ParseMeaning;
 
 typedef enum ParseStatementState
@@ -1514,6 +1518,9 @@ struct ParseScalar
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
     uint32_t errors;
+    // Whether a block item's GNU attributes came before an identifier no binding of the parse names
+    // (ParseScalarResult.undecided).
+    bool undecided;
     // Optional source-event recorder. Null for syntax-only parsing and the vector fallback.
     ParseBindingTrace* binding_trace;
 };
@@ -1771,7 +1778,7 @@ BUSTER_INLINE void parse_scalar_bind_name(ParseScalar* parser, uint32_t name, ui
 BUSTER_INLINE void parse_scalar_bind(ParseScalar* parser, uint32_t token, uint8_t meaning, CBindingKind kind)
 {
     parse_binding_trace_declare(parser, token, C_BINDING_ORDINARY, kind, false);
-    parse_scalar_bind_name(parser, parser->names[token], meaning);
+    parse_scalar_bind_name(parser, parser->names[token], meaning == PARSE_MEANING_ORDINARY ? PARSE_MEANING_DECLARED : meaning);
 }
 
 BUSTER_INLINE void parse_scalar_restore(ParseScalar* parser, uint32_t mark)
@@ -1800,7 +1807,7 @@ static void parse_scalar_keep_parameters(ParseScalar* parser, uint32_t scope)
         const uint32_t name = parser->log_names[k];
         const uint8_t meaning = parser->meanings[name];
         parser->kept_names[parser->kept_count] = name;
-        parser->kept_meanings[parser->kept_count] = meaning == PARSE_MEANING_KR_LISTED ? PARSE_MEANING_ORDINARY : meaning;
+        parser->kept_meanings[parser->kept_count] = meaning == PARSE_MEANING_KR_LISTED ? PARSE_MEANING_DECLARED : meaning;
         if (parser->binding_trace != 0 && parser->binding_trace->bindings->valid)
         {
             ParseBindingTrace* trace = parser->binding_trace;
@@ -3238,6 +3245,21 @@ static uint32_t parse_scalar_first_gnu_attribute(const ParseScalar* parser, uint
     return result;
 }
 
+// Whether identifier `i`, after the GNU attributes that start a block item's declaration, is clang's "expected identifier
+// or '('" (#147): clang's statement reader asks Sema what the name is first (TryAnnotateName), and a name of no type
+// (an object, a function, an enumerator, a parameter, or one it declares implicitly as a function before a `(`) is an
+// annotation token no declarator starts with. A name no binding of the parse has, with no `(` after it, is an implicit
+// int's declarator, unless a file-scope declaration before the tokens names it (ParseScalarResult.undecided). Clang's
+// typo correction and builtins' names without a call aren't modelled.
+static bool parse_scalar_attribute_name(ParseScalar* parser, uint32_t i)
+{
+    const uint8_t meaning = parser->meanings[parser->names[i]];
+    const bool bound = meaning != PARSE_MEANING_ORDINARY && meaning != PARSE_MEANING_TYPEDEF;
+    const bool result = bound || parser->kinds[i + 1] == PARSE_KIND_L_PAREN;
+    parser->undecided |= !result;
+    return result;
+}
+
 // The token after a block item's attributes (parse_scalar_block_attribute), which isn't another's: whether they start a
 // declaration or the statement they are of. `head` after a control head or a label, `attributes` GNU ones that are each a
 // statement's, `gnu` any GNU one. An asm statement's GNU attributes (not a label's) are clang's error at the first
@@ -3263,6 +3285,11 @@ static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, Pa
         // A statement's attributes before a block's end, which clang's statement reader expects a statement after (C23's
         // after a label's name too).
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (!head && !attributes && !statement && !expression && gnu && kind == PARSE_KIND_IDENTIFIER && !parse_scalar_is_typedef_name(parser, i) &&
+             parse_scalar_attribute_name(parser, i))
+    {
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_AT_TOKEN);
     }
     else if (!head && !attributes && !statement && !expression)
     {
@@ -5621,6 +5648,10 @@ struct ParseScalarResult
     bool out_of_memory;
     // A typedef name was declared again at file scope as an ordinary identifier, which changes how what follows parses.
     bool retyped;
+    // A block item's GNU attributes came before an identifier that no binding of the parse names, and no `(` follows
+    // (parse_scalar_attribute_name): an implicit int's declaration where the name is undeclared, clang's error where an
+    // earlier file-scope declaration the tokens don't have declares it. Exact where the tokens start at the unit's.
+    bool undecided;
 };
 
 // Parses tokens [0, count) into `tree`, whose arrays have `count` entries, with the scratch arena's memory for its
@@ -5629,7 +5660,7 @@ struct ParseScalarResult
 BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                              ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace)
 {
-    ParseScalarResult result = { .errors = 0, .out_of_memory = false, .retyped = false };
+    ParseScalarResult result = { .errors = 0, .out_of_memory = false, .retyped = false, .undecided = false };
     const uint64_t mark = scratch->length;
     const uint64_t slots = (uint64_t)count + 2;
     ParseScalar parser = {
@@ -5670,6 +5701,7 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         .diagnostic_count = 0,
         .diagnostic_capacity = capacity,
         .errors = 0,
+        .undecided = false,
         .binding_trace = trace,
     };
     if (parser.frames == 0 || parser.candidates == 0 || parser.waiting == 0 || parser.log_names == 0 || parser.log_meanings == 0 || parser.kept_names == 0 ||
@@ -5718,6 +5750,7 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         }
         parse_scalar_restore(&parser, 0);
         result.errors = parser.errors;
+        result.undecided = parser.undecided;
         *diagnostic_count = parser.diagnostic_count;
     }
     arena_pop_to(scratch, mark);
@@ -8394,8 +8427,9 @@ struct ParseFallback
     // Top-level declarations the scalar parser parsed, and their tokens.
     uint32_t items;
     uint64_t tokens;
-    // The scalar parser found an error in one, ran out of memory, or saw one declare a typedef name again as an ordinary
-    // identifier: the whole unit goes to the scalar parser.
+    // The scalar parser found an error in one, ran out of memory, saw one declare a typedef name again as an ordinary
+    // identifier, or met a name only earlier file-scope declarations decide (ParseScalarResult.undecided): the whole unit
+    // goes to the scalar parser.
     bool errors;
 };
 
@@ -8414,8 +8448,9 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, 
     const ParseScalarResult parse = parse_scalar(input->kinds + begin, input->names + begin, input->flags + begin, end + 1 - begin, input->language, meanings, &tree,
                                                  input->scratch, input->diagnostics, input->diagnostic_capacity, &diagnostic_count);
     // A declaration that made a file-scope typedef name an ordinary one changes how the rest of the unit parses, which
-    // the kernels' type names don't know: the whole unit goes to the scalar parser.
-    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped;
+    // the kernels' type names don't know, and a name only the earlier file-scope declarations can decide
+    // (parse_scalar_attribute_name), which the scalar parser doesn't have here: the whole unit goes to the scalar parser.
+    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped || (parse.undecided && begin != 0);
     for (uint32_t j = begin; j <= end; j += 1)
     {
         kernels->parents[j] = kernels->parents[j] == BUSTER_PARSE_ROOT ? BUSTER_PARSE_ROOT : kernels->parents[j] + begin;
@@ -13066,7 +13101,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         const ParseScalarResult parsed = parse_tree_columns_reserve(parser, &parser->tree) ?
             parse_scalar(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, parser->tokens.count, parser->language, &parser->meanings, &parser->tree,
                          temporary, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
-            (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false };
+            (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false, .undecided = false };
         parser->errors = parsed.errors + parsed.out_of_memory;
         parser->fatal = parsed.out_of_memory ? PARSE_MESSAGE_OUT_OF_MEMORY : PARSE_MESSAGE_NONE;
         result = parser->errors == 0;
