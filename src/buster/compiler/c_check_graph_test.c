@@ -1017,9 +1017,62 @@ static void check_test_leaf_records(CheckTest* test)
     check_test_expect(test, differences == 0 && rows != 0 && merged_rows != 0, "graph leaf records and rows read back as their dense twin's, merged too");
 }
 
+// Both validators on a graph's leaf rows (#628, #1562's review): sixteen leaves, the first with a row, accepted whole; then
+// refused with its rows' column null, with more rows than their room, with a row past the rows (in a block, and on one
+// node, which the vector path takes by its exact tail), and with a row that holds another value than its record.
+static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
+{
+    const uint64_t mark = storage->length;
+    CheckGraph graph;
+    const bool ready = check_graph_initialize(&graph, storage, 16, 0);
+    check_test_expect(test, ready, "leaf rows' validation graph allocation");
+    for (uint32_t i = 0; ready && i < 16; i += 1)
+    {
+        check_test_leaf(&graph, i, check_test_integer(BUSTER_TYPE_INT, i == 0 ? (unsigned __int128)1 << 100 : i));
+    }
+    uint8_t pure[17];
+    CheckGraphValidation state;
+    uint32_t failed = 0;
+    uint32_t verdicts = 0;
+    for (uint32_t step = 0; ready && step < 6; step += 1)
+    {
+        CheckValue* const payloads = graph.leaf_payloads;
+        const uint32_t capacity = graph.leaf_payload_capacity;
+        const uint32_t row = graph.leaf_records[0].row;
+        const uint32_t flags = payloads[0].flags;
+        switch (step)
+        {
+            case 1: graph.leaf_payloads = NULL; break;
+            case 2: graph.leaf_payload_capacity = 0; break;
+            case 3: graph.leaf_records[0].row = graph.leaf_payload_count + 1; break;
+            case 4:
+            {
+                graph.leaf_records[0].row = graph.leaf_payload_count + 1;
+                graph.count = 1;
+                graph.leaf_count = 1;
+            } break;
+            case 5: payloads[0].flags ^= 1; break;
+            default: break;
+        }
+        const bool scalar = check_graph_validate(&graph, pure, &state, &failed);
+        const bool vector = check_graph_validate_vector(&graph, pure, &state, &failed);
+        verdicts += scalar == (step == 0) && vector == (step == 0);
+        graph.leaf_payloads = payloads;
+        graph.leaf_payload_capacity = capacity;
+        graph.leaf_records[0].row = row;
+        payloads[0].flags = flags;
+        graph.count = 16;
+        graph.leaf_count = 16;
+    }
+    check_test_expect(test, ready && graph.leaf_payload_count == 1 && verdicts == 6,
+                      "both validators accept a graph's leaf rows whole and refuse a null column, rows past their room, a row past the rows and a row unlike its record");
+    arena_pop_to(storage, mark);
+}
+
 static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     check_test_leaf_records(test);
+    check_test_leaf_rows_invalid(test, storage);
     check_test_graph_partial_allocations(test, table, storage);
     check_test_graph_argument_guards(test, table, storage, output, scratch);
     check_test_graph_barriers(test, storage, output, scratch);

@@ -1009,13 +1009,27 @@ static inline uint32_t check_graph_leaf_overload_head(const CheckGraph* graph, u
     return check_graph_leaf_head_at(graph, graph->leaf_slots[node]);
 }
 
+// Whether a leaf's record and its row hold the same value in the fields both hold: the field accessors read the record and
+// check_graph_leaf_at the row, which check_graph_write_leaf writes from one value.
+static bool check_graph_leaf_row_agrees(const CheckGraphLeaf* leaf, const CheckValue* value)
+{
+    return leaf->type == value->type && leaf->flags == value->flags && leaf->object == value->object && leaf->overload_head == value->overload_head &&
+           leaf->integer == (uint64_t)value->integer && leaf->category == (uint8_t)value->category && leaf->constant_kind == (uint8_t)value->constant_kind;
+}
+
 // Whether the leaf in slot `slot` is well formed, as the validators require it: its overload set one of the candidates, and
-// a record's row (#628) none or one of the graph's rows, which check_graph_validate_lists bounds by their room and column.
-// A row past them is refused, not read as none.
+// a record's row (#628) none or one of the graph's rows, which check_graph_validate_lists bounds by their room and column,
+// holding what the record holds. A row past them is refused, not read as none.
 static inline bool check_graph_leaf_valid_at(const CheckGraph* graph, uint32_t slot)
 {
-    const bool row = graph->dense_leaves != NULL || graph->leaf_records[slot].row <= graph->leaf_payload_count;
-    return row && check_graph_leaf_head_at(graph, slot) <= graph->overload_candidate_count;
+    bool valid = true;
+    if (graph->dense_leaves == NULL)
+    {
+        const CheckGraphLeaf* leaf = graph->leaf_records + slot;
+        valid = leaf->row <= graph->leaf_payload_count &&
+                (leaf->row == 0 || check_graph_leaf_row_agrees(leaf, graph->leaf_payloads + leaf->row - 1));
+    }
+    return valid && check_graph_leaf_head_at(graph, slot) <= graph->overload_candidate_count;
 }
 
 // Writes `value` as the leaf in slot `slot`: its record, and where it has more than a record holds, its whole value as a
