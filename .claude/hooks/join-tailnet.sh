@@ -4,9 +4,10 @@
 # which the allow rules in settings.json expect, and does nothing where TS_AUTHKEY or tailscale is missing, outside a
 # disposable session, or where the daemon is already up, keeps its identity in memory and reaches benchpress.
 #
-# It manages the daemon only in a disposable session: Claude Code's cloud (CLAUDE_CODE_REMOTE=true), a container whose
-# process 1 isn't an init system (Codex's cloud), or where BUSTER_TAILNET_DISPOSABLE=1 says so. On any other machine the
-# daemon and its state belong to the host: the hook leaves them alone, whatever TS_AUTHKEY says.
+# It manages the daemon only in a session positively identified as disposable: Claude Code's cloud
+# (CLAUDE_CODE_REMOTE=true), or an environment that sets BUSTER_TAILNET_DISPOSABLE=1 (Codex's cloud environment must, to
+# join). Neither process 1's name nor being in a container says that a host's daemon or its state is disposable. On any
+# other machine the daemon and its state belong to the host: the hook leaves them alone, whatever TS_AUTHKEY says.
 #
 # The environment may have started a daemon on the default socket already,
 # without HTTPS_PROXY in its environment: it dials the control server directly,
@@ -38,10 +39,7 @@ default_socket=$(realpath -m "$socket")
 
 disposable()
 {
-    local init
-    init=$(cat "$proc/1/comm" 2> /dev/null)
-    [ "${CLAUDE_CODE_REMOTE:-}" = true ] || [ "${BUSTER_TAILNET_DISPOSABLE:-}" = 1 ] ||
-        { [ -n "$init" ] && [ "$init" != systemd ] && [ "$init" != init ]; }
+    [ "${CLAUDE_CODE_REMOTE:-}" = true ] || [ "${BUSTER_TAILNET_DISPOSABLE:-}" = 1 ]
 }
 
 # The value of tailscaled's flag NAME in process PID's command line, in any of Go's forms (-NAME=V, --NAME=V, -NAME V,

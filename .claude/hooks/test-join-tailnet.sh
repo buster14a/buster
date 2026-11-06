@@ -63,6 +63,9 @@ fixture()
     echo "$1" > "$FIX/proc/1/comm"
     echo persistent > "$FIX/root/var/lib/tailscale/tailscaled.state"
     default=$FIX/root/var/run/tailscale/tailscaled.sock
+    # The default socket as the host's daemon left it.
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$default"
+    socket_inode=$(stat -c %i "$default")
 }
 
 # A daemon with these arguments: a sleep, orphaned so that its parent reaps it when it's stopped, whose command line
@@ -99,10 +102,12 @@ stopped()
     ! alive "$1" || fail "daemon $1 ($(tr '\0' ' ' < "$FIX/proc/$1/cmdline")) is still running"
 }
 
+# Nothing started, and the default socket the one the fixture made.
 nothing_started()
 {
     [ ! -e "$FIX/started" ] || fail "a daemon was started: $(cat "$FIX/started")"
     [ ! -e "$FIX/up" ] || fail "tailscale up ran: $(cat "$FIX/up")"
+    [ -S "$default" ] && [ "$(stat -c %i "$default")" = "$socket_inode" ] || fail "the default socket was removed or replaced"
 }
 
 # One daemon started, in memory on the default socket, and logged in with the key.
@@ -181,12 +186,27 @@ run_hook CLAUDE_CODE_REMOTE=true
 stopped "$last"
 replaced
 
-name='a container whose process 1 is not an init system: a healthy daemon with its state on disk'
+name='a persistent host whose process 1 is runit: a healthy daemon with its state on disk'
+fixture runit
+daemon --state=/var/lib/tailscale/tailscaled.state
+run_hook
+survives "$last"
+nothing_started
+
+name='a persistent host whose process 1 is s6-svscan: a daemon that answers no status'
+fixture s6-svscan
+daemon "--socket=$FIX/root/run/tailscale/tailscaled.sock"
+touch "$FIX/status-fails"
+run_hook
+survives "$last"
+nothing_started
+
+name='a container without CLAUDE_CODE_REMOTE or the opt-in: a healthy daemon with its state on disk'
 fixture process_api
 daemon --statedir=/var/lib/tailscale
 run_hook
-stopped "$last"
-replaced
+survives "$last"
+nothing_started
 
 name='BUSTER_TAILNET_DISPOSABLE=1 on a host with an init system'
 fixture systemd

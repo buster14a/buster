@@ -20,10 +20,12 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   status` lists peers that no ping reaches). A session whose checkout predates
   the hook, or whose hook ran before the daemon went stale, runs it again by
   hand: `bash .claude/hooks/join-tailnet.sh`.
-- **Only in a disposable session:** the hook manages the daemon only in Claude
-  Code's cloud (`CLAUDE_CODE_REMOTE=true`), in a container whose process 1
-  isn't an init system (Codex's cloud), or where `BUSTER_TAILNET_DISPOSABLE=1`
-  says so. On any other machine it leaves the daemon and its state alone. A
+- **Only in a disposable session:** the hook manages the daemon only where the
+  session is positively identified as disposable: Claude Code's cloud
+  (`CLAUDE_CODE_REMOTE=true`), or an environment that sets
+  `BUSTER_TAILNET_DISPOSABLE=1`, as Codex's cloud environment must to join.
+  Neither process 1's name nor a container says that a host's daemon is
+  disposable. On any other machine it leaves the daemon and its state alone. A
   daemon on another socket is never touched; one whose `--socket` names the
   default socket, in any of the flag's forms or through `/var/run`'s link to
   `/run`, is on the default socket. `.claude/hooks/test-join-tailnet.sh` (the
