@@ -1340,7 +1340,10 @@ decisions in #154 and on #117's configuration):
   `section`, `target`, `transparent_union`, `used`, `vector_size`, `visibility`
   and `weak`. Paired underscores are normalized. C attribute queries accept
   the corresponding `gnu::` names (`ext_vector_type` and `overloadable` use
-  `clang::`) and return **201910** for standard `fallthrough`.
+  `clang::`) and return **201910** for standard `fallthrough`. Standard
+  `deprecated` and `maybe_unused` return **201904** and **202106** now that
+  the checker implements their diagnostics (#1475), including their paired
+  underscore spellings and their extension use in earlier C modes.
   `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
   and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
   `__has_extension` also exposes these implemented constructs in older modes.
@@ -1407,12 +1410,10 @@ tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
 these implemented paths does not remove their argument, subject or ABI limits.
 
-Accepted but unimplemented attributes remain zero, including `always_inline`,
-`noinline`, `format`, `noreturn`, `unused`, `nodiscard`,
-`maybe_unused` and `deprecated`. The last three have parsed records but no
-implemented diagnostic consumer; reporting their C23 date codes would falsely
-advertise that consumer. The unpublished common symbols' effect also
-remains zero. Generic GNU atomic load/store/exchange/compare-exchange,
+Standard `nodiscard` remains zero: its parsed record has no discarded-result
+diagnostic consumer yet (#1394). The `deprecated` and `maybe_unused` query fix
+does not enable other attribute spellings or promise that consumer; #1475's
+`nodiscard` request remains open. Generic GNU atomic load/store/exchange/compare-exchange,
 GNU lock-free queries and test-and-set/clear remain unadvertised; scalar GNU atomics and
 implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
