@@ -1869,9 +1869,13 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
             objects[i] = check_test_random(test) % 3 == 0 ? 0 : object;
             declarations[i] = check_test_random(test) % 4 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % (count + 2);
         }
+        // Every other round labels few objects, as a unit with glibc's headers does, so that the vector kernels' filter
+        // (check_input_filter_bits) leaves most groups of 16 tokens ungathered; the others label a quarter of them.
+        const bool sparse_labels = round % 2 != 0;
         for (uint32_t w = 0; w < object_words; w += 1)
         {
-            labelled[w] = check_test_random(test) & check_test_random(test);
+            const uint32_t draw = check_test_random(test);
+            labelled[w] = !sparse_labels ? draw & check_test_random(test) : draw % 8 == 0 ? UINT32_C(1) << (check_test_random(test) % 32) : 0;
         }
         arena_pop_to(&sparse, 0);
         const CheckInput input = {
@@ -1903,6 +1907,7 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
             memset(declared, 0xa5, (uint64_t)token_words * sizeof(uint32_t));
             check_input_asm_labelled_tokens(&input, labelled, declared, scalar != 0);
             differences += memcmp(declared, expected_declared, (uint64_t)token_words * sizeof(uint32_t)) != 0;
+            const CheckInputFilter filter = check_input_filter_bits(declared, token_words);
             for (uint32_t first = 0; first < count; first += 16)
             {
                 uint32_t mask = 0;
@@ -1913,7 +1918,7 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
                     mask |= marked || every ? UINT32_C(1) << lane : 0;
                     uses += marked && scalar == 0;
                 }
-                differences += check_input_asm_labelled_uses(&input, declared, first, count, scalar != 0) != mask;
+                differences += check_input_asm_labelled_uses(&input, declared, &filter, first, count, scalar != 0) != mask;
             }
         }
     }
