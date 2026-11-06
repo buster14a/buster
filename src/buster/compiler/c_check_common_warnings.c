@@ -3504,10 +3504,85 @@ static bool check_common_enum_value(const CheckInput* input, const Parser* parse
 
 // -Wswitch: an enum selector and case labels that name every handled enumerator, with no default. A case whose
 // expression is not a single enumerator name leaves the answer to a full constant evaluator.
+// The unit-wide indexes the enum switches read (#1348), built at the first one: the program's cases sorted by owner
+// (stable, so each switch's cases keep the program's order) and each enumerator token's first retained value. A switch
+// then finds its cases by a binary search and an enumerator's value by one load, not a scan of the unit's.
+typedef struct CheckCommonSwitchIndex CheckCommonSwitchIndex;
+struct CheckCommonSwitchIndex
+{
+    uint32_t* case_owners;
+    uint32_t* case_order;
+    uint32_t* enum_values;
+    bool built;
+};
+
+static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parser* parser, const CheckInput* input, const CheckProgram* program,
+                                      Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    index->built = true;
+    const uint32_t cases = program != NULL ? program->case_count : 0;
+    uint32_t* owners = cases != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* order = owners != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* owners_out = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* order_out = owners_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, cases) : NULL;
+    uint32_t* digits = order_out != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, 2049) : NULL;
+    if (digits != NULL)
+    {
+        for (uint32_t c = 0; c < cases; c += 1)
+        {
+            owners[c] = program->cases[c].owner;
+            order[c] = c;
+        }
+        // An LSD radix sort, 11 bits a pass: each pass is stable, so equal owners keep the program's order.
+        for (uint32_t shift = 0; shift < 33; shift += 11)
+        {
+            memset(digits, 0, 2049 * sizeof(uint32_t));
+            for (uint32_t c = 0; c < cases; c += 1)
+            {
+                digits[((owners[c] >> shift) & 0x7ff) + 1] += 1;
+            }
+            for (uint32_t d = 1; d < 2049; d += 1)
+            {
+                digits[d] += digits[d - 1];
+            }
+            for (uint32_t c = 0; c < cases; c += 1)
+            {
+                const uint32_t at = digits[(owners[c] >> shift) & 0x7ff]++;
+                owners_out[at] = owners[c];
+                order_out[at] = order[c];
+            }
+            uint32_t* swap = owners;
+            owners = owners_out;
+            owners_out = swap;
+            swap = order;
+            order = order_out;
+            order_out = swap;
+        }
+        index->case_owners = owners;
+        index->case_order = order;
+    }
+    uint32_t* values = input->enum_values != NULL && count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    if (values != NULL)
+    {
+        memset(values, 0xff, (uint64_t)count * sizeof(uint32_t));
+        for (uint32_t i = input->enum_value_count; i-- > 0;)
+        {
+            const uint32_t token = input->enum_values[i].token;
+            if (token < count)
+            {
+                values[token] = i;
+            }
+        }
+        index->enum_values = values;
+    }
+}
+
 static void check_common_switches(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
+    CheckCommonSwitchIndex index = { 0 };
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     static const uint8_t roles[] = { PARSE_ROLE_LEAF_RIGHT };
     CheckCommonScan scan = { 0 };
@@ -3543,6 +3618,10 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         {
             continue;
         }
+        if (!index.built)
+        {
+            check_common_switch_index(&index, parser, input, program, scratch);
+        }
         const uint32_t body = closer + 1 < count ? closer + 1 : count;
         const uint32_t body_end = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? check_common_parent(parser, body) : count;
         bool has_default = false;
@@ -3553,7 +3632,22 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t case_bound = body_end > body ? body_end - body : 0;
         uint32_t* found = case_bound != 0 && program != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, case_bound) : NULL;
         uint32_t found_count = 0;
-        if (found != NULL)
+        if (found != NULL && index.case_owners != NULL)
+        {
+            uint32_t low = 0;
+            uint32_t high = program->case_count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = index.case_owners[middle] < closer ? middle + 1 : low;
+                high = index.case_owners[middle] < closer ? high : middle;
+            }
+            for (uint32_t k = low; k < program->case_count && index.case_owners[k] == closer && found_count < case_bound; k += 1)
+            {
+                found[found_count++] = index.case_order[k];
+            }
+        }
+        else if (found != NULL)
         {
             for (uint32_t c = 0; c < program->case_count; c += 1)
             {
@@ -3634,7 +3728,9 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
             {
                 const uint32_t name = parser->tokens.names[at];
                 unsigned __int128 value = 0;
-                values_known = check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                const uint32_t retained = index.enum_values != NULL ? index.enum_values[at] : BUSTER_CHECK_NONE;
+                values_known = index.enum_values != NULL ? retained != BUSTER_CHECK_NONE : check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                value = retained != BUSTER_CHECK_NONE ? input->enum_values[retained].value : value;
                 TypeId value_type = input->declared_types[at];
                 value_type = value_type != 0 ? type_unqualified(type_strip_aligned(types, value_type)) : 0;
                 if (value_type != 0 && types->types.kind[type_index(value_type)] == BUSTER_TYPE_KIND_ENUM)
