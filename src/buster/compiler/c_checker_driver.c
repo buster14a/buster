@@ -78,6 +78,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
         case CHECK_INPUT_KR_IMPLICIT_INT: result = "parameter was not declared; ISO C99 and later do not support implicit int"; break;
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
+        case CHECK_INPUT_DIRECT_INITIALIZER_ARRAY: result = "array initializer must be an initializer list or string literal"; break;
+        case CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED: result = "initializer for a variable with deduced type contains multiple expressions"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
         case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
@@ -229,6 +231,10 @@ static String8 check_driver_attribute_spelling(const Parser* parser, const Prepr
 
 static String8 check_warning_attribute_normalized(String8 name);
 
+// This argument error has no source spelling to interpolate. The corpus's first-error record and the driver's
+// complete diagnostic stream share it, including when a later parse error requires a resumed view.
+static const char check_driver_alignment_power[] = "requested alignment is not a power of 2";
+
 // An attribute argument's error (#147, CHECK_INPUT_ATTRIBUTE_ARGUMENT: c_check_attribute.c's CheckAttributeArgumentError
 // in `detail`'s low byte, a parameter's place above it) as clang words it, the attribute named from its first token
 // (`first`) as each message names it: an applied attribute's normalized name (aligned's), the parsed attribute's (a GNU
@@ -262,7 +268,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_AN_INTEGER_CONSTANT: snprintf(text, capacity, "'%s' attribute requires an integer constant", parsed); break;
         case CHECK_ARGUMENT_PARAMETER_INTEGER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an integer constant", parsed, number); break;
         case CHECK_ARGUMENT_EXT_VECTOR_INTEGER: snprintf(text, capacity, "ext_vector_type attribute requires an integer constant"); break;
-        case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "requested alignment is not a power of 2"); break;
+        case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "%s", check_driver_alignment_power); break;
         case CHECK_ARGUMENT_ZERO_VECTOR: snprintf(text, capacity, "zero vector size"); break;
         case CHECK_ARGUMENT_REGPARM_RANGE: snprintf(text, capacity, "'regparm' parameter must be between 0 and 6 inclusive"); break;
         case CHECK_ARGUMENT_OUT_OF_BOUNDS: snprintf(text, capacity, "'%s' attribute parameter %u is out of bounds", parsed, number); break;
@@ -455,7 +461,9 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
     const CheckInputMsPragma* layout = check_input_ms_report(input, report);
     return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
            section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : fp != NULL ? check_input_fp_error_message(fp->error) :
-           layout != NULL ? "this pragma cannot appear in struct declaration" : check_driver_input_message(report->message);
+           layout != NULL ? "this pragma cannot appear in struct declaration" :
+           report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
+           check_driver_alignment_power : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)
@@ -2237,6 +2245,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                             "'%.*s%s%.*s' attribute does not appear on the first declaration", (int)scope.length, scope.pointer,
                                                             scoped ? "::" : "", (int)attribute.length, attribute.pointer);
                             }
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED && input->reports[index].subject != 0 &&
+                                 input->reports[index].subject - 1 < count)
+                        {
+                            const uint32_t declaration = input->reports[index].subject - 1;
+                            const uint32_t name = parser->tokens.names[declaration];
+                            const bool c23 = input->reports[index].detail != 0;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                 "initializer for variable '%.*s' with type '%s' contains multiple expressions",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name), c23 ? "auto" : "__auto_type");
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)

@@ -336,6 +336,12 @@ static void check_test_program_asm_goto(CheckTest* test, const char* clang)
 
 static void check_test_program_asm(CheckTest* test, const char* clang)
 {
+    // F3-prefixed scans work on baseline too. Compare with clang on the same machine: REP BSR may execute as LZCNT.
+    check_test_program_source(test,
+        "int tested(int n){unsigned x=(unsigned)n|256u,lo,hi;"
+        "__asm__(\"rep bsfl %1,%0\" : \"=r\"(lo) : \"r\"(x) : \"cc\");"
+        "__asm__(\"rep bsrl %1,%0\" : \"=r\"(hi) : \"r\"(x) : \"cc\");return (int)(lo+hi*32u);}",
+        "asm-rep-scans", clang);
     check_test_program_asm_room(test);
     check_test_program_asm_placement(test);
     // Statements placed in their caller (#1059), each run against clang's build: values live across them in Tier 0's

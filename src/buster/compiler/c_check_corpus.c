@@ -35,6 +35,7 @@ struct CheckCorpusPath
     bool undefined_checked;
     Arena scratch;
     Arena prefix_arena;
+    CheckResumed* resumed;
     CheckPrefix* prefix;
     CheckRepair* repair;
     CheckCorpusPath* repaired;
@@ -847,20 +848,30 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         path->parsed = parsed && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE;
         path->resource = parser->fatal != PARSE_MESSAGE_NONE;
     }
+    const Parser* recovered = parser;
     const Parser* view = parser;
     bool semantic = path->parsed;
     if (ready && !path->parsed && !path->resource)
     {
         path->prefix_arena = arena_reserve(UINT64_C(1) << 36);
         path->scratch = arena_reserve(UINT64_C(1) << 36);
+        path->resumed = BUSTER_ARENA_PUSH_ARRAY(&path->prefix_arena, CheckResumed, 1);
         path->prefix = BUSTER_ARENA_PUSH_ARRAY(&path->prefix_arena, CheckPrefix, 1);
-        ready = path->prefix != 0 && path->scratch.base != 0;
+        ready = path->resumed != NULL && path->prefix != NULL && path->scratch.base != NULL;
         if (ready)
         {
-            const CheckPrefixStatus status = check_prefix_make(path->prefix, parser, &path->prefix_arena, &path->scratch);
+            const CheckPrefixStatus status = check_prefix_resume(path->resumed, parser, &path->prefix_arena, &path->scratch);
             path->resource |= status == CHECK_PREFIX_RESOURCE;
-            semantic = status == CHECK_PREFIX_READY;
-            view = semantic ? &path->prefix->parser : parser;
+            recovered = status == CHECK_PREFIX_READY ? &path->resumed->parser : parser;
+            semantic = recovered != parser && recovered->errors == 0;
+            view = recovered;
+            if (!semantic && !path->resource)
+            {
+                const CheckPrefixStatus prefix = check_prefix_make(path->prefix, recovered, &path->prefix_arena, &path->scratch);
+                path->resource |= prefix == CHECK_PREFIX_RESOURCE;
+                semantic = prefix == CHECK_PREFIX_READY;
+                view = semantic ? &path->prefix->parser : recovered;
+            }
         }
     }
     if (ready && semantic)
@@ -1063,53 +1074,26 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         check_corpus_late_diagnostics(path, view, pp, path->position);
     }
     check_corpus_warning_diagnostics(path, view, BUSTER_CHECK_NONE, NULL);
-    if (!path->parsed && path->token == BUSTER_CHECK_NONE)
-    {
-        // A clean semantic prefix never accepts the failed original parse or turns its cutoff into TU end.
-        path->phase = "parse";
-        const ParseTestOutcome outcome = parse_test_outcome(parser, pp);
-        path->line = outcome.line;
-        path->column = outcome.column;
-        snprintf(path->message, sizeof(path->message), "%s", outcome.message);
-        for (uint32_t report = 0; report < parser->diagnostic_count && path->token == BUSTER_CHECK_NONE; report += 1)
-        {
-            const ParseDiagnostic* diagnostic = parser->diagnostics + report;
-            if (diagnostic->error)
-            {
-                path->token = diagnostic->token;
-                path->position = path->token;
-                path->pragma = 0;
-                const uint32_t location = parse_diagnostic_location(parser, pp, diagnostic);
-                const char* name = 0;
-                uint32_t length = 0;
-                pp_presumed(pp, location, &name, &length);
-                snprintf(path->file, sizeof(path->file), "%.*s", (int)length, name != 0 ? name : "");
-            }
-        }
-    }
-    else
-    {
-        check_corpus_location(path, view, pp);
-    }
+    check_corpus_location(path, view, pp);
     if (ready && !path->parsed && !path->resource)
     {
         // Diagnostic-only recovery retains the original parse rejection and uses only whitelisted reports.
-        check_corpus_repair(path, parser, pp, BUSTER_SCALAR_PATH(scalar));
+        check_corpus_repair(path, recovered, pp, BUSTER_SCALAR_PATH(scalar));
     }
-    if (ready && !path->parsed && !path->resource && parser->tokens.pragma_count != 0)
+    if (ready && !path->parsed && !path->resource && recovered->tokens.pragma_count != 0)
     {
         // Unknown-state directives do not depend on the validity of a surrounding unfinished expression.
         // Their original insertion point can precede the parse lookahead while lying beyond every safe tree.
         path->original_pragmas = BUSTER_ARENA_PUSH_ARRAY(&path->prefix_arena, CheckInput, 1);
         const bool retained = path->original_pragmas != NULL &&
-                              check_diagnostic_original_pragmas(path->original_pragmas, parser, pp, check_diagnostic_parse_end(parser),
+                              check_diagnostic_original_pragmas(path->original_pragmas, recovered, pp, check_diagnostic_parse_end(recovered),
                                                                 &path->prefix_arena, &path->scratch);
         path->resource |= !retained;
         uint32_t token = BUSTER_CHECK_NONE;
         uint32_t source = BUSTER_CHECK_NONE;
         const bool promoted = retained && check_diagnostic_first_pragma_error_mode(path->original_pragmas, BUSTER_CHECK_NONE, &token, &source, suppress_warnings);
         if (promoted && (token < path->position || (token == path->position &&
-            (strcmp(path->phase, "parse") == 0 || source < check_corpus_source(path, parser)))))
+            (strcmp(path->phase, "parse") == 0 || source < check_corpus_source(path, recovered)))))
         {
             path->token = token;
             path->position = token;
@@ -1128,22 +1112,59 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             }
             path->phase = "promoted-warning";
             snprintf(path->message, sizeof(path->message), "%s", pragma_message != NULL ? pragma_message : check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
-            check_corpus_location(path, parser, pp);
+            check_corpus_location(path, recovered, pp);
         }
     }
     if (path->initialized)
     {
-        path->resource |= !check_initializers_warning_context(&path->warning_events, &path->input, parser, &path->types, &path->scratch);
+        path->resource |= !check_initializers_warning_context(&path->warning_events, &path->input, view, &path->types, &path->scratch);
         if (path->parsed && path->adapted && path->checked && path->stream.report_count == 0 && path->initializers.status == CHECK_INIT_OK)
         {
             CheckInput uses;
             const CheckWarningEvents initializers = check_warning_view(&path->warning_events);
             path->undefined_checked = check_initializers_warning_uses(&uses, &path->input, &initializers, &path->warning_arena) &&
-                                      check_warning_undefined_internal(&path->undefined_warnings, &uses, parser, &path->types, &path->stream, &path->scratch);
+                                      check_warning_undefined_internal(&path->undefined_warnings, &uses, view, &path->types, &path->stream, &path->scratch);
             path->resource |= !path->undefined_checked;
         }
     }
-    check_corpus_first_warning(path, parser, pp);
+    check_corpus_first_warning(path, view, pp);
+    if (!path->parsed)
+    {
+        // Resumed semantics can diagnose later declarations. Compare publication positions in the common PP stream,
+        // never an original token index with an inserted-token index, and preserve the original parse rejection.
+        Parser printed = *parser;
+        printed.diagnostics = recovered != parser ? path->resumed->diagnostics : parser->diagnostics;
+        printed.diagnostic_count = recovered != parser ? path->resumed->diagnostic_count : parser->diagnostic_count;
+        const uint32_t semantic_source = path->position == BUSTER_CHECK_NONE ? pp->output.count + 1 :
+                                         check_driver_publication_position(recovered, pp, path->position, pp->output.count);
+        for (uint32_t report = 0; report < printed.diagnostic_count; report += 1)
+        {
+            const ParseDiagnostic* diagnostic = printed.diagnostics + report;
+            if (diagnostic->error)
+            {
+                const uint32_t source = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
+                if (source <= semantic_source)
+                {
+                    const ParseTestOutcome outcome = parse_test_outcome(&printed, pp);
+                    path->phase = "parse";
+                    path->line = outcome.line;
+                    path->column = outcome.column;
+                    path->token = diagnostic->token;
+                    path->position = path->token;
+                    path->pragma = 0;
+                    path->warning_token = BUSTER_CHECK_NONE;
+                    path->warning_source = BUSTER_CHECK_NONE;
+                    snprintf(path->message, sizeof(path->message), "%s", outcome.message);
+                    const uint32_t location = parse_diagnostic_location(parser, pp, diagnostic);
+                    const char* name = NULL;
+                    uint32_t length = 0;
+                    pp_presumed(pp, location, &name, &length);
+                    snprintf(path->file, sizeof(path->file), "%.*s", (int)length, name != NULL ? name : "");
+                }
+                break;
+            }
+        }
+    }
     return path->parsed && path->adapted && path->programmed && path->warning_token == BUSTER_CHECK_NONE && !path->resource;
 }
 
@@ -2063,10 +2084,12 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = a->prefix->status == b->prefix->status && a->prefix->end == b->prefix->end && a->prefix->diagnostic == b->prefix->diagnostic;
     }
-    const bool prefix = a->prefix != 0 && a->prefix->status == CHECK_PREFIX_READY;
-    const bool trees = a->parsed || prefix;
-    const Parser* left_parser = prefix ? &a->prefix->parser : x;
-    const Parser* right_parser = prefix && b->prefix != 0 ? &b->prefix->parser : y;
+    const bool prefix = a->prefix != NULL && a->prefix->status == CHECK_PREFIX_READY;
+    const bool resumed = a->resumed != NULL && a->resumed->status == CHECK_PREFIX_READY;
+    const bool other_resumed = b->resumed != NULL && b->resumed->status == CHECK_PREFIX_READY;
+    const bool trees = a->parsed || prefix || (resumed && a->resumed->parser.errors == 0);
+    const Parser* left_parser = prefix ? &a->prefix->parser : resumed ? &a->resumed->parser : x;
+    const Parser* right_parser = prefix && b->prefix != NULL ? &b->prefix->parser : other_resumed ? &b->resumed->parser : y;
     equal = equal && left_parser->tokens.count == right_parser->tokens.count && left_parser->tokens.pragma_count == right_parser->tokens.pragma_count;
     for (uint32_t token = 0; equal && trees && token < left_parser->tokens.count; token += 1)
     {
@@ -2335,7 +2358,21 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
 
 static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* b, const Parser* x, const Parser* y)
 {
-    bool equal = check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
+    bool equal = (a->resumed == NULL) == (b->resumed == NULL);
+    if (equal && a->resumed != NULL)
+    {
+        equal = a->resumed->status == b->resumed->status && a->resumed->inserted == b->resumed->inserted && a->resumed->discarded == b->resumed->discarded &&
+                a->resumed->diagnostic_count == b->resumed->diagnostic_count;
+        for (uint32_t i = 0; equal && i < a->resumed->diagnostic_count; i += 1)
+        {
+            const ParseDiagnostic* left = a->resumed->diagnostics + i;
+            const ParseDiagnostic* right = b->resumed->diagnostics + i;
+            equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
+                    left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed &&
+                    left->resume_delete == right->resume_delete && left->resume_end == right->resume_end;
+        }
+    }
+    equal = equal && check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
                  (a->repaired == NULL) == (b->repaired == NULL) && (a->original_pragmas == NULL) == (b->original_pragmas == NULL);
     if (equal && a->original_pragmas != NULL)
     {
