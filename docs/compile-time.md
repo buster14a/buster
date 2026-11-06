@@ -915,8 +915,9 @@ base pages the 9.1 MB of the values' pages that the records don't touch.
 On the 9700X, CPU 2 under the host's lock, main `ec5f0f6b` against the change
 (`9cfc0f50`), built with `BUSTER_HOST_ARCH=znver5`, measured as the attributes'
 change was: 8 interleaved rounds of `perf stat -r 3`, then `measure-compile
---runs 11` of each with the other as its reference, and one `--time-stages` run
-of each. Every object is the same bytes by both paths, on 8 lanes and with
+--runs 11` of each with the other as its reference, all of them under one hold
+of the host's lock (about 20 seconds), and one `--time-stages` run of each under
+another. Every object is the same bytes by both paths, on 8 lanes and with
 `-g`.
 
 | measure | main | records |
