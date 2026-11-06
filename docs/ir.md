@@ -259,7 +259,9 @@ block are structurally valid; removing trivial phis is an SSA construction/clean
 assumption imposed by this representation.
 
 `ir_build_uses` fully verifies the function, then counts uses, prefix-sums the
-counts and fills `IrUses`. `offsets` has `instruction_count + 1` entries;
+counts and fills `IrUses`. A caller that has just verified the function, as the
+optimizer's preparation has, calls `ir_cfg_validated` and `ir_uses_validated`,
+which build the same arrays without verifying it again (#786). `offsets` has `instruction_count + 1` entries;
 `uses` contains `(instruction, operand)` pairs. Positions 0/1/2 denote a/b/c,
 and 3 plus the argument/incoming index denotes a call or phi side operand.
 Each slice is stable in instruction/operand order, and repeated operands produce
@@ -271,24 +273,37 @@ are accumulated in u64 and checked before becoming u32 offsets.
 
 `ir_verify` checks common instruction rules 16 rows at a time. Byte-permute tables
 classify operand roles and semantic rules; type-set membership, operand/result
-agreement and terminator masks are vector comparisons. Indexed type reads use
-bounded scalar byte loads into the batch, avoiding hardware gathers and accidental
-four-byte reads from byte columns. Constants, calls, phis, switches and conversions
-use exact scalar handling; a failing vector batch also uses the scalar rule to
-produce the same diagnostic. `ir_verify_scalar` checks one instruction at a time.
-Both return the same `IrCheck` fields, including the first error location.
+agreement and terminator masks are vector comparisons. An operand's type is a
+byte permute of two registers holding the 128 types that end with the batch's
+own (all of a function of at most 128 instructions), or of one holding the
+function's first 64 (its parameters' and entry constants'); only a value in
+neither is a byte load of its own, so no read is a hardware gather or an
+accidental four-byte read from a byte column (`ir_operand_types`, #786).
+Constants, calls, phis, switches and conversions use exact scalar handling; a
+failing vector batch also uses the scalar rule to produce the same diagnostic.
+`ir_verify_scalar` checks one instruction at a time. Both return the same
+`IrCheck` fields, including the first error location.
 
 The graph phase checks phi coverage/types, duplicate switch constants and use
 ordering. Duplicate switch detection uses stable byte-radix sorting with at most
-16 passes, so adversarial i128 keys cannot cause a quadratic hash-probe scan.
+16 passes, so adversarial i128 keys cannot cause a quadratic hash-probe scan. The
+vector path finds the phis and switches 64 operations at a time; a phi after a
+non-phi of its block is the first misplaced one, so the check needs no state
+carried through the block.
 
 An optional `IrDominance` view supplies trusted half-open dominator-tree intervals.
 Both endpoints are zero for an unreachable block. The verifier checks use order
 within a block regardless of this view. With it, cross-block definitions must
 enclose the use block's interval; cross-block uses involving unreachable blocks
 are rejected. Phi uses use their predecessor's position and interval. The vector
-path compares batches of 16 uses; the scalar twin performs the same comparisons
-one at a time. `dominance_checked` distinguishes complete interval checking from
+path checks 16 instructions' operand columns at a time (`ir_dominance_batch`,
+#786): a use of an earlier value of its own block, the common case, needs nothing
+more, and its batch's blocks, at most 16 consecutive ones, give each lane's block
+start and interval by a permute of one load. With the view, an earlier block's
+definition has its block and interval gathered. A use at or after its own
+instruction, a phi's and a call's operands, and a failing lane go to the exact
+per-instruction check (`ir_check_operands`), which is the scalar twin, in order,
+so both report the same first error. `dominance_checked` distinguishes complete interval checking from
 structural verification. The verifier does not construct or prove the supplied
 dominator tree: #174 owns that analysis.
 
@@ -833,7 +848,12 @@ conversion and constant coverage, loop/diamond/self phis, duplicate targets,
 8,192 adversarial i128 switch cases, guarded columns of lengths 0 through 33,
 dominance tails, overflow, arena rollback, exact printer text and random
 integer DAG mutations. Agreement alone is insufficient: malformed fixtures must
-be rejected by both paths. A labels fixture (`ir_test_labels`) checks
+be rejected by both paths. Generated functions of up to 40 blocks, with phis,
+selects, stores, addresses with and without an index and returns, are valid but
+for where each value is used; both paths must report the first use error, or
+none, that an independent oracle gives under no dominator view, a chain of
+blocks (some unreachable) and random intervals (`ir_test_dominance_generated`,
+#786: four per `--count`). A labels fixture (`ir_test_labels`) checks
 `br_indirect`'s successors (three labels, two distinct blocks: two edges), a
 label's phi, and the refusals of a label without a block beside an indirect
 branch, a label past the blocks, a branch through an integer and a missing label

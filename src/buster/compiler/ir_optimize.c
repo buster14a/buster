@@ -1301,13 +1301,15 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     {
         check = ir_check(IR_ERROR_PHI, 0, 0);
     }
+    // Verified above, the graph and the use lists are built without checking the function again, as ir_build_cfg and
+    // ir_build_uses would, which checked its shape and rows three times and its graph twice in each preparation (#786).
     if (check.error == IR_OK)
     {
-        check.error = ir_build_cfg(function, scratch, output, &work->cfg);
+        check.error = ir_cfg_validated(function, scratch, output, &work->cfg);
     }
     if (check.error == IR_OK)
     {
-        check.error = ir_build_uses(function, scratch, output, &work->uses);
+        check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
     if (check.error == IR_OK)
     {
