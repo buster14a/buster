@@ -1567,6 +1567,58 @@ static uint32_t files_test_lanes(const char* text, uint32_t* lanes)
     return valid ? result : 0;
 }
 
+// Regular .c and .h files, in path order. A symbolic link is not a file the walk opens, and a directory
+// entry that disappears is not read as a regular file.
+static bool files_test_sources(const char* directory)
+{
+    char root[PATH_MAX];
+    char sub[PATH_MAX];
+    char source_c[PATH_MAX];
+    char source_h[PATH_MAX];
+    char other[PATH_MAX];
+    char nested[PATH_MAX];
+    char link_path[PATH_MAX];
+    snprintf(root, sizeof(root), "%s/list", directory);
+    snprintf(sub, sizeof(sub), "%s/sub", root);
+    snprintf(source_c, sizeof(source_c), "%s/a.c", root);
+    snprintf(source_h, sizeof(source_h), "%s/b.h", root);
+    snprintf(other, sizeof(other), "%s/skip.txt", root);
+    snprintf(nested, sizeof(nested), "%s/c.c", sub);
+    snprintf(link_path, sizeof(link_path), "%s/z.c", root);
+    const bool ready = mkdir(root, 0700) == 0 && mkdir(sub, 0700) == 0 && files_test_write(source_c, "int a;\n") && files_test_write(source_h, "int b;\n") &&
+                       files_test_write(other, "no\n") && files_test_write(nested, "int c;\n") && symlink("a.c", link_path) == 0;
+    FilesSources sources = { 0 };
+    const bool listed = ready && files_list_sources(&sources, root);
+    const char* const expect[] = { source_c, source_h, nested };
+    bool names = listed && sources.count == BUSTER_ARRAY_LENGTH(expect);
+    for (uint32_t i = 0; names && i < sources.count; i += 1)
+    {
+        names = strcmp(sources.paths[i], expect[i]) == 0;
+    }
+    if (!names)
+    {
+        printf("files_list_sources: %u paths, expected a.c, b.h and sub/c.c\n", sources.count);
+    }
+    uint32_t slots = 0;
+    const bool slots_fit = files_table_slots(0, &slots) && slots == 16 && files_table_slots(8, &slots) && slots == 16 && files_table_slots(9, &slots) && slots == 32 &&
+                           files_table_slots(1u << 30, &slots) && slots == (1u << 31);
+    const uint64_t lane_cap = (uint64_t)BUSTER_LANE_MAX_COUNT * BUSTER_FILES_MAX_REQUESTS;
+    const bool slots_refuse = !files_table_slots(lane_cap, &slots) && !files_table_slots((uint64_t)1 << 32, &slots);
+    if (!slots_fit || !slots_refuse)
+    {
+        printf("files_table_slots: a lane-cap sum must not wrap a 32-bit request total\n");
+    }
+    arena_release(&sources.arena);
+    unlink(link_path);
+    unlink(nested);
+    unlink(other);
+    unlink(source_h);
+    unlink(source_c);
+    rmdir(sub);
+    rmdir(root);
+    return names && slots_fit && slots_refuse;
+}
+
 static int run_files_tests(int argument_count, char** arguments)
 {
     uint32_t lanes[BUSTER_FILES_TEST_MAX_LANES] = { 1, 2, 3, 8 };
@@ -1680,6 +1732,7 @@ static int run_files_tests(int argument_count, char** arguments)
     }
     if (passed_all && file_count == 0)
     {
+        passed_all &= files_test_sources(directory);
         for (uint32_t way = 0; way < 4; way += 1)
         {
             passed_all &= files_test_tree(directory, lanes, lane_count, way < 2, (way & 1) != 0, id_order);

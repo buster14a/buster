@@ -220,6 +220,8 @@ static void tier1_select_test_burs_tables(Tier1SelectTest* test)
 {
     tier1_select_test_expect(test, tier1_select_initialize() && tier1_select_initialized(), "the selection's state tables build");
     tier1_select_test_expect(test, tier1_burs_state_count > 1 && tier1_burs_state_count <= BUSTER_TIER1_BURS_MAX_STATES && tier1_burs_rule_count <= 256, "the tables have states and rules within their bounds");
+    tier1_select_test_expect(test, tier1_burs_pool_length > 0 && tier1_burs_pool_length <= BUSTER_TIER1_BURS_POOL && tier1_burs_pool_length <= INT32_MAX / 2,
+                             "the generated pool fits its storage and signed gather offsets");
     // The REG leaf's state is the first: it derives a register (its rule munch's), and from it an address and an index.
     const uint8_t* reg = &tier1_burs_state_rules[BUSTER_TIER1_BURS_REG_STATE * TIER1_BURS_NONTERMINALS];
     tier1_select_test_expect(test, tier1_burs_rules[reg[TIER1_BURS_REG]].action == TIER1_BURS_ACTION_MUNCH && reg[TIER1_BURS_A1] != 0 && reg[TIER1_BURS_INDEX] != 0 && reg[TIER1_BURS_IMM] == 0,

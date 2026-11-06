@@ -35,6 +35,13 @@ static void check_test_driver_lane_attributes(CheckTest* test, const char* clang
         { "void h(void);\nvoid k(void) { void h(void) __attribute__((hot)); }\n" BUSTER_LANE_PADDING "void m(void) { void h(void) __attribute__((cold)); }\n", true },
         { "void h(void);\n" BUSTER_LANE_PADDING "void k(void) { { void h(void) __attribute__((hot)); } void h(void) __attribute__((cold)); }\n", true },
         { "void h(void);\n" BUSTER_LANE_PADDING "void k(void) { void h(void) __attribute__((hot)); { void h(void) __attribute__((cold)); } }\n", true },
+        // Constant expressions in a block's attribute list preserve the same scope through their evaluation jobs.
+        { "void h(void);\n" BUSTER_LANE_PADDING
+          "void k(void) { void h(void) __attribute__((hot, aligned(sizeof(int)))); }\nvoid h(void) __attribute__((cold));\n", true },
+        { "void h(void);\n" BUSTER_LANE_PADDING
+          "void k(void) { { void h(void) __attribute__((hot, aligned(sizeof(int)))); } void h(void) __attribute__((cold)); }\n", true },
+        { "void h(void);\n" BUSTER_LANE_PADDING
+          "void k(void) { void h(void) __attribute__((hot, aligned(sizeof(int)))); { void h(void) __attribute__((cold)); } }\n", true },
         { "void h(void) __attribute__((hot));\n" BUSTER_LANE_PADDING "void k(void) { void h(void); { void h(void) __attribute__((cold)); } }\n", true },
         { "void k(void) { extern void h(void) __attribute__((hot)); }\nvoid m(void) { void h(void) __attribute__((cold)); }\n" BUSTER_LANE_PADDING, false },
         // A block's first declaration, which a later file-scope one links to: the definition inherits its attributes (#1446's
@@ -44,6 +51,8 @@ static void check_test_driver_lane_attributes(CheckTest* test, const char* clang
         { "void k(void) { extern void h(void) __attribute__((hot)); }\nvoid h(void);\n" BUSTER_LANE_PADDING
           "void m(void) { void h(void) __attribute__((cold)); }\n", false },
         { "void k(void) { extern void h(void) __attribute__((hot)); }\n" BUSTER_LANE_PADDING "void h(void) __attribute__((cold));\n", false },
+        { "void k(void) { extern void h(void) __attribute__((hot, aligned(sizeof(int)))); }\n" BUSTER_LANE_PADDING
+          "void h(void) __attribute__((cold));\n", false },
         // The same, after an earlier late attribute made the masks, which then take the block's first declaration as it
         // binds (#1446's second review).
         { "void f(void) {}\nvoid f(void) __attribute__((cold));\nvoid k(void) { extern void g(void) __attribute__((hot)); }\n" BUSTER_LANE_PADDING

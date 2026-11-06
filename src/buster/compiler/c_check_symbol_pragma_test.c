@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Original literal symbol-pragma fixtures: metadata across parser schedules, conservative refusal boundaries,
-// and transactional preparation with poisoned arenas. Native symbol/relocation tests are in the driver suite.
+// Original literal symbol-pragma fixtures from #1135, retained against the expanded #1447 handler: metadata across
+// parser schedules, conservative refusal boundaries, and transactional preparation with poisoned arenas. Cases that
+// now have implemented Clang warning/no-op semantics remain fixtures with their new expected metadata.
 
 static void check_test_symbol_pragma_history(CheckTest* test)
 {
@@ -41,7 +42,7 @@ static void check_test_symbol_pragma_history(CheckTest* test)
                 uint8_t handled[3] = { 0 };
                 CheckInput input = { 0 };
                 CheckInputReader reader = { .output = &input, .parser = &parser, .pp = &pp, .arena = &arena, .scratch = &scratch };
-                const bool valid = check_input_symbol_pragmas(&reader, handled);
+                const bool valid = check_input_symbol_pragmas(&reader, handled, true);
                 if (pass == 0)
                 {
                     required = arena.length;
@@ -50,8 +51,8 @@ static void check_test_symbol_pragma_history(CheckTest* test)
                     for (uint32_t i = 0; published && i < 3; i += 1)
                     {
                         const CheckInputSymbolPragma* record = input.symbol_pragmas->records + i;
-                        check_test_expect(test, handled[i] == 2 && record->pragma == i && record->token == parser.tokens.pragma_positions[i] &&
-                                               record->name != 0 && ((record->replacement != 0) == (i == 1)), "symbol history preserves kind, name and source ordering");
+                        check_test_expect(test, handled[i] == 1 && record->pragma == i && record->token == parser.tokens.pragma_positions[i] &&
+                                               record->name != 0 && ((record->target != 0) == (i == 1)), "symbol history preserves kind, name and source ordering");
                     }
                 }
                 else
@@ -98,21 +99,22 @@ static void check_test_symbol_pragmas(CheckTest* test)
         { "#pragma redefine_extname missing exported_f\nint f;\n", true, false, NULL },
         { "_Pragma(\"weak f\")\nint f;\n", true, true, NULL },
         { "#pragma weak f = g\nint g(void){return 7;}\n", false, false, NULL },
-        { "#pragma weak missing\nint f;\n", false, false, NULL },
-        { "#pragma weak f\nstatic int f;\n", false, false, NULL },
-        { "#pragma redefine_extname f exported_f\nstatic int f;\n", false, false, NULL },
-        { "int f(void){return 7;}\n#pragma weak f\n", false, false, NULL },
-        { "int f=7;\n#pragma redefine_extname f exported_f\n", false, false, NULL },
-        { "extern int f;\nint g(void){return f;}\n#pragma weak f\n", false, false, NULL },
-        { "int f(void);\nint g(void){return f();}\n#pragma redefine_extname f exported_f\n", false, false, NULL },
-        { "#pragma redefine_extname f exported_f\nint f __asm__(\"other_f\");\n", false, false, NULL },
+        { "#pragma weak missing\nint f;\n", true, false, NULL },
+        { "#pragma weak f\nstatic int f;\n", true, false, NULL },
+        { "#pragma redefine_extname f exported_f\nstatic int f;\n", true, false, NULL },
+        { "int f(void){return 7;}\n#pragma weak f\n", true, false, NULL },
+        { "int f=7;\n#pragma redefine_extname f exported_f\n", true, false, NULL },
+        { "extern int f;\nint g(void){return f;}\n#pragma weak f\n", true, true, NULL },
+        // The reader retains the rename; emission decides whether an earlier eager reference kept the original name.
+        { "int f(void);\nint g(void){return f();}\n#pragma redefine_extname f exported_f\n", true, false, "exported_f" },
+        { "#pragma redefine_extname f exported_f\nint f __asm__(\"other_f\");\n", true, false, "other_f" },
         { "#define f g\n#pragma weak f\n#undef f\nint f;\n", false, false, NULL },
         { "#define exported_f g\n#pragma redefine_extname f exported_f\nint f;\n", false, false, NULL },
-        { "int g(void){\n#pragma weak f\nreturn 0;}\nint f;\n", false, false, NULL },
+        { "int g(void){\n#pragma weak f\nreturn 0;}\nint f;\n", true, true, NULL },
         { "struct S{\n#pragma weak f\nint member;};\nint f;\n", false, false, NULL },
         { "int\n#pragma weak f\nf;\n", false, false, NULL },
-        { "#pragma weak f trailing\nint f;\n", false, false, NULL },
-        { "#pragma redefine_extname f exported_f trailing\nint f;\n", false, false, NULL },
+        { "#pragma weak f trailing\nint f;\n", true, false, NULL },
+        { "#pragma redefine_extname f exported_f trailing\nint f;\n", true, false, NULL },
     };
     static InternTable identifiers;
     static Preprocessor pp;

@@ -203,6 +203,9 @@ static void check_vector_conversion(CheckValue* value, TypeId destination, uint3
 static TypeId check_vector_mask_type(TypeTable* table, TypeId vector)
 {
     const TypeId element = check_vector_element(table, vector);
+    // Clang's masks retain plain char's identity for bytes. On LP64, extended vectors choose long for eight-byte
+    // elements; GNU vector_size chooses long long. Equal lane widths alone do not make extended types assignable.
+    const bool extended = check_action_kind(table, vector) == BUSTER_TYPE_KIND_EXT_VECTOR;
     TypeId mask = 0;
     if (element == BUSTER_TYPE_BOOL)
     {
@@ -212,15 +215,15 @@ static TypeId check_vector_mask_type(TypeTable* table, TypeId vector)
     {
         switch (type_size(table, element))
         {
-            case 1: mask = BUSTER_TYPE_SCHAR; break;
+            case 1: mask = BUSTER_TYPE_CHAR; break;
             case 2: mask = BUSTER_TYPE_SHORT; break;
             case 4: mask = BUSTER_TYPE_INT; break;
-            case 8: mask = BUSTER_TYPE_LLONG; break;
+            case 8: mask = extended ? BUSTER_TYPE_LONG : BUSTER_TYPE_LLONG; break;
             case 16: mask = BUSTER_TYPE_INT128; break;
             default: break;
         }
     }
-    return mask == 0 ? 0 : type_vector(table, mask, check_vector_count(table, vector), check_action_kind(table, vector) == BUSTER_TYPE_KIND_EXT_VECTOR);
+    return mask == 0 ? 0 : type_vector(table, mask, check_vector_count(table, vector), extended);
 }
 
 static TypeId check_vector_common(const TypeTable* table, const CheckValue* left, const CheckValue* right, CheckActionResult* result)
@@ -266,7 +269,7 @@ static void check_vector_binary(TypeTable* table, const CheckAction* action, Che
     const bool compare = action->op >= CHECK_OP_LESS && action->op <= CHECK_OP_NOT_EQUAL;
     const bool logical = action->op == CHECK_OP_LOGICAL_AND || action->op == CHECK_OP_LOGICAL_OR;
     const bool boolean = (lv && le == BUSTER_TYPE_BOOL) || (rv && re == BUSTER_TYPE_BOOL);
-    const bool bool_allowed = compare || logical || action->op == CHECK_OP_BIT_AND || action->op == CHECK_OP_BIT_OR || action->op == CHECK_OP_BIT_XOR;
+    const bool bool_allowed = compare || action->op == CHECK_OP_BIT_AND || action->op == CHECK_OP_BIT_OR || action->op == CHECK_OP_BIT_XOR;
     if (integer && (!check_action_is_integer(table, le) || !check_action_is_integer(table, re)))
     {
         check_action_diagnose(result, CHECK_DIAG_INTEGER_REQUIRED, !check_action_is_integer(table, le) ? 0 : 1);
@@ -275,8 +278,7 @@ static void check_vector_binary(TypeTable* table, const CheckAction* action, Che
     {
         check_action_diagnose(result, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
     }
-    else if (logical && ((boolean && (!lv || !rv || le != BUSTER_TYPE_BOOL || re != BUSTER_TYPE_BOOL)) ||
-                         (check_action_kind(table, left.type) != BUSTER_TYPE_KIND_EXT_VECTOR && check_action_kind(table, right.type) != BUSTER_TYPE_KIND_EXT_VECTOR)))
+    else if (logical && check_action_kind(table, left.type) != BUSTER_TYPE_KIND_EXT_VECTOR && check_action_kind(table, right.type) != BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         check_action_diagnose(result, CHECK_DIAG_SCALAR_REQUIRED, 0);
     }
@@ -530,10 +532,14 @@ static void check_vector_member(TypeTable* table, const CheckAction* action, Che
 
 static void check_vector_conditional(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
-    const CheckValue condition = check_action_operand(table, action, result, 0);
+    CheckValue condition = check_action_operand(table, action, result, 0);
     CheckValue left = check_action_operand(table, action, result, 1);
     CheckValue right = check_action_operand(table, action, result, 2);
     const bool vc = check_vector_type(table, condition.type);
+    if (!vc && (action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+    {
+        check_action_fp_promote(table, &condition, &result->conversions[0], action->node, action->context.fp_environment);
+    }
     const bool lv = check_vector_type(table, left.type);
     const bool rv = check_vector_type(table, right.type);
     TypeId common = 0;

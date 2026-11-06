@@ -287,7 +287,11 @@ static void check_complex_part(TypeTable* table, const CheckAction* action, Chec
 
 static void check_complex_conjugate(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
-    const CheckValue input = check_action_operand(table, action, result, 0);
+    CheckValue input = check_action_operand(table, action, result, 0);
+    if ((action->context.fp_environment & BUSTER_CHECK_FP_EVAL_MASK) != 0)
+    {
+        check_action_fp_promote(table, &input, &result->conversions[0], action->node, action->context.fp_environment);
+    }
     result->value = input;
     result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
     if (input.constant_kind == CHECK_CONSTANT_COMPLEX)

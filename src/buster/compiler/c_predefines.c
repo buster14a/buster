@@ -3444,9 +3444,15 @@ static __attribute__((unused)) X86Target predefines_function_target(const Predef
     return result;
 }
 
+#define BUSTER_PREDEFINES_FP_APPROX_FUNC 0x01u
+#define BUSTER_PREDEFINES_FP_REASSOCIATE 0x02u
+#define BUSTER_PREDEFINES_FP_RECIPROCAL 0x04u
+
 // The floating-point macros' inputs, stepped through the options in order as clang's driver does
 // (RenderFloatingPointOptions): whether to define __FAST_MATH__, __FINITE_MATH_ONLY__ 1 and __NO_MATH_ERRNO__.
-static void predefines_floating_point(const PredefinesOptions* options, bool* fast, bool* finite, bool* no_errno)
+// Return the three effective relaxation permissions that conflict with a lexical eval_method pragma. Reassociation
+// requires both signed-zero and trapping semantics disabled, just as the driver requires before emitting -mreassociate.
+static uint8_t predefines_floating_point(const PredefinesOptions* options, bool* fast, bool* finite, bool* no_errno)
 {
     bool honor_infinities = true;
     bool honor_nans = true;
@@ -3566,6 +3572,9 @@ static void predefines_floating_point(const PredefinesOptions* options, bool* fa
     *fast = !honor_infinities && !honor_nans && !math_errno && associative && approx_func && reciprocal && !signed_zeros && !trapping && !rounding;
     *finite = *fast || (!honor_infinities && !honor_nans);
     *no_errno = !math_errno;
+    return (approx_func ? BUSTER_PREDEFINES_FP_APPROX_FUNC : 0) |
+           (associative && !signed_zeros && !trapping ? BUSTER_PREDEFINES_FP_REASSOCIATE : 0) |
+           (reciprocal ? BUSTER_PREDEFINES_FP_RECIPROCAL : 0);
 }
 
 // __FLT_EVAL_METHOD__'s value where predefines_text doesn't run (--predefines): -ffp-eval-method's, else 0 with SSE

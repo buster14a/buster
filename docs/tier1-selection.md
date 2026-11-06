@@ -599,14 +599,12 @@ representer); and each operator's table gives the state of each pair of
 representers. The grammar isn't finite-state as it stands (a chain of additions
 grows a register's cost against a fold's zero without bound), so normalized
 costs saturate at 8, past which a difference no longer picks another rule in
-these patterns. The tables have 582 states, 172 rules, at most 57
-representers in an operator's position and a pool of 18,705 16-bit entries for
-the operators' maps and tables (as `test-tier1-select` prints them), and are in
+these patterns. `test-tier1-select` prints the generated state, rule, representer,
+and 16-bit pool entry counts. The tables are in
 the baked section (`baked.c`), so a compile starts with them built; `--tier1`
 and `test-baked-tables` build them where the executable isn't baked. The bound
-and table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gives 346 states, 23
-representers and 11,418 entries, and 16 gives 1,430 states, past the tables'
-1,024, so that its build's bake fails.
+and table sizes are `BUSTER_TIER1_BURS_*`; table generation fails if the
+grammar exceeds a table's fixed capacity.
 
 A plan then takes four passes over the function's nodes, each 16 nodes a
 vector with an exact scalar twin (`tier1_burs_*_scalar`):

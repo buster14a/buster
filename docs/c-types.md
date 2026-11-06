@@ -163,7 +163,7 @@ where a slot confirms the whole key in the line it is found in.
 A tag (struct, union or enum) is one per declaration, never hash-consed. It
 has its members (identifier id, type, bit-field width, explicit alignment,
 packed, and the offset in bits that layout writes), its layout inputs (packed,
-`#pragma pack`'s value and its `aligned` attribute) and its completion number,
+`#pragma pack`'s value, its `aligned` attribute and Microsoft layout selection) and its completion number,
 the order in which tags are completed, from 1, for #113's deferred bodies. An
 enum gets its underlying type when complete: fixed, or as clang chooses it from
 the enumerators' values (`type_enum_value_bits` and `type_enum_underlying`,
@@ -268,6 +268,35 @@ The layout is clang's `ItaniumRecordLayoutBuilder` for C on x86-64
 
 The scalar layout (`type_layout_scalar`) is this one record at a time, used by
 `type_record_layout`, and the twin and fallback of the vector layout.
+
+`TypeRecordAttributes.ms_struct` selects Clang's Microsoft record rules on the
+same Linux target. Adjacent bit-fields share a complete storage unit only when
+their types have the same byte size and the next field fits. A following
+ordinary member starts after the complete unit. Bit-field alignment follows
+the unit's size, including through a typedef that reduces its ordinary
+alignment. Unnamed fields raise the record's alignment too. A zero-width field
+after an ordinary field or another zero-width field has no natural alignment
+effect; after a nonzero bit-field it aligns the next unit. Packed records and
+`#pragma pack` retain that zero-width alignment rule. Within an active unit,
+explicit alignment does not move a field, though it can raise record alignment.
+
+Microsoft unions reserve a complete bit-field storage unit, or one byte for a
+zero-width field, while bit-fields contribute no alignment even with an explicit
+field alignment. Ordinary builtin members recover their element's natural width
+alignment through aligned typedefs and fixed arrays; complex values and other
+derived types retain their ordinary ABI alignment. Record-level alignment still
+applies. Units with a non-power-of-two byte size, such as `_BitInt(129)`'s 24
+bytes, return `TYPE_ERROR_MS_STRUCT_ALIGNMENT`: the table's log2 alignment
+representation cannot describe Clang's resulting alignment.
+
+Both scalar and vector layouts use these rules. The vector kernel retains a
+per-lane storage-unit size and blends Microsoft offsets, sizes and alignments
+only into the selected lanes. Groups containing no Microsoft records skip the
+extra rule block. The new flag is preserved by type copies and deferred replay.
+Fixed oracle fixtures cover 27 Microsoft layouts; the random Clang layout
+oracle also mixes ordinary and Microsoft records. The historical measurements
+below describe the ordinary layout before this addition; no new throughput
+claim is made here.
 
 ### The vector layout
 

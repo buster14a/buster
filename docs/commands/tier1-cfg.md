@@ -14,7 +14,10 @@ requirements. [Command index](README.md).
   each piece of a range cut at a split where its split's moves leave it. Its
   classes, and `tier1_allocate.c`'s, are general, vector and AVX-512's opmask
   registers (#179: k1 to k7 for values, a class with k0 refused, k0 the class's
-  scratch, every mask clobbered by a call). `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
+  scratch, every mask clobbered by a call). Edge moves read each live value's location at the predecessor's exit and
+  the successor's entry from one forward sweep of that value's intervals (#1399), and emission resolves a position
+  from the first interval overlapping its block when that column fits. The verifier and the certificate keep the
+  binary search and check both results against it. `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
   three classes with mutants; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
