@@ -629,6 +629,65 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
             fprintf(stderr, "  ./- diagnostics: %s\n", dash_directory_run.errors != NULL ? dash_directory_run.errors : "(missing)");
         }
         cc_compat_release(&dash_directory_run);
+        const bool preprocessed_source = cc_compat_write(&test, "linux.i", "int linux;\n");
+        const char* const linux_i[] = { "-fsyntax-only", "linux.i", NULL };
+        CCCompatibilityRun linux_i_run = cc_compat_run(&test, test.compiler, NULL, linux_i);
+        cc_compat_expect(&test, preprocessed_source && linux_i_run.status == 0, ".i keeps linux as an identifier");
+        if (linux_i_run.status != 0)
+        {
+            fprintf(stderr, "  .i diagnostics: %s\n", linux_i_run.errors != NULL ? linux_i_run.errors : "(missing)");
+        }
+        cc_compat_release(&linux_i_run);
+        const bool macro_source = cc_compat_write(&test, "macro.i", "#define FOO 1\nint FOO;\n");
+        const char* const macro_i[] = { "-fsyntax-only", "macro.i", NULL };
+        CCCompatibilityRun macro_i_run = cc_compat_run(&test, test.compiler, NULL, macro_i);
+        cc_compat_expect(&test, macro_source && macro_i_run.status == 0, ".i does not expand a macro in the output");
+        if (macro_i_run.status != 0)
+        {
+            fprintf(stderr, "  macro.i diagnostics: %s\n", macro_i_run.errors != NULL ? macro_i_run.errors : "(missing)");
+        }
+        cc_compat_release(&macro_i_run);
+        const bool kept = cc_compat_write(&test, "kept.h", "int FOO;\n");
+        const bool included = cc_compat_write(&test, "included.i", "#define FOO 1\n#include \"kept.h\"\nint FOO;\n");
+        const char* const included_args[] = { "-fsyntax-only", "included.i", NULL };
+        CCCompatibilityRun included_run = cc_compat_run(&test, test.compiler, NULL, included_args);
+        cc_compat_expect(&test, kept && included && included_run.status == 0, ".i include is not macro-expanded");
+        if (included_run.status != 0)
+        {
+            fprintf(stderr, "  included.i diagnostics: %s\n", included_run.errors != NULL ? included_run.errors : "(missing)");
+        }
+        cc_compat_release(&included_run);
+        const bool linux_source = cc_compat_write(&test, "linux.c", "int linux;\n");
+        const char* const linux_c[] = { "-fsyntax-only", "linux.c", NULL };
+        CCCompatibilityRun linux_c_run = cc_compat_run(&test, test.compiler, NULL, linux_c);
+        cc_compat_expect(&test, linux_source && linux_c_run.status != 0, "a .c file still expands linux");
+        cc_compat_release(&linux_c_run);
+        const bool plain = cc_compat_write(&test, "plain.c", "#define M(x) ((x)+1)\nint v = M(2);\n");
+        const char* const fpre[] = { "-E", "-fpreprocessed", "plain.c", NULL };
+        CCCompatibilityRun fpre_run = cc_compat_run(&test, test.compiler, NULL, fpre);
+        cc_compat_expect(&test, plain && fpre_run.status != 0 && fpre_run.errors != NULL && strstr(fpre_run.errors, "-fpreprocessed") != NULL, "-E rejects -fpreprocessed");
+        cc_compat_release(&fpre_run);
+        const bool injected = cc_compat_write(&test, "inject.c", "int injected(void) { return 0; }\n");
+        const char define_newline[] = "FOO=1\n#error injected";
+        const char* const define_args[] = { "-fsyntax-only", "-D", define_newline, "inject.c", NULL };
+        CCCompatibilityRun define_run = cc_compat_run(&test, test.compiler, NULL, define_args);
+        cc_compat_expect(&test, injected && define_run.status == 0 && define_run.errors != NULL && strstr(define_run.errors, "embedded newline") != NULL, "-D keeps only the first line");
+        if (!(define_run.status == 0 && define_run.errors != NULL && strstr(define_run.errors, "embedded newline") != NULL))
+        {
+            fprintf(stderr, "  -D status %d diagnostics: %s\n", define_run.status, define_run.errors != NULL ? define_run.errors : "(missing)");
+        }
+        cc_compat_release(&define_run);
+        char quote_dir[PATH_MAX];
+        snprintf(quote_dir, sizeof(quote_dir), "%s/quote", test.directory);
+        const bool quote_made = mkdir(quote_dir, 0700) == 0 && cc_compat_write(&test, "quote/a\".h", "int quoted_header;\n") && cc_compat_write(&test, "quoted.c", "int quoted_value;\n");
+        const char* const include_quote[] = { "-fsyntax-only", "-include", "quote/a\".h", "quoted.c", NULL };
+        CCCompatibilityRun include_quote_run = cc_compat_run(&test, test.compiler, NULL, include_quote);
+        cc_compat_expect(&test, quote_made && include_quote_run.status == 0, "-include opens a path that contains a quote");
+        if (include_quote_run.status != 0)
+        {
+            fprintf(stderr, "  quote include diagnostics: %s\n", include_quote_run.errors != NULL ? include_quote_run.errors : "(missing)");
+        }
+        cc_compat_release(&include_quote_run);
         cc_compat_cleanup(&test);
     }
     printf("CC compatibility: %u checks, %u failures\n", test.checks, test.failures);
