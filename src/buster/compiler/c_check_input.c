@@ -37,6 +37,8 @@ typedef enum CheckInputMessage
     // Clang's parenthesized initializer after attributes or an asm label (#1252).
     CHECK_INPUT_DIRECT_INITIALIZER_ARRAY,
     CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED,
+    // A field designator that names no member of the record in CheckInputReport.type.
+    CHECK_INPUT_INITIALIZER_MEMBER,
     // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
@@ -259,6 +261,7 @@ static const char* const check_input_messages[] =
     "initializer element is not a compile-time constant",
     "array initializer must be an initializer list or string literal",
     "initializer for a variable with deduced type contains multiple expressions",
+    "field designator does not name a member of the record type",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
     "cannot jump from this goto statement to its label",

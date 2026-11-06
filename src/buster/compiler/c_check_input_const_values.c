@@ -17,6 +17,10 @@ static uint32_t check_input_const_expressions(CheckInputReader* reader, uint32_t
         {
             token += 1;
         }
+        else if (check_init_old_style_designator(parser, token, end))
+        {
+            token += 2;
+        }
         else if (kind == PARSE_KIND_PERIOD)
         {
             token += token + 1 < end ? 2 : 1;
