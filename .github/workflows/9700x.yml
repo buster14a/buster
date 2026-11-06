@@ -485,6 +485,23 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
+      - name: Preserve failed source SSA comparison inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ssa-source-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-O${{ matrix.optimization }}-shard${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            /tmp/ssa-source-*/**/*.c
+            /tmp/ssa-source-*/**/*.log
+            /tmp/ssa-source-*/**/*.out
+            /tmp/ssa-source-*/**/output
+            ${{ runner.temp }}/ssa-source-*/**/*.c
+            ${{ runner.temp }}/ssa-source-*/**/*.log
+            ${{ runner.temp }}/ssa-source-*/**/*.out
+            ${{ runner.temp }}/ssa-source-*/**/output
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Compile main.c alone under TSan or MSan
         # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
         # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the

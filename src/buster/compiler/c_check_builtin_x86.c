@@ -26,14 +26,15 @@
 // SUPPRESSED retains the audited fact without a diagnostic. No event is a hard action error. Missing CFG information
 // must remain DEFERRED or later emit conservatively; it must not silently suppress the warning.
 //
-// The immutable 559 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
-// implementation was copied. They cover 531 exact names: 127 RC sets, 91 SAE sets, 64 scale sets and 277 deferred ranges
+// The immutable 562 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
+// implementation was copied. They cover 534 exact names: 127 RC sets, 91 SAE sets, 64 scale sets and 280 deferred ranges
 // (#126 added the build's 17 ranges and 6 scales, whose names joined the own-main scope, #619 ucmpd128_mask's range,
 // #148 the 8 ranges of the SSE shuffles, shifts, extracts and inserts that stb_image, dr_libs and minimp3 call,
 // #799 five additional 128/256-bit shuffle, blend and align names, and #148 the rest of clang's x86 builtins it
 // implements, the supplementary scope's: c_builtin_supplementary_scope.inc, <xmmintrin.h>'s _mm_prefetch's hint among
 // them, the table's last row: its name sorts after every __builtin_ one). Names in the
-// attested catalogue without a row have no additional SemaX86 rule. Reference source/case lines accompany each row:
+// attested catalogue without a row have no additional immediate rule. The two 32-bit-only eflags names are rejected
+// separately, before immediate checks, by SemaX86.cpp:523-540. Reference source/case lines accompany each row:
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaX86.cpp
 // Generic ICE/range behavior: SemaChecking.cpp:2971-2989,6796-6843; runtime context/reachability: SemaExpr.cpp and
 // AnalysisBasedWarnings.cpp; Warning+DefaultError: DiagnosticSemaKinds.td's warn_argument_invalid_range.
@@ -85,6 +86,8 @@ typedef enum CheckBuiltinX86Constraint
     CHECK_BUILTIN_X86_CONSTRAINT_RANGE,
     // A gather's or scatter's scale: a hard set, 1, 2, 4 or 8 (SemaX86's CheckBuiltinGatherScatterScale).
     CHECK_BUILTIN_X86_CONSTRAINT_SCALE,
+    // SemaX86's isX86_32Builtin on our x86-64 target, before the immediate constraints.
+    CHECK_BUILTIN_X86_CONSTRAINT_TARGET32,
 } CheckBuiltinX86Constraint;
 
 typedef struct CheckBuiltinX86Action CheckBuiltinX86Action;
@@ -549,6 +552,9 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_vcvtph2w512_mask", 31, CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 0x0f10, 218 },
     { "__builtin_ia32_vcvtps2ph", 24, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 760 },
     { "__builtin_ia32_vcvtps2ph256", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 762 },
+    { "__builtin_ia32_vcvtps2ph256_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 763 },
+    { "__builtin_ia32_vcvtps2ph512_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 764 },
+    { "__builtin_ia32_vcvtps2ph_mask", 29, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 761 },
     { "__builtin_ia32_vcvtps2phx512_mask", 33, CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 0x0f10, 200 },
     { "__builtin_ia32_vcvtqq2ph512_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 0x0f10, 224 },
     { "__builtin_ia32_vcvtsd2sh_round_mask", 35, CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 0x0f10, 253 },
@@ -709,7 +715,7 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "_mm_prefetch", 12, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 607 },
 };
 
-_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 559, "the audited x86 rule manifest has 559 rows");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 562, "the audited x86 rule manifest has 562 rows");
 
 static int check_builtin_x86_compare(const char* name, uint32_t bytes, const CheckBuiltinX86Rule* rule)
 {
@@ -798,6 +804,11 @@ static __attribute__((unused)) void check_builtin_x86_one(const TypeTable* table
              (uint32_t)input->reachability > CHECK_BUILTIN_X86_UNREACHABLE)
     {
         check_builtin_x86_fail(output, CHECK_BUILTIN_X86_INVALID, CHECK_BUILTIN_X86_CONSTRAINT_NONE, CHECK_DIAG_INVALID_TYPE, 0, 0);
+    }
+    else if ((input->name_bytes == sizeof("__builtin_ia32_readeflags_u32") - 1 && memcmp(input->name, "__builtin_ia32_readeflags_u32", input->name_bytes) == 0) ||
+             (input->name_bytes == sizeof("__builtin_ia32_writeeflags_u32") - 1 && memcmp(input->name, "__builtin_ia32_writeeflags_u32", input->name_bytes) == 0))
+    {
+        check_builtin_x86_fail(output, CHECK_BUILTIN_X86_ERROR, CHECK_BUILTIN_X86_CONSTRAINT_TARGET32, CHECK_DIAG_INCOMPATIBLE, 0, 0);
     }
     else
     {

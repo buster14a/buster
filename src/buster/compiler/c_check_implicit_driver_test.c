@@ -646,6 +646,13 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "void g(void) { printf(\"%hhd\\n\", 1L); }\n"
         "void h(void) { printf(\"%hd\\n\", 1L); }\n"
         "void i(void) { printf(\"%tu\\n\", 1LL); }\n";
+    static const char format_promoted_arguments[] =
+        "int printf(const char *, ...);\n"
+        "void f(_Bool b, short s, unsigned short us, char c, int i, const char *cs, signed char *p, const int *ci) {\n"
+        "  printf(\"%c\", b); printf(\"%lc\", b); printf(\"%hhd\", s); printf(\"%hhu\", us);\n"
+        "  printf(\"%hhn\", cs); printf(\"%n\", ci);\n"
+        "  printf(\"%c\", i); printf(\"%hhd\", c); printf(\"%hhd\", i); printf(\"%hhn\", p);\n"
+        "}\n";
     static const char format_specifiers[] =
         "#include <stdio.h>\n"
         "void a(void) { printf(\"%D\\n\", 1); }\n"
@@ -857,6 +864,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { comma_unparenthesized, { "-Wall", "-Wextra", NULL, NULL } },
         { positional_format_edges, { "-Wall", NULL, NULL, NULL } },
         { format_integer_class, { "-Wall", NULL, NULL, NULL } },
+        { format_promoted_arguments, { NULL, NULL, NULL, NULL } },
         { format_specifiers, { "-Wall", NULL, NULL, NULL } },
         { format_modifiers, { "-Wall", NULL, NULL, NULL } },
         { format_argument_order, { "-Wall", NULL, NULL, NULL } },

@@ -761,6 +761,14 @@ typedef enum ImportTestSpareName
 {
     IMPORT_TEST_NAME_CTORS,
     IMPORT_TEST_NAME_DTORS,
+    IMPORT_TEST_NAME_CTORS_DOT,
+    IMPORT_TEST_NAME_DTORS_EXACT,
+    IMPORT_TEST_NAME_CTORS_EXTRA,
+    IMPORT_TEST_NAME_DTORS_EXTRA,
+    IMPORT_TEST_NAME_RELRO_EXACT,
+    IMPORT_TEST_NAME_RELRO_DOT,
+    IMPORT_TEST_NAME_RELRO_EXTRA,
+    IMPORT_TEST_NAME_RELRO_X,
     IMPORT_TEST_NAME_PRIORITY_HIGH,
     IMPORT_TEST_NAME_PRIORITY_LETTER,
     IMPORT_TEST_NAME_PRIORITY_DIGITS,
@@ -771,6 +779,14 @@ typedef enum ImportTestSpareName
 static const char* const import_test_spare_names[IMPORT_TEST_SPARE_NAMES] = {
     [IMPORT_TEST_NAME_CTORS] = ".ctors",
     [IMPORT_TEST_NAME_DTORS] = ".dtors.00042",
+    [IMPORT_TEST_NAME_CTORS_DOT] = ".ctors.00042",
+    [IMPORT_TEST_NAME_DTORS_EXACT] = ".dtors",
+    [IMPORT_TEST_NAME_CTORS_EXTRA] = ".ctors_extra",
+    [IMPORT_TEST_NAME_DTORS_EXTRA] = ".dtors_extra",
+    [IMPORT_TEST_NAME_RELRO_EXACT] = ".data.rel.ro",
+    [IMPORT_TEST_NAME_RELRO_DOT] = ".data.rel.ro.audit",
+    [IMPORT_TEST_NAME_RELRO_EXTRA] = ".data.rel.ro_extra",
+    [IMPORT_TEST_NAME_RELRO_X] = ".data.rel.roX",
     [IMPORT_TEST_NAME_PRIORITY_HIGH] = ".init_array.65536",
     [IMPORT_TEST_NAME_PRIORITY_LETTER] = ".init_array.1x",
     [IMPORT_TEST_NAME_PRIORITY_DIGITS] = ".init_array.000101",
@@ -1594,6 +1610,23 @@ static bool import_test_objects(Arena* arena)
             changed = import_test_changed(&changed, g->headers[IMPORT_TEST_RELA_TEXT] + offsetof(Elf64_Shdr, sh_entsize), 8, 0, arena);
             import_test_object_check(&tally, test, import_test_bytes(&changed), "tables without sh_entsize", path, arena);
         }
+        // Change the writable data section's name and check its independently specified class on both paths.
+        static const struct { ImportTestSpareName name; uint8_t class; } names_to_class[] = {
+            { IMPORT_TEST_NAME_CTORS_EXTRA, BUSTER_LINK_CLASS_DATA },
+            { IMPORT_TEST_NAME_DTORS_EXTRA, BUSTER_LINK_CLASS_DATA },
+            { IMPORT_TEST_NAME_RELRO_EXACT, BUSTER_LINK_CLASS_DATA_RELRO },
+            { IMPORT_TEST_NAME_RELRO_DOT, BUSTER_LINK_CLASS_DATA_RELRO },
+            { IMPORT_TEST_NAME_RELRO_EXTRA, BUSTER_LINK_CLASS_DATA },
+            { IMPORT_TEST_NAME_RELRO_X, BUSTER_LINK_CLASS_DATA },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names_to_class); i += 1)
+        {
+            const ImportTestSpareName name = names_to_class[i].name;
+            const ImportTestFile changed_name = import_test_changed(f, f->headers[IMPORT_TEST_DATA] + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[name], arena);
+            test->classes[IMPORT_TEST_DATA] = names_to_class[i].class;
+            import_test_object_check(&tally, test, import_test_bytes(&changed_name), import_test_spare_names[name], IMPORT_TEST_VECTOR, arena);
+        }
+        test->classes[IMPORT_TEST_DATA] = BUSTER_LINK_CLASS_DATA;
         ImportTestFile changed = { 0 };
 
         // Each check a well-formed object never trips. The ELF header and the section table.
@@ -1633,6 +1666,10 @@ static bool import_test_objects(Arena* arena)
         import_test_case(&tally, o, f, "SHF_GROUP in no group", data + offsetof(Elf64_Shdr, sh_flags), 8, SHF_WRITE | SHF_ALLOC | SHF_GROUP,
                          import_test_result(IMPORT_ERROR_BOUNDS, data, IMPORT_TEST_DATA, 0, 0, 0), arena);
         import_test_case(&tally, o, f, ".ctors", data + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_CTORS],
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, data, IMPORT_TEST_DATA, 0, 0, SHT_PROGBITS), arena);
+        import_test_case(&tally, o, f, ".ctors.00042", data + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_CTORS_DOT],
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, data, IMPORT_TEST_DATA, 0, 0, SHT_PROGBITS), arena);
+        import_test_case(&tally, o, f, ".dtors", data + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_DTORS_EXACT],
                          import_test_result(IMPORT_ERROR_UNSUPPORTED, data, IMPORT_TEST_DATA, 0, 0, SHT_PROGBITS), arena);
         // The groups and the priorities.
         const uint64_t group = f->headers[IMPORT_TEST_GROUP];

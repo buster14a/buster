@@ -11,6 +11,8 @@
 #ifndef BUSTER_C_CHECK_INITIALIZER_INCLUDED
 #define BUSTER_C_CHECK_INITIALIZER_INCLUDED
 
+#include "c_check_noderef_types.c"
+
 typedef struct CheckInitString CheckInitString;
 struct CheckInitString
 {
@@ -96,6 +98,7 @@ typedef struct CheckInitFrame CheckInitFrame;
 struct CheckInitFrame
 {
     TypeId type;
+    const CheckNoderefType* noderef;
     uint64_t offset;
     uint64_t next;
     uint32_t width;
@@ -112,6 +115,7 @@ typedef struct CheckInitSelection CheckInitSelection;
 struct CheckInitSelection
 {
     TypeId type;
+    const CheckNoderefType* noderef;
     uint64_t offset;
     uint32_t width;
     CheckInitHistoryNode* history;
@@ -179,6 +183,7 @@ struct CheckInitWarningSink
     // facts privately, then publishes only after its final part append. The optional set deduplicates source facts.
     CheckWarningBuffer* events;
     CheckWarningSet* event_keys;
+    CheckNoderefInitializer noderef;
 };
 
 typedef struct CheckInitWarningCollector CheckInitWarningCollector;
@@ -359,8 +364,13 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
         const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
         const bool excess = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS;
-        const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL;
-        if (!once || sink->event_keys == NULL || !check_warning_set_contains(&keys, key))
+        const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
+                          event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION;
+        // GNU range initialization converts each selected element, and clang diagnoses each noderef removal. Keep
+        // repeats from this walk, but still drop a scalar conversion already diagnosed by the graph or an earlier walk.
+        // `keys` is a private copy on its first insertion; the sink's prefix stays frozen until publication below.
+        const CheckWarningSet* seen = event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION ? sink->event_keys : &keys;
+        if (!once || sink->event_keys == NULL || !check_warning_set_contains(seen, key))
         {
             const CheckWarningNote* notes = event->note_count != 0 ? walker->warning_events.notes + event->note_first : NULL;
             valid = (!once || sink->event_keys == NULL || check_warning_set_add(&keys, key)) &&
@@ -529,6 +539,7 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
     bool valid = false;
     *selected = (CheckInitSelection){
         .type = frame->type,
+        .noderef = frame->noderef,
         .offset = frame->offset,
         .width = frame->width,
         .history = direct ? frame->history : NULL,
@@ -541,6 +552,7 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
              kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         selected->type = type_element(types, base);
+        selected->noderef = frame->noderef != NULL ? frame->noderef->base : NULL;
         const bool packed = kind == BUSTER_TYPE_KIND_EXT_VECTOR && type_unqualified(selected->type) == BUSTER_TYPE_BOOL;
         const uint64_t size = type_size(types, selected->type);
         const uint64_t bits = packed ? 1 : size * 8;
@@ -568,6 +580,8 @@ static bool check_init_select(CheckInitWalker* walker, CheckInitFrame* frame, Ch
             if (!bit_field || types->members.name[member] != 0)
             {
                 selected->type = types->members.type[member];
+                const CheckNoderefInitializer* noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? &walker->warnings->sink->noderef : NULL;
+                selected->noderef = noderef != NULL ? check_noderef_member(noderef->members, noderef->member_count, member) : NULL;
                 selected->width = bit_field ? types->members.bit_width[member] : 0;
                 valid = types->members.offset[member] <= UINT64_MAX - frame->offset;
                 selected->offset += valid ? types->members.offset[member] : 0;
@@ -744,6 +758,8 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
         walker->frames[walker->depth] = (CheckInitFrame){
             .type = type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC ?
                     type_conversion_operand(walker->types, selected->type) : selected->type,
+            .noderef = selected->noderef != NULL && type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC ?
+                       selected->noderef->base : selected->noderef,
             .offset = selected->offset,
             .width = selected->width,
             .braced = braced,
@@ -2150,6 +2166,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
     {
         value_selection.type = type_conversion_operand(walker->types, selected->type);
+        value_selection.noderef = selected->noderef != NULL ? selected->noderef->base : NULL;
         selected = &value_selection;
     }
     const CheckInitConstants* previous_constants = walker->constants;
@@ -2257,6 +2274,24 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 {
                     check_init_semantic_warning(walker, &warning, NULL, 0);
                 }
+                const CheckNoderefInitializer* noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? &walker->warnings->sink->noderef : NULL;
+                const CheckNoderefType* pointed = selected->noderef != NULL ? selected->noderef->base : NULL;
+                if (type_kind(walker->types, type_strip_aligned(walker->types, destination)) == BUSTER_TYPE_KIND_POINTER &&
+                    type_kind(walker->types, type_strip_aligned(walker->types, check_stream_type(walker->stream, node))) == BUSTER_TYPE_KIND_POINTER &&
+                    noderef != NULL && noderef->values != NULL &&
+                    ((noderef->values[node / 64] >> (node % 64)) & 1u) != 0 && (pointed == NULL || !pointed->marked))
+                {
+                    const CheckWarningEvent annotation = {
+                        .id = CHECK_WARNING_ID_NODEREF,
+                        .kind = CHECK_WARNING_EVENT_NODEREF_CONVERSION,
+                        .token = check_warning_expression_location(walker->parser, walker->types, walker->stream, node, token, end),
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = walker->warning_completion,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                    };
+                    check_init_semantic_warning(walker, &annotation, NULL, 0);
+                }
                 check_init_history_value(walker, selected, token, node, false, converted.value.flags);
             }
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -2326,6 +2361,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
     {
         walker->frames[0] = (CheckInitFrame){
             .type = type,
+            .noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? walker->warnings->sink->noderef.root : NULL,
             .wrapper = true,
             .history = check_init_history_node(walker, NULL, 0, type),
             .designator = BUSTER_CHECK_NONE,
