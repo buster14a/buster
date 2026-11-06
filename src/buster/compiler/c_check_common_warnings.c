@@ -3866,12 +3866,17 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         {
             uint32_t* missing = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count);
             unsigned __int128* missing_values = missing != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, unsigned __int128, enum_count) : NULL;
-            if (missing == NULL || missing_values == NULL)
+            uint32_t* order = missing_values != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count) : NULL;
+            uint32_t* merged = order != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, enum_count) : NULL;
+            if (merged == NULL)
             {
                 check_common_exhausted(pp);
             }
-            values_known = missing != NULL && missing_values != NULL;
-            uint32_t missing_count = 0;
+            values_known = merged != NULL;
+            // The uncovered enumerators in declaration order, then stably merge-sorted by value (#1348): each run of
+            // equal values lists its first-declared enumerator once, the list the value-deduplicated insertion it
+            // replaces built, already in value order.
+            uint32_t uncovered = 0;
             for (uint32_t e = 0; values_known && e < enum_count; e += 1)
             {
                 bool covered = false;
@@ -3882,30 +3887,39 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                     const unsigned __int128 hi_key = item->range ? check_program_case_order(program, item, true) : lo_key;
                     covered = all_case_keys[e] >= lo_key && all_case_keys[e] <= hi_key;
                 }
-                for (uint32_t m = 0; !covered && m < missing_count && !covered; m += 1)
-                {
-                    covered = all_keys[e] == missing_values[m];
-                }
                 if (!covered)
+                {
+                    order[uncovered++] = e;
+                }
+            }
+            for (uint32_t width = 1; values_known && width < uncovered; width *= 2)
+            {
+                for (uint32_t low = 0; low < uncovered; low += 2 * width)
+                {
+                    const uint32_t middle = low + width < uncovered ? low + width : uncovered;
+                    const uint32_t high = middle + width < uncovered ? middle + width : uncovered;
+                    uint32_t left = low;
+                    uint32_t right = middle;
+                    for (uint32_t k = low; k < high; k += 1)
+                    {
+                        const bool take_left = left < middle && (right >= high || all_keys[order[left]] <= all_keys[order[right]]);
+                        merged[k] = take_left ? order[left++] : order[right++];
+                    }
+                }
+                uint32_t* swap = order;
+                order = merged;
+                merged = swap;
+            }
+            uint32_t missing_count = 0;
+            for (uint32_t k = 0; values_known && k < uncovered; k += 1)
+            {
+                const uint32_t e = order[k];
+                if (missing_count == 0 || missing_values[missing_count - 1] != all_keys[e])
                 {
                     missing[missing_count] = all_names[e];
                     missing_values[missing_count] = all_keys[e];
                     missing_count += 1;
                 }
-            }
-            for (uint32_t i = 1; i < missing_count; i += 1)
-            {
-                const uint32_t name = missing[i];
-                const unsigned __int128 value = missing_values[i];
-                uint32_t j = i;
-                while (j > 0 && missing_values[j - 1] > value)
-                {
-                    missing[j] = missing[j - 1];
-                    missing_values[j] = missing_values[j - 1];
-                    j -= 1;
-                }
-                missing[j] = name;
-                missing_values[j] = value;
             }
             char* list = values_known && missing_count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, char, 512) : NULL;
             if (values_known && missing_count != 0 && list == NULL)
