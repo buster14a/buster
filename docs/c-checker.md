@@ -5461,15 +5461,21 @@ change, it refused such a declaration by name.
   (`TryAnnotateName`), and a name of no type is an annotation token no
   declarator starts with. So where GNU attributes make a block item a
   declaration, an identifier there that names an object, a function, an
-  enumerator or a parameter in scope, or one before `(` (which clang declares
-  implicitly as a function), is its "expected identifier or '('", in every
-  standard (`int x; void f(void) { __attribute__(()) x = 1; }`); an undeclared
-  one is an implicit int's declarator, which C89 takes. The parser decides it
+  enumerator or a parameter in scope, or before C23 one before `(` (which
+  clang declares implicitly as a function), is its "expected identifier or
+  '('", in every standard (`int x; void f(void) { __attribute__(()) x = 1;
+  }`). A name of no ordinary binding that a tag in scope has is clang's
+  "must use 'struct' tag to refer to type 'x'" (its
+  `isTagTypeWithMissingTag`, the tag's keyword named), and any other an
+  implicit int's declarator, which C89 takes. The parser decides it
   (`parse_scalar_attribute_name`): its bindings tell a name it bound as an
-  ordinary identifier (`PARSE_MEANING_DECLARED`) from one it never bound.
+  ordinary identifier (`PARSE_MEANING_DECLARED`) from one it never bound, and
+  it keeps the tags in scope (`ParseScalar.tags`), each declaration popped at
+  its scope's end with its undo-log entry (the binding trace's, or one of its
+  own).
   The vector path's fallback parses one declaration with the file-scope
   typedef names alone, so a name it never bound there may be a file-scope
-  object's, and the whole unit goes to the scalar parser
+  object's or tag's, and the whole unit goes to the scalar parser
   (`ParseScalarResult.undecided`), which has every earlier declaration. An
   empty list (`__attribute__(())`) is a declaration's, as clang's needs an
   attribute to read a statement; after a control statement's head (`if

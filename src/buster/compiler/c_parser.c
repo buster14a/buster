@@ -1029,6 +1029,9 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(TYPE_SPECIFIER_MISSING, "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]") \
     X(TYPE_SPECIFIER_REQUIRED, "a type specifier is required for all declarations") \
     X(UNKNOWN_TYPE_NAME, "unknown type name '%s'") \
+    X(MUST_USE_STRUCT_TAG, "must use 'struct' tag to refer to type '%s'") \
+    X(MUST_USE_UNION_TAG, "must use 'union' tag to refer to type '%s'") \
+    X(MUST_USE_ENUM_TAG, "must use 'enum' tag to refer to type '%s'") \
     X(EXTRANEOUS_BEFORE_SEMI, "extraneous '%s' before ';'") \
     X(UNEXPECTED_SEMI_BEFORE, "unexpected ';' before '%s'") \
     X(EXTRANEOUS_AFTER_CONDITION, "extraneous ')' after condition, expected a statement") \
@@ -1381,6 +1384,11 @@ struct ParseFrame
 // binds as an ordinary identifier, ParseFrame.name_meaning, before parse_scalar_bind makes it PARSE_MEANING_DECLARED):
 // clang's lookup at a block item's GNU attributes tells a declared name from an undeclared one
 // (parse_scalar_attribute_name).
+// The kind of a tag in scope (ParseScalar.tags), 0 for none.
+#define BUSTER_PARSE_TAG_STRUCT 1
+#define BUSTER_PARSE_TAG_UNION 2
+#define BUSTER_PARSE_TAG_ENUM 3
+
 typedef enum ParseMeaning
 {
     PARSE_MEANING_ORDINARY,
@@ -1524,6 +1532,14 @@ struct ParseScalar
     // Whether a block item's GNU attributes came before an identifier no binding of the parse names
     // (ParseScalarResult.undecided).
     bool undecided;
+    // The tag names in scope (#147, parse_scalar_bind_tag): a BUSTER_PARSE_TAG_* kind per name, 0 for none, and the
+    // declarations that made them, each its undo-log entry's position, its name and the kind it hid, which a scope's end
+    // pops with its entry (parse_scalar_restore).
+    uint8_t* tags;
+    uint32_t* tag_positions;
+    uint32_t* tag_names;
+    uint8_t* tag_hidden;
+    uint32_t tag_count;
     // Optional source-event recorder. Null for syntax-only parsing and the vector fallback.
     ParseBindingTrace* binding_trace;
 };
@@ -1786,6 +1802,11 @@ BUSTER_INLINE void parse_scalar_bind(ParseScalar* parser, uint32_t token, uint8_
 
 BUSTER_INLINE void parse_scalar_restore(ParseScalar* parser, uint32_t mark)
 {
+    while (parser->tag_count > 0 && parser->tag_positions[parser->tag_count - 1] >= mark)
+    {
+        parser->tag_count -= 1;
+        parser->tags[parser->tag_names[parser->tag_count]] = parser->tag_hidden[parser->tag_count];
+    }
     ParseBindingTrace* trace = parser->binding_trace;
     if (trace != 0 && trace->bindings->valid && trace->bindings->active_count > mark + trace->builtin_count)
     {
@@ -3255,16 +3276,25 @@ static uint32_t parse_scalar_first_gnu_attribute(const ParseScalar* parser, uint
 
 // Whether identifier `i`, after the GNU attributes that start a block item's declaration, is clang's "expected identifier
 // or '('" (#147): clang's statement reader asks Sema what the name is first (TryAnnotateName), and a name of no type
-// (an object, a function, an enumerator, a parameter, or one it declares implicitly as a function before a `(`) is an
-// annotation token no declarator starts with. A name no binding of the parse has, with no `(` after it, is an implicit
-// int's declarator, unless a file-scope declaration before the tokens names it (ParseScalarResult.undecided). Clang's
-// typo correction and builtins' names without a call aren't modelled.
-static bool parse_scalar_attribute_name(ParseScalar* parser, uint32_t i)
+// (an object, a function, an enumerator, a parameter, or before C23 one it declares implicitly as a function before a
+// `(`) is an annotation token no declarator starts with. A name of no ordinary binding and no `(` after it that a tag in scope has
+// is clang's "must use 'struct' tag to refer to type 'x'" (its isTagTypeWithMissingTag), the tag's keyword named. Any
+// other name of no binding of the parse is an implicit int's declarator, unless a file-scope declaration before the
+// tokens names it (ParseScalarResult.undecided). Returns the error's message, or PARSE_MESSAGE_NONE. Clang's typo
+// correction and builtins' names without a call aren't modelled.
+static uint8_t parse_scalar_attribute_name(ParseScalar* parser, uint32_t i)
 {
-    const uint8_t meaning = parser->meanings[parser->names[i]];
+    const uint32_t name = parser->names[i];
+    const uint8_t meaning = parser->meanings[name];
+    const uint8_t tag = parser->tags[name];
     const bool bound = meaning != PARSE_MEANING_ORDINARY && meaning != PARSE_MEANING_TYPEDEF;
-    const bool result = bound || parser->kinds[i + 1] == PARSE_KIND_L_PAREN;
-    parser->undecided |= !result;
+    // C23 has no implicit function declarations: a `(` decides nothing there.
+    const bool implicit = parser->kinds[i + 1] == PARSE_KIND_L_PAREN && parser->language.standard < 2023;
+    const uint8_t result = bound || implicit ? PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN :
+                           tag == BUSTER_PARSE_TAG_STRUCT ? PARSE_MESSAGE_MUST_USE_STRUCT_TAG :
+                           tag == BUSTER_PARSE_TAG_UNION ? PARSE_MESSAGE_MUST_USE_UNION_TAG :
+                           tag == BUSTER_PARSE_TAG_ENUM ? PARSE_MESSAGE_MUST_USE_ENUM_TAG : PARSE_MESSAGE_NONE;
+    parser->undecided |= result == PARSE_MESSAGE_NONE;
     return result;
 }
 
@@ -3283,6 +3313,9 @@ static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, Pa
                            kind == PARSE_KIND_SEMI || kind == PARSE_KIND_ASM ||
                            (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
     const bool expression = !gnu && kind != PARSE_KIND_R_BRACE && !parse_scalar_starts_declaration(parser, i, true);
+    // A name after GNU attributes that start a declaration, which clang looks up first (parse_scalar_attribute_name).
+    const uint8_t named = !head && !attributes && !statement && !expression && gnu && kind == PARSE_KIND_IDENTIFIER && !parse_scalar_is_typedef_name(parser, i) ?
+                              parse_scalar_attribute_name(parser, i) : PARSE_MESSAGE_NONE;
     frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
     if (kind == PARSE_KIND_ASM && gnu && !label)
     {
@@ -3294,10 +3327,9 @@ static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, Pa
         // after a label's name too).
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
     }
-    else if (!head && !attributes && !statement && !expression && gnu && kind == PARSE_KIND_IDENTIFIER && !parse_scalar_is_typedef_name(parser, i) &&
-             parse_scalar_attribute_name(parser, i))
+    else if (named != PARSE_MESSAGE_NONE)
     {
-        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_AT_TOKEN);
+        parse_scalar_error_argument(parser, i, named, BUSTER_PARSE_AT_TOKEN, named == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN ? BUSTER_PARSE_NONE : i);
     }
     else if (!head && !attributes && !statement && !expression)
     {
@@ -3623,6 +3655,39 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
     }
 }
 
+// A tag's name at `token`, whose keyword frame `frame` read (#147, ParseScalar.tags): declared in the current scope where
+// no tag of the name is in scope, or by its definition or a declaration of it alone (`struct x;`), and a use otherwise, as
+// the binding trace takes it (parse_binding_trace_tag), whose undo-log entry of name zero for the declaration then keeps
+// its scope; without the trace, an entry of its own. A tag in a definition's parameter list ends with the list
+// (parse_scalar_keep_parameters keeps the ordinary names alone).
+static void parse_scalar_bind_tag(ParseScalar* parser, uint32_t token, const ParseFrame* frame, bool definition, bool standalone)
+{
+    const uint32_t name = parser->names[token];
+    const uint32_t before = parser->log_count;
+    const bool declares = parser->tags[name] == 0 || definition || standalone;
+    if (parser->binding_trace != 0)
+    {
+        parse_binding_trace_tag(parser, token, definition, standalone);
+    }
+    else if (declares)
+    {
+        parser->log_names[parser->log_count] = 0;
+        parser->log_meanings[parser->log_count] = parser->meanings[0];
+        parser->log_count += 1;
+    }
+    if (parser->log_count > before)
+    {
+        const uint32_t keyword = frame->tag_token;
+        const uint8_t kind = frame->tag_kind == PARSE_KIND_ENUM ? BUSTER_PARSE_TAG_ENUM :
+                             keyword < parser->count && parser->names[keyword] == C_NAME_UNION ? BUSTER_PARSE_TAG_UNION : BUSTER_PARSE_TAG_STRUCT;
+        parser->tag_positions[parser->tag_count] = before;
+        parser->tag_names[parser->tag_count] = name;
+        parser->tag_hidden[parser->tag_count] = parser->tags[name];
+        parser->tag_count += 1;
+        parser->tags[name] = kind;
+    }
+}
+
 static void parse_scalar_tag(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
     const uint8_t kind = parser->kinds[i];
@@ -3643,7 +3708,7 @@ static void parse_scalar_tag(ParseScalar* parser, uint32_t i, ParseFrame* frame,
     {
         const uint8_t next = parser->kinds[i + 1];
         const bool body = next == PARSE_KIND_L_BRACE || (next == PARSE_KIND_COLON && frame->tag_kind == PARSE_KIND_ENUM && parse_scalar_starts_type(parser, i + 2));
-        parse_binding_trace_tag(parser, i, body, next == PARSE_KIND_SEMI);
+        parse_scalar_bind_tag(parser, i, frame, body, next == PARSE_KIND_SEMI);
         step->role = body ? PARSE_ROLE_LEAF_RIGHT : PARSE_ROLE_TAG;
         frame->mode = body ? PARSE_MODE_TAG_BODY : PARSE_MODE_SPECIFIERS;
     }
@@ -5758,15 +5823,22 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         .diagnostic_capacity = capacity,
         .errors = 0,
         .undecided = false,
+        .tags = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)meanings->capacity + 1),
+        .tag_positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
+        .tag_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
+        .tag_hidden = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots),
+        .tag_count = 0,
         .binding_trace = trace,
     };
     if (parser.frames == 0 || parser.candidates == 0 || parser.waiting == 0 || parser.log_names == 0 || parser.log_meanings == 0 || parser.kept_names == 0 ||
-        parser.kept_meanings == 0 || parser.statements == 0 || parser.brackets == 0)
+        parser.kept_meanings == 0 || parser.statements == 0 || parser.brackets == 0 || parser.tags == 0 || parser.tag_positions == 0 || parser.tag_names == 0 ||
+        parser.tag_hidden == 0)
     {
         result.out_of_memory = true;
     }
     else
     {
+        memset(parser.tags, 0, (uint64_t)meanings->capacity + 1);
         // The stacks' sentinels.
         parser.candidates[0] = (ParseCandidate){ .position = BUSTER_PARSE_NONE, .key = 0 };
         parser.waiting[0] = (ParseWaiting){ .position = BUSTER_PARSE_NONE, .threshold = 0, .left = BUSTER_PARSE_NONE, .left_key = 0 };

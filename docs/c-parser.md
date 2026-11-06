@@ -348,8 +348,9 @@ runs out of memory or declares a file-scope typedef name again as an ordinary
 identifier, which changes how the rest of the unit parses. So it does when a
 fallback declaration's block item has GNU attributes before a name the
 declaration never bound (`ParseScalarResult.undecided`): whether that name is
-an earlier file-scope declaration's decides between clang's "expected
-identifier or '('" and an implicit int's declarator
+an earlier file-scope declaration's or tag's decides between clang's
+"expected identifier or '('" or "must use 'struct' tag" and an implicit int's
+declarator
 (`parse_scalar_attribute_name`, #147), and only the whole unit's parse has
 those declarations. Valid code meets it only as C89's implicit int.
 

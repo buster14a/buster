@@ -518,6 +518,21 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x; void f(void) { __extension__ __attribute__(()) x = 1; }\n", "1:55: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "int x; void f(void) { for (__attribute__(()) x = 1;;) ; }\n", "1:46: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "int x; void f(void) { __attribute__(()) static x = 1; __attribute__(()) *x; }\n", "1:48: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A name of no ordinary binding that a tag in scope has, clang's Sema's error first (isTagTypeWithMissingTag), the tag
+    // in scope as its scope keeps it (the parser's ParseScalar.tags): an ordinary binding first, a tag of a block that
+    // ended none, and a file-scope tag before the fallback's declaration through the whole unit. Before C23 a `(` makes
+    // the name an implicit function's; C23 has none.
+    { "struct x { int v; }; void f(void) { __attribute__(()) x = 1; }\n", "1:55: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "struct x { int v; }; void f(void) { __attribute__((unused)) x; }\n", "1:61: must use 'struct' tag to refer to type 'x'", 0, true },
+    { "union u { int v; }; void f(void) { __attribute__(()) u; }\n", "1:54: must use 'union' tag to refer to type 'u'", "c89", true },
+    { "enum e { A }; void f(void) { __attribute__(()) e = 1; }\n", "1:48: must use 'enum' tag to refer to type 'e'", "gnu89", true },
+    { "struct x; void f(void) { { __attribute__(()) x = 1; } }\n", "1:46: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "void g(void) { struct x { int v; }; } void f(void) { __attribute__(()) x = 1; x = 2; }\n", "", "gnu89" },
+    { "struct x { int v; }; void f(void) { int x; __attribute__(()) x = 1; }\n", "1:62: expected identifier or '('", "gnu89" },
+    { "int y; void g(void) { y = 1; } struct x { int v; }; void h(void) { y = 2; } void f(void) { __attribute__(()) x = 1; }\n",
+      "1:110: must use 'struct' tag to refer to type 'x'", "gnu89", true },
+    { "struct x { int v; }; void f(void) { __attribute__(()) x(1); }\n", "1:55: must use 'struct' tag to refer to type 'x'", "c23", true },
+    { "void f(void) { __attribute__(()) x(1); }\n", "1:36: expected parameter declarator", "c23" },
     { "void f(__attribute__((aligned(8))) *p);\n", "1:37: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
