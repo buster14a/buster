@@ -53,9 +53,30 @@ _Static_assert((uint64_t)BUSTER_PP_MAX_HISTORY * (sizeof(PPExpansion) / 4) < INT
 // to first[b] + counts[b]), their offsets ascending, each less than the function's code's bytes (`sizes`), and where its
 // body's code starts, after its prologue (`bodies`). From the emission's output arena, with BUSTER_CHECK_DEBUG_SLACK
 // rows' room past `count`.
+typedef struct CheckDebugValueSpan CheckDebugValueSpan;
+struct CheckDebugValueSpan
+{
+    uint32_t begin;
+    uint32_t end;
+    uint32_t token;
+};
+
+typedef struct CheckDebugBody CheckDebugBody;
+struct CheckDebugBody
+{
+    const CheckDebugBinding* bindings;
+    const Tier0Home* homes;
+    const uint8_t* classes;
+    const CheckDebugValueSpan* spans;
+    uint32_t local_count;
+    uint32_t span_count;
+};
+
 typedef struct CheckProgramRows CheckProgramRows;
 struct CheckProgramRows
 {
+    const Link* link;
+    CheckDebugBody* values;
     uint32_t* offsets;
     uint32_t* tokens;
     uint32_t* first;
@@ -659,7 +680,7 @@ static uint32_t check_debug_keep(const uint32_t* offsets, const uint32_t* keys, 
 #endif
 }
 
-_Static_assert(BUSTER_OBJECT_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS && BUSTER_OBJECT_DEBUG_INFO == DEBUG_SECTION_INFO &&
+_Static_assert(BUSTER_OBJECT_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS + 1 && BUSTER_OBJECT_DEBUG_INFO == DEBUG_SECTION_INFO &&
                    BUSTER_OBJECT_DEBUG_ABBREV == DEBUG_SECTION_ABBREV && BUSTER_OBJECT_DEBUG_LINE == DEBUG_SECTION_LINE &&
                    BUSTER_OBJECT_DEBUG_ADDR == DEBUG_SECTION_ADDR && BUSTER_OBJECT_DEBUG_RNGLISTS == DEBUG_SECTION_RNGLISTS &&
                    BUSTER_OBJECT_DEBUG_FIELDS == BUSTER_DEBUG_SECTIONS - 1,
@@ -677,6 +698,8 @@ struct CheckDebug
     // The rows each pass made and kept, for the tests and the benchmark.
     uint32_t raw_rows;
 };
+
+#include "c_check_debug_values.c"
 
 // The unit's file of a key (check_debug_source's, one per name): the one it has, or a new one (`files`, room for the
 // program's functions and one more), which PPFile keys remember in `by_file` and #line keys in `by_directive`.
@@ -804,8 +827,9 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
             debug->attach.sections[section] = (String8){ .pointer = (char*)debug->output.sections[section].bytes, .length = debug->output.sections[section].size };
             debug->object.sections[section] = debug->attach.sections[section];
         }
+        valid = check_debug_values(debug, program, rows, parser, arena, scratch);
     }
-    else
+    if (!valid)
     {
         arena_pop_to(arena, mark);
         *debug = (CheckDebug){ .raw_rows = rows->count };

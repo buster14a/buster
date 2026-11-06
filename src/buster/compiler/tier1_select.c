@@ -134,8 +134,8 @@ typedef enum Tier1SelectRule
     // from memory where it folds a load (FLOAT_LOAD_OPERAND, values[1] and values[2] the address's base and index). A
     // negation, xorps of the sign bit, which the scratch general register moves into the vector class's scratch
     // register. A load and a store as the integer ones, the store's value in values[2], each one movss or movsd, which stays its node's last record (the CFG consumer patches a frame object's
-    // base and offset into it). A comparison's truth value, `condition` its IR predicate (EQ to GE): ucomis, setcc and
-    // movzx, and for == and != the parity flag's setcc and their and or or, since unordered operands set ZF too. A branch
+    // base and offset into it). A comparison's truth value, `condition` its IR predicate (EQ to GE): clear the general
+    // result, ucomis and setcc, and for == and != the parity flag's setcc and their and or or, since unordered sets ZF. A branch
     // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
     // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
     // !(a >= b), true. The conversions (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others,
@@ -620,6 +620,7 @@ struct Tier1SelectHoles
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
+    bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
@@ -638,10 +639,10 @@ static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
     switch (operation)
     {
     case X86_OPERATION_ADD:
-        form = width == 8 ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32;
+        form = width == 8 ? X86_FORM_ADD_R64_RM64 : width == 2 ? X86_FORM_ADD_R16_RM16 : width == 1 ? X86_FORM_ADD_R8_RM8 : X86_FORM_ADD_R32_RM32;
         break;
     case X86_OPERATION_SUB:
-        form = width == 8 ? X86_FORM_SUB_R64_RM64 : X86_FORM_SUB_R32_RM32;
+        form = width == 8 ? X86_FORM_SUB_R64_RM64 : width == 2 ? X86_FORM_SUB_R16_RM16 : width == 1 ? X86_FORM_SUB_R8_RM8 : X86_FORM_SUB_R32_RM32;
         break;
     case X86_OPERATION_AND:
         form = width == 8 ? X86_FORM_AND_R64_RM64 : X86_FORM_AND_R32_RM32;
@@ -1282,7 +1283,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction)
         {
             .rm = destination,
-            .form = holes->operation == X86_OPERATION_NEG ? (width == 8 ? X86_FORM_NEG_RM64 : X86_FORM_NEG_RM32) : (width == 8 ? X86_FORM_NOT_RM64 : X86_FORM_NOT_RM32),
+            .form = holes->operation == X86_OPERATION_NEG ? (width == 8 ? X86_FORM_NEG_RM64 : width == 2 ? X86_FORM_NEG_RM16 : width == 1 ? X86_FORM_NEG_RM8 : X86_FORM_NEG_RM32) :
+                                                          (width == 8 ? X86_FORM_NOT_RM64 : width == 2 ? X86_FORM_NOT_RM16 : width == 1 ? X86_FORM_NOT_RM8 : X86_FORM_NOT_RM32),
         });
         break;
     case TIER1_RULE_REGISTER:
@@ -1346,6 +1348,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = destination;
         record.form = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+        if (holes->operation == X86_OPERATION_MOVSX)
+        {
+            record.form = width == 4 ? X86_FORM_MOVSXD_R64_RM32 : width == 2 ? (holes->source_width == 8 ? X86_FORM_MOVSX_R64_RM16 : X86_FORM_MOVSX_R32_RM16) :
+                                                                                         (holes->source_width == 8 ? X86_FORM_MOVSX_R64_RM8 : X86_FORM_MOVSX_R32_RM8);
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -1381,10 +1388,23 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_COMPARE:
     case TIER1_RULE_COMPARE_IMMEDIATE:
+    {
+        // A zeroed destination stays canonical when setcc writes its low byte. Clear before the comparison where the
+        // destination is independent of its inputs. An aliased input must be read first; mov-immediate then preserves
+        // the flags, unlike the xor zero idiom. Neither sequence depends on a partial-register result's movzx.
+        const bool aliases = destination == holes->left || (!holes->compare_immediate && destination == holes->right);
+        if (!aliases)
+        {
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
+        }
         tier1_select_compare(&result, holes);
+        if (aliases)
+        {
+            tier1_select_append(&result, tier1_select_constant_move(4, destination, 0));
+        }
         tier1_select_append(&result, (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] });
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
         break;
+    }
     case TIER1_RULE_BRANCH_COMPARE:
         tier1_select_compare(&result, holes);
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
@@ -1812,6 +1832,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const bool swapped = condition == IR_LT || condition == IR_LE;
         const uint8_t first = (swapped ? holes->right : holes->left) & 15;
         const uint8_t second = (swapped ? holes->left : holes->right) & 15;
+        // Floating inputs are in the vector class, so clearing this general-register result cannot alias either one.
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
         tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, first, second));
         if (condition == IR_EQ || condition == IR_NE)
         {
@@ -1825,7 +1847,6 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const bool strict = condition == IR_LT || condition == IR_GT;
             tier1_select_append(&result, (X86Instruction){ .form = strict ? X86_FORM_SETA_RM8 : X86_FORM_SETAE_RM8, .rm = destination });
         }
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination));
         break;
     }
     case TIER1_RULE_FLOAT_BRANCH_COMPARE:
@@ -1895,6 +1916,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     default:
         tier1_select_append(&result, (X86Instruction){0});
         break;
+    }
+    if (holes->sign_result)
+    {
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVSXD_R64_RM32, destination, destination));
     }
     return result;
 }
@@ -2127,8 +2152,9 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // ordered argument slice, including duplicates, is in the effective-use CSR, immediate is its symbol ID, and width
 // is the result width (zero for void). Memory/conversion patterns keep logical byte widths, while the allocator and
 // frame consumer use tier1_select_width's 4-byte canonical storage for I8/I16. Conversion source_width is the source's
-// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. A zero extension of a canonical
-// I1, I8 or I16 value selects COPY instead, with canonical width and the narrow source width retained; COPY of a narrow
+// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. A signed LOAD_ADDRESS uses MOVSX as
+// its operation, width as its exact memory width and source_width as its destination width (4 or 8). A zero extension
+// of a canonical integer selects COPY instead, with canonical width and the source width retained; COPY of a narrow
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
 // A COPY's source_width is the plan's record of that certificate, which both paths' plans must agree on; the emitter
 // doesn't read it, since a copy in its own register is nothing at every width (#1116, tier1_select_expand).
@@ -2158,6 +2184,10 @@ struct Tier1SelectPattern
     // A test's: no-ops the node's expansion writes before its rule's records, which take its sequence to its room and
     // past it (#989's review). Every pattern the selector makes has none.
     uint8_t nops;
+    // A sign-preserving I32 representation uses eight bytes in spills and CFG edge moves; zero means the type width.
+    uint8_t storage_width;
+    // An ordinary I32 ALU operation writes its wrapping result first, then establishes signed 64-bit storage once.
+    bool sign_result;
 };
 
 typedef struct Tier1SelectPlan Tier1SelectPlan;
@@ -2221,6 +2251,9 @@ struct Tier1SelectForest
     const uint32_t* barriers;
     // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
     const uint8_t* canonical;
+    // Semantic range certificates: the low byte is the number of possibly nonzero bits, the high byte the smallest
+    // signed width. These describe the IR value; canonical separately proves its physical register's upper bits.
+    const uint16_t* known_bits;
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
     bool vectors;
@@ -2291,8 +2324,8 @@ static uint32_t tier1_select_width(uint32_t type)
 {
     // Narrow SSA values occupy a zero-extended 32-bit register/spill slot; signedness is explicit in IR_SEXT. An I32's
     // upper half is unspecified, as System V leaves a parameter's and a result's (#1116): every rule reads an I32 operand
-    // at 32 bits (an address's index is an I64), and a zero extension to I64 always writes its 32-bit move. So no copy,
-    // truncation to I32, call argument or call result clears it.
+    // at 32 bits (an address's index is an I64). A zero extension to I64 keeps its 32-bit move unless selection proves
+    // those upper bits zero. No ordinary copy, truncation to I32, call argument or call result clears them.
     return type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
 }
 
@@ -2352,57 +2385,44 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 
 #define BUSTER_TIER1_SELECT_CANONICAL_PASSES 8
 
-// A narrow SSA value is canonical in its 32-bit storage when every write to the register that holds it leaves the bits
-// past its width zero. These producers write all 32 bits themselves:
-//   IR_CONST, IR_UNDEF   the type's masked bits, in a 32-bit move (or zero)
-//   IR_PARAM             a narrow parameter's entry MOVZX, before any read (tier1_emit_cfg.c; narrow parameters keep the
-//                        function out of the straight-line consumer)
-//   IR_LOAD              MOVZX_R32_RM8/RM16 (byte/word loads zero-extend)
-//   IR_TRUNC             MOVZX_R32_RM8/RM16 (a truncation to I8/I16)
-//   IR_SEXT              MOVSX, then the I16 MOVZX
-//   IR_ICMP, IR_FCMP     setcc (an FCMP's == and != with the parity's), then MOVZX_R32_RM8
-//   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
-//   IR_FPTOSI/FPTOUI     cvtts*2si, then MOVZX_R32_RM8/RM16 (a narrow result's, #141)
-// COPY, BITCAST, ZEXT, SELECT and PHI only move narrow values (MOV, CMOV, edge moves, spill/reload), so they are
-// canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it is noncanonical too
-// and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
-// The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
-// probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
-// rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
-static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, uint8_t* canonical)
+#include "tier1_select_ranges.c"
+
+// Compact, monotone range facts, shared by both selection paths. Unknown is the type's full width. Starting there
+// (including at phis) is essential: a loop must never prove its own invariant from an optimistic backedge. Bounded
+// sweeps handle forward block references too; facts not reached within the bound remain conservative.
+static void tier1_select_known_bits_passes(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector, bool seed)
 {
     const uint32_t count = function->instruction_count;
-    for (uint32_t node = 0; node < count; node += 1)
+    // The caller's fresh scratch column is disjoint from this immutable IR and its arrays. Cache the stable array
+    // addresses across known's stores, without relying on the host build's disabled type-based alias analysis.
+    const uint8_t* const types = function->type;
+    const uint8_t* const operations = function->op;
+    const uint32_t* const inputs_a = function->a;
+    const uint32_t* const inputs_b = function->b;
+    const uint32_t* const inputs_c = function->c;
+    const IrConstant* const constants = function->constants;
+    if (seed && BUSTER_VECTOR_PATH(vector))
     {
-        canonical[node] = 0;
-        if (tier1_select_narrow_width(function->type[node]) != 0)
+        // Independent seed classification, 32 nodes at a time. Both loads and stores are masked at the logical tail.
+        for (uint32_t first = 0; first < count; first += 32)
         {
-            switch (function->op[node])
-            {
-            case IR_CONST:
-            case IR_UNDEF:
-            case IR_PARAM:
-            case IR_LOAD:
-            case IR_TRUNC:
-            case IR_SEXT:
-            case IR_ICMP:
-            case IR_FCMP:
-            case IR_FPTOSI:
-            case IR_FPTOUI:
-            case IR_CALL_INDIRECT:
-                canonical[node] = 1;
-                break;
-            // A row call's narrow result (#141) is its field's, whose bits past the class are the row's: not canonical.
-            case IR_CALL:
-                canonical[node] = function->calls[function->b[node]].row == 0;
-                break;
-            // A mask's kmovb or kmovw into a 32-bit register (TIER1_RULE_MASK_TO_INTEGER, #179) zero-extends.
-            case IR_BITCAST:
-                canonical[node] = function->a[node] < count && tier1_select_mask_width(function->type[function->a[node]]) != 0;
-                break;
-            default:
-                break;
-            }
+            const uint32_t left = count - first;
+            const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
+            const __m512i type = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(active, types + first));
+            __m512i bits = _mm512_set1_epi16(64);
+            bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I1)), _mm512_set1_epi16(1));
+            bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I8)), _mm512_set1_epi16(8));
+            bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I16)), _mm512_set1_epi16(16));
+            bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I32)), _mm512_set1_epi16(32));
+            _mm512_mask_storeu_epi16(known + first, active, _mm512_or_si512(bits, _mm512_slli_epi16(bits, 8)));
+        }
+    }
+    else if (seed)
+    {
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            const uint32_t bits = tier1_select_width(types[node]) != 0 ? ir_type_bits[types[node]] : 64;
+            known[node] = (uint16_t)(bits | (bits << 8));
         }
     }
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
@@ -2410,18 +2430,223 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
         bool changed = false;
         for (uint32_t node = 0; node < count; node += 1)
         {
-            if (canonical[node] == 0 && tier1_select_narrow_width(function->type[node]) != 0)
+            const uint32_t type = types[node];
+            if (tier1_select_width(type) != 0)
+            {
+                const uint32_t bits = ir_type_bits[type];
+                const uint32_t op = operations[node];
+                const uint32_t a = inputs_a[node];
+                const uint32_t b = inputs_b[node];
+                const uint32_t ua = a < count ? known[a] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : bits;
+                const uint32_t ub = b < count ? known[b] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : bits;
+                const uint32_t sa = a < count ? known[a] >> 8 : bits;
+                const uint32_t sb = b < count ? known[b] >> 8 : bits;
+                uint32_t unsigned_bits = bits;
+                uint32_t signed_bits = bits;
+                if (op == IR_CONST || op == IR_UNDEF)
+                {
+                    const uint64_t mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+                    const uint64_t value = op == IR_CONST ? constants[a].low & mask : 0;
+                    const uint64_t magnitude = (value >> (bits - 1)) != 0 ? (~value & mask) : value;
+                    unsigned_bits = value == 0 ? 0 : 64 - (uint32_t)__builtin_clzll(value);
+                    signed_bits = magnitude == 0 ? 1 : 65 - (uint32_t)__builtin_clzll(magnitude);
+                }
+                else if (op == IR_COPY || op == IR_TRUNC || op == IR_BITCAST || op == IR_INTTOPTR || op == IR_PTRTOINT)
+                {
+                    // Only equal-width integer bitcasts preserve these facts; masks have no integer facts here.
+                    if (a < count && tier1_select_width(types[a]) != 0)
+                    {
+                        unsigned_bits = ua;
+                        signed_bits = sa;
+                    }
+                }
+                else if (op == IR_ZEXT)
+                {
+                    unsigned_bits = ua;
+                }
+                else if (op == IR_SEXT)
+                {
+                    signed_bits = sa;
+                    unsigned_bits = ua < ir_type_bits[types[a]] ? ua : bits;
+                }
+                else if (op == IR_ICMP || op == IR_FCMP)
+                {
+                    unsigned_bits = 1;
+                }
+                else if (op == IR_AND || op == IR_OR || op == IR_XOR)
+                {
+                    unsigned_bits = op == IR_AND ? (ua < ub ? ua : ub) : (ua > ub ? ua : ub);
+                    signed_bits = sa > sb ? sa : sb;
+                }
+                else if (op == IR_NOT)
+                {
+                    signed_bits = sa;
+                }
+                else if (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_NEG)
+                {
+                    const uint32_t maximum_unsigned = ua > ub ? ua : ub;
+                    const uint32_t maximum_signed = sa > sb ? sa : sb;
+                    unsigned_bits = op == IR_ADD ? maximum_unsigned + 1 : op == IR_MUL ? (ua == 0 || ub == 0 ? 0 : ua + ub) : bits;
+                    signed_bits = op == IR_NEG ? sa + 1 : op == IR_MUL ? sa + sb : maximum_signed + 1;
+                }
+                else if (op == IR_UDIV || op == IR_UREM)
+                {
+                    unsigned_bits = op == IR_UREM && ub < ua ? ub : ua;
+                }
+                else if (op == IR_LSHR || op == IR_ASHR || op == IR_SHL)
+                {
+                    const bool constant = b < count && operations[b] == IR_CONST;
+                    const uint64_t shift = constant ? constants[inputs_a[b]].low : 0;
+                    if (shift < bits && (op != IR_SHL || constant))
+                    {
+                        unsigned_bits = op == IR_SHL ? ua + (uint32_t)shift : op == IR_LSHR || ua < bits ? (ua > shift ? ua - (uint32_t)shift : 0) : bits;
+                        signed_bits = op == IR_SHL ? sa + (uint32_t)shift : op == IR_ASHR ? (sa > shift ? sa - (uint32_t)shift : 1) : bits;
+                    }
+                }
+                else if (op == IR_SELECT)
+                {
+                    const uint32_t c = inputs_c[node];
+                    unsigned_bits = ub > (known[c] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) ? ub : known[c] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK;
+                    signed_bits = sb > (known[c] >> 8) ? sb : known[c] >> 8;
+                }
+                else if (op == IR_PHI)
+                {
+                    unsigned_bits = 0;
+                    signed_bits = 1;
+                    const uint32_t operands = (uint32_t)ir_operand_count(function, node);
+                    for (uint32_t p = 0; p < operands; p += 1)
+                    {
+                        const uint32_t value = ir_operand(function, node, p, blocks[node]).value;
+                        unsigned_bits = unsigned_bits > (known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) ? unsigned_bits : known[value] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK;
+                        signed_bits = signed_bits > (known[value] >> 8) ? signed_bits : known[value] >> 8;
+                    }
+                }
+                unsigned_bits = unsigned_bits < bits ? unsigned_bits : bits;
+                signed_bits = signed_bits < bits ? signed_bits : bits;
+                const uint16_t previous = known[node];
+                unsigned_bits = unsigned_bits < (previous & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) ? unsigned_bits : previous & BUSTER_TIER1_KNOWN_UNSIGNED_MASK;
+                signed_bits = signed_bits < (previous >> 8) ? signed_bits : previous >> 8;
+                // A zero sign bit is also a signed-range proof (including zero, which needs one signed bit).
+                signed_bits = unsigned_bits < signed_bits ? unsigned_bits + 1 : signed_bits;
+                const uint16_t endpoint = op == IR_COPY && type == IR_I32 && types[a] == IR_I32 ? known[a] & BUSTER_TIER1_KNOWN_BELOW_MAX : 0;
+                const uint16_t next = (uint16_t)(unsigned_bits | (signed_bits << 8) | (previous & BUSTER_TIER1_KNOWN_BELOW_MAX) | endpoint);
+                changed |= previous != next;
+                known[node] = next;
+            }
+        }
+        if (!changed)
+        {
+            break;
+        }
+    }
+}
+
+static void tier1_select_known_bits(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
+{
+    tier1_select_known_bits_passes(function, blocks, known, vector, true);
+    if (tier1_select_induction_bounds(function, dominance, blocks, workspace, known, vector))
+    {
+        tier1_select_known_bits_passes(function, blocks, known, vector, false);
+    }
+}
+
+#include "tier1_select_storage.c"
+
+// A narrow SSA value, or an I32, is canonical when its physical register holds zeros past its type's width. I64/PTR
+// satisfy this vacuously. These narrow producers write all 32 bits themselves:
+//   IR_CONST, IR_UNDEF   the type's masked bits, in a 32-bit move (or zero)
+//   IR_PARAM             a narrow parameter's entry MOVZX, before any read (tier1_emit_cfg.c; narrow parameters keep the
+//                        function out of the straight-line consumer)
+//   IR_LOAD              MOVZX_R32_RM8/RM16 (byte/word loads zero-extend)
+//   IR_TRUNC             MOVZX_R32_RM8/RM16 (a truncation to I8/I16)
+//   IR_SEXT              MOVSX, then the I16 MOVZX
+//   IR_ICMP, IR_FCMP     zeroed general-register storage, then setcc (FCMP's == and != combine the parity's too)
+//   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
+//   IR_FPTOSI/FPTOUI     cvtts*2si, then MOVZX_R32_RM8/RM16 (a narrow result's, #141)
+// I32 ALU operations and ordinary 32-bit loads clear the upper half; I32 parameters, calls and rows do not promise it.
+// A requested signed-load representation instead preserves the sign in all 64 bits and in eight-byte spill storage.
+// A zero-count shift, multiplication/division by one and a truncation can coalesce without a 32-bit write, so they
+// need their operand's proof. COPY, BITCAST, ZEXT, SELECT and PHI propagate only proven storage properties.
+// Any other producer is left noncanonical: a copy of it is noncanonical too
+// and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
+// The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
+// probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
+// rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
+static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, uint32_t* workspace, bool vector)
+{
+    const uint32_t count = function->instruction_count;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        const uint32_t type = function->type[node];
+        canonical[node] = type == IR_I64 || type == IR_PTR;
+        if (tier1_select_narrow_width(type) != 0 || type == IR_I32)
+        {
+            switch (function->op[node])
+            {
+            case IR_CONST:
+            case IR_UNDEF:
+            case IR_LOAD:
+            case IR_SEXT:
+            case IR_ICMP:
+            case IR_FCMP:
+            case IR_FPTOSI:
+                canonical[node] = 1;
+                break;
+            case IR_FPTOUI:
+                // The unsigned I32 conversion uses a 64-bit cvtt instruction, rather than a 32-bit write.
+                canonical[node] = type != IR_I32;
+                break;
+            case IR_PARAM:
+            case IR_CALL_INDIRECT:
+                canonical[node] = type != IR_I32;
+                break;
+            case IR_TRUNC:
+                // Truncation to I32 can coalesce without writing, retaining the source's whole upper half.
+                canonical[node] = type != IR_I32 || (known[function->a[node]] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= 32;
+                break;
+            case IR_ADD:
+            case IR_SUB:
+            case IR_AND:
+            case IR_OR:
+            case IR_XOR:
+            case IR_NEG:
+            case IR_NOT:
+            case IR_INTRINSIC:
+                canonical[node] = type == IR_I32;
+                break;
+            // A row call's narrow result (#141) is its field's, whose bits past the class are the row's: not canonical.
+            case IR_CALL:
+                canonical[node] = type != IR_I32 && function->calls[function->b[node]].row == 0;
+                break;
+            // A mask's kmovb or kmovw into a 32-bit register (TIER1_RULE_MASK_TO_INTEGER, #179) zero-extends.
+            case IR_BITCAST:
+                canonical[node] = function->a[node] < count && (tier1_select_mask_width(function->type[function->a[node]]) != 0 || (type == IR_I32 && function->type[function->a[node]] == IR_F32));
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    tier1_select_sign_requests(function, known, canonical, workspace, vector);
+    for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
+    {
+        bool changed = false;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            if ((canonical[node] & BUSTER_TIER1_STORAGE_ZERO) == 0 &&
+                (function->type[node] != IR_I32 || (canonical[node] & BUSTER_TIER1_STORAGE_SIGN) == 0) &&
+                (tier1_select_narrow_width(function->type[node]) != 0 || function->type[node] == IR_I32))
             {
                 const uint32_t op = function->op[node];
                 const uint32_t a = function->a[node];
                 bool value = false;
                 if (op == IR_COPY || op == IR_BITCAST || op == IR_ZEXT)
                 {
-                    value = a < count && canonical[a] != 0;
+                    value = a < count && (canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0;
                 }
                 else if (op == IR_SELECT)
                 {
-                    value = function->b[node] < count && function->c[node] < count && canonical[function->b[node]] != 0 && canonical[function->c[node]] != 0;
+                    value = function->b[node] < count && function->c[node] < count && (canonical[function->b[node]] & BUSTER_TIER1_STORAGE_ZERO) != 0 && (canonical[function->c[node]] & BUSTER_TIER1_STORAGE_ZERO) != 0;
                 }
                 else if (op == IR_PHI)
                 {
@@ -2430,14 +2655,63 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
                     for (uint32_t p = 0; p < operand_count; p += 1)
                     {
                         const uint32_t operand = ir_operand(function, node, p, blocks[node]).value;
-                        value = value && operand < count && canonical[operand] != 0;
+                        value = value && operand < count && (canonical[operand] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+                    }
+                }
+                else if (function->type[node] == IR_I32 && (op == IR_MUL || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || op == IR_SDIV || op == IR_UDIV || op == IR_SREM || op == IR_UREM))
+                {
+                    const uint32_t b = function->b[node];
+                    const bool constant = b < count && function->op[b] == IR_CONST;
+                    const uint64_t immediate = constant ? (uint32_t)function->constants[function->a[b]].low : 0;
+                    // A shift by zero (also a dynamic count), multiplication by one or division by one can leave
+                    // the destination untouched. Their source must already have the required upper half.
+                    const bool shifts = op == IR_SHL || op == IR_LSHR || op == IR_ASHR;
+                    const bool identity = shifts ? !constant || (immediate & 31) == 0 : constant && immediate == 1 && op != IR_SREM && op != IR_UREM;
+                    value = !identity || (canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+                    if (op == IR_MUL && function->op[a] == IR_CONST && (uint32_t)function->constants[function->a[a]].low == 1)
+                    {
+                        value = (canonical[b] & BUSTER_TIER1_STORAGE_ZERO) != 0;
                     }
                 }
                 if (value)
                 {
-                    canonical[node] = 1;
+                    canonical[node] |= BUSTER_TIER1_STORAGE_ZERO;
                     changed = true;
                 }
+            }
+            if (function->type[node] == IR_I32)
+            {
+                const uint8_t before = canonical[node];
+                uint8_t facts = before;
+                const uint32_t op = function->op[node];
+                const uint32_t a = function->a[node];
+                bool sign = false;
+                if (op == IR_COPY && function->type[a] == IR_I32)
+                {
+                    sign = (canonical[a] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+                }
+                else if (op == IR_SELECT)
+                {
+                    sign = (canonical[function->b[node]] & canonical[function->c[node]] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+                }
+                else if (op == IR_PHI)
+                {
+                    sign = true;
+                    const uint32_t operands = (uint32_t)ir_operand_count(function, node);
+                    for (uint32_t operand = 0; operand < operands; operand += 1)
+                    {
+                        const uint32_t value = ir_operand(function, node, operand, blocks[node]).value;
+                        sign &= (canonical[value] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+                    }
+                }
+                facts |= sign ? BUSTER_TIER1_STORAGE_SIGN : 0;
+                if ((known[node] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < 32 && facts != 0)
+                {
+                    // For a nonnegative I32, sign-extended and zero-extended storage are the same bits.
+                    facts |= BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN;
+                }
+                changed |= facts != before;
+                canonical[node] = facts;
             }
         }
         if (!changed)
@@ -2445,6 +2719,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             break;
         }
     }
+    tier1_select_storage_components(function, canonical, workspace, vector);
 }
 
 // A call's argument's type: a fixed parameter's, or an unnamed one's (a variadic call's past its parameters) its value's,
@@ -3219,6 +3494,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_pattern_cost(
 static inline __attribute__((always_inline)) void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
 {
     assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
+    pattern.intrinsic_cost += pattern.sign_result;
     candidates->patterns[candidates->count] = pattern;
     candidates->costs[candidates->count] = tier1_select_pattern_cost(forest, node, &pattern);
     candidates->count += 1;
@@ -3421,9 +3697,25 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         {
             const bool right = tier1_select_constant(function, b, &constant);
             const bool left = !right && tier1_select_constant(function, a, &constant);
-            taken = (right || left) && !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
-            next.base = right ? a : b;
-            constant_node = right ? b : a;
+            if (right || left)
+            {
+                taken = !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
+                next.base = right ? a : b;
+                constant_node = right ? b : a;
+            }
+            else
+            {
+                // The typed stream also spells a pointer offset as inttoptr(add(ptrtoint(base), index)).
+                // Its full-width addition is the memory operand's base and index, not a separate lea. Never
+                // cross a narrow addition/extension or introduce a second index into an existing address.
+                taken = address.index == BUSTER_IR_NONE;
+                if (taken)
+                {
+                    next.base = a;
+                    next.index = tier1_select_index(forest, root, b, 1, &next.displacement, &peeled);
+                    next.scale = 0;
+                }
+            }
         }
         else if (taken && op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
         {
@@ -3485,13 +3777,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t c = function->c[node];
     const uint32_t type = function->type[node];
     const uint32_t width = tier1_select_width(type);
+    const bool sign_storage = type == IR_I32 && forest->canonical != 0 &&
+                              (forest->canonical[node] & (BUSTER_TIER1_STORAGE_ZERO | BUSTER_TIER1_STORAGE_SIGN)) == BUSTER_TIER1_STORAGE_SIGN;
+    const bool sign_result = sign_storage && (op == IR_PARAM || tier1_select_sign_birth(function, node));
     Tier1SelectCandidates candidates = {0};
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
         .stack_object = BUSTER_IR_NONE,
         .operation = (uint8_t)tier1_select_operation(op),
-        .width = (uint8_t)width,
+        .width = (uint8_t)(sign_storage && !sign_result ? 8 : width),
+        .storage_width = type == IR_I32 && forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_STORAGE_WIDE) != 0 ? 8 : 0,
+        .sign_result = sign_result,
     };
     const bool integer = type == IR_I32 || type == IR_I64;
     // A mask's operations (#179): the stored mask's width for a store, the result's for the others; and a floating
@@ -3901,7 +4198,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // parameters, the result MOVZX for narrow calls, and the producers' own full-width writes), so the copy is as
         // canonical as its source; the emitter doesn't read it.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
-        base.source_width = narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0 ? narrow_width : 0;
+        base.source_width = narrow_width != 0 && forest->canonical != 0 && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0 ? narrow_width : 0;
         base.intrinsic_cost = 1;
         // A pointer's 64 bits, or the pointer of 64 bits, from an address: the address's lea, or the copy of what the
         // conversions around it convert.
@@ -3932,32 +4229,276 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
              (op == IR_ZEXT && (type == IR_I8 || type == IR_I16 || integer) && (function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)) ||
              (op == IR_SEXT && (type == IR_I16 || integer) && (function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)))
     {
-        // A zero extension of a canonical I1, I8 or I16 value is a copy: the source register already holds the
-        // destination value with zeros past its width (the planner's canonical column, tier1_select_canonical), and a
-        // 32-bit move zeroes the whole 64-bit register. This keeps the second movzx of issue #981's speedtest1 loop out
-        // of the plan on both paths. The copy records the narrow source width (plan metadata the emitter doesn't read: a
-        // copy in its own register is nothing); an I32 source's zero extension always writes its move, since its upper
-        // half is unspecified (tier1_select_width).
-        // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the comparison's own setcc/movzx;
+        // A canonical source already has zero bits past its type, including I32 results of actual 32-bit writes.
+        // A proven nonnegative signed extension is a zero extension; a truncation whose discarded bits are known zero
+        // is a copy too. Neither semantic range facts alone nor an ABI's unspecified upper bits certify a copy.
+        // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the canonical comparison result;
         // this copy covers a comparison the fold leaves alone.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
-        const bool narrow_copy = op == IR_ZEXT && narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0;
-        base.rule = narrow_copy ? TIER1_RULE_COPY : op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;
+        const uint32_t source_bits = ir_type_bits[function->type[a]];
+        const uint32_t unsigned_bits = forest->known_bits != 0 ? forest->known_bits[a] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK : source_bits;
+        const bool nonnegative = op == IR_SEXT && (unsigned_bits < source_bits ||
+                                                  (forest->canonical != 0 && (forest->canonical[node] & BUSTER_TIER1_RANGE_NONNEGATIVE_USE) != 0));
+        const bool canonical = forest->canonical != 0 && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+        const bool sign_copy = op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && forest->canonical != 0 &&
+                               (forest->canonical[a] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+        const bool copy = sign_copy || (canonical && (op == IR_ZEXT || nonnegative || (op == IR_TRUNC && unsigned_bits <= ir_type_bits[type])));
+        base.rule = copy ? TIER1_RULE_COPY : op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT || nonnegative ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;
         base.values[0] = a;
-        if (narrow_copy)
+        if (copy)
         {
-            base.source_width = narrow_width;
+            base.source_width = narrow_width != 0 ? narrow_width : (uint8_t)tier1_select_memory_width(function->type[a]);
             base.intrinsic_cost = 1;
         }
         else
         {
-            base.width = (uint8_t)tier1_select_memory_width(type);
+            base.width = sign_storage ? 8 : (uint8_t)tier1_select_memory_width(type);
             base.source_width = function->type[a] == IR_I1 ? 4 : (uint8_t)tier1_select_memory_width(function->type[a]);
             base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
         }
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A narrow ALU write preserves an already-zero upper part while wrapping only the result's byte or word.
+        // Copying its left input at 32 bits first (when needed) keeps that certificate. Both inputs must fit and have
+        // physical zero storage, since the commutative register pattern may exchange them when the destination aliases.
+        if (op == IR_TRUNC && (type == IR_I8 || type == IR_I16) && function->type[a] == IR_I32 && tier1_select_tree_child(forest, node, a) &&
+            forest->known_bits != 0 && forest->canonical != 0)
+        {
+            const uint32_t operation = function->op[a];
+            const uint32_t left = function->a[a];
+            const uint32_t right = function->b[a];
+            const uint32_t bits = ir_type_bits[type];
+            const bool unary = operation == IR_NEG || operation == IR_NOT;
+            const bool binary = operation == IR_ADD || operation == IR_SUB;
+            const bool first = left < function->instruction_count && (forest->known_bits[left] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= bits && (forest->canonical[left] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+            const bool second = unary || (right < function->instruction_count && (forest->known_bits[right] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= bits && (forest->canonical[right] & BUSTER_TIER1_STORAGE_ZERO) != 0);
+            if ((unary || binary) && first && second)
+            {
+                Tier1SelectPattern narrow = base;
+                narrow.rule = unary ? TIER1_RULE_UNARY : TIER1_RULE_REGISTER;
+                narrow.width = (uint8_t)(bits / 8);
+                narrow.source_width = 0;
+                narrow.values[0] = left;
+                narrow.values[1] = unary ? BUSTER_IR_NONE : right;
+                narrow.operation = (uint8_t)tier1_select_operation(operation);
+                narrow.intrinsic_cost = 2;
+                tier1_select_fold(forest, node, a, &narrow);
+                tier1_select_add_candidate(forest, node, &candidates, narrow);
+            }
+        }
+        // Undo a truncation of an already sign-extended value without manufacturing the intermediate masked value.
+        // The original definition must have the destination's type and canonical storage, so future zero extensions
+        // remain valid even if this copy coalesces. Effective uses keep it alive when the truncation has other users.
+        const uint32_t original = op == IR_SEXT && function->op[a] == IR_TRUNC ? function->a[a] : BUSTER_IR_NONE;
+        if (original < function->instruction_count && forest->known_bits != 0 && function->type[original] == type &&
+            (forest->known_bits[original] >> 8) <= source_bits && (forest->canonical[original] & BUSTER_TIER1_STORAGE_ZERO) != 0 &&
+            (!sign_storage || (forest->canonical[original] & BUSTER_TIER1_STORAGE_SIGN) != 0))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_COPY;
+            folded.values[0] = original;
+            folded.width = sign_storage ? 8 : (uint8_t)tier1_select_width(type);
+            folded.source_width = 0;
+            folded.intrinsic_cost = 1;
+            tier1_select_fold(forest, node, a, &folded);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (original < function->instruction_count && base.rule == TIER1_RULE_SIGN_EXTEND && tier1_select_tree_child(forest, node, a))
+        {
+            // sext(trunc(x)) reads x's low source-width bits directly. Drop only the register truncation; a wider
+            // load producing x keeps its original access width and ordering, even when all higher bits are discarded.
+            Tier1SelectPattern projected = base;
+            projected.values[0] = original;
+            tier1_select_fold(forest, node, a, &projected);
+            tier1_select_add_candidate(forest, node, &candidates, projected);
+        }
+        // A bounded signed offset can be computed at 64 bits directly. Every skipped I32 add/sub must be proven not
+        // to overflow; the remaining base must have a physical signed-64 representation, including after spills.
+        // This covers Lua's signed instruction fields: sext64((masked_i32 - bias) + 1), without assuming I32 wrapping
+        // arithmetic in general is a 64-bit address expression. Eight signed imm32 additions cannot overflow int64_t.
+        if (op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && base.rule == TIER1_RULE_SIGN_EXTEND && forest->known_bits != 0 && forest->canonical != 0)
+        {
+            uint32_t value = a;
+            int64_t addend = 0;
+            Tier1SelectPattern affine = base;
+            for (uint32_t depth = 0; depth < BUSTER_TIER1_SELECT_WALK && tier1_select_tree_child(forest, node, value); depth += 1)
+            {
+                const uint32_t operation = function->op[value];
+                uint32_t input = function->a[value];
+                uint32_t constant = function->b[value];
+                if (operation == IR_ADD && function->op[constant] != IR_CONST && function->op[input] == IR_CONST)
+                {
+                    const uint32_t swap = constant;
+                    constant = input;
+                    input = swap;
+                }
+                const bool arithmetic = (operation == IR_ADD || operation == IR_SUB) && function->type[value] == IR_I32 && function->op[constant] == IR_CONST;
+                const uint32_t input_signed = arithmetic ? forest->known_bits[input] >> 8 : 32;
+                const uint32_t constant_signed = arithmetic ? forest->known_bits[constant] >> 8 : 32;
+                const int64_t immediate = arithmetic ? (int32_t)function->constants[function->a[constant]].low : 0;
+                const int64_t delta = operation == IR_SUB ? -immediate : immediate;
+                const bool plus_one = arithmetic && delta == 1 && (forest->known_bits[input] & BUSTER_TIER1_KNOWN_BELOW_MAX) != 0;
+                if (!arithmetic || (input_signed >= 32 && !plus_one) || constant_signed >= 32)
+                {
+                    break;
+                }
+                addend += delta;
+                tier1_select_fold(forest, node, value, &affine);
+                tier1_select_fold(forest, node, constant, &affine);
+                value = input;
+            }
+            if (value != a && function->type[value] == IR_I32 && (forest->canonical[value] & BUSTER_TIER1_STORAGE_SIGN) != 0 && addend == (int64_t)(int32_t)addend)
+            {
+                affine.rule = addend == 0 ? TIER1_RULE_COPY : TIER1_RULE_LEA_ADD;
+                affine.width = 8;
+                affine.source_width = 0;
+                affine.values[0] = value;
+                affine.values[1] = BUSTER_IR_NONE;
+                affine.displacement = (int32_t)addend;
+                affine.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, affine);
+            }
+            // Two bounded signed fields add without I32 overflow. Their actual sign-preserving storage lets one
+            // 64-bit LEA compute the sum and the walked constants, without materializing a narrowed intermediate.
+            if (function->op[value] == IR_ADD && tier1_select_tree_child(forest, node, value) && addend == (int64_t)(int32_t)addend)
+            {
+                const uint32_t left = function->a[value];
+                const uint32_t right = function->b[value];
+                if ((forest->known_bits[left] >> 8) < 32 && (forest->known_bits[right] >> 8) < 32 &&
+                    (forest->canonical[left] & forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    affine.rule = TIER1_RULE_LEA_ADD;
+                    affine.width = 8;
+                    affine.source_width = 0;
+                    affine.values[0] = left;
+                    affine.values[1] = right;
+                    affine.scale = 0;
+                    affine.displacement = (int32_t)addend;
+                    affine.intrinsic_cost = 1;
+                    tier1_select_fold(forest, node, value, &affine);
+                    tier1_select_add_candidate(forest, node, &candidates, affine);
+                }
+            }
+        }
+        // Sign extension commutes with bitwise operations, NOT and arithmetic right shift. Negation also fits when
+        // its operand needs fewer than 32 signed bits. Each source must already have the full signed representation;
+        // no assumption about an incoming register's upper half or a wrapping I32 addition enters these patterns.
+        if (op == IR_SEXT && type == IR_I64 && function->type[a] == IR_I32 && base.rule == TIER1_RULE_SIGN_EXTEND &&
+            tier1_select_tree_child(forest, node, a) && forest->canonical != 0 && forest->known_bits != 0)
+        {
+            const uint32_t operation = function->op[a];
+            const uint32_t left = function->a[a];
+            const uint32_t right = function->b[a];
+            const bool sign_left = left < function->instruction_count && function->type[left] == IR_I32 && (forest->canonical[left] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+            Tier1SelectPattern folded = base;
+            folded.width = 8;
+            folded.source_width = 0;
+            folded.values[0] = left;
+            folded.values[1] = BUSTER_IR_NONE;
+            folded.operation = (uint8_t)tier1_select_operation(operation);
+            folded.intrinsic_cost = 2;
+            uint32_t constant = BUSTER_IR_NONE;
+            bool supported = false;
+            if (sign_left && (operation == IR_NOT || (operation == IR_NEG && (forest->known_bits[left] >> 8) < 32)))
+            {
+                folded.rule = TIER1_RULE_UNARY;
+                supported = true;
+            }
+            else if (sign_left && operation == IR_ASHR && right < function->instruction_count && function->op[right] == IR_CONST && function->constants[function->a[right]].low < 32)
+            {
+                folded.immediate = function->constants[function->a[right]].low;
+                folded.rule = folded.immediate == 0 ? TIER1_RULE_COPY : TIER1_RULE_IMMEDIATE;
+                constant = right;
+                supported = true;
+            }
+            else if (operation == IR_MUL && tier1_select_signed_multiply(function, forest->known_bits, a))
+            {
+                constant = function->op[right] == IR_CONST ? right : function->op[left] == IR_CONST ? left : BUSTER_IR_NONE;
+                const uint32_t other = constant == right ? left : right;
+                if (constant != BUSTER_IR_NONE && (forest->canonical[other] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_IMMEDIATE;
+                    folded.values[0] = other;
+                    folded.immediate = (uint64_t)(int64_t)(int32_t)function->constants[function->a[constant]].low;
+                    folded.intrinsic_cost = 1;
+                    supported = true;
+                }
+                else if (sign_left && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_REGISTER;
+                    folded.values[1] = right;
+                    folded.intrinsic_cost = 3;
+                    supported = true;
+                }
+            }
+            else if (sign_left && operation == IR_SUB && right < function->instruction_count && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0 &&
+                     (forest->known_bits[left] >> 8) < 32 && (forest->known_bits[right] >> 8) < 32)
+            {
+                folded.rule = TIER1_RULE_REGISTER;
+                folded.values[1] = right;
+                folded.intrinsic_cost = 3;
+                supported = true;
+            }
+            else if (operation == IR_AND || operation == IR_OR || operation == IR_XOR)
+            {
+                const uint32_t other = function->op[right] == IR_CONST ? left : right;
+                constant = function->op[right] == IR_CONST ? right : function->op[left] == IR_CONST ? left : BUSTER_IR_NONE;
+                if (constant != BUSTER_IR_NONE && (forest->canonical[other] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_IMMEDIATE;
+                    folded.values[0] = other;
+                    folded.immediate = (uint64_t)(int64_t)(int32_t)function->constants[function->a[constant]].low;
+                    supported = true;
+                }
+                else if (sign_left && (forest->canonical[right] & BUSTER_TIER1_STORAGE_SIGN) != 0)
+                {
+                    folded.rule = TIER1_RULE_REGISTER;
+                    folded.values[1] = right;
+                    folded.intrinsic_cost = 3;
+                    supported = true;
+                }
+            }
+            if (supported)
+            {
+                tier1_select_fold(forest, node, a, &folded);
+                tier1_select_fold(forest, node, constant, &folded);
+                tier1_select_add_candidate(forest, node, &candidates, folded);
+            }
+        }
+        // Signed widening is transitive: sext64(sext32(i8)) needs only the final extension. Following single-use
+        // extensions also exposes their original load, avoiding movsbl followed by movslq for a signed-byte index.
+        uint32_t signed_source = a;
+        Tier1SelectPattern widened = base;
+        for (uint32_t depth = 0; op == IR_SEXT && (base.rule == TIER1_RULE_SIGN_EXTEND || sign_copy) && depth < BUSTER_TIER1_SELECT_WALK &&
+                                 function->op[signed_source] == IR_SEXT && tier1_select_tree_child(forest, node, signed_source); depth += 1)
+        {
+            tier1_select_fold(forest, node, signed_source, &widened);
+            widened.rule = TIER1_RULE_SIGN_EXTEND;
+            signed_source = function->a[signed_source];
+            widened.values[0] = signed_source;
+            widened.source_width = (uint8_t)tier1_select_memory_width(function->type[signed_source]);
+        }
+        if (signed_source != a)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, widened);
+        }
+        // Read and extend once. The existing load-fold proof preserves exact access width and ordering and excludes
+        // volatile/atomic accesses, including when pure sign extensions separated the load from this consumer.
+        if (op == IR_SEXT && (type == IR_I32 || type == IR_I64) && tier1_select_load_folds(forest, node, signed_source))
+        {
+            Tier1SelectPattern folded = widened;
+            folded.rule = TIER1_RULE_LOAD_ADDRESS;
+            folded.operation = X86_OPERATION_MOVSX;
+            folded.width = (uint8_t)tier1_select_memory_width(function->type[signed_source]);
+            folded.source_width = sign_storage ? 8 : (uint8_t)tier1_select_memory_width(type);
+            folded.values[0] = function->a[signed_source];
+            folded.values[1] = BUSTER_IR_NONE;
+            folded.intrinsic_cost = 1;
+            tier1_select_fold(forest, node, signed_source, &folded);
+            tier1_select_memory(forest, node, function->a[signed_source], &folded, 0);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
         // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
-        // setcc and movzx already the extension's 32 (or 64) bits.
+        // canonical truth result already holds the extension's 32 (or 64) bits.
         Tier1SelectPattern folded = base;
         bool negated = false;
         const uint32_t tested = op == IR_ZEXT && function->type[a] == IR_I1 && a + 1 == node ? tier1_select_truth(forest, node, a, &folded, &negated) : BUSTER_IR_NONE;
@@ -4007,7 +4548,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[0] = other;
             folded.values[1] = BUSTER_IR_NONE;
             folded.immediate = immediate;
-            folded.intrinsic_cost = op == IR_MUL ? 1 : 2;
+            // A three-operand imul is one record, but pricing it below a copy plus shift chose imul even for
+            // powers of two (#1217). Use a latency penalty, as division already does, so the
+            // shift and 3/5/9 lea candidates win. Keep the BURS grammar's two immediate-multiply costs equal.
+            folded.intrinsic_cost = op == IR_MUL ? 3 : 2;
             tier1_select_fold(forest, node, constant, &folded);
             tier1_select_add_candidate(forest, node, &candidates, folded);
             if (op == IR_ADD)
@@ -4219,7 +4763,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.values[2] = store ? b : BUSTER_IR_NONE;
         base.width = (uint8_t)tier1_select_memory_width(store ? function->type[b] : type);
+        if (!store && sign_storage)
+        {
+            base.operation = X86_OPERATION_MOVSX;
+            base.source_width = 8;
+        }
         base.intrinsic_cost = 1;
+        // A store already discards the upper bits. Materializing a single-use truncation first would clear bits the
+        // exact-width memory instruction never reads; keep the access (including volatile/atomic flags) at this node.
+        if (store && function->op[b] == IR_TRUNC && tier1_select_tree_child(forest, node, b))
+        {
+            base.values[2] = function->a[b];
+            tier1_select_fold(forest, node, b, &base);
+        }
         Tier1SelectPattern folded = base;
         const bool walked = tier1_select_memory(forest, node, a, &folded, 0);
         // Through a frame object the folded address stands alone, as above.
@@ -4430,8 +4986,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
 }
 
 // The scalar oracle is maximal munch: most covered nodes first. A switch fixes ties independently of the vector
-// minimum-cost selection. Both share legality, not the choice of cheapest cover. In particular munch chooses a
-// power-of-two multiply's shift before its three-operand immediate IMUL; the costed cover may choose the latter. A
+// minimum-cost selection. Both share legality, not the choice of cheapest cover. Both prefer a power-of-two
+// multiply's shift to its three-operand immediate IMUL (#1217's latency penalty). A
 // division by a register ranks below every rule for a constant divisor, which covers its constant even where the
 // constant has other uses (and so doesn't count among the folds), as the costed cover always prefers them.
 static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
@@ -4474,6 +5030,9 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
             break;
         case TIER1_RULE_LEA_ADD:
             rank = 4;
+            break;
+        case TIER1_RULE_COPY:
+            rank = 2;
             break;
         default:
             rank = 1;
@@ -4650,6 +5209,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     uint32_t* level_nodes = 0;
     uint32_t* positions = 0;
     uint8_t* canonical = 0;
+    uint16_t* known_bits = 0;
     uint32_t* pending = 0;
     // Each node's last user, its only one where it has a single use: the bottom-up path's classes read it.
     uint32_t* users = 0;
@@ -4665,6 +5225,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         level_nodes = ir_allocate(scratch, count, 4, &ok);
         positions = ir_allocate(scratch, (uint64_t)count + 1, 4, &ok);
         canonical = ir_allocate(scratch, count, 1, &ok);
+        known_bits = ir_allocate(scratch, count, sizeof(uint16_t), &ok);
         pending = ir_allocate(scratch, (uint64_t)count + 1, 4, &ok);
         plan.patterns = ir_allocate(output, count, sizeof(Tier1SelectPattern), &ok);
         plan.covered = ir_allocate(output, count, 1, &ok);
@@ -4770,7 +5331,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     if (error == TIER1_SELECT_OK)
     {
-        tier1_select_canonical(function, blocks, canonical);
+        tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
+        tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
     }
     if (error == TIER1_SELECT_OK)
     {
@@ -4805,6 +5368,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .costs = plan.costs,
         .barriers = barriers,
         .canonical = canonical,
+        .known_bits = known_bits,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
     // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
@@ -5015,6 +5579,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
+        .sign_result = pattern->sign_result,
         .nops = pattern->nops,
     };
     switch (pattern->rule)

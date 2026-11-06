@@ -64,20 +64,25 @@ static bool asm_read_file(const char* path, Arena* arena, String8* source)
 
 // Reuse both preprocessor kernels and printers. The bounded in-memory stream includes their line markers and
 // avoids a subprocess or a temporary source file. The returned slice belongs to the assembler's arena.
-static bool asm_preprocess_file(const char* path, PPOptions options, Arena* arena, String8* source)
+static bool asm_preprocess_unit(const char* path, PPOptions options, Arena* arena, String8* source,
+                                InternTable* table, Preprocessor* pp, DependencyOutput* dependency, Arena* dependency_arena,
+                                const char* output, FILE* errors, bool* fatal)
 {
-    static InternTable table;
-    static Preprocessor pp;
     options.assembly = true;
     options.expansion_starts = true;
     const uint64_t saved = arena->length;
     source->pointer = arena_push(arena, BUSTER_ASM_MAX_SOURCE + 1, 1);
-    bool result = source->pointer != 0 && intern_initialize(&table);
+    bool result = source->pointer != 0;
     if (result)
     {
-        result = pp_initialize(&pp, &options, &table) && pp_run(&pp, path);
+        const bool initialized = pp_initialize(pp, &options, table);
+        result = initialized && pp_run_input(pp, path);
+        if (fatal != NULL)
+        {
+            *fatal = !initialized || pp->fatal;
+        }
         FILE* stream = result ? fmemopen(source->pointer, BUSTER_ASM_MAX_SOURCE + 1, "w") : 0;
-        result = stream != 0 && pp_print(&pp, stream, true);
+        result = stream != 0 && pp_print(pp, stream, true);
         if (stream != 0)
         {
             result = fflush(stream) == 0 && result;
@@ -86,8 +91,15 @@ static bool asm_preprocess_file(const char* path, PPOptions options, Arena* aren
             source->length = result ? (uint64_t)length : 0;
             result = fclose(stream) == 0 && result;
         }
-        pp_release(&pp);
-        intern_release(&table);
+        if (result && dependency != NULL && options.dependencies.enabled)
+        {
+            result = pp_dependencies(pp, path, output, dependency_arena, dependency, errors);
+        }
+        pp_release(pp);
+    }
+    else if (fatal != NULL)
+    {
+        *fatal = true;
     }
     arena_pop_to(arena, result ? (uint64_t)((uint8_t*)source->pointer - arena->base) + source->length + 1 : saved);
     if (!result)
@@ -97,7 +109,16 @@ static bool asm_preprocess_file(const char* path, PPOptions options, Arena* aren
     return result;
 }
 
-static void asm_diagnostic(const char* path, String8 source, AsmResult result, bool preprocessed)
+static bool asm_preprocess_file(const char* path, PPOptions options, Arena* arena, String8* source)
+{
+    static InternTable table;
+    static Preprocessor pp;
+    const bool result = intern_initialize(&table) && asm_preprocess_unit(path, options, arena, source, &table, &pp, NULL, NULL, NULL, stderr, NULL);
+    intern_release(&table);
+    return result;
+}
+
+static void asm_diagnostic_to(FILE* errors, const char* path, String8 source, AsmResult result, bool preprocessed)
 {
     uint32_t line = 1;
     uint32_t column = 1;
@@ -176,12 +197,17 @@ static void asm_diagnostic(const char* path, String8 source, AsmResult result, b
     }
     if (result.error_name.length != 0)
     {
-        fprintf(stderr, "%s:%u:%u: error: %s: %.*s\n", path, line, column, result.error, (int)result.error_name.length, result.error_name.pointer);
+        fprintf(errors, "%s:%u:%u: error: %s: %.*s\n", path, line, column, result.error, (int)result.error_name.length, result.error_name.pointer);
     }
     else
     {
-        fprintf(stderr, "%s:%u:%u: error: %s\n", path, line, column, result.error);
+        fprintf(errors, "%s:%u:%u: error: %s\n", path, line, column, result.error);
     }
+}
+
+static void asm_diagnostic(const char* path, String8 source, AsmResult result, bool preprocessed)
+{
+    asm_diagnostic_to(stderr, path, source, result, preprocessed);
 }
 
 static int run_assembler_command(int count, char** arguments)

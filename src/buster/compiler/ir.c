@@ -331,9 +331,9 @@ struct IrFunction
     // Exclusive symbol bound supplied by the translation unit. UINT32_MAX permits any non-sentinel SymbolId.
     uint32_t symbol_count;
     // The labels (GNU C's && and goto *, and the producer's jump tables' cases): label k's block, at whose code the
-    // producer defines its k-th label symbol, and which every br_indirect may go to; or BUSTER_IR_NONE for a label no
-    // block holds, in a function without br_indirect (whose labels no jump can reach: a backend defines their symbols
-    // anywhere in the function).
+    // producer defines its k-th label symbol, and which a br_indirect may go to through its explicit list or all-label
+    // targets; or BUSTER_IR_NONE for a label no block holds and no indirect branch reaches (a backend defines its
+    // symbol anywhere in the function).
     uint32_t* labels;
     uint32_t label_count;
     // By-value aggregates' ABI records: the calls' (IrCall.abi), and the function's own when parameter_passed isn't 0:

@@ -19,6 +19,22 @@ typedef enum CheckProgramStatus
     CHECK_PROGRAM_BACKEND,
 } CheckProgramStatus;
 
+// Cold constraint facts survive a failed program's output rollback. No source or arena pointer is retained.
+typedef enum CheckProgramMessage
+{
+    CHECK_PROGRAM_MESSAGE_GENERIC,
+    CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE,
+    CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
+} CheckProgramMessage;
+
+typedef struct CheckProgramFailure CheckProgramFailure;
+struct CheckProgramFailure
+{
+    CheckProgramMessage message;
+    TypeId type;
+    unsigned __int128 value;
+};
+
 // A variable-length array's object (block scope, automatic, of a runtime size) is ALLOCATEd at its declaration (`token`;
 // `target` is its block's closing token), after its bounds' VLA entries; the first of its block is preceded by the
 // block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (after the
@@ -314,6 +330,7 @@ struct CheckProgram
     bool cfstring_class_own;
     uint32_t token;
     uint32_t diagnostic_position;
+    CheckProgramFailure failure;
     CheckProgramStatus status;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target, frame_pointer and probe_stack.
@@ -343,7 +360,7 @@ struct CheckProgram
     // The function declarations with a target, target_clones, always_inline, flatten or noreturn attribute, as keys of
     // their object in the high half and their token in the low, sorted by object (per object, the target attributes' in
     // token order, then the others'), for code generation's check of target features at -c (#775,
-    // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
+    // check_program_target_features), or a late symbol rename's emission walk. Other units retain no keys.
     uint64_t* attribute_keys;
     uint32_t attribute_key_count;
     // Each body's source labels' places, its controls' indices where code after them begins, in the order the writer
@@ -365,8 +382,12 @@ struct CheckProgram
     // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
     // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
     // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
-    // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
+    // target attribute, an x86 builtin's call (#148), such a query, or a symbol rename after an earlier use.
     uint8_t* body_eager;
+    // For a unit with a redefine_extname after an earlier use, one byte per retained symbol pragma: whether an
+    // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
+    // view; the input's asm-label facts remain unchanged for syntax and type checks.
+    uint8_t* symbol_pragma_originals;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
     // lifetime_first (by the block's closing brace, BUSTER_CHECK_NONE for a block without them) through lifetime_next (by
     // declaration), in token order; null otherwise.
@@ -468,6 +489,8 @@ struct CheckControlWriter
     uint8_t* dropped_regions;
     // check_control_foldable's stack, `fold_capacity` nodes: check_program's node stack, which no other pass uses while
     // the bodies are written.
+    // Temporary storage for a known constant switch's nonrecursive source collector.
+    Arena* switch_scratch;
     uint32_t* fold_stack;
     uint32_t fold_capacity;
     uint32_t count;
@@ -532,7 +555,7 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // resolves each body's instruction set from: keys of their object in the high half and their token in the low, in each
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
 // Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
-// only code generation's check of target features reads, and only in a unit with a target attribute (#775,
+// code generation's check of target features or a late symbol rename's emission walk reads (#775,
 // CheckProgram.attribute_keys); and the file-scope declarations with an alias, ifunc or weakref attribute, which
 // check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
@@ -1589,6 +1612,8 @@ static void check_control_drop(CheckControlWriter* writer, uint32_t low, uint32_
     writer->dropped_ranges[writer->dropped_range_count++] = ((uint64_t)low << 32) | high;
 }
 
+#include "c_check_program_switch.c"
+
 // Appends a source label's number, a writer's label, to the writer's CheckProgram.label_positions, which the bodies'
 // loop turns into its place once the label's body is written: a label is a token, so the column has room.
 static void check_control_source_label(CheckControlWriter* writer, uint32_t label)
@@ -1721,41 +1746,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         }
         else if (parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH)
         {
-            writer->stops[token] = end;
-            uint32_t width = 0;
-            bool sign = false;
-            if (!check_action_integer_type(writer->program->types, check_stream_type(writer->program->stream, condition), &width, &sign))
-            {
-                check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
-            }
-            uint32_t fallback = end;
-            for (uint32_t c = writer->case_first[token]; c != BUSTER_CHECK_NONE; c = writer->case_next[c])
-            {
-                const CheckProgramCase* item = writer->program->cases + c;
-                if (item->fallback)
-                {
-                    fallback = writer->source_labels[item->token];
-                }
-            }
-            check_control_mark(writer, end);
-            check_control_statement(writer, body, end, task.repeat);
-            check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, fallback);
-            uint32_t cases = 0;
-            for (uint32_t c = writer->case_first[token]; c != BUSTER_CHECK_NONE; c = writer->case_next[c])
-            {
-                if (!writer->program->cases[c].fallback)
-                {
-                    check_control_entry(writer, CHECK_CONTROL_CASE, writer->program->cases[c].token, BUSTER_CHECK_NONE, c);
-                    cases += 1;
-                }
-            }
-            check_control_entry(writer, CHECK_CONTROL_SWITCH, token, condition, BUSTER_CHECK_NONE);
-            // A jump table takes four clusters of cases or more, so only a switch of four cases or more may have one: the
-            // program lists those. The drain writes this SWITCH entry next, the last task pushed, at writer->count.
-            if (cases >= 4 && writer->switch_count < writer->switch_capacity)
-            {
-                writer->switches[writer->switch_count++] = writer->count;
-            }
+            check_control_switch(writer, keyword, token, body, condition, end, task.repeat);
         }
         else
         {
@@ -3408,20 +3399,30 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
 // The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
 // unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
 // so each object's are still in token order) and then the always_inline, flatten and noreturn ones, sorted stably by
-// object with the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it
-// can lack a feature by clang's rule. Returns false if there was no room.
+// object with the radix kernel's twins (c_bindings_sort). A late symbol rename also needs the callee keys for the
+// shared emission walk's noreturn decisions. Other units without a target attribute keep none. Returns false if
+// there was no room.
 __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
 {
     const uint64_t total = (uint64_t)events->count + events->callee_count;
     bool valid = events->room && total <= UINT32_MAX;
-    if (valid && events->count != 0)
+    bool late = false;
+    const CheckInputSymbolPragmas* pragmas = program->input->symbol_pragmas;
+    for (uint32_t i = 0; events->callee_count != 0 && pragmas != NULL && !late && i < pragmas->count; i += 1)
+    {
+        late = pragmas->records[i].after_use;
+    }
+    if (valid && (events->count != 0 || late))
     {
         uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
         uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);
         valid = keys != 0 && temporary != 0;
         if (valid)
         {
-            memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            if (events->count != 0)
+            {
+                memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            }
             if (events->callee_count != 0)
             {
                 memcpy(keys + events->count, events->callee_keys, (uint64_t)events->callee_count * sizeof(uint64_t));
@@ -3818,6 +3819,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .switch_capacity = switch_capacity,
         .dropped_ranges = dropped_ranges,
         .dropped_regions = dropped_regions,
+        .switch_scratch = scratch,
         .fold_stack = stack,
         .fold_capacity = node_count + 1,
         .capacity = capacity,
@@ -3992,8 +3994,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const CheckProgramStatus status = program->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : program->status;
         const uint32_t token = status == CHECK_PROGRAM_INVALID ? check_program_diagnostic_location(parser, program->token) : program->token;
         const uint32_t position = program->diagnostic_position;
+        const CheckProgramFailure failure = program->failure;
         arena_pop_to(output, mark);
-        *program = (CheckProgram){ .status = status, .token = token, .diagnostic_position = position };
+        *program = (CheckProgram){ .status = status, .token = token, .diagnostic_position = position, .failure = failure };
         valid = false;
     }
     else
@@ -4005,6 +4008,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     return valid;
 }
 
+#include "c_check_program_symbol_pragma.c"
 #include "c_check_program_select.c"
 #include "c_check_program_helpers.c"
 #include "c_check_program_asm.c"

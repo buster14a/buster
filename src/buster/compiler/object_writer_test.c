@@ -340,7 +340,8 @@ static const char* object_view_symbol_name(const ObjectView* view, uint64_t symb
 // Parses an ET_REL file and checks what every object the writer writes keeps (the orientation comment). Returns false
 // with a description in `error` at the first problem. With `foreign`, for GNU as's objects, a section's contents may
 // start anywhere: GNU as 2.42 starts them at a multiple of their alignment, as the writer does, but 2.47 doesn't always
-// (.rodata, aligned to 16, at an offset of 0x448).
+// (.rodata, aligned to 16, at an offset of 0x448). Clang 23.1.4 omits SHF_INFO_LINK on a COMDAT relocation section;
+// its sh_info still identifies the target and must satisfy the same bounds and group-membership checks.
 static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t length, bool foreign, char* error, uint64_t error_size)
 {
     *view = (ObjectView){
@@ -620,7 +621,7 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         {
             const Elf64_Shdr* target = section->sh_info < view->section_count ? &view->sections[section->sh_info] : 0;
             valid = section->sh_link == view->symbol_table_index && target != 0 && section->sh_info != 0 && target->sh_type != SHT_NOBITS &&
-                    target->sh_type != SHT_RELA && (section->sh_flags & SHF_INFO_LINK) != 0 && section->sh_entsize == sizeof(Elf64_Rela) &&
+                    target->sh_type != SHT_RELA && (foreign || (section->sh_flags & SHF_INFO_LINK) != 0) && section->sh_entsize == sizeof(Elf64_Rela) &&
                     section->sh_size % sizeof(Elf64_Rela) == 0 && section->sh_size != 0 && section->sh_addralign == 8;
             if (!valid)
             {

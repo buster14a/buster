@@ -740,7 +740,7 @@ static void check_builtin_float_test_classes(CheckBuiltinFloatTest* test, TypeTa
     check_builtin_float_one(table, &action, &result);
     check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "isfpclass refuses a complex argument");
     const TypeId vectors[2] = { type_vector(table, BUSTER_TYPE_FLOAT, 4, false), type_vector(table, BUSTER_TYPE_DOUBLE, 2, true) };
-    const TypeId results[2] = { type_vector(table, BUSTER_TYPE_INT, 4, false), type_vector(table, BUSTER_TYPE_LLONG, 2, true) };
+    const TypeId results[2] = { type_vector(table, BUSTER_TYPE_INT, 4, false), type_vector(table, BUSTER_TYPE_LONG, 2, true) };
     for (uint32_t i = 0; i < 2; i += 1)
     {
         arguments[0] = (CheckValue){ .type = vectors[i], .category = CHECK_RVALUE };

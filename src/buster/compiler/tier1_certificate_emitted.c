@@ -360,7 +360,7 @@ static uint32_t tier1_cert_emitted_narrow(uint32_t type)
     return type == IR_I1 || type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
 }
 
-// General register `reg`'s low `width` bytes (1 or 2), as a new location: a narrow parameter's as its caller passed it.
+// General register `reg`'s low `width` bytes, as a new location: the caller's bytes before an explicit entry conversion.
 static uint32_t tier1_cert_emitted_low(Tier1CertEmittedBuild* build, uint32_t reg, uint32_t width)
 {
     uint32_t result = BUSTER_CERT_NONE;
@@ -370,7 +370,7 @@ static uint32_t tier1_cert_emitted_low(Tier1CertEmittedBuild* build, uint32_t re
         build->locations[result] = (Tier1CertLocation){
             .unit = 8 * reg,
             .width = (uint16_t)width,
-            .extent = (uint16_t)width,
+            .extent = (uint16_t)(width == 4 ? 8 : width),
             .class = TIER1_CERT_GPR,
             .reg = (uint8_t)reg,
         };
@@ -673,7 +673,7 @@ static uint32_t tier1_cert_emitted_use(const Tier1EmitResult* emitted, uint32_t 
 {
     uint32_t where = 0;
     uint8_t kind = 0;
-    const bool found = value != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, value, position, &where, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+    const bool found = value != BUSTER_TIER1_CFG_NONE && tier1_cfg_location_oracle(&emitted->cfg, value, position, &where, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
     return found ? where : UINT32_MAX;
 }
 
@@ -683,7 +683,7 @@ static uint32_t tier1_cert_emitted_definition(const Tier1EmitResult* emitted, ui
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
     const uint32_t value = emitted->node_values[node];
-    const uint32_t interval = value != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_at(cfg, value, position) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t interval = value != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_oracle(cfg, value, position) : BUSTER_TIER1_CFG_NONE;
     const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? cfg->allocation.fragment_offsets[interval] : 0;
     const bool found = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == position && cfg->allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
     return found ? 32 * emitted->cfg_input.classes[value] + cfg->allocation.registers[fragment] : UINT32_MAX;
@@ -2885,8 +2885,8 @@ static void tier1_cert_emitted_range(const Tier1CertEmittedBuild* build, Tier1Ce
     *high = end - shift > *high ? end - shift : *high;
 }
 
-// Record `r` of the entry block's body, its origin ENTRY's: a narrow parameter's extension into its canonical form, which
-// is the parameter itself, or a parameter's move into its register.
+// Record `r` of the entry block's body, its origin ENTRY's: a parameter's explicit representation conversion,
+// which defines the parameter itself from only its caller's logical bytes, or a parameter's move into its register.
 static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
 {
     const Tier1EmitResult* emitted = build->emitted;
@@ -2895,7 +2895,8 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
     const uint32_t node = emitted->origin_values[r];
     const bool parameter = node < function->instruction_count && function->op[node] == IR_PARAM;
     const uint32_t type = parameter ? function->type[node] : IR_VOID;
-    const uint16_t extend = type == IR_I1 || type == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_NONE;
+    const bool signed_parameter = parameter && type == IR_I32 && build->plan->patterns[node].sign_result;
+    const uint16_t extend = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : type == IR_I1 || type == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_NONE;
     const Tier1SelectPlace place = parameter ? tier1_select_parameter_place(function, function->a[node]) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
     const bool narrowed = extend != X86_FORM_NONE && record.form == extend && place.kind == BUSTER_TIER1_PLACE_GENERAL && record.reg == tier1_select_parameter_registers[place.index] && record.rm == record.reg &&
                           record.mode == BUSTER_X86_REGISTER_DIRECT;
@@ -2905,15 +2906,15 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
     int32_t offset = 0;
     const bool incoming = place.kind == BUSTER_TIER1_PLACE_STACK && tier1_emit_cfg_incoming(emitted, (uint64_t)BUSTER_ABI_SLOT_BYTES * place.index, &base, &offset) && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == base && record.displacement == offset;
     const uint32_t float_width = parameter ? tier1_select_float_width(type) : 0;
-    const uint16_t general_form = type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : extend;
+    const uint16_t general_form = signed_parameter ? extend : type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : extend;
     const uint16_t vector_form = float_width != 0 ? tier1_select_float_forms(float_width)->load : X86_FORM_NONE;
     bool valid = !incoming || record.form == general_form || record.form == vector_form;
-    const uint32_t narrow = tier1_cert_emitted_narrow(type);
+    const uint32_t narrow = signed_parameter ? 4 : tier1_cert_emitted_narrow(type);
     const uint32_t value = parameter ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
     if (valid && ((incoming && extend != X86_FORM_NONE && record.reg < 16) || narrowed))
     {
-        // A narrow parameter's extension into its canonical 32-bit storage: the instruction that reads its caller's bytes
-        // (in its register's low bytes, or its slot's) and defines the parameter's value, so that without it nothing does.
+        // Read only the caller's logical bytes and define the selected representation. Exact instruction form,
+        // source and destination are required: omitting it or reading unspecified upper bytes defines no value.
         const uint32_t from = narrowed ? tier1_cert_emitted_low(build, record.reg, narrow) : tier1_cert_emitted_memory(build, record, narrow);
         Tier1CertSource* source = 0;
         Tier1CertInstruction* instruction = 0;
@@ -2932,7 +2933,7 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
             source->use_count = 1;
             source->def_count = 1;
             instruction->locations[0] = from;
-            instruction->locations[1] = tier1_cert_emitted_gpr(record.reg, 4);
+            instruction->locations[1] = tier1_cert_emitted_gpr(record.reg, signed_parameter ? 8 : 4);
             instruction->operand_count = 2;
             build->stats->originals += 1;
         }
@@ -3144,16 +3145,44 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             fact_capacity += 1;
         }
     }
+    // Carried call-save rows are untrusted additional homes. Validate node/class/mask/frame indices before using
+    // them, then let the checker prove their actual bytes along every incoming edge. Block zero has no saved rows.
+    const uint32_t* const entry_rows = emitted->entry_rows;
+    const uint32_t call_save_mask = prepared->call_save_mask;
+    uint64_t row_facts = 0;
+    for (uint32_t b = 0; valid && entry_rows != 0 && b < blocks; b += 1)
+    {
+        for (uint32_t reg = 0; valid && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            const uint32_t node = entry_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg];
+            if (node != BUSTER_IR_NONE)
+            {
+                const uint32_t v = node < count ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
+                const uint64_t row = (uint64_t)emitted->allocation.spill_count + (uint32_t)__builtin_popcount(call_save_mask & ((1u << reg) - 1));
+                valid = b != 0 && v < values && input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && (call_save_mask & (1u << reg)) != 0 && row < emitted->frame.count;
+                valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_ORIGIN, UINT32_MAX);
+                row_facts += 1;
+            }
+        }
+    }
+    fact_capacity += row_facts;
     // The arrays: the locations (the registers', then a frame range per record and per kernel's store at most), the
     // values, the facts, the source and code, the blocks, edges and renames; and the scratch maps.
-    // The aggregates' parts' steps take a few locations and sources each (#789, #1284): their copies' kills and definitions.
-    const uint64_t parts = (uint64_t)value_total - build.parameter_parts;
-    build.location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * records + 8 * blocks + 2 * function->parameter_count + 64 + 16 * parts;
-    build.source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * count + 16 + 24 * parts;
-    build.code_capacity = records + build.source_capacity;
+    // Aggregate parts need their own locations and sources (#789, #1284), in addition to carried-row facts.
+    valid = valid && (value_total >= build.parameter_parts || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    const uint64_t parts = valid ? (uint64_t)value_total - build.parameter_parts : 0;
+    const uint64_t location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * (uint64_t)records + 8 * (uint64_t)blocks + 2 * (uint64_t)function->parameter_count + 64 + row_facts + 16 * parts;
+    const uint64_t source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * (uint64_t)count + 16 + 24 * parts;
+    const uint64_t code_capacity = records + source_capacity;
+    const uint64_t facts_capacity = fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + build.entry_count + 1;
+    valid = valid && ((location_capacity <= UINT32_MAX && source_capacity <= UINT32_MAX && code_capacity <= UINT32_MAX && facts_capacity <= UINT32_MAX) ||
+                      tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    build.location_capacity = valid ? (uint32_t)location_capacity : 0;
+    build.source_capacity = valid ? (uint32_t)source_capacity : 0;
+    build.code_capacity = valid ? (uint32_t)code_capacity : 0;
     build.locations = valid ? arena_push_array(output, build.location_capacity, sizeof(Tier1CertLocation), _Alignof(Tier1CertLocation)) : 0;
     Tier1CertValue* cert_values = valid ? arena_push_array(output, (uint64_t)value_total + 1, sizeof(Tier1CertValue), _Alignof(Tier1CertValue)) : 0;
-    Tier1CertFact* facts = valid ? arena_push_array(output, fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + build.entry_count + 1, sizeof(Tier1CertFact), _Alignof(Tier1CertFact)) : 0;
+    Tier1CertFact* facts = valid ? arena_push_array(output, facts_capacity, sizeof(Tier1CertFact), _Alignof(Tier1CertFact)) : 0;
     build.source = valid ? arena_push_array(output, build.source_capacity, sizeof(Tier1CertSource), _Alignof(Tier1CertSource)) : 0;
     build.code = valid ? arena_push_array(output, build.code_capacity, sizeof(Tier1CertInstruction), _Alignof(Tier1CertInstruction)) : 0;
     Tier1CertBlock* cert_blocks = valid ? arena_push_array(output, (uint64_t)blocks + 1, sizeof(Tier1CertBlock), _Alignof(Tier1CertBlock)) : 0;
@@ -3361,7 +3390,12 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             valid = !stacked || incoming || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
             // A narrow one is only its caller's bytes, its own value at entry (tier1_cert_emitted_entry's extension reads
             // them into its canonical storage).
-            const uint32_t narrow = tier1_cert_emitted_narrow(function->type[node]);
+            const bool signed_parameter = function->type[node] == IR_I32 && plan->patterns[node].sign_result;
+            const uint32_t narrow = signed_parameter ? 4 : tier1_cert_emitted_narrow(function->type[node]);
+            if (signed_parameter)
+            {
+                cert_values[build.incoming + function->a[node]].width = 4;
+            }
             const uint32_t width = narrow != 0 ? narrow : tier1_cert_emitted_width(emitted, v);
             const uint32_t location = stacked ? (incoming ? tier1_cert_emitted_entry_frame(&build, slot, width) : BUSTER_CERT_NONE)
                                     : narrow != 0 && general ? tier1_cert_emitted_low(&build, reg, narrow)
@@ -3459,7 +3493,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
                         uint8_t kind = 0;
                         int32_t offset = 0;
                         uint32_t location = BUSTER_CERT_NONE;
-                        valid = tier1_cfg_entry_location(cfg, v, entry, &where, &kind);
+                        valid = tier1_cfg_entry_location_oracle(cfg, v, entry, &where, &kind);
                         if (valid && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
                         {
                             location = tier1_cert_emitted_register(&build, v, where);
@@ -3475,6 +3509,31 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
                             .location = location,
                         };
                         valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
+                    }
+                }
+            }
+        }
+        for (uint32_t b = 1; valid && entry_rows != 0 && b < blocks; b += 1)
+        {
+            for (uint32_t reg = 0; valid && numbers[b] != BUSTER_CERT_NONE && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+            {
+                const uint32_t node = entry_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg];
+                if (node != BUSTER_IR_NONE)
+                {
+                    if (pass == 0)
+                    {
+                        fact_offsets[b + 1] += 1;
+                    }
+                    else
+                    {
+                        const uint32_t v = emitted->node_values[node];
+                        const X86Instruction save = tier1_emit_call_save(emitted, reg, false);
+                        const uint32_t location = tier1_cert_emitted_frame(&build, save.displacement, tier1_cert_emitted_width(emitted, v));
+                        facts[fill[b]++] = (Tier1CertFact){
+                            .value = v,
+                            .location = location,
+                        };
+                        valid = location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
                     }
                 }
             }

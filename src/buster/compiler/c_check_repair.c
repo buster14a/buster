@@ -436,10 +436,14 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
         result = (report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && !label_address) ||
                  ((report->message == CHECK_INPUT_LITERAL || report->message == CHECK_INPUT_WIDE_LITERAL) &&
                   (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING)) ||
-                 (report->message == CHECK_INPUT_REDECLARATION && ((kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_LABEL)) ||
+                 ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) &&
+                  ((kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_LABEL)) ||
+                 (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) ||
                  // The source reader proves the absence of an enclosing loop/switch from the original control
                  // headers. Appending closing braces cannot create such an enclosing statement around this use.
-                 (report->message == CHECK_INPUT_DECLARATION && ((role == PARSE_ROLE_RETURN && (kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE)) || asm_name)) ||
+                 (role == PARSE_ROLE_RETURN && ((report->message == CHECK_INPUT_BREAK && kind == PARSE_KIND_BREAK) ||
+                                               (report->message == CHECK_INPUT_CONTINUE && kind == PARSE_KIND_CONTINUE))) ||
+                 (report->message == CHECK_INPUT_DECLARATION && asm_name) ||
                  (report->message == CHECK_INPUT_RETURN && kind == PARSE_KIND_RETURN);
         // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
         // cannot supply the non-asm body constraint, which remains outside this whitelist.

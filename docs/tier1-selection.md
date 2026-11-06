@@ -64,7 +64,8 @@ patterns are:
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
   nests. A branch on such a chain is its comparison's `cmp` and `jcc`, and its
-  zero extension to an integer the comparison's `cmp`, `setcc` and `movzx`,
+  zero extension to an integer the comparison's zero-initialized destination,
+  `cmp` and `setcc` (an aliased destination is cleared by a flag-preserving move after `cmp`),
   negated for an odd number of `eq` links, where every link is consecutive and
   used only by the next, so that nothing the pattern doesn't compute runs
   between the comparison and its test. `if (a < b)` had been
@@ -350,10 +351,167 @@ arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
 "Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
+### Proven upper bits (#1219)
+
+Selection keeps two semantic range bounds per integer value: the number of
+possibly nonzero low bits and the smallest signed width. Constants, masks,
+shifts, bounded arithmetic, extensions and truncations supply the bounds; copies, selects and phis
+propagate them. They start unknown, including on loop backedges, and improve
+in at most eight sweeps per round. Unresolved cycles retain the full range.
+Widths need seven bits each; the spare low-byte bit records a proved I32 value
+strictly below `INT_MAX` without adding a scratch column.
+
+A checked induction certificate can then establish a nonnegative I32 loop
+index. Every initial edge must supply a nonnegative constant or a run-time value
+already independently proved nonnegative, such as a mask or zero extension.
+These facts begin with unknown backedges. Every other edge
+must add a known nonnegative stride to that same phi. A strict upper-bound
+guard may check the sum on the backedge: a walk of at most eight blocks may
+follow unconditional bridges to that guard, each bridge with exactly one
+incoming predecessor. An alternate entrance refuses the proof. The predecessor
+map reuses selection's positions workspace before level ordering. With indirect
+control flow, every address-taken label is conservatively ambiguous; marking
+them once preserves unrelated unique edges without enumerating labels per jump.
+A header guard before the increment also
+works when the selected successor has only the header as its predecessor and
+the existing verified dominance intervals prove that successor dominates the
+increment. This bounds the increment by the admitted index plus its stride,
+including the terminating index; merely dominating it with the header does
+not prove that the guarded edge executes. One maximum covers all starts and all
+admitted backedge values. Every increment must fit signed I32: after a header
+guard, its admitted index plus stride; before a sum guard, the common maximum
+plus stride. Unsigned guards also require a
+proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated
+tests, unknown strides and possible wrapping sums retain their extensions.
+Only a complete certificate supplies facts, followed by one additional bounded
+propagation round. The candidate scan is masked SIMD with a scalar twin.
+
+A separate phi certificate excludes `INT_MAX` when every incoming edge supplies
+an independently bounded value or necessarily tests that incoming value with
+a strict upper guard. Arithmetic may wrap before the guard: only the selected
+value entering the phi receives the endpoint fact. A guard of the old phi
+does not constrain its increment. Constant `INT_MAX` seeds and unsigned guards
+that can admit it refuse the certificate.
+
+A sign extension of a single-use register truncation reads the original
+register's low bits directly. This removes the intermediate mask without
+narrowing a load's memory access or assuming that the original value fits
+the truncated signed range.
+
+A separate byte certifies physical register storage. A 32-bit ALU result or
+ordinary 32-bit load clears the upper half; an incoming `I32`, a call result and a machine row
+make no such promise. Copies and phis need their inputs' certificates. A shift
+whose count can be zero, multiplication or division by one, and a truncation
+to `I32` can leave a register untouched, so their proofs account for that.
+
+The same byte can instead certify a sign-preserving `I32` representation:
+all 64 register bits equal its signed value. A real signed-widening consumer
+requests it from an ordinary `I32` load or a byte/word sign extension to `I32`,
+through a worklist of at most eight nodes: copies, selects, small phis and
+the admitted expression patterns below. The defining load or extension writes 64 bits
+once, preserving its exact memory width. Later signed widening is a copy;
+unsigned widening still clears the upper half. Copies, selects and phis
+propagate only proven representations, and a nonnegative value makes the two
+certificates equivalent. A sign-only value records eight-byte storage in its
+selected pattern: both native consumers preserve all eight bytes through
+spills, reloads and CFG edge moves. Edge moves use the source's width, so an
+I32 phi and every incoming value in its connected component share eight-byte
+spill storage if any member needs it. Union by rank and path halving closes
+arbitrarily long phi chains in the dead positions workspace. This width
+obligation grants no upper-bit fact to opaque inputs. Calls and opaque rows
+receive no sign certificate. An I32 parameter with two distinct signed widening
+roots (directly or through same-type copies) explicitly establishes its signed
+representation once at entry. General-register inputs receive `movsxd` before
+entry moves or reads; a stack input uses a four-byte `movsxd` load. Unsigned
+widening still clears the upper half, and a single signed use stays local.
+The dead positions workspace counts these requests before its storage-component
+role; this adds no allocation and assumes nothing about incoming ABI upper bits.
+For a requested loop state with that strict endpoint, an ordinary I32 ALU
+definition can establish signed storage once: perform its wrapping 32-bit
+operation, then sign-extend its result. Later widening of the state is a copy,
+and its separately proved `+1` can use a 64-bit `lea`. The original loop update
+retains its I32 wrapping semantics. A nonzero constant arithmetic right shift
+can establish storage the same way. Multiplication, division, dynamic or
+zero-count shifts and no-write copy identities do not use this definition form. The selected pattern
+records the extra operation, and both emitters preserve its eight-byte storage.
+
+A branch can prove a value nonnegative only at a guarded conversion. The
+selected successor must have the conditional block as its only predecessor
+and dominate the conversion, using the verified dominator intervals. Signed
+lower bounds, equality to a nonnegative value and unsigned upper bounds below
+the sign bit supply such facts. The source must independently have real
+zero-upper-bit storage. A separate use annotation removes that conversion;
+the source's unguarded uses retain their signed extensions. Alternate
+entrances and address-taken labels refuse the proof. The pass keeps one
+conservative guard per value and reuses positions and pending workspace.
+
+With both facts, a nonnegative signed extension becomes a zero extension,
+and a zero extension of already canonical storage becomes a coalescible copy.
+A truncation of a value already in the unsigned destination range is a copy;
+sign extension can bypass a truncation of an already sign-extended value.
+Successive sign extensions read the original narrow value directly, including
+a folded signed load through an intermediate integer promotion.
+A single-use ordinary load followed by sign extension becomes one exact-width
+`movsx`/`movsxd` load, under the existing memory-order and address-fold rules.
+Volatile and atomic accesses retain their separate access.
+An exact-width store can read the original value of a single-use truncation:
+the memory instruction itself discards the unwanted upper bits, preserving
+the same address, byte count and observable access.
+For a signed 32-bit offset followed by extension to 64 bits, selection can
+combine a single-use chain of constant additions/subtractions into one 64-bit
+`lea`. Two signed fields that each fit fewer than 32 signed bits also add
+without I32 overflow; their sum and walked constants can use one 64-bit `lea`.
+Every intermediate operation must be proven nonoverflowing and the remaining
+operands must have physical sign-preserving storage, including nonnegative
+canonical values. An unbounded
+32-bit subtraction retains its extension and wrapping semantics.
+For a single-use expression followed by signed widening, bitwise operations,
+NOT and constant arithmetic right shift commute with sign extension when the
+inputs already have that representation. Negation also does so when its input
+needs fewer than 32 signed bits. A difference of two values each needing fewer
+than 32 signed bits, or a product whose signed widths sum to at most 32, also
+fits without I32 overflow and can operate directly on their signed 64-bit
+representations. A positive power-of-two multiplier adds only its shift to
+the input's signed width; an immediate multiply keeps its constant folded.
+The native expression matrix checks negative
+fields and constants, full-width signed loads, poisoned ABI bits, and wrapping
+addition/negation controls that must retain their extensions.
+
+A byte or word truncation of a single-use I32 add, subtract, negation or NOT can
+instead use a byte or word ALU operation when its inputs already fit that
+unsigned width and have physical zero storage. The initial 32-bit copy, when
+needed, preserves those zero upper bits; the narrow operation wraps only the
+low result and leaves the rest zero. Both binary inputs must satisfy the proof
+because commutative register selection can exchange them on an alias. This
+removes the separate truncation while preserving canonical narrow storage.
+
+The bounds occupy two scratch bytes per node and the storage certificate one.
+The independent range seeds are classified in 32-node SIMD batches with masked
+tails and an exact scalar twin; dependency propagation reuses bounded ordered
+sweeps on both selector paths. `test-tier1-select` checks poisoned ABI upper
+halves, signed boundaries, zero-count shifts, identity operations, retruncation,
+volatile and exact-width loads, cyclic phis, and every tail through 65 nodes
+against protected pages. The bounds do not assume an ABI extension or infer a
+loop's numeric range from its initial value alone. `test-tier1-emit` executes
+positive and unsafe induction near-matches through both selection/allocation
+paths with constrained registers and independent unsigned-bit arithmetic.
+Mixed signed/unsigned widening tests keep eight loaded values live before
+either use, require real three-register spills, check the stored results
+independently, and put exact-width input at a protected page boundary. A
+volatile `I32` load checks the conservative representation.
+Mixed signed, positive, volatile and opaque phi inputs check uniform spill
+widths without inventing sign facts. Byte/word wrapping and guarded conversion
+fixtures observe the complete 64-bit result, including poisoned ABI inputs,
+negative bypass paths and unsafe unsigned bounds.
+
 Comparisons used by a branch alone do not produce `setcc`. Their comparison and
 conditional jump are consecutive records. A comparison producing a value uses
-`cmp`/`test`, `setcc`, then `movzx`; clearing the destination before comparison
-would corrupt an aliased input, so the zero extension follows `setcc`.
+canonical 32-bit storage and `setcc`. An independent destination is cleared with
+`xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
+`mov r32, 0` clears the destination while preserving the flags. A floating
+comparison's result is in the general class and its inputs in the vector class,
+so it can always clear the result before `ucomis`. Its parity combination for
+unordered equality/inequality touches only the already canonical low byte.
 
 The body uses only RAX, RCX, RDX, RSI, RDI and R8–R10. R11 is reserved for
 operand-overlap repairs. Parameters must be an entry-block prefix, with up to
@@ -455,14 +613,12 @@ representer); and each operator's table gives the state of each pair of
 representers. The grammar isn't finite-state as it stands (a chain of additions
 grows a register's cost against a fold's zero without bound), so normalized
 costs saturate at 8, past which a difference no longer picks another rule in
-these patterns. The tables have 582 states, 172 rules, at most 57
-representers in an operator's position and a pool of 18,705 16-bit entries for
-the operators' maps and tables (as `test-tier1-select` prints them), and are in
+these patterns. `test-tier1-select` prints the generated state, rule, representer,
+and 16-bit pool entry counts. The tables are in
 the baked section (`baked.c`), so a compile starts with them built; `--tier1`
 and `test-baked-tables` build them where the executable isn't baked. The bound
-and table sizes are `BUSTER_TIER1_BURS_*`: a bound of 4 gives 346 states, 23
-representers and 11,418 entries, and 16 gives 1,430 states, past the tables'
-1,024, so that its build's bake fails.
+and table sizes are `BUSTER_TIER1_BURS_*`; table generation fails if the
+grammar exceeds a table's fixed capacity.
 
 A plan then takes four passes over the function's nodes, each 16 nodes a
 vector with an exact scalar twin (`tier1_burs_*_scalar`):
@@ -653,15 +809,16 @@ counts are reported separately as `call_stores` and `call_loads`.
 An `I32` value's upper half is unspecified in Tier 1's registers, as System V
 leaves an `int` parameter's and result's (#1116). Every rule reads an `I32`
 operand at 32 bits (an address's index is an `I64`), and a zero extension to
-`I64` always writes its `mov r32, r32`, even in place. So nothing else writes
-a move to clear it:
+`I64` writes its `mov r32, r32`, even in place, unless selection proves that
+the upper half is already zero (#1219). Nothing else needs to clear it:
 
 - an `I32` argument is passed as the argument moves leave its register;
 - an `I32` result stays in RAX;
 - a copy of an `I32`, and a truncation to `I32`, is nothing in its own register.
 
 Narrow values keep their canonical storage (#981): a narrow result is still
-zero-extended from RAX, and a narrow truncation still clears in place.
+zero-extended from RAX, and a narrow truncation clears in place unless its
+discarded bits are already proven zero.
 
 Call-containing functions disable the red zone and use the frame planner's
 System V call alignment, including zero-argument calls. The bounded register

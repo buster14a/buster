@@ -121,8 +121,9 @@ Beside them are three tables, and optional parts for aggregates and for the symb
     class may name one too, of at least the class's bytes (a memory class's slot's 16: `tier0_value_object`), whose
     first bytes they read or write, its home a memory operand as a slot's is: a front end's value that must live in
     memory, which it then reads and writes as it would a value's local;
-  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), each counted as its size rounded up to 16
-    and, aligned past 16, its alignment less 16, so that every frame displacement fits a disp32.
+  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (`INT32_MAX - 15` bytes, #1149), each counted as its size rounded up to 16
+    and, aligned past 16, its alignment less 16. Frame layout still checks the complete allocation and every
+    displacement before emission; a large object combined with other slots can therefore remain unsupported.
 
   A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.

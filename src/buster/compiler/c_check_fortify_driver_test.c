@@ -45,8 +45,47 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         const char* name;
         const char* source;
         int result;
+        bool compatibility;
     } cases[] =
     {
+        {
+            "system-header diagnostic wrapper without size annotations",
+            "# 1 \"fortify-system.h\" 1 3\n"
+            "static inline int header_wrapper(int n) __attribute__((diagnose_if((n>8),(\"too large\"),\"warning\"))){return n;}\n"
+            "# 1 \"fortify.c\" 2\nint main(void){return header_wrapper(3)!=3;}\n",
+            0
+        },
+        {
+            "object-size attributes use conservative unknown bounds",
+            "#define Q(N,A,M,B) static __attribute__((noinline)) unsigned long N(char*const p __attribute__((A(M))))"
+            "{char*q=p;unsigned long n=B(q++,M);return q==p?n:99;}\n"
+            "Q(s0,pass_object_size,0,__builtin_object_size) Q(s1,pass_object_size,1,__builtin_object_size)\n"
+            "Q(s2,pass_object_size,2,__builtin_object_size) Q(s3,pass_object_size,3,__builtin_object_size)\n"
+            "Q(d0,pass_dynamic_object_size,0,__builtin_dynamic_object_size) Q(d1,pass_dynamic_object_size,1,__builtin_dynamic_object_size)\n"
+            "Q(d2,pass_dynamic_object_size,2,__builtin_dynamic_object_size) Q(d3,pass_dynamic_object_size,3,__builtin_dynamic_object_size)\n"
+            "int main(void){char b[8];return s0(b)!=(unsigned long)-1||s1(b)!=(unsigned long)-1||s2(b)||s3(b)||"
+            "d0(b)!=(unsigned long)-1||d1(b)!=(unsigned long)-1||d2(b)||d3(b)||__builtin_object_size(b,0)!=8;}",
+            0,
+            true
+        },
+        {
+            "object-size overloads prefer wrappers and preserve ordinary addresses",
+            "#define O __attribute__((overloadable))\n#define P __attribute__((pass_object_size(1)))\n"
+            "int pick(char*p){return 3;}static int pick(char*const p P) O{return 7;}\n"
+            "int wrap(char*p){return 11;}extern inline __attribute__((gnu_inline,always_inline,overloadable))"
+            "int wrap(char*const p P){return 13;}\n"
+            "static int dyn(char*const p __attribute__((pass_dynamic_object_size(0)))) O{return 17;}\n"
+            "static int bounded(char*const p P,unsigned long n) O "
+            "__attribute__((diagnose_if((__builtin_object_size(p,1)!=(unsigned long)-1&&n>__builtin_object_size(p,1)),"
+            "(\"too large\"),\"warning\"))){return n;}\n"
+            "int options(char*p,int flags,...){return 1;}\n"
+            "static int options(char*p,int flags,unsigned mode,...) O __attribute__((unavailable(\"too many\")));\n"
+            "static int options(char*const p P,int flags) O{return 19;}\n"
+            "static int options(char*const p P,int flags,unsigned mode) O{return 23;}\n"
+            "int main(void){char b[8];int effects=0;int(*a)(char*)=&pick;int(*w)(char*)=&wrap;"
+            "return pick((effects++,b))!=7||wrap(b)!=13||dyn(b)!=17||bounded(b,3)!=3||options(b,0)!=19||options(b,0,3u)!=23||a(b)!=3||w(b)!=11||effects!=1;}",
+            0
+        },
         {
             "query-selected fortified native calls",
             "#if !(__has_builtin(__builtin___memcpy_chk) && __has_builtin(__builtin___memmove_chk) && __has_builtin(__builtin___mempcpy_chk) && "
@@ -238,10 +277,12 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
     char binary[512];
     char object[512];
     char names_file[512];
+    char other_source[512];
     snprintf(source, sizeof(source), "%s/fortify.c", directory);
     snprintf(binary, sizeof(binary), "%s/fortify", directory);
     snprintf(object, sizeof(object), "%s/fortify.o", directory);
     snprintf(names_file, sizeof(names_file), "%s/fortify.names", directory);
+    snprintf(other_source, sizeof(other_source), "%s/fortify-other.c", directory);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         const bool written = parse_test_write(source, cases[c].source, strlen(cases[c].source));
@@ -250,6 +291,10 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         {
             for (uint32_t path = 0; path < 3; path += 1)
             {
+                if (path == 0 && cases[c].compatibility)
+                {
+                    continue;
+                }
                 char* text = NULL;
                 char* arguments[] = { (char*)(path == 0 ? clang : executable), optimization == 0 ? "-O0" : "-O2",
                                       "-Wno-fortify-source", source, "-o", binary, path == 1 ? "--scalar" : NULL, NULL };
@@ -269,24 +314,95 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
             }
         }
     }
-#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 40)
     // Actual optimized system headers, not hand-written substitutes for their fortify wrappers.
     static const char headers[] =
-        "#include <stdio.h>\n#include <string.h>\n#include <strings.h>\n"
+        "#define _GNU_SOURCE 1\n#include <stdio.h>\n#include <string.h>\n#include <strings.h>\n"
+        "#include <stdlib.h>\n#include <unistd.h>\n#include <wchar.h>\n#include <poll.h>\n#include <fcntl.h>\n#include <sys/socket.h>\n"
         "int main(int argc,char**argv){char buf[32],dst[32];memcpy(buf,\"hello world\",12);strcpy(dst,buf);strcat(dst,\"!\");"
-        "snprintf(buf,sizeof buf,\"%s %d\",dst,argc);puts(buf);return strcmp(buf,\"hello world! 1\")!=0;}\n";
-    const bool headers_written = parse_test_write(source, headers, sizeof(headers) - 1);
-    check_test_expect(test, headers_written, "fortified system-header reproducer written");
-    for (uint32_t level = 2; headers_written && level <= 3; level += 1)
+        "snprintf(buf,sizeof buf,\"%s %d\",dst,argc);puts(buf);if(strcmp(buf,\"hello world! 1\"))return 1;"
+        "void*(*copy)(void*,const void*,size_t)=&memcpy;if(copy(dst,buf,15)!=dst||strcmp(dst,buf))return 2;"
+        "int fd=open(\"/dev/null\",O_RDONLY);if(fd<0||read(fd,buf,sizeof buf)!=0||close(fd))return 3;"
+        "wchar_t wide[8];if(wmemcpy(wide,L\"abc\",4)!=wide||wcscmp(wide,L\"abc\"))return 4;"
+        "if(poll(0,0,0))return 5;int pair[2];if(socketpair(AF_UNIX,SOCK_STREAM,0,pair))return 6;"
+        "if(send(pair[0],\"ok\",3,0)!=3||recv(pair[1],buf,sizeof buf,0)!=3||strcmp(buf,\"ok\"))return 7;"
+        "return close(pair[0])||close(pair[1]);}\n";
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        int result;
+        bool system_link;
+    } header_cases[] =
+    {
+        { "fortified system headers", headers, 0 },
+        { "fortified header keeps printf security flag", "#include <stdio.h>\nint main(void){char b[32],f[]=\"x%n\";int n=0;snprintf(b,sizeof b,f,&n);return 0;}\n", 128 + SIGABRT },
+        // mbstowcs has two distinct extern declarations redirected to the same libc symbol. Validate its object
+        // and ABI with Clang's linker independently of the direct binder's existing duplicate-name restriction.
+        { "fortified wide conversion object", "#include <stdlib.h>\n#include <wchar.h>\nint main(void){wchar_t b[8];return mbstowcs(b,\"abc\",8)!=3||wcscmp(b,L\"abc\");}\n", 0, true },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(header_cases); c += 1)
+    {
+        const bool written = parse_test_write(source, header_cases[c].source, strlen(header_cases[c].source));
+        check_test_expect(test, written, "fortified system-header reproducer written");
+        for (uint32_t level = 2; written && level <= 3; level += 1)
+        {
+            for (uint32_t path = 0; path < 5; path += 1)
+            {
+                char* text = NULL;
+                char* arguments[] = { (char*)(path == 0 ? clang : executable), "-O2", level == 2 ? "-D_FORTIFY_SOURCE=2" : "-D_FORTIFY_SOURCE=3",
+                                      source, "-o", header_cases[c].system_link ? object : binary, path == 0 ? "-Wno-unused-parameter" : path >= 3 ? "-fno-lazy-system-headers" : "-flazy-system-headers",
+                                      path == 1 || path == 3 ? "--scalar" : "-Wno-unused-parameter", header_cases[c].system_link ? "-c" : NULL, NULL };
+                unlink(binary);
+                unlink(object);
+                const int compiled = check_test_driver_spawn(arguments, &text);
+                int linked = 0;
+                if (compiled == 0 && header_cases[c].system_link)
+                {
+                    char* link_text = NULL;
+                    char* link_arguments[] = { (char*)clang, "-no-pie", object, "-o", binary, NULL };
+                    linked = check_test_driver_spawn(link_arguments, &link_text);
+                    if (linked != 0 && link_text != NULL)
+                    {
+                        fprintf(stderr, "%s", link_text);
+                    }
+                    free(link_text);
+                }
+                const int ran = compiled == 0 && linked == 0 ? check_test_fortify_execute(binary) : -1;
+                char description[256];
+                snprintf(description, sizeof(description), "%s: FORTIFY_SOURCE=%u path %u compiles and exits %d (got compile %d, run %d)",
+                         header_cases[c].name, level, path, header_cases[c].result, compiled, ran);
+                check_test_expect(test, compiled == 0 && linked == 0 && ran == header_cases[c].result, description);
+                if (compiled != 0 && text != NULL)
+                {
+                    fprintf(stderr, "%s", text);
+                }
+                free(text);
+            }
+        }
+    }
+    static const char library[] =
+        "#include <stdio.h>\n#include <string.h>\n"
+        "#define O __attribute__((overloadable))\n"
+        "static int variant_linkage(int n) O{return n;}double variant_linkage(double n) O{return n+1;}"
+        "extern int variant_linkage(int) O;\n"
+        "int copied(char*d){char s[16];snprintf(s,sizeof s,\"%s\",\"hello\");memcpy(d,s,6);return s[0];}\n";
+    static const char client[] =
+        "#include <stdio.h>\n#include <string.h>\nint copied(char*);\n"
+        "double variant_linkage(double) __attribute__((overloadable));\n"
+        "int main(void){char b[16],s[16];snprintf(s,sizeof s,\"%d\",42);memcpy(b,s,3);"
+        "return strcmp(b,\"42\")||copied(b)!='h'||strcmp(b,\"hello\")||variant_linkage(2.0)!=3.0;}\n";
+    const bool units_written = parse_test_write(other_source, library, sizeof(library) - 1) && parse_test_write(source, client, sizeof(client) - 1);
+    check_test_expect(test, units_written, "fortified multi-unit fixtures written");
+    for (uint32_t level = 2; units_written && level <= 3; level += 1)
     {
         for (uint32_t path = 0; path < 3; path += 1)
         {
             char* text = NULL;
             char* arguments[] = { (char*)(path == 0 ? clang : executable), "-O2", level == 2 ? "-D_FORTIFY_SOURCE=2" : "-D_FORTIFY_SOURCE=3",
-                                  source, "-o", binary, path == 1 ? "--scalar" : NULL, NULL };
+                                  source, other_source, "-o", binary, path == 1 ? "--scalar" : "-Wno-unused-parameter", NULL };
             unlink(binary);
             const int compiled = check_test_driver_spawn(arguments, &text);
-            check_test_expect(test, compiled == 0 && check_test_fortify_execute(binary) == 0, "FORTIFY_SOURCE=2/3 real headers compile, link and run");
+            check_test_expect(test, compiled == 0 && check_test_fortify_execute(binary) == 0, "fortified wrappers remain private across translation units");
             if (compiled != 0 && text != NULL)
             {
                 fprintf(stderr, "%s", text);
@@ -294,9 +410,6 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
             free(text);
         }
     }
-#else
-    fprintf(stderr, "checker-fortify: system-header case requires pre-2.40 glibc; newer Clang wrappers need #147's pass_object_size ABI\n");
-#endif
     static const char* const invalid[] =
     {
         "void f(char*d,char*s){__builtin___memcpy_chk(d,s,4);}",
@@ -306,6 +419,16 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         "void f(char*d,int m){__builtin_dynamic_object_size(d,m);}",
         "void f(char*d){__builtin_dynamic_object_size(d,4);}",
         "void f(char*d){__builtin___memcpy_chkk(d,d,0,0);}",
+        "void f(char*const p __attribute__((pass_object_size(4))));",
+        "void f(char*const p __attribute__((pass_dynamic_object_size(-1))));",
+        "void f(char*const p __attribute__((pass_object_size())));",
+        "void f(char*const p __attribute__((pass_object_size(0,1))));",
+        "void f(int p __attribute__((pass_object_size(0))));",
+        "void f(char*p __attribute__((pass_object_size(0)))){}",
+        "void f(char*const p __attribute__((pass_object_size(0),pass_dynamic_object_size(0))));",
+        "void f(void) __attribute__((diagnose_if(1,\"unconditional contract\",\"error\")));void g(void){f();}",
+        "int f(int) __attribute__((overloadable));static int f(int) __attribute__((overloadable));",
+        "int f(char*,int,...);static int f(char*,int,unsigned,...) __attribute__((overloadable,unavailable(\"too many\")));void g(void){f(0,0,1u,2);}",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(invalid); c += 1)
     {
@@ -381,6 +504,7 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         }
     }
     unlink(names_file);
+    unlink(other_source);
     unlink(object);
     unlink(binary);
     unlink(source);

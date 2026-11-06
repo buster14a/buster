@@ -2447,11 +2447,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 559 audited SemaX86 constraint facts for 531
+`c_check_builtin_x86.c` adds 562 audited SemaX86 constraint facts for 534
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
 rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 277 direct ranges,
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 280 direct ranges,
 `_mm_prefetch`'s hint (0 to 7) the last of them.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
@@ -2671,6 +2671,62 @@ supplementary fact's edges with clang (`check_builtin_x86_test_clang_supplementa
 a function per value of the constrained argument, the others at values their
 facts accept, declared at the prototype's types as clang spells them. Clang
 must refuse exactly the values the fact refuses, with the fact's bounds.
+
+#1029 adds the remaining 21 x86 names from the znver5 `__has_builtin` gap to
+the supplementary scope, with their existing Clang 23.1.1 catalogue
+prototypes and target-feature expressions. The implementation and fixtures
+are original. The additional semantic facts are audited from
+[`llvmorg-23.1.1`'s `SemaX86.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaX86.cpp):
+
+- The fourteen `pcmpestr*128` and `pcmpistr*128` names use SSE4.2 leaves
+  specialized by the converted immediate byte. Explicit lengths move from
+  the helper ABI's `edi`/`esi` into `eax`/`edx`; index results move `ecx` to
+  `eax`, masks return in `xmm0`, and A/C/O/S/Z flag results use `setcc` and
+  zero extension. The planner deduplicates by name and immediate, with a
+  separate bounded key table allocated only for units using these leaves.
+  The ordinary call boundary accounts for every implicit register clobber.
+  Their prototype's `I` marker requires an integer constant expression;
+  SemaX86 adds no direct range check for these names. Controls outside the
+  byte are converted to the prototype's `char` before specialization.
+- SSE4a's `extrqi` and `insertqi` use their two-immediate instruction forms.
+  The row retains each operand's separate ICE check and packs the converted
+  length and index bytes into the encoder's two-immediate field. These
+  names likewise have no extra SemaX86 range rule. Native fixtures compare
+  the defined low quadword, with lengths and indices whose sum is at most
+  64 after the instruction's six-bit truncation; they do not inspect
+  EXTRQ's unspecified upper quadword.
+- `vcvtps2ph_mask`, `vcvtps2ph256_mask` and `vcvtps2ph512_mask` use masked
+  narrowing rows with source in ModRM.reg and destination in r/m. The
+  128/256-bit forms require AVX-512VL and the 512-bit form AVX-512F.
+  SemaX86's cases at lines 761, 763 and 764 constrain argument 1 to 0–255.
+  The 512-bit form selects its SAE encoding only for controls 8–12 and
+  encodes them as 0–4. Other controls, including 13–15 and 255, keep their
+  ordinary encoding; there is no extra rounding operand or separate
+  SAE-set check. A pinned Clang 23.1.4 assembly oracle confirms this
+  distinction, and the native fixture resets MXCSR between controls and
+  width groups so that exception status cannot conceal it.
+- `readeflags_u32` and `writeeflags_u32` are recognized by `__has_builtin`
+  even on x86-64. Calls receive `this builtin is only available on 32-bit
+  targets`, following `isX86_32Builtin` and its early check at lines
+  523–540. This is a semantic error in dead and unevaluated code too, before
+  lowering. Prototype errors still take precedence, and a failed call has
+  no valid expression type, preventing cascading operator diagnostics.
+
+`test-checker` adds native Clang comparisons for all fourteen string results,
+both SSE4a forms, and all three masked conversions. They exercise repeated
+and distinct controls in one unit, signed and saturated lengths, live input
+vectors across fixed-register calls, both mask formats, zero/sparse/full
+conversion masks, the full low rounding nibble, all MXCSR rounding modes,
+ties and exceptional floating values. The MXCSR is restored after each
+fixture. Independent byte checks cover all 256 controls of each string
+leaf through both encoders, including its fixed-register ABI and bounded
+output failure. Diagnostic fixtures compare both SSE4a ICE positions,
+string controls and the 32-bit-only errors against Clang. The existing
+supplementary-range oracle covers the three new range facts; catalogue and
+preprocessor tests cover exact names, bounded slices and target features.
+The lowering-to-prototype coverage check also requires both SSE4a immediate
+arguments to be ICEs, and checks VCVTPS2PH512's shared immediate/SAE control
+at its actual parameter index while leaving the runtime mask unrestricted.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these

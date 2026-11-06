@@ -65,9 +65,21 @@ successor's assertion after its **sequential** edits and simultaneous source
 phi renaming. All blocks must be reachable; disconnected circular assertions
 are rejected rather than treated as proofs.
 
-An assertion names at most one location per value. Different equal-width names
-may share the same byte span, provided the ABI or every incoming edge proves
-each name. Partial overlapping assertions are refused. Within a block, copies
+An assertion may name several locations per value: each home must independently
+be proved from the ABI or on **every** incoming edge. Different equal-width
+names may share the same byte span under the same proof requirement. Exact
+repeated facts are idempotent; partial overlapping assertions are refused.
+Equal-span names form transitive alias sets, independent of assertion order,
+including when a later fact joins names already asserted at different homes.
+The fast seed uses a temporary union-by-rank forest in its existing name
+scratch, flattens names and byte tokens, then binds frame-recipe incarnations.
+The oracle uses an independent dense alias closure for ABI and local assertion
+seeds; certificates still never seed its CFG inference. An undefined incoming
+phi (`BUSTER_CERT_NONE`) is the exception: it may assert only one physical byte
+span, with exact duplicate views allowed. Any bits may satisfy that one home,
+but they do not prove equality between several homes; otherwise such a phi
+could falsely join unrelated known values. Defined incoming phis still support
+multiple independently proved homes. Within a block, copies
 may establish any number of register and stack homes. The exit requirements
 share the same assertion discipline; they are proved on every zero-edge
 (sink) block, and a program with exit requirements but no sink block is
@@ -175,8 +187,11 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
     (`BUSTER_TIER1_CFG_NONE`, the IR's undef that #141's blocks' lifetimes
     give promotion) is a rename from `BUSTER_CERT_NONE`: any bits are the
     phi's value along that edge, so its fact needs no proof there, which is
-    what `tier1_cfg_verify` checks of it too. The oracle makes every unit hold
-    such a destination after the edge.
+    what `tier1_cfg_verify` checks of it too. Only one physical span may be
+    asserted for that undefined destination; it cannot establish equality
+    between distinct homes. The oracle makes every unit hold such a destination
+    during inference, then checks that single-span obligation on the edge in
+    its separate local sufficiency pass.
   - A rematerializable value is an integer recipe of its class, with its own
     id as the payload.
 - **The allocation is untrusted.** Its stream is what the consumers run. Each
@@ -294,8 +309,9 @@ counts fixpoint rounds and cumulative work.
 Fast scratch is bounded by
 `24*units + 24*values + 5*blocks + 96` bytes with the current record layouts.
 Checking costs linear work in the bounded declarations, source instructions/
-operands, rewritten edits, certificate assertions, edge/rename obligations and
-byte-unit updates. Width is bounded by 64 bytes. There are no per-store scans
+operands, rewritten edits, edge/rename obligations and byte-unit updates, plus
+near-linear union/find work in the certificate assertions' alias closure.
+Width is bounded by 64 bytes. There are no per-store scans
 of stack homes, per-block clears of the value domain or per-edge state copies.
 
 The fragment adapter includes `tier1_allocate.c`'s input contract and independently
@@ -386,7 +402,9 @@ the normalized-stream checker/oracle and fragment mutation suites. The stream
 fixtures cover ABI entry, initialized/uninitialized cycles, critical edges,
 phi cycles, sibling-edge isolation, forged homes, partial writes, omitted
 uses, tied-source copies, call clobbers/restricted masks, callee-saved exits,
-exit-assertion shape and sink requirements, stack reuse, stale definition
+exit-assertion shape and sink requirements, multi-home assertions, all alias
+orders, narrow carried rows, missing/overwritten/wrong-owner rows on edges and
+joins, stale loop incarnations, stack reuse, stale definition
 incarnations, frame-recipe base redefinitions, legal exchanges, damaged XORs
 and missing materializations. There are 1,000 generated valid move sequences
 and 1,000 independently checked mutations, plus structural/capacity tests and
@@ -616,6 +634,29 @@ The decoding:
   from its slot) is the instruction that reads those bytes and defines the
   parameter, so an extension left out, or made a wider move or load, leaves the
   parameter undefined and its uses fail.
+- **Carried call-save rows (#1270).** `tier1_emit_cfg_records` carries rows only
+  from a block's single predecessor earlier in layout (`only < b`); joins and
+  backward-layout edges reset them. No load is owed at entry. The private rows
+  are disjoint from allocation spill/edge-move slots; fixed-register sequences
+  still invalidate rows they overwrite. A row's SSA name dominates the
+  predecessor and cannot be redefined in its sole successor.
+
+  With `Tier1EmitOptions.certify` and a nonempty general call-save mask,
+  `Tier1EmitResult.entry_rows` retains `cfg_input.block_count * 16` contiguous
+  `uint32_t` node owners (block-major, register-minor; `BUSTER_IR_NONE` means
+  unknown); otherwise it is null. It lives in the output arena with the emitted
+  records. The same-size exit table is emission scratch only. The producer
+  allocates neither table for a function without general call-save rows.
+
+  `tier1_certificate_emitted` bounds each owner, value class, register mask and
+  frame row before publication. Each nonempty reachable entry row adds a fact
+  at `tier1_emit_call_save`'s actual frame displacement, at the value's width:
+  four bytes for a canonical narrow integer even though the store/load is
+  eight bytes. These untrusted assertions supplement, never replace, the
+  allocation's register/slot facts. The normal edge proof must establish each
+  one from decoded records; a row-owner claim alone proves nothing. Missing,
+  stale, overwritten or wrong-owner rows fail closed. The fact/location
+  capacities include every added row; no fixed per-value home limit is assumed.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
   record by rsp's offset from its value at entry, each record exactly its form's
   (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),

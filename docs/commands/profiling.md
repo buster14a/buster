@@ -15,6 +15,65 @@ requirements. [Command index](README.md).
   `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
   lexer and the encoder were measured and profiled on the 9700X, with these
   tools: read it before tuning a stage.
+
+## Comparing generated Tier 1 code over layouts (#1450)
+
+Compare Lua's run time across several **relative code layouts** before attributing
+a change to Tier 1's frames, probes or instructions. In
+[#1435](https://github.com/buster14a/buster/issues/1435), padding before all of
+Lua's code preserved the hot functions' collisions modulo 4 KiB. Seven of eight
+shifts suggested a regression; over 33 link orders, the mean of the paired log
+ratios was +0.02%, with a 95% interval of -1.44% to +1.49%. The
+[measurement record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/closures-stli-1435-2026-11-05)
+contains the objects' orders, counters, profiles and analysis.
+
+For a comparison of two compiler revisions:
+
+1. Compile Lua's translation units to objects once per revision, with the same
+   source, target and flags. Keep those objects fixed throughout the layout
+   experiment. Relink each revision's complete object set in several recorded
+   permutations, using the **same permutation for both revisions**, linker,
+   libraries and link flags. Include the normal order and choose the additional
+   permutations before looking at their timings. Save each actual object order,
+   not just a random seed whose generator or inputs might later change.
+2. Alternatively, insert padding before a unit in the middle of the link so
+   that hot code on opposite sides moves relative to each other. Inspect the
+   linked addresses to verify that the intended relative positions changed.
+   `./build.sh shifts DIRECTORY SOURCE SHIFT...` does this for the compiler's
+   own objects; see [the build guide](build.md#experiments).
+   Shifting the compiler executable does not vary the layout of the Lua
+   executable it generates. A single pad before all Lua objects, ASLR and fresh file
+   copies alone are insufficient for this relative-layout check.
+3. Check every generated executable's output against clang -O0's for every
+   script before timing it. Pin timed runs to the same CPU on the 9700X and
+   follow the shared lock rules above. Warm up every executable and rotate the
+   revisions' order within each layout. Keep the per-run wall time, user cycles
+   and instructions with the revision, layout, round and script identifiers.
+4. Report the within-layout medians, the paired revision ratios by layout and
+   their spread. Base an interval across layouts on the independent layouts,
+   not on treating repeats of one executable as additional layouts. If the
+   sign changes across layouts, or their uncertainty covers the claimed
+   effect, collect more layouts or report the result as inconclusive. Keep a
+   single-layout result labeled as such.
+
+`time-runs` already accepts several executables for each named build:
+`--build base BASE_ORDER_0 --build head HEAD_ORDER_0 --build base BASE_ORDER_1
+--build head HEAD_ORDER_1 ... --list closures.lua`. Give each build's placements
+in the same order; its rounds rotate the execution order and its report retains
+the placement medians. Repeat the lists for the other four scripts. Its
+`over placements` range is a range of comparisons, **not a confidence interval
+or a paired-layout estimator**; calculate paired ratios from the recorded
+per-layout results when reporting those statistics. `--copies` measures a
+separate file-placement effect and does not create a new relative code layout.
+
+`measure-tier1-programs` currently builds one Lua executable per compiler. Its
+repeated runs establish that layout's variation; a reported change from those
+runs needs the relinked comparison above before it is attributed to a compiler
+change. Preserve the commands, object hashes, link orders and raw results in
+`buster-performance`, and link the record from the issue or PR. This method
+does not by itself attribute #1450's compile-time instruction increase or the
+Tier 0 stack-probe cost; those still need their own measurements.
+
 ## Profiling tools
 
 `./build/compiler test-profile` (about 10 ms) checks `profile.c`. Each tool

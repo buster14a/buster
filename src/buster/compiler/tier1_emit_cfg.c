@@ -634,7 +634,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             const uint32_t mask_width = tier1_select_mask_width(function->type[node]);
             const uint32_t float_width = tier1_select_float_width(function->type[node]);
             const uint32_t vector_width = vectors ? tier1_select_vector_width(function->type[node]) : 0;
-            widths[node] = (uint8_t)tier1_select_width(function->type[node]);
+            widths[node] = (uint8_t)tier1_select_storage_width(plan, node);
             prepared->sizes[node] = widths[node] != 0 ? widths[node] : mask_width != 0 ? mask_width : float_width != 0 ? float_width : vector_width != 0 ? vector_width : 8;
             prepared->alignments[node] = prepared->sizes[node] < 16 ? prepared->sizes[node] : 16;
         }
@@ -1610,7 +1610,8 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
             const bool in_vector = found && kind == BUSTER_TIER1_ALLOCATE_REGISTER && float_width != 0 && tier1_emit_cfg_vector_location(location);
             const bool in_register = found && kind == BUSTER_TIER1_ALLOCATE_REGISTER && float_width == 0 && location < 16;
             const bool in_slot = found && kind == BUSTER_TIER1_ALLOCATE_SPILL && tier1_emit_cfg_slot(emitted, location, &slot);
-            const uint16_t general_form = type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+            const bool signed_parameter = type == IR_I32 && plan->patterns[node].sign_result;
+            const uint16_t general_form = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : type == IR_I64 || type == IR_PTR || float_width == 8 ? X86_FORM_MOV_R64_RM64 : type == IR_I32 || float_width == 4 ? X86_FORM_MOV_R32_RM32 : type == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
             const uint8_t target = in_vector ? (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION) : in_register ? (uint8_t)location : (uint8_t)BUSTER_TIER1_SELECT_SCRATCH;
             const X86Instruction load = { .form = in_vector ? tier1_select_float_forms(float_width)->load : general_form, .reg = target, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = offset };
             const uint32_t width = emitted->prepared.sizes[node];
@@ -1872,9 +1873,11 @@ static Tier1EmitError tier1_emit_cfg_indirect(Tier1EmitResult* emitted, uint32_t
 
 // Each of the function's labels' first record (Tier1EmitResult.label_records, #789): its block's, or where the indirect
 // jump that may go to it has a stub for that edge, the stub's, which the jump reaches through the label's address alone.
-// A label no block holds, in a function without br_indirect, gets the function's first record. An indirect jump with one
-// successor jumps there directly, and its label is its block's. A label is one address for every indirect jump that may
-// go to it. The C lowering puts each on one jump's list (a jump table's, or the dispatch block's of GNU C's goto *), but
+// A label no block holds keeps UINT32_MAX: no indirect branch reaches it, though other indirect branches with explicit
+// target lists may remain. The driver still defines its symbol at the function's start, without adding a control-flow
+// target. An indirect jump with one successor jumps there directly, and its label is its block's. A label is one
+// address for every indirect jump that may go to it. The C lowering puts each on one jump's list (a jump table's, or
+// the dispatch block's of GNU C's goto *), but
 // for a dispatch block that lists none, which may go to every label, where goto * has no label of its own, and the IR
 // doesn't require it. A label two jumps may go to is its block's where neither edge has a stub, and otherwise the
 // function is refused, TIER1_EMIT_UNSUPPORTED: one jump would enter the other's stub (#1016's review).
@@ -1894,7 +1897,7 @@ static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1Em
     uint8_t* stubbed = function->label_count != 0 ? ir_allocate(scratch, function->label_count, 1, &ok) : 0;
     for (uint32_t k = 0; ok && k < function->label_count; k += 1)
     {
-        records[k] = function->labels[k] == BUSTER_IR_NONE ? 0 : block_first[function->labels[k] + added];
+        records[k] = function->labels[k] == BUSTER_IR_NONE ? UINT32_MAX : block_first[function->labels[k] + added];
         owners[k] = BUSTER_IR_NONE;
         owner_counts[k] = 0;
         stubbed[k] = 0;
@@ -3054,6 +3057,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     emitted->origin_values = ok && certify ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
     emitted->block_records = ok && certify ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     emitted->stub_records = ok && certify ? ir_allocate(output, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
+    const bool call_rows = emitted->prepared.call_save_mask != 0;
+    const uint64_t row_count = (uint64_t)blocks * BUSTER_TIER1_EMIT_GENERAL_REGISTERS;
+    emitted->entry_rows = ok && certify && call_rows ? ir_allocate(output, row_count, 4, &ok) : 0;
+    uint32_t* exit_rows = ok && call_rows ? ir_allocate(scratch, row_count, 4, &ok) : 0;
     emitted->dropped = ok && certify ? ir_allocate(output, (uint64_t)count + 1, 1, &ok) : 0;
     emitted->row_placements = ok && certify && function->row_count != 0 ? ir_allocate(output, (uint64_t)count + 1, sizeof(Tier1RowPlacement), &ok) : 0;
     transitions.offsets = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 2, 4, &ok) : 0;
@@ -3144,7 +3151,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 transitions.values[f] = node;
             }
             // The blocks whose starts the interval covers.
-            uint32_t b = tier1_cfg_block_of(input, start);
+            uint32_t b = cfg->position_blocks != 0 ? cfg->position_blocks[start] : tier1_cfg_block_of(input, start);
             b += input->block_starts[b] < start ? 1 : 0;
             for (; error == TIER1_EMIT_OK && b < blocks && input->block_starts[b] < cfg->intervals.ends[i]; b += 1)
             {
@@ -3181,17 +3188,18 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     }
     emitted->body_record = buffer.count;
     tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_FRAME, 0), BUSTER_IR_NONE);
-    // A narrow parameter into its canonical 32-bit storage, in its register before anything reads it: its caller
-    // extends it by its own type (sign or zero), which the canonical form doesn't keep.
+    // Parameter representations, before anything reads or moves their incoming registers. Narrow values become
+    // canonical zero-extended I32; an I32 with shared signed uses explicitly establishes its full signed I64 bits.
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
     {
         const uint32_t type = function->type[node];
         const uint32_t narrow = type == IR_I1 || type == IR_I8 ? 1 : type == IR_I16 ? 2 : 0;
-        const Tier1SelectPlace place = function->op[node] == IR_PARAM && narrow != 0 ? tier1_select_parameter_place(function, function->a[node]) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
+        const bool signed_parameter = type == IR_I32 && plan->patterns[node].sign_result;
+        const Tier1SelectPlace place = function->op[node] == IR_PARAM && (narrow != 0 || signed_parameter) ? tier1_select_parameter_place(function, function->a[node]) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
         if (place.kind == BUSTER_TIER1_PLACE_GENERAL && emitted->node_values[node] != BUSTER_TIER1_CFG_NONE)
         {
             const uint8_t reg = (uint8_t)tier1_select_parameter_registers[place.index];
-            const X86Instruction extend = { .form = narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
+            const X86Instruction extend = { .form = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
             error = tier1_emit_append(&buffer, extend) ? error : TIER1_EMIT_MEMORY;
             tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_ENTRY, node), node);
         }
@@ -3205,11 +3213,12 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         block_first[b] = b == 0 ? 0 : buffer.count;
         const uint32_t entry = input->block_starts[b];
+        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+        const uint32_t only = degree == 1 ? input->predecessors[input->predecessor_offsets[b]] : UINT32_MAX;
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
-        if (input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] == 1)
+        if (only != UINT32_MAX)
         {
-            const uint32_t p = input->predecessors[input->predecessor_offsets[b]];
-            uint32_t e = input->successor_offsets[p];
+            uint32_t e = input->successor_offsets[only];
             while (input->successors[e] != b)
             {
                 e += 1;
@@ -3240,12 +3249,21 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         }
         const uint32_t first = b < added ? 0 : function->block_offsets[b - added];
         const uint32_t end = b < added ? 0 : function->block_offsets[b - added + 1];
-        // The calls' saves in this block (Tier1EmitSaves, #1116). No load is owed at a block's start, and no row is
-        // known there: every block starts with no rows, so its first call stores each value it saves. A row its one
-        // predecessor stored would still hold its value, but the code's certificate (#939) proves each block from its
-        // entry facts, which have each value in one place, the allocation's, and so can't know the row's.
+        // No load is owed at entry. Carry private call-save rows only from the sole predecessor already emitted.
+        // Joins and backward layout edges start unknown, so a loop cannot carry an earlier incarnation of a name.
+        // A carried-in name cannot be defined here: this block would then dominate its own sole predecessor.
+        // Edge moves use allocation slots, not call-save rows. With certify, publish these untrusted extra homes;
+        // each is proved from the predecessor's actual records, not from this carry heuristic (#1270).
         Tier1EmitSaves saves;
         tier1_emit_saves_reset(&saves, vector);
+        if (exit_rows != 0 && only < b)
+        {
+            memcpy(saves.rows, exit_rows + (uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, sizeof(saves.rows));
+        }
+        if (emitted->entry_rows != 0)
+        {
+            memcpy(emitted->entry_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, saves.rows, sizeof(saves.rows));
+        }
         for (uint32_t node = first; error == TIER1_EMIT_OK && node < end; node += 1)
         {
             const uint32_t op = function->op[node];
@@ -3618,6 +3636,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         if (error == TIER1_EMIT_OK && b < added && cfg->edge_placements[0] == TIER1_CFG_EDGE_PREDECESSOR)
         {
             error = tier1_emit_cfg_moves(emitted, 0, &buffer);
+        }
+        if (error == TIER1_EMIT_OK && exit_rows != 0)
+        {
+            memcpy(exit_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, saves.rows, sizeof(saves.rows));
         }
     }
     // The pending jumps' targets, now that every block and stub has its first record, and the labels'.

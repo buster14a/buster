@@ -221,9 +221,19 @@ definition. Its flags and edges:
   `if (BUSTER_VECTOR_PATH(vector))` in a baseline build no longer emits the
   AVX-512 kernel it calls. A variable-length array's address is read only after
   its allocation, which the lowering checks at each read: one in an operand that
-  a constant condition never evaluates is never allocated, nor read. A constant
-  `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
-  `FindCaseStatementsForValue`) are still written and selected.
+  a constant condition never evaluates is never allocated, nor read. Constant
+  `switch` statements use the same dropped ranges (#1192), before reference
+  selection: a foldable selector keeps the matching case or default and its
+  fallthrough statements through the first direct break, or nothing without a
+  match/default. The nonrecursive collector in `c_check_program_switch.c`
+  retains the whole switch when skipped labels or declarations, an escaping
+  inner break, a partially entered scope's fallthrough declarations, or a case
+  range encountered before the reverse-order match prevent Clang's
+  `FindCaseStatementsForValue` shortcut. Nonconstant/effectful selectors and
+  the outside-constant-context refusals (`__builtin_constant_p(n)`, `(n,1)`)
+  keep normal dispatch. Complete retained blocks keep their scope exits;
+  terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
+  Dropped regions and block-scope statics introduce no selection roots.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
   section, not a member, so no edge reaches the members nothing else does — a
   static registry entry first — but GNU ld's bounds still cover them. After
@@ -674,11 +684,16 @@ A unit whose type table has a transport vector type (#137, a vector of `bool`,
 of 1 or 2 bytes or of more than 64 bytes: only a unit with a vector kind is
 scanned for one) takes the rules for every node too: such a node's operation,
 cast or element writes entries a piece, an element or a cleared byte at a
-time past a node's bounds (`check_lower_transport_room`: 20 entries for each
-16 bytes, 8 for each of a `bool` vector's bytes, and for an element-wise
-conversion, shuffle or reduction 32 an element, which a `bool` vector's maximum or
-minimum nearly fills). The intrinsics' headers have
-one, AMX's 1024-byte `_tile1024i`, whose nodes take about 900 entries each.
+time past a node's bounds (`check_lower_transport_room`: 48 entries for each
+16 bytes, including logical masks, blends and private operand copies, 8 for
+each of a `bool` vector's bytes, and for an element-wise conversion, shuffle,
+builtin, reduction or logical operation 32 an element, which a `bool` vector's
+maximum or minimum nearly fills). The node also reserves twelve temporaries
+for sources, results and scalar or vector intermediates. Ordinary extended
+vectors' logical operators and vector conditions use these counts too; the
+vector counting pass selects those nodes only in a unit with an extended-vector
+type. The intrinsics' headers have a transport type, AMX's 1024-byte
+`_tile1024i`, whose nodes take the same bounded accounting.
 
 After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
 take their targets: their labels' entries. The loop compared every entry's
@@ -1270,8 +1285,9 @@ lowering already writes for scalars or ordinary vectors.
   once into a register-sized temporary that every piece reads. What the rows
   refuse at a level (variable shifts without AVX2 or AVX-512BW, 64-bit compares
   without SSE4.2, integer division, 8-bit multiplication) is refused by the same
-  names as the ordinary vectors'; bf16 elements, whose rows split by halves, are
-  refused by name.
+  names as the ordinary vectors'. Bf16 arithmetic uses its ordinary rows too,
+  in pieces of at most 32 bytes under float excess precision, so the widened
+  elements fit one register; native AVX10.2 uses the full register width.
 - **Vectors of `bool`**: their bits as clang's `<N x i1>` keeps them in memory,
   element i at bit i % 8 of byte i / 8. Their operators are bitwise operations on
   the bytes (`check_lower_transport_bools`): `&`, `|` and `^` themselves, `~` and
@@ -1304,25 +1320,60 @@ lowering already writes for scalars or ordinary vectors.
   first to last in their promoted type, a maximum or minimum by a mask without a
   branch; a `bool` vector's sum is an exclusive or and its product a
   conjunction, as `i1`'s arithmetic wraps.
+- **Element-wise builtins** use the ordinary rows on disjoint register-sized
+  pieces (`check_lower_transport_elementwise`). The `ldexp` exponent can have
+  another element width: each argument advances by its own width, and the
+  widest one bounds the piece's lane count. Tiny operands are copied into
+  private padded storage, and only the result's actual bytes are stored.
+  Libm functions, `pdep`, `pext` and scalar `clmul` read each element through
+  the same address/value handoff as ordinary vectors. Boolean builtins use
+  packed bit operations (`check_lower_transport_boolean_builtin`): max and
+  saturating add are OR; min, `pdep`, `pext` and `clmul` are AND; saturating
+  subtract is `a & ~b`; popcount and bitreverse keep their operand. A one-bit
+  funnel shift has a count modulo one, so the left funnel keeps the first
+  operand and the right funnel the second. All arguments are still evaluated
+  once, and only defined result bits are retained.
+- **Floating reductions** preserve clang's reduction tree across register
+  boundaries (`check_lower_transport_reduce_floating`): repeatedly combine the
+  low and high halves in register-sized pieces, then use the ordinary
+  legal-width reduction. Maximum and minimum preserve their NaN and signed
+  zero rules; `max` and `min` fold the final legal vector in source order.
+  Associative sums use -0.0 in unused padding lanes and then add the start
+  value. Ordered sums visit the defined lanes first to last.
+- **Logical operators and vector conditions** (`check_lower_vector_logical`)
+  use the same piece-wise compare and selection rows at tiny, ordinary and
+  transport widths. Logical truth is nonzero; an integer vector condition
+  selects by each lane's sign bit, and a boolean condition by its packed bit.
+  Every operand is evaluated once, including both conditional arms. Capturing
+  an address-valued operand copies its value before a later operand can
+  modify the source object. Half-precision logical truth falls back to scalar
+  comparisons where no matching target row exists.
 - **Compound assignments** compute into the result's object with the
   destination's address as the left operand, then copy the result into the
   destination (memmove past Tier 0's copy limit, for a tile).
 
-Refused by name (`check_lower_transport_refusal`, and the strings at their
-places): the elementwise and floating vector builtins and floating reductions of
-transport vectors; logical operators and vector conditions, as the ordinary
-vectors'; increments, as the ordinary vectors'; and compound assignments and
-increments of a `bool` vector's elements, whose clang 23 code is invalid IR (an
+The ordinary rows' element-type and target-feature refusals remain. Floating
+reductions of half-precision and bf16 elements and padded floating extrema
+remain named refusals, as do bf16 comparisons and excess-precision arithmetic
+chains. Clang rejects whole-vector increments and boolean-vector `&&` and `||`;
+the checker diagnoses them. Compound assignments and increments of a `bool`
+vector's elements remain named lowering refusals: clang 23's code is invalid IR (an
 `extractelement` of the vector's `i8`), which crashes clang on some (`^= 1`,
 `*= 2`, `--`) and computes no element's value on others: what clang itself
-doesn't compile. Element-wise conversions, shuffles and reductions take at most
-1024 elements, an entry run each, as clang's code is a run of each element's
-instructions.
+doesn't compile. Boolean elementwise `clzg` and `ctzg` also retain a named
+refusal: clang 23.1.4 emits a scalar zero count followed by an invalid
+scalar-to-vector `trunc`, crashing or producing incorrect code depending on
+the vector's width. Element-wise conversions, shuffles, non-boolean builtins,
+reductions and logical operations take at most 1024 elements, bounding their
+expanded entry runs; packed bit operations do not unpack those lanes.
 
 `test-checker --program-vectors` runs a program of all of these against clang
 -O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,
 x86-64-v2 and x86-64-v3 (`baseline-transport-compute`), on both paths; the
-refusals' fixtures name each refusal. The same programs pass by the driver
+packed boolean builtins have matching `vector-boolean-builtins` and
+`baseline-boolean-builtins` cases covering 1 through 1024 lanes, padding,
+neighboring-byte guards and argument evaluation. The refusals' fixtures name
+each refusal. The same programs pass by the driver
 with `--scalar`, by default and with `--tier1 --verify` at x86-64, x86-64-v3 and
 x86-64-v4.
 
