@@ -613,6 +613,21 @@ the 9700X job's `measure-compile` runs it, keeps them. A process started
 with them off keeps them off, and `BUSTER_HUGE_PAGES` decides instead where
 it is set. `--time-stages` reports `busy` for this case.
 
+With it, against main, 7 rotating rounds ([the
+record](https://github.com/buster14a/buster-performance/tree/29f4551fec87b04eaf47eb286e2bcdae66810c63/docs/measurements/page-policy-672-2026-11-06),
+`final/`):
+
+| compiles at once | main | this policy |
+| ---: | ---: | ---: |
+| 1 | 67.2 MB/s | 67.4 MB/s |
+| 2 | 118.2 MB/s | 118.0 MB/s |
+| 4 | 184.9 MB/s | 184.1 MB/s |
+| 8 | 234.0 MB/s | 270.3 MB/s |
+
+Each of the 8 compiles of a round found the host busy. A fixed floor of base
+pages in front of every arena, 8 or 32 MB, did neither: it cost a compile
+alone 6% to 8% and gained 4% on 8.
+
 ## The link
 
 A unit that links keeps its link (`check_units_keep`): its code and data as

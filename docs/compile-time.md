@@ -849,7 +849,7 @@ with the arenas' huge pages (`BUSTER_HUGE_PAGES=1`) and without them
 (`BUSTER_HUGE_PAGES=0`), at main `ec5f0f6b`: 297.0 MB against 228.0 MB. Every
 arena's mapping was logged with its call stack and matched to
 `/proc/self/smaps` at each `--time-stages` mark ([the
-record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/page-policy-672-2026-11-06),
+record](https://github.com/buster14a/buster-performance/tree/29f4551fec87b04eaf47eb286e2bcdae66810c63/docs/measurements/page-policy-672-2026-11-06),
 `diag/`). The checker's three arenas hold 38 MB of the 69 MB difference (the
 driver's arena 27 MB, its output arena 7.8 MB, its scratch 3.5 MB), which
 #628 follows. Four arenas outside the checker each took a huge page or two for
@@ -869,7 +869,9 @@ with base pages: the index's first 4 MB (`BUSTER_TYPE_INDEX_SMALL_BYTES`,
 65,536 buckets), the two file cache arenas' first 2 MB
 (`BUSTER_FILE_CACHE_SMALL_BYTES`) and the scratch's first 4 MB
 (`BUSTER_SCRATCH_ARENA_SMALL_BYTES`). On the VM the peak falls from 296.8 to
-288.3 MB, for 386 more faults, with the object the same bytes.
+288.3 MB, for 386 more faults, with the object the same bytes. On the 9700X a
+compile alone peaks at 287.2 MB against main's 293.7 MB, in the same time
+(138.7 against 139.9 ms), with 396 more faults.
 
 ## The checker's graph and program passes (#530)
 
