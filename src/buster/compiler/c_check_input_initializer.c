@@ -463,9 +463,7 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
                 node->value = value;
                 node->value.flags |= BUSTER_CHECK_ICE;
                 node->value.fault = CHECK_FAULT_NONE;
-                node->next = reader->constexpr_values;
-                reader->constexpr_values = node;
-                reader->constexpr_count += 1;
+                check_input_constexpr_add(reader, node);
             }
         }
     }
