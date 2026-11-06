@@ -9504,14 +9504,15 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     const uint32_t count = graph->argument_counts[node];
     const BuiltinIntrinsicInfo* info = effect != NULL ? effect->info : NULL;
     const CheckX86LowerRule* rule = info != NULL ? check_x86_lower_rule(info->name, info->name_length) : NULL;
-    // The immediate the rule's records take, and its rounding control, its last argument where it has one.
+    // The immediate the rule's records take, its optional second byte, and a separate rounding control at the end.
     const uint32_t skipped = rule != NULL ? rule->immediate : BUSTER_CHECK_X86_NO_IMMEDIATE;
-    const uint32_t rounded = rule != NULL && rule->rounding != CHECK_X86_ROUND_NONE && count != 0 ? count - 1 : BUSTER_CHECK_X86_NO_IMMEDIATE;
-    CheckValue immediates[2] = { 0 };
+    const uint32_t rounded = rule != NULL && rule->rounding != CHECK_X86_ROUND_NONE && rule->rounding != CHECK_X86_ROUND_IMMEDIATE_SAE && count != 0 ? count - 1 : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    const uint32_t paired = rule != NULL && rule->immediate_extra != 0 ? rule->immediate_extra - 1u : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    CheckValue immediates[3] = { 0 };
     bool constants = true;
-    for (uint32_t i = 0; i < 2; i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(immediates); i += 1)
     {
-        const uint32_t a = i == 0 ? skipped : rounded;
+        const uint32_t a = i == 0 ? skipped : i == 1 ? rounded : paired;
         if (a < count)
         {
             // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
@@ -9541,10 +9542,12 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     const bool packed = rule != NULL && rule->fixed == CHECK_X86_PREDICATE_FCMP &&
                         (rule->family == CHECK_X86_LOWER_COMPARE || rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE);
     const bool strict = packed && check_lower_half_strict(writer);
+    const uint64_t immediate = paired != BUSTER_CHECK_X86_NO_IMMEDIATE ?
+        ((uint64_t)immediates[0].integer & 0xff) | (((uint64_t)immediates[2].integer & 0xff) << 8) : (uint64_t)immediates[0].integer;
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
-                         check_x86_lower_row_of(&writer->target, rule, (uint64_t)immediates[0].integer,
+                         check_x86_lower_row_of(&writer->target, rule, immediate,
                                                 rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, strict, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
@@ -9559,7 +9562,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
         const uint8_t class = check_lower_x86_bits_class(writer, stream->argument_conversions[first + a].type);
-        const bool taken = a != skipped && a != rounded;
+        const bool taken = a != skipped && a != rounded && a != paired;
         if (taken && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR &&
             row.operand_classes[operand] != BUSTER_TYPED_CLASS_MASK)
         {
@@ -9609,7 +9612,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         uint32_t taken = operand;
         for (uint32_t a = count; a-- > 0;)
         {
-            if (a != skipped && a != rounded)
+            if (a != skipped && a != rounded && a != paired)
             {
                 // The argument at its prototype's type, then widened, or a mask's converted to the mask class (the tasks
                 // run in the reverse of their pushes).
