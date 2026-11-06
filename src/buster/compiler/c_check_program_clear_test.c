@@ -168,7 +168,7 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
                  "__attribute__((noinline)) static int gaps(int n){struct P p={.x=n,.y=n+1};int bad=p.x!=n||p.y!=n+1;"
                  "for(int i=0;i<Z;i++)bad|=p.gap[i];return bad;}"
                  "__attribute__((noinline)) static int text(int n){char t[Z]=\"ab\";int bad=t[0]!='a'||t[1]!='b';for(int i=2;i<Z;i++)bad|=t[i];"
-                 "t[n%%Z]=1;return bad;}"
+                 "t[(unsigned)n%%Z]=1;return bad;}"
                  "__attribute__((noinline)) static int unions(int n){union U u={{1,2,(unsigned char)n}};int bad=u.c[2]!=(unsigned char)n;"
                  "for(int i=3;i<Z;i++)bad|=u.s.c[i];return bad;}"
                  "__attribute__((noinline)) static int vol(int n){volatile struct S s={.c[1]=(unsigned char)n};int bad=s.c[1]!=(unsigned char)n;"
