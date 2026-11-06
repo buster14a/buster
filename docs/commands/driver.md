@@ -174,9 +174,14 @@ executable invocations against Clang and GNU Make.
 
 The implicit compile/link driver classifies each positional input before opening
 it (#1120). `.c`, `.h` and `.i` are C; `.s` is assembly; `.S` is preprocessed
-assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Other suffixes
-are also linker inputs, with a warning; the foreign reader diagnoses their
-actual format. `-x c`, `-x assembler` and `-x assembler-with-cpp` override the
+assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Known
+unsupported source suffixes, including C++ (`.cpp`, `.cc`, `.cxx`, `.C`, `.ii`
+and C++ headers and module sources), Objective-C (`.m`, `.mi`, `.mm`, `.M`, `.mii`),
+CUDA/HIP/SYCL, OpenCL, HLSL, LLVM IR (`.ll`, `.bc`), precompiled headers and ASTs,
+Ada (`.ads`, `.adb`), Fortran and `.asm`, are diagnosed before any
+source or output is opened (#1472). Other suffixes remain linker inputs, with
+a warning; the foreign reader diagnoses their actual format.
+`-x c`, `-x assembler` and `-x assembler-with-cpp` override the
 suffix for following inputs only; `-x none` restores suffix inference. Joined
 `-xLANG` works too. Stdin requires an explicit language at that operand.
 
