@@ -6328,15 +6328,21 @@ operands. Malformed forms use `-Wignored-pragmas`, including missing names and
 trailing tokens. These lexical warnings survive parser recovery.
 
 For a rename after a parsed use, emission selection decides whether an earlier
-emitted reference has already fixed the original name. It reads the compact live
-references of eager function bodies and static initializers once, with each
-body's definition-completion point. Constant-dead statements, unselected operands,
-unevaluated expressions and deferred functions do not block a later rename. A
+emitted reference has already fixed the original name. Compact references select
+candidate eager bodies; the existing target-feature emission walk finds their
+actual references, with each body's definition-completion point. It preserves
+source labels and constant-false loop bodies while skipping plain statements
+after a return or an ordinary noreturn call. Static initializers retain their
+eager/deferred rules. Unevaluated expressions, unselected operands and deferred
+functions do not block a later rename. A
 directive inside an eager function still precedes that function's emission. This
 cost and its cold per-pragma decisions exist only in units with a late rename;
 the declaration's retained asm-label fact and source coordinates stay immutable.
-The object oracle covers 26 late-rename shapes, including eager/deferred static
-data, and compares scalar/vector objects and poisoned multi-lane objects.
+The object oracle covers 43 late-rename shapes, including eager/deferred static
+data, unreachable labels, loops, gotos, overloaded noreturn calls and trapping builtins, and
+compares scalar/vector objects and poisoned multi-lane objects. The shared walk
+borrows live preprocessing options only during selection and retains no new
+pointer to a worker's preprocessor.
 
 `#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
 declaration without a C declarator. This is separate from ordinary weak binding.
