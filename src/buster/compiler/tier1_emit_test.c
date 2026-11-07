@@ -170,6 +170,8 @@ static bool tier1_emit_test_load(Tier1EmitTest* test, Tier1SelectCode* code, voi
             covered &= x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE;
         }
         tier1_emit_test_expect(test, covered, "every frame and body record has a covered form");
+        // #181: and a complete Zen 5 row (x86_zen5_rows.c), which the model's consumers need.
+        tier1_emit_test_expect(test, x86_zen5_missing(code->records, code->count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "every frame and body record has a complete Zen 5 row");
         ready = x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, *executable, capacity, 0, 0) > 0;
         tier1_emit_test_expect(test, ready, "baseline encoder accepts complete frame and body");
         ready = ready && mprotect(*executable, *bytes, PROT_READ | PROT_EXEC) == 0;

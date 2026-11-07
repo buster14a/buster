@@ -36,7 +36,7 @@ static bool tier1_model_test_begin(Tier1ModelTest* test)
     bool valid = fflush(test->file) == 0 && ftruncate(fileno(test->file), 0) == 0 && fseek(test->file, 0, SEEK_SET) == 0;
     if (valid)
     {
-        valid = fputs("origin,record,form,mnemonic,mode,reg,rm,index,vvvv,decorations,immediate,displacement,cost_id,gpr_latency,throughput,retired_ops,flags_latency,load_extra,executed_uops,pipes\n", test->file) >= 0;
+        valid = fputs("origin,record,form,mnemonic,mode,reg,rm,index,vvvv,decorations,immediate,displacement,cost_id,latency,throughput,retired_ops,flags_latency,load_extra,fp_ops,pipes\n", test->file) >= 0;
     }
     return valid;
 }
@@ -197,13 +197,17 @@ static void tier1_model_test_regressions(Tier1ModelTest* test)
         const Tier1ModelManifest* manifest = test->manifest;
         if (variant == 7)
         {
-            const bool separate = valid && manifest->count == 2 && manifest->unknown == 2 && manifest->cases[0].refusal != 0 && manifest->cases[1].refusal != 0 && strcmp(manifest->cases[0].refusal, "high-byte-register") == 0 && strcmp(manifest->cases[1].refusal, "operand-width") == 0 && manifest->cases[0].occurrences == 1 && manifest->cases[1].occurrences == 1;
+            const bool separate = valid && manifest->count == 2 && manifest->cases[0].cost_id == manifest->cases[1].cost_id && manifest->cases[0].refusal != 0 && manifest->cases[1].refusal != 0 && strcmp(manifest->cases[0].refusal, "high-byte-register") == 0 && strcmp(manifest->cases[1].refusal, "operand-width") == 0 && manifest->cases[0].occurrences == 1 && manifest->cases[1].occurrences == 1;
             tier1_model_test_expect(test, separate, "high-byte alias and unsupported width remain distinct refused cases");
         }
         if (variant == 8)
         {
-            const bool separate = valid && manifest->count == 2 && manifest->unknown == 1 && manifest->cases[0].cost_id != 0 && manifest->cases[0].refusal == 0 && manifest->cases[1].cost_id == 0 && manifest->cases[1].refusal != 0 && strcmp(manifest->cases[1].refusal, "forced-zero-displacement") == 0 && manifest->cases[0].occurrences == 1 && manifest->cases[1].occurrences == 1;
-            tier1_model_test_expect(test, separate, "unknown forced-displacement LEA cannot merge into a known eligible control");
+            // #181: [rbp + index] has a forced displacement, a third component: the model's LEA_THREE row, not the
+            // control's LEA_INDEX one, and the harness still refuses it.
+            const uint8_t three = x86_zen5_case_ids[x86_zen5_case_find(X86_FORM_LEA_R64_M, X86_COST_LEA_THREE)];
+            const uint8_t index = x86_zen5_case_ids[x86_zen5_case_find(X86_FORM_LEA_R64_M, X86_COST_LEA_INDEX)];
+            const bool separate = valid && manifest->count == 2 && manifest->unknown == 0 && manifest->cases[0].cost_id == index && manifest->cases[0].refusal == 0 && manifest->cases[1].cost_id == three && manifest->cases[1].refusal != 0 && strcmp(manifest->cases[1].refusal, "forced-zero-displacement") == 0 && manifest->cases[0].occurrences == 1 && manifest->cases[1].occurrences == 1;
+            tier1_model_test_expect(test, separate, "forced-displacement LEA keeps its own case, apart from a known eligible control");
         }
     }
 }

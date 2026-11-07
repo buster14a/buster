@@ -701,11 +701,12 @@ rematerialization costs greater than the reload cost suppress the mark.
 scalar twin a plain loop: each copy's GPR latency as `tier1_rematerialize`
 emits it, against the model's L1-hit load (`mov r64, [base]`), the cheapest any
 reload of a slot can be, so that a copy no costlier than it is no costlier than
-the reload it saves. The model has measured no copy's latency yet (its
-`mov r32, imm32` and zeroing `xor` cases have throughputs alone, and it has no
-case for a lea from rip or at a displacement), so every candidate is
-recomputed; both consumers fill the columns, which follow the model as #181
-measures more.
+the reload it saves. With #181's rows the reload is 4 cycles (an L1 load's
+address chain), a `lea` from RIP or a frame base 1, a GOT slot's load 4, and a
+constant's move and a zeroing `xor` have no latency (they read nothing: the
+column is absent, so unknown); no copy costs more than its reload, and every
+candidate is still recomputed. Both consumers fill the columns, which follow
+the model's rows.
 
 `tier1_rematerialize` emits one baseline x86 record. Zero uses `xor r32,r32`
 only when the caller reports no live flags; otherwise it uses `mov r32,0`.
