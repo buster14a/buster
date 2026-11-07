@@ -4865,6 +4865,7 @@ static const CheckOp check_common_reach_ops[] =
     CHECK_OP_COMMA,
     CHECK_OP_DIVIDE,
     CHECK_OP_REMAINDER,
+    CHECK_OP_DEREFERENCE,
     CHECK_OP_LESS,
     CHECK_OP_LESS_EQUAL,
     CHECK_OP_GREATER,
