@@ -1070,10 +1070,73 @@ the next. Three changes were measured and aren't in:
 
 What would lower all three is in the huge pages that columns of unknown length
 touch in part: the graph's node columns (about 8 MB, a node a token of room,
-42% of it used), the preprocessor's token columns (5.6 MB) and its file's
-windows (5.6 MB). Each needs its count, or a bound close to it, before it is
-pushed, so that its columns can sit side by side. Base pages for them trade
-faults for the memory, as the sparse output's did.
+42% of it used) and the preprocessor's token columns (5.6 MB). Each needs its
+count, or a bound close to it, before it is pushed, so that its columns can
+sit side by side. Base pages for them trade faults for the memory, as the
+sparse output's did. The file's windows, the third, now go after the run
+(below).
+
+### The files' token columns, and `-Wempty-body`'s replay (#628)
+
+The file cache's token columns (`FileCacheArenas.columns`: the kinds, starts
+and values, 9 bytes a token, and the leading-space words after the kinds) held
+11.5 MB of `sqlite3.c`'s, from preprocessing to the end, in all three peaks.
+Nothing reads them after the run: the parser, the checker and the diagnostics
+read the output, the ranges, and the files' bytes and line tables. The
+checker's driver now gives them back once the run is over
+(`pp_release_file_columns`, `docs/c-preprocessor.md`'s "Deferred history"),
+and a later replay for the history prepares the files again.
+
+That made a replay dearer, and `sqlite3.c`'s compile with the `compile_time`
+step's options replayed: not for a diagnostic, but for `-Wempty-body`'s
+indentation check (#1339). sqlite defines `NDEBUG`, so glibc's `assert` is
+`(__ASSERT_VOID_CAST (0))`. A `for (...);` followed by an `assert`
+needs the column of the `assert`'s invocation, which only the history gave:
+the whole unit was preprocessed again in `check-program`, for that one column.
+`pp_output_invocation_place` now gives it from the file's bytes when the two
+file tokens around the expansion hold one invocation alone, and the history
+answers anything else (`--scalar` always asks it).
+
+On the VM with huge pages (`BUSTER_HUGE_PAGES=1`), main `4d6562be` against
+the change, `-c sqlite3.c`, five runs each, the objects the same bytes
+(medians):
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| peak RSS, the step's options | 269,604 KiB | 255,464 KiB |
+| `check-program`, the step's options | 59.3 ms | 46.5 ms |
+| minor faults, the step's options | 6,282 | 5,902 |
+| peak RSS, `-w` | 269,604 KiB | 255,464 KiB |
+| `check-program`, `-w` | 19.4 ms | 18.8 ms |
+| minor faults, `-w` | 5,832 | 5,900 |
+
+The peak map's three plateaus (the instrumented build of "Partly used huge
+pages", on main `53854a7c`, with the change applied) fall from 270.1, 270.9
+and 269.8 MB to 255.9, 256.6 and 250.0 MB: the reader's end, `static-data`'s
+end and the backend. The backend falls further since it no longer holds the
+replay's history. `static-data`'s end is now the compile's peak, 0.7 MB above
+the reader's.
+
+On the 9700X, main `4d6562be` against the change (`fb2b4af1`), each compile
+under its own grant of the lock, the order alternating by round
+([the record](https://github.com/buster14a/buster-performance/tree/fd7993d1a82e4c3e2ead2fe7cbd97cc3e01db725/docs/measurements/file-columns-628-2026-11-07)),
+every object the same bytes in six modes and the diagnostics too (medians):
+
+| measure | main | the change |
+| --- | ---: | ---: |
+| task clock, the step's options (7 rounds) | 131.06 ms | 124.95 ms |
+| user instructions | 1,403.6 M | 1,323.8 M |
+| kernel cycles | 93.81 M | 86.72 M |
+| `check-program` | 31.22 ms | 25.18 ms |
+| page faults | 6,265 | 5,845 |
+| peak RSS | 272,556 KiB | 258,172 KiB |
+| task clock, `-w` (5 rounds) | 109.22 ms | 108.96 ms |
+| kernel cycles, `-w` | 89.27 M | 86.27 M |
+| peak RSS, `-w` | 272,560 KiB | 258,172 KiB |
+
+With the step's options the change is faster in each round, by 4.77 to 6.44 ms:
+its 80 M fewer instructions are the replay's. With `-w`, which never replayed,
+the time is the same.
 
 ## The checker's graph and program passes (#530)
 
