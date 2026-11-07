@@ -20,8 +20,12 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
   as it was), sizes and counts whose arithmetic overflows, the page sizes
-  asked for, read back from `/proc/self/smaps`, and a measuring arena's
-  (`arena_measure`) random pushes, which must take what a reserved arena's do;
+  asked for, read back from `/proc/self/smaps`, a measuring arena's
+  (`arena_measure`) random pushes, which must take what a reserved arena's do,
+  and, in children of an unsanitized build, 2 TiB of tables, which must commit
+  uncharged where commit charge isn't bounded, and commits refused under a
+  small `RLIMIT_DATA`, which mustn't switch the thread to compact reservations
+  (#1521, `docs/arena-memory.md`);
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;

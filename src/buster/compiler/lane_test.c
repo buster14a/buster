@@ -1045,6 +1045,107 @@ static bool lane_test_arenas(void)
     const bool refusals_waited = refusing > 0 && waitpid(refusing, &refusing_status, 0) == refusing;
     lane_test_expect(&tally, refusals_waited && WIFEXITED(refusing_status) && WEXITSTATUS(refusing_status) == 0,
                      "an arena of tables refused for its size didn't fail cleanly, or switched to compact reservations wrongly");
+#if !BUSTER_SANITIZER_RESOURCES
+    // Tables larger than a host's RAM and swap (#1521), 2 TiB, in a child: heuristic overcommit refused their commit as
+    // one request before their mapping was MAP_NORESERVE, as it refused the preprocessor's 10 GB on a host of 8 GB, which
+    // then took every later arena of the thread to 64 MB. Where commit charge isn't bounded (arena_commit_unbounded) they
+    // commit, writable at both ends and uncharged ("nr" in VmFlags); where it is, a refusal leaves both bases null and
+    // sets arena_commit_refused. Neither switches the thread to compact reservations. An address space too small for
+    // the mapping skips the check. A sanitizer build, whose runtime lays out the address space itself, leaves it out.
+    fflush(stdout);
+    const pid_t uncharged = fork();
+    if (uncharged == 0)
+    {
+        arena_pool = 0;
+        arena_compact = false;
+        arena_commit_refused = false;
+        arena_failure = (ArenaFailure){ 0 };
+        const bool unbounded = arena_commit_unbounded();
+        ArenaTable large[] = {
+            { .bytes = 1ull << 40, .small = 1ull << 40 },
+            { .bytes = 1ull << 40, .small = 1ull << 40 },
+        };
+        Arena committed = arena_reserve_tables(large, BUSTER_ARRAY_LENGTH(large));
+        const bool mapped = committed.base != 0 || arena_failure.commit;
+        bool valid = !mapped;
+        if (committed.base != 0)
+        {
+            uint8_t* first = large[0].base;
+            uint8_t* last = (uint8_t*)large[1].base + large[1].bytes - 1;
+            first[0] = 0x5a;
+            last[0] = 0xa5;
+            bool found = false;
+            const bool flagged = lane_test_vm_flag((uintptr_t)first, "nr", &found) && found;
+            valid = first[0] == 0x5a && last[0] == 0xa5 && !arena_compact && !arena_commit_refused && (flagged || !unbounded);
+        }
+        else if (mapped)
+        {
+            valid = !unbounded && large[0].base == 0 && large[1].base == 0 && arena_commit_refused && !arena_compact;
+        }
+        arena_release(&committed);
+        _exit(valid ? 0 : 1);
+    }
+    int uncharged_status = 0;
+    const bool uncharged_waited = uncharged > 0 && waitpid(uncharged, &uncharged_status, 0) == uncharged;
+    lane_test_expect(&tally, uncharged_waited && WIFEXITED(uncharged_status) && WEXITSTATUS(uncharged_status) == 0,
+                     "tables past the host's memory were refused where commit charge isn't bounded, or a refusal switched the thread");
+    // A refused commit (#1521), in a child whose RLIMIT_DATA admits 64 MB more than its data has: tables of 96 MB are
+    // refused whole, which sets arena_commit_refused and leaves arena_compact as it was; so is an ordinary arena's push of
+    // 96 MB, which leaves the arena as it was. A reservation of 64 GiB after them keeps its capacity, and pushes within
+    // the limit, while arena_capacity_shift gives the compact shape to the tables committed whole.
+    fflush(stdout);
+    const pid_t bounded_commit = fork();
+    if (bounded_commit == 0)
+    {
+        arena_pool = 0;
+        arena_compact = false;
+        arena_commit_refused = false;
+        arena_failure = (ArenaFailure){ 0 };
+        uint64_t data = 0;
+        FILE* status = fopen("/proc/self/status", "r");
+        char line[256];
+        while (status != NULL && data == 0 && fgets(line, sizeof(line), status) != NULL)
+        {
+            unsigned long long kilobytes = 0;
+            data = sscanf(line, "VmData: %llu kB", &kilobytes) == 1 ? (uint64_t)kilobytes << 10 : 0;
+        }
+        if (status != NULL)
+        {
+            fclose(status);
+        }
+        struct rlimit limit;
+        bool valid = data != 0 && getrlimit(RLIMIT_DATA, &limit) == 0;
+        limit.rlim_cur = (rlim_t)(data + (64ull << 20));
+        valid = valid && limit.rlim_cur <= limit.rlim_max && setrlimit(RLIMIT_DATA, &limit) == 0;
+        const uint32_t full_shift = arena_capacity_shift(1ull << 30);
+        ArenaTable over[] = {
+            { .bytes = 48ull << 20, .small = 48ull << 20 },
+            { .bytes = 48ull << 20, .small = 48ull << 20 },
+        };
+        Arena refused_tables = valid ? arena_reserve_tables(over, BUSTER_ARRAY_LENGTH(over)) : (Arena){ .base = (uint8_t*)1 };
+        valid = valid && refused_tables.base == 0 && over[0].base == 0 && over[1].base == 0 && arena_failure.commit && arena_commit_refused && !arena_compact;
+        arena_commit_refused = false;
+        Arena ordinary = arena_reserve(64ull << 30);
+        const Arena before = ordinary;
+        valid = valid && ordinary.capacity == (64ull << 30) && arena_push(&ordinary, 96ull << 20, 64) == 0 && ordinary.length == before.length &&
+                ordinary.peak == before.peak && arena_commit_refused && !arena_compact;
+        Arena later = arena_reserve(64ull << 30);
+        uint8_t* pushed = arena_push(&later, 16ull << 20, 64);
+        valid = valid && later.capacity == (64ull << 30) && pushed != 0 && arena_reservation_limit() > BUSTER_ARENA_COMPACT_BYTES;
+        if (pushed != 0)
+        {
+            pushed[(16ull << 20) - 1] = 1;
+        }
+        valid = valid && full_shift == 0 && arena_capacity_shift(1ull << 30) == 5;
+        arena_release(&later);
+        arena_release(&ordinary);
+        _exit(valid ? 0 : 1);
+    }
+    int bounded_status = 0;
+    const bool bounded_waited = bounded_commit > 0 && waitpid(bounded_commit, &bounded_status, 0) == bounded_commit;
+    lane_test_expect(&tally, bounded_waited && WIFEXITED(bounded_status) && WEXITSTATUS(bounded_status) == 0,
+                     "a refused commit switched the thread to compact reservations, or didn't shrink the tables committed whole");
+#endif
     ArenaTable none[] = { { .bytes = 0, .small = 0, .base = (void*)1 } };
     const Arena refused = arena_reserve_tables(none, 1);
     const Arena empty_tables = arena_reserve_tables(tables, 0);

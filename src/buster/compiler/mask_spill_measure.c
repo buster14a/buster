@@ -231,7 +231,7 @@ static bool mask_spill_sample(const X86CostProgram* program, uint64_t iterations
     }
     valid &= ioctl(counters->fd[0], PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) == 0;
     valid &= read(counters->fd[0], sample, sizeof(*sample)) == sizeof(*sample);
-    valid &= sample->count == 3 && sample->running != 0 && sample->enabled == sample->running;
+    valid &= sample->count == BUSTER_X86_COST_COUNTERS && sample->running != 0 && sample->enabled == sample->running;
     const uint64_t expected = iterations * (program->body_count + 2);
     valid &= sample->values[1] >= expected && sample->values[1] - expected < 4096 && sample->values[0] != 0;
     return valid;
@@ -290,7 +290,7 @@ static int run_mask_spill_measure(int argc, char** argv)
         fprintf(stderr, "measure-mask-spills needs AVX512F, AVX512BW and AVX512DQ\n");
         valid = false;
     }
-    X86CostCounters counters = { .fd = { -1, -1, -1 } };
+    X86CostCounters counters = { .fd = { -1, -1, -1, -1, -1 } };
     valid = valid && x86_encoder_initialize() && x86_zen5_counters(&counters);
     if (valid)
     {
@@ -348,13 +348,7 @@ static int run_mask_spill_measure(int argc, char** argv)
             }
         }
     }
-    for (uint32_t i = 0; i < 3; i += 1)
-    {
-        if (counters.fd[i] >= 0)
-        {
-            close(counters.fd[i]);
-        }
-    }
+    x86_zen5_counters_close(&counters);
     if (!valid)
     {
         fprintf(stderr, "measure-mask-spills failed: check options, CPU, perf permissions and pinned counters; no missing counter is treated as zero\n");

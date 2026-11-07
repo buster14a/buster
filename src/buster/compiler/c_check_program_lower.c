@@ -11583,7 +11583,13 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_DEREFERENCE)
     {
-        if (!address && !address_value)
+        // An indirection through a pointer to void (`(void)*p`) reads nothing, as clang's: its pointer is evaluated and
+        // dropped (#147).
+        if (!address && !address_value && class == BUSTER_TYPED_CLASS_VOID)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (!address && !address_value)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value->type));
         }

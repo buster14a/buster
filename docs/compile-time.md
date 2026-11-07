@@ -1657,6 +1657,55 @@ keeps the probes and the receipts.
 | user instructions | 1,304.696 M | 1,299.420 M | −0.40% |
 | `check-input` | 46.614 ms | 46.388 ms | −0.23 ms |
 
+## The coded walk's actions inlined into its loop (#1671)
+
+**What the walk does.** A probe of `-c sqlite3.c` counted it
+([#1671](https://github.com/buster14a/buster/issues/1671#issuecomment-6710430485)):
+- **451,790 actions** over 695,362 postorder positions, making 316,456 nodes. Half the actions (229,679) splice no
+  values.
+- **The largest classes:** identifiers 95,402; lists 74,297; terminators 54,508; literals 44,184; binaries 42,766.
+- **Flushes:** 3,592 before a visit, 87 of a full batch, 1 at the end.
+
+**Where main's cycles went**, by source line on the 9700X, in shares of the whole compile:
+
+| part | share |
+| --- | ---: |
+| each action's call frame | about 2.3% |
+| the preparation: the compaction's gather, the identifiers' gathers, the literals | about 2.4% |
+| `check_graph_record_nodes` | 0.78% |
+| the flush's writes and gathers | about 0.6% |
+| the batch's adds | 0.57% |
+| the value splice | 0.56% |
+| each class action's own body | 0.17% at most |
+
+**The call frame.** `check_input_expression_coded` was a call per action, not inlined into the chunk's loop. Each paid:
+- four arguments pushed on the stack after a `vzeroupper` (about 60% of `check_input_expressions_coded_range`'s samples);
+- the prologue and epilogue;
+- spills.
+
+The flush only looked large off the host, where the VM's page faults in the walk (6,821) put it at 36% of the actions.
+
+**The change.**
+- **The untimed loop** takes the action always inlined, with the identifier and literal cursors in registers.
+- **The hot class actions.** Once the action was inlined, clang called the identifier's, literal's and terminator's
+  actions instead, so those three are always inlined too.
+- **The timed loop** (`PPOptions.expression_timing`, `benchmark-checker-bindings`) calls a wrapper, so the body is
+  inlined once.
+- **Nothing the actions do changes.** The scalar path, the walk's visit at every token, stays their twin.
+
+**Measured on the 9700X.** Main `1c966613` against the head `6c1b3ac8`, in 8 interleaved rounds, then
+`measure-compile` each way. Every run held the lock on its own. The objects are the same bytes.
+[The record](https://github.com/buster14a/buster-performance/tree/19c50f5aeda77b78d9d70f48ad3ea9326aadc064/docs/measurements/check-input-1671-coded-inline-2026-11-07)
+keeps the probe, main's profile by line and instruction, and the receipts.
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time | 121.810 ms | 120.990 ms | −0.67% |
+| user cycles | 591.072 M | 586.604 M | −0.76% |
+| user instructions | 1,298.686 M | 1,278.616 M | −1.55% |
+| `check-input` | 46.480 ms | 45.673 ms | −0.81 ms |
+| `expressions.actions` | 10.075 ms | 9.436 ms | −0.64 ms |
+
 ## The coded walk's flush records its nodes 16 at a time (#1671)
 
 **What it replaces.** Each flush of the coded walk's batch called `check_graph_record_nodes`, which recorded the

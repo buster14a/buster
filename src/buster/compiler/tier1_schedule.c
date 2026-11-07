@@ -120,11 +120,11 @@ static bool tier1_schedule_is_pinned(Tier1ScheduleInput input, uint32_t index, u
     return pinned;
 }
 
-// A record's priority weight, cycles * 256, where the measured model (x86_zen5.c) has no GPR latency for its operand
-// case: the measured rows' classes for the integer forms (an ALU operation 1 cycle, a multiplication 3, a scaled lea 2,
-// and an L1 load 4, the load taking the operation's place in a move and adding to it in another form); and for the
-// floating ones, which the model hasn't measured yet (#181), weights of their usual order (an addition, multiplication
-// or conversion 3, a fused multiply-add 4, a division 13, a square root 15). Weights order a block's ready records by the
+// A record's priority weight, cycles * 256, where the measured model (x86_zen5.c, #181) has no latency for its operand
+// case (a form without a row, or a case without the path: a constant's move, a store): the measured rows' classes for
+// the integer forms (an ALU operation 1 cycle, a multiplication 3, a scaled lea 2, and an L1 load 4, the load taking the
+// operation's place in a move and adding to it in another form); and for the floating ones weights of their usual
+// order (an addition, multiplication or conversion 3, a fused multiply-add 4, a division 13, a square root 15). Weights order a block's ready records by the
 // longest path after them; they are not cycle predictions, and a better model changes only which ready record is first.
 static uint16_t tier1_schedule_weight(const X86Instruction* instruction, bool load)
 {
@@ -439,7 +439,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             {
                 const uint8_t id = x86_zen5_id(&input.instructions[i]);
                 graph->cost_ids[i] = id;
-                stats.unknown_cases += id == X86_COST_NONE;
+                stats.unknown_cases += id == 0;
                 for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
                 {
                     stats.missing_columns[column] += x86_zen5_columns[column][id] == BUSTER_X86_COST_UNKNOWN;
@@ -447,13 +447,13 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             }
             if (BUSTER_VECTOR_PATH(vector))
             {
-                x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_GPR_LATENCY, graph->latencies);
+                x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
             }
             else
             {
-                x86_zen5_lookup_scalar(graph->cost_ids, input.count, X86_COST_GPR_LATENCY, graph->latencies);
+                x86_zen5_lookup_scalar(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
             }
-            // A measured GPR latency where the model has one for the record's operand case, its class's weight where
+            // The model's latency where it has one for the record's operand case, its class's weight where
             // it hasn't (tier1_schedule_weight).
             for (uint32_t i = 0; i < input.count; i += 1)
             {
