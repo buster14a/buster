@@ -103,6 +103,12 @@ struct Tier1MasksTest
     uint32_t builtin_attempts;
     uint32_t builtin_rows;
     uint32_t builtin_native;
+    // The front end's comparisons into masks (#1623, tier1_masks_test_compares): those tried, those through every stage,
+    // those of them the IR's comparisons (the others machine rows), and Tier 0's native runs of them.
+    uint32_t compare_attempts;
+    uint32_t compare_rows;
+    uint32_t compare_decoded;
+    uint32_t compare_native;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -4530,6 +4536,211 @@ static void tier1_masks_test_builtins(Tier1MasksTest* test)
     free(program);
 }
 
+// The C model of a comparison into a mask (#1623): `lanes` lanes of the rule's elements of `a` and `b` compared by `code`,
+// the immediate clang takes, under `writemask`: an integer compare's vpcmp predicate (==, <, <=, false, !=, >=, >, true;
+// signed or not as the rule's), and a float compare's as its low 4 bits say (LLVM's selection keeps no more): EQ_OQ,
+// LT_OS, LE_OS, UNORD_Q, NEQ_UQ, NLT_US, NLE_US, ORD_Q, EQ_UQ, NGE_US, NGT_US, FALSE_OQ, NEQ_OQ, GE_OS, GT_OS and
+// TRUE_UQ, by C's comparisons of the lanes widened to double, NaNs unordered.
+static uint64_t tier1_masks_test_compare_model(const CheckX86LowerRule* rule, uint32_t code, const uint8_t* a, const uint8_t* b, uint64_t writemask)
+{
+    const uint32_t element = rule->element;
+    const uint32_t lanes = rule->bytes / element;
+    uint64_t result = 0;
+    for (uint32_t lane = 0; lane < lanes; lane += 1)
+    {
+        bool bit = false;
+        if (rule->form != X86_FORM_NONE)
+        {
+            double x = 0;
+            double y = 0;
+            if (element == 4)
+            {
+                float fx = 0;
+                float fy = 0;
+                memcpy(&fx, a + 4 * lane, 4);
+                memcpy(&fy, b + 4 * lane, 4);
+                x = fx;
+                y = fy;
+            }
+            else
+            {
+                memcpy(&x, a + 8 * lane, 8);
+                memcpy(&y, b + 8 * lane, 8);
+            }
+            const bool unordered = x != x || y != y;
+            switch (code & 15)
+            {
+            case 0: bit = x == y; break;
+            case 1: bit = x < y; break;
+            case 2: bit = x <= y; break;
+            case 3: bit = unordered; break;
+            case 4: bit = x != y; break;
+            case 5: bit = !(x < y); break;
+            case 6: bit = !(x <= y); break;
+            case 7: bit = !unordered; break;
+            case 8: bit = unordered || x == y; break;
+            case 9: bit = !(x >= y); break;
+            case 10: bit = !(x > y); break;
+            case 11: bit = false; break;
+            case 12: bit = !unordered && x != y; break;
+            case 13: bit = x >= y; break;
+            case 14: bit = x > y; break;
+            default: bit = true; break;
+            }
+        }
+        else
+        {
+            uint64_t ux = 0;
+            uint64_t uy = 0;
+            memcpy(&ux, a + element * lane, element);
+            memcpy(&uy, b + element * lane, element);
+            const uint32_t shift = 64 - 8 * element;
+            const int64_t sx = (int64_t)(ux << shift) >> shift;
+            const int64_t sy = (int64_t)(uy << shift) >> shift;
+            const bool less = rule->is_signed ? sx < sy : ux < uy;
+            const bool equal = ux == uy;
+            switch (code & 7)
+            {
+            case 0: bit = equal; break;
+            case 1: bit = less; break;
+            case 2: bit = less || equal; break;
+            case 3: bit = false; break;
+            case 4: bit = !equal; break;
+            case 5: bit = !less; break;
+            case 6: bit = !less && !equal; break;
+            default: bit = true; break;
+            }
+        }
+        result |= (uint64_t)bit << lane;
+    }
+    return result & writemask;
+}
+
+// The front end's comparisons into masks through Tier 0 and the IR to Tier 1 (#1623): every COMPARE rule of integer and
+// packed float lanes (not FP16's, whose lanes the IR hasn't, nor a scalar compare's) at every immediate clang takes, a
+// float's as LLVM selects it, each row as check_x86_lower_masks moves it into the mask class, as the program's only row:
+// 8 statements, each the row of two vectors loaded from the input buffer (the last's second at its first's place, every
+// lane equal), its writemask a constant of every bit, as clang's intrinsics without a mask give it, or, in the odd
+// statements, an input word, its mask stored into an output slot. Tier 0 compiles it by both paths and, where the host
+// has AVX-512, runs it against the C model (tier1_masks_test_compare_model). Then tier1_masks_test_typed_pipeline takes
+// it through the IR: a row of an IR predicate as the IR's comparison (ir_simd_typed_compare_mask), which the IR's
+// interpreter runs at every stage, and any other as its machine row; and through Tier 1 natively, against the model too.
+static void tier1_masks_test_compares(Tier1MasksTest* test)
+{
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    uint8_t* image = malloc(BUSTER_TIER0_TEST_MASK_CODE);
+    Tier0TestMaskShared* shared = malloc(sizeof(*shared));
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    Arena tier0 = arena_reserve(64u << 20);
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && image != 0 && shared != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0 &&
+                                                   tier0.base != 0,
+                                         "the comparisons' memory");
+    uint64_t state = test->random ^ UINT64_C(0x6a09e667f3bcc909);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool floating = rule->form != X86_FORM_NONE;
+        const bool taken = rule->family == CHECK_X86_LOWER_COMPARE && (!floating || (rule->fixed == CHECK_X86_PREDICATE_FCMP && rule->element >= 4));
+        for (uint32_t code = 0; taken && code < (floating ? 32u : 8u); code += 1)
+        {
+            const uint64_t output_mark = test->output.length;
+            test->compare_attempts += 1;
+            Tier0Operation row;
+            const bool made = check_x86_lower_row_of(&target, rule, code, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &target);
+            char name[128];
+            snprintf(name, sizeof(name), "%s (code %u)", rule->name, code);
+            bool ok = tier1_masks_test_expect(test, made && row.operand_count == 3 && row.result_class == BUSTER_TYPED_CLASS_MASK, "the front end's comparison row, in the mask class at x86-64-v4");
+            program->count = 0;
+            program->overflow = false;
+            program->rows = true;
+            program->objects = false;
+            for (uint32_t k = 0; ok && k < 8; k += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, 2 * k);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, rule->bytes);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k == 7 ? 2 * k : 2 * k + 8);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, rule->bytes);
+                if ((k & 1) != 0)
+                {
+                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
+                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                else
+                {
+                    tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_MAX);
+                }
+                tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[2]);
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, row.result_bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the comparison's program fits");
+            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+            functions[0].operations = &row;
+            functions[0].operation_count = 1;
+            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+            {
+                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+                tier0_test_mask_inputs(in, &state);
+                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+                for (uint32_t k = 0; k < 8; k += 1)
+                {
+                    const uint8_t* a = (const uint8_t*)in + 16 * k;
+                    const uint8_t* b = (const uint8_t*)in + (k == 7 ? 16 * k : 16 * k + 64);
+                    const uint64_t value = tier1_masks_test_compare_model(rule, code, a, b, (k & 1) != 0 ? in[k] : UINT64_MAX);
+                    memcpy(wanted + 8 * k, &value, row.result_bytes);
+                }
+            }
+            Tier0TestTally tally = { 0 };
+            const uint32_t length = ok ? tier0_test_mask_build(&tally, name, functions, 2, &tier0, image) : 0;
+            ok = tier1_masks_test_expect(test, length != 0 && tally.failures == 0, "Tier 0 compiles the front end's comparison by both paths");
+            for (uint32_t input = 0; ok && test->native && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+            {
+                memset(shared, 0, sizeof(*shared));
+                memcpy(shared->in, inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8), BUSTER_TIER1_MASKS_TEST_IN);
+                memset(shared->out, 0xa5, sizeof(shared->out));
+                const bool ran = tier0_test_mask_native(image, length, shared);
+                const bool same = ran && memcmp(shared->out, expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT, BUSTER_TIER1_MASKS_TEST_OUT) == 0;
+                if (!tier1_masks_test_expect(test, same, "Tier 0's code of the front end's comparison gives the model's masks natively"))
+                {
+                    printf("test-tier1-masks: %s, input %u: %s\n", name, input, ran ? "the outputs differ" : "the run failed");
+                }
+                test->compare_native += same;
+            }
+            arena_pop_to(&tier0, 0);
+            // The IR's predicates, written out: vpcmp's but false and true; a float's EQ_OQ, LT_OS, LE_OS, NEQ_UQ, GE_OS
+            // and GT_OS in the low 4 bits.
+            const uint32_t low = code & 15;
+            const bool decodable = floating ? low == 0 || low == 1 || low == 2 || low == 4 || low == 13 || low == 14 : code != 3 && code != 7;
+            bool machine = false;
+            ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, decodable, inputs, expected, arenas, &machine);
+            test->compare_rows += ok;
+            test->compare_decoded += ok && decodable;
+            tier1_masks_test_expect(test, test->scratch.length == 0, "the comparisons return the scratch arena");
+            arena_pop_to(&test->output, output_mark);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                arena_pop_to(&arenas[k], 0);
+            }
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    arena_release(&tier0);
+    free(shared);
+    free(image);
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
 {
     uint64_t seed = 179;
@@ -4615,6 +4826,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_folded_effects(&test);
             tier1_masks_test_typed(&test);
             tier1_masks_test_builtins(&test);
+            tier1_masks_test_compares(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -4627,8 +4839,13 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows),
+            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
+            // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
+            // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
+            tier1_masks_test_expect(&test, test.compare_attempts == 24 * 8 + 6 * 32 && test.compare_rows == test.compare_attempts && test.compare_decoded == 24 * 6 + 6 * 12,
+                                    "every front-end comparison into a mask goes through Tier 0, the IR and Tier 1, those of an IR predicate as the IR's comparisons");
+            tier1_masks_test_expect(&test, !test.native || test.compare_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.compare_rows, "Tier 0 runs every front-end comparison natively");
             // The front end's rows: every rule of the five families, the shifts at every count.
             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
@@ -4636,6 +4853,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
                test.typed_programs, test.typed_runs, test.typed_machine);
         printf("test-tier1-masks: the front end's opmask rows: %u through Tier 0 natively (%u runs), the IR's interpreter, SSA, the optimizer and Tier 1\n", test.builtin_rows, test.builtin_native);
+        printf("test-tier1-masks: the front end's comparisons into masks: %u through Tier 0 natively (%u runs) and Tier 1, %u of them the IR's comparisons through its interpreter, SSA and the "
+               "optimizer, the others machine rows\n",
+               test.compare_rows, test.compare_native, test.compare_decoded);
         tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
                                 "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
         tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,

@@ -2780,7 +2780,8 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
 
 // The machine rows' fixture (#141): x86-64-v4's vector builtins and the vector operators on elements other than 32-bit
 // integers, whose X86 rows the IR's row calls run (tier1_emit_cfg_row): bytes, words and quadwords; compares into masks
-// of every width; masked and zero-masked operations and blends; two-source permutes and shuffles; shifts by an
+// of every width, unmasked and masked, which the IR decodes into its own comparisons (#1623); masked and zero-masked
+// operations and blends; two-source permutes and shuffles; shifts by an
 // immediate, by a count in a general register and by vectors; masked loads and stores, a store of no result and a
 // compress; inserts, extracts and widening conversions of 16-, 32- and 64-byte vectors; broadcasts from general registers,
 // reductions and extractions into them; a loop whose row results cross its back edge, with values live across rows; and
@@ -2818,13 +2819,14 @@ static const char check_test_tier1_rows_source[] =
     "    __mmask32 w = _mm512_cmpgt_epi16_mask(a, b);\n"
     "    __mmask16 d = _mm512_cmple_epi32_mask(a, b);\n"
     "    __mmask8 q = _mm512_cmpneq_epi64_mask(a, b);\n"
-    "    return eq ^ (lt << 1) ^ ((uint64_t)w << 7) ^ ((uint64_t)d << 23) ^ ((uint64_t)q << 40);\n"
+    "    __mmask16 f = _mm512_cmp_ps_mask(_mm512_castsi512_ps(a), _mm512_castsi512_ps(b), _CMP_LE_OS);\n"
+    "    return eq ^ (lt << 1) ^ ((uint64_t)w << 7) ^ ((uint64_t)d << 23) ^ ((uint64_t)q << 40) ^ ((uint64_t)f << 47);\n"
     "}\n"
     "__m512i r_masked(__m512i a, __m512i b, __mmask64 k, __mmask16 k16)\n"
     "{\n"
     "    __m512i x = _mm512_mask_add_epi8(a, k, a, b);\n"
-    "    __m512i y = _mm512_maskz_sub_epi32(k16, x, b);\n"
-    "    __m512i z = _mm512_mask_blend_epi8(k, y, b);\n"
+    "    __m512i y = _mm512_maskz_sub_epi32(_mm512_mask_cmpgt_epi32_mask(k16, x, b) | (k16 >> 4), x, b);\n"
+    "    __m512i z = _mm512_mask_blend_epi8(_mm512_mask_cmplt_epu8_mask(k, y, a) ^ (k >> 5), y, b);\n"
     "    return _mm512_mask_mov_epi16(z, (__mmask32)(k >> 3), a);\n"
     "}\n"
     "__m512i r_permutes(__m512i a, __m512i b, __m512i idx)\n"
@@ -2956,7 +2958,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
                                   check_test_tier1_rows_other_source, "-march=x86-64-v4", host, 0);
     // #1283: Tier 1 places a row's vector roles one at a time, so that most rows take no move into or out of place: by
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
-    // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows).
+    // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
+    // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
+    // them with the rows still.
+    const uint64_t compares = 11;
     char header[512];
     char unit[512];
     char object[512];
@@ -2971,9 +2976,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         CheckTestTier1Build build;
         const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
         char message[256];
-        snprintf(message, sizeof(message), "the machine rows' unit takes at most a move into or out of place for every two rows (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
+        snprintf(message, sizeof(message),
+                 "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows, message);
+        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows + compares, message);
         unlink(object);
     }
     unlink(unit);

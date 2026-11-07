@@ -159,8 +159,9 @@ at every width, one of them a loop. `bmi-builtins.c`'s four functions lower the
 scalar BMI builtins of both widths, one of them in a loop, and an elementwise
 deposit of a vector to the IR's `intrinsic` (#141). `vector-rows.c`'s seven functions lower
 vector operators on bytes, words and quadwords and vector builtins to row calls (#141's
-machine rows): a compare into a mask, a masked store of no result, a shift by a count
-from a general register, a permute and a loop whose row results are phis. `carrier-rows.c`'s five
+machine rows): a masked store of no result, a shift by a count from a general register,
+a permute and a loop whose row results are phis; and a compare into a mask to the IR's
+own `vcmp` (#1623, "Comparisons into a mask" below). `carrier-rows.c`'s five
 functions lower #1280's SSE carriers, vectors of 4 and 8 bytes, as `f32` and `f64` values in and out of row calls:
 narrowing shuffles, widening conversions, loads, stores, constants, operators and a loop whose carriers are phis
 ([the IR guide](ir.md)'s "SSE carriers"). `test-ir-simd` runs a function of each
@@ -302,9 +303,63 @@ either way and `main_unit_backend.c` its 2,432. The frontend unit's rows are:
 | 10 | ternary logic, tests, blends |
 | 114 | others |
 
-A comparison into a mask alone is the IR's own `vcmp`, so decoding it is the
-next measurable step. Shuffles and conversions need new operations, which the
-full opcode table can only take as `intrinsic` kinds, as the splat does.
+A comparison into a mask alone is the IR's own `vcmp`, which #1623 decodes
+(below). Shuffles and conversions need new operations, which the full opcode
+table can only take as `intrinsic` kinds, as the splat does.
+
+## Comparisons into a mask (#1623)
+
+An intrinsic's comparison into a mask (`_mm512_cmpeq_epi8_mask`, its masked
+`_mm512_mask_` form and the rest of `vpcmp`, `vpcmpu`, `vcmpps` and `vcmppd` at
+each width) is one row in the mask class: two vectors and a writemask in, the
+mask out, the record's immediate its predicate. `ir_simd_typed_compare_mask`
+decodes it as the IR's `vcmp` of its lanes where the immediate is an IR
+predicate: vpcmp's `==`, `<`, `<=`, `!=`, `>=` and `>` (signed, or unsigned for
+vpcmpu), and a float's `EQ_OQ`, `LT_OS`, `LE_OS`, `NEQ_UQ`, `GE_OS` and `GT_OS`,
+the immediates Tier 1 selects for C's operators, so that the instruction it
+selects is the one the row named, its exceptions too. The front end gives
+clang's `GT_OS` and `GE_OS` as `LT_OS` and `LE_OS` of the operands swapped
+(`check_x86_lower_float_predicate`, as LLVM selects them); the decoder takes
+either order, the other as the reversed predicate (`a < b` as `b > a`, exact for
+every lane and NaN).
+
+The mask is the `vcmp`'s ANDed with the writemask, but where the typed stream
+gives the writemask as a constant of every lane converted to the mask just
+before the row (`ir_typed_unmasked`), as clang's intrinsics without a mask do;
+both lowering passes read that from the typed stream, so they decide alike. The
+features are those of the forms Tier 1 selects: the comparison's own, AVX512F,
+VL below 64 bytes, DQ for a mask of 8 lanes or fewer (`kmovb`, `kandb`) and BW
+for 32 or 64. Any other immediate (vpcmp's false and true, a float's other 26),
+a scalar's or FP16's compare, SAE's form, a memory operand or any other
+decoration, and a target without one of those features leave the row a machine
+row, which runs it as before.
+
+Measured by `--tier1 --tier1-report -march=znver5`, each compiler compiling
+the same sources: on `main_unit_frontend.c`, main `cf38957a` has 1,675 machine
+rows and 581,418 records, and this change 1,212 rows (−463) and 581,189
+records; on `main_unit_backend.c`, 2,458 rows and 1,492,985 records, and 1,718
+rows (−740) and 1,492,371 records. The moves around the rows are unchanged
+(787 and 995): the comparisons took none as rows.
+
+The tests:
+
+- `test-ir-simd` decodes every COMPARE rule's row at every immediate clang
+  takes (960 rows, a float's as LLVM selects it and strictly), 252 of them the
+  IR's comparisons, against predicates, lanes, mask widths and features written
+  out; without each feature it needs, a row stays a machine row; its operands
+  swapped, it decodes as the reversed predicate; and 14 changes of each
+  (decorations, displacement, memory, registers, immediates 3 and 7, the
+  result's mask of another width, an operand of another width or class, a
+  record too many, SAE's form) leave it a machine row.
+- `test-tier1-masks` takes each of the 384 rows of the integer and packed float
+  rules as a program's only row, 8 statements of two vectors under a writemask
+  of every bit or of an input word, through both of Tier 0's paths natively
+  against a C model of the lanes, then both lowering paths, the IR's interpreter
+  at every stage (the 216 of an IR predicate; the others are machine rows) and
+  Tier 1's native code against the model.
+- `test-checker-driver`'s machine rows' unit has eleven such comparisons, two
+  under a writemask and a float's, run natively against clang's; its bound of a
+  move for every two rows counts them with the rows, where they took no move.
 
 ## Lanes: the vectors' element types (#141)
 
