@@ -189,6 +189,13 @@ table. The kinds are:
   gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
   `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
   guide](c-builtins-integration.md)'s "Direct read/modify/writes").
+  A seq_cst source store uses the exchange with `BUSTER_TYPED_RMW_STORE` (#1396).
+  That provenance is valid only for an exchange of seq_cst immediately followed
+  by `DISCARD` of its class. Its destination may be uninitialized: the interpreter
+  checks alignment, bounds and writability but does not read its old bytes.
+  The source assignment's new value stays in the lowering's desired buffer.
+  `ir_lower` retains store provenance in the IR's exchange, and helper reporting
+  counts it as an atomic access. Standalone fences remain `FENCE` entries.
 - `ATOMIC_CAS` (#1059), an atomic compare-exchange, pops the expected value and the desired one, both of an integer
   `class`, and pushes the object's old value of `class`: `value` a C memory order and, from
   `BUSTER_TYPED_CAS_LOCAL_SHIFT`, the local (of U64) that holds the object's address, since three operands and a scratch

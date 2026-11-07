@@ -280,7 +280,7 @@ static int run_builtin_atomic_helper_tests(int argc, char** argv)
         const uint32_t bytes = load || store ? 1u << (i % 4) : 0;
         const CBuiltinAtomicHelper helper = cbuiltin_atomic_helper_emit(id, bytes, &arena);
         const uint32_t parameters = load ? 2 : store ? 3 : i == 10 ? 0 : 1;
-        const uint32_t records = load ? 2 : store ? 3 : i == 9 ? 1 : 2;
+        const uint32_t records = i == 9 ? 1 : 2;
         valid = cbuiltin_atomic_test_expect(&test, helper.code.error == TIER0_OK && helper.code.count == records && helper.code.branch_count == 0 &&
             helper.code.reference_count == 0 && helper.parameter_count == parameters && helper.result_class == (load ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID) &&
             helper.compiler_barrier && helper.required_alignment == bytes && x86_validate(helper.code.records, helper.code.count) == helper.code.count &&

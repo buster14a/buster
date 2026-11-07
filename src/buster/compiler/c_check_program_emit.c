@@ -442,7 +442,8 @@ struct CheckTier1Report
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
 // family's direct forms in the lowered code (an atomic access's LOAD, STORE or SET with its marker, a builtin's or an
-// implicit _Atomic object's; an atomic read/modify/write's ATOMIC_RMW; a fence's FENCE, but a seq_cst store's own after
+// implicit _Atomic object's, or its seq_cst exchange marked RMW_STORE; an atomic read/modify/write's other ATOMIC_RMW;
+// a fence's FENCE, but a legacy seq_cst store's own after
 // it; an asm statement placed in its caller, its X86 entry), its helpers' call sites (a builtin's, an
 // implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the helpers planned,
 // the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a
@@ -473,10 +474,11 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
         {
             const uint8_t kind = function->kinds[e];
             const uint8_t class = function->classes[e];
+            const bool exchange_store = kind == BUSTER_TYPED_ATOMIC_RMW && (function->values[e] & BUSTER_TYPED_RMW_STORE) != 0;
             const bool access = (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && class >= BUSTER_TYPED_CLASS_I8 &&
                                 class <= BUSTER_TYPED_CLASS_U64 && (function->values[e] & BUSTER_TYPED_ACCESS_ATOMIC) != 0;
-            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += access;
-            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
+            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += access || exchange_store;
+            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += (kind == BUSTER_TYPED_ATOMIC_RMW && !exchange_store) || kind == BUSTER_TYPED_ATOMIC_CAS;
             report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE && !store;
             store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
         }

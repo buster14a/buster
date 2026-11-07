@@ -3,9 +3,9 @@
 //
 // #1059's direct atomic loads and stores, by both paths' lowerings and Tier 0's twins: an aligned load or store of an
 // integer or a pointer of a constant order its kind takes (check_program_direct_access), GNU's _n or C11's, and an
-// implicit _Atomic object's (check_lower_atomic_direct_plan), is the typed stream's LOAD or SET with its atomic marker
-// (BUSTER_TYPED_ACCESS_ATOMIC and the order), with no helper's call, and a seq_cst store the FENCE of seq_cst after it;
-// Tier 0's code has the access, and an mfence after a seq_cst store alone, in its place among the function's accesses to
+// implicit _Atomic object's (check_lower_atomic_direct_plan), is the typed stream's marked LOAD or SET, or a seq_cst
+// store's ATOMIC_RMW with RMW_STORE provenance and its old value discarded, with no helper's call. Tier 0's code has
+// the access, an xchg for a seq_cst store, in its place among the function's accesses to
 // memory, as x86_semantics.c reads them (check_test_fences_summary's trace). A dynamic order, an order its kind doesn't
 // take, a scoped family's and a floating object's keep their helper, the plan's use of it. Natively against clang:
 // every width and order, the C11 forms, a pointer's, an implicit _Atomic object's loads, stores and updates (whose loop
@@ -28,7 +28,8 @@ static CheckTestAccesses check_test_accesses_summary(const Tier0Function* functi
         const uint8_t kind = function->kinds[i];
         const uint8_t class = function->classes[i];
         const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
-        if ((kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && scalar && function->values[i] != 0)
+        const bool exchange_store = kind == BUSTER_TYPED_ATOMIC_RMW && (function->values[i] & BUSTER_TYPED_RMW_STORE) != 0;
+        if (((kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) || exchange_store) && scalar && function->values[i] != 0)
         {
             accesses.markers |= accesses.count < 8 ? (function->values[i] & 0xff) << (8 * accesses.count) : 0;
             accesses.count += 1;
@@ -47,6 +48,10 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
                                  "void store_relaxed(short*p,short v){__atomic_store_n(p,v,__ATOMIC_RELAXED);}"
                                  "void store_release(char*p,char v){__atomic_store_n(p,v,__ATOMIC_RELEASE);}"
                                  "void store_seq(int*p,int v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);}"
+                                 "void store_seq_byte(char*p,char v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);}"
+                                 "void store_seq_short(short*p,short v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);}"
+                                 "void store_seq_long(long*p,long v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);}"
+                                 "void store_seq_pointer(int**p,int*v){__atomic_store_n(p,v,__ATOMIC_SEQ_CST);}"
                                  "int c11(_Atomic int*p){__c11_atomic_store(p,1,__ATOMIC_SEQ_CST);return __c11_atomic_load(p,__ATOMIC_ACQUIRE);}"
                                  "int*pointer(int**p){return __atomic_load_n(p,__ATOMIC_CONSUME);}"
                                  "int implicit(int v){a=v;return a;}"
@@ -63,8 +68,8 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
         uint32_t calls;
         const char* trace;
     };
-    // A marker is BUSTER_TYPED_ACCESS_ATOMIC (0x10) with its order; a seq_cst store's FENCE has value 5 and its record an
-    // mfence ('f') after its write ('w'); a load is a read ('r'), and a helper's call a call ('c'). The implicit object's
+    // An access marker and the seq_cst exchange store's provenance both use 0x10 with the order. A seq_cst store's
+    // xchg reads and writes ('m'), a weaker store writes ('w'), a load reads ('r'), and a helper calls ('c'). The implicit object's
     // plan writes its value's buffer through its address first (its two 'w's before the store's), and the floating
     // load's helper result, its bits, is read back from its frame temporary through its address (the 'r' after the call).
     static const CheckTestAccessCase cases[] = {
@@ -73,10 +78,14 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
         { "load_seq", 1, 0x15, 0, 0, "r" },
         { "store_relaxed", 1, 0x10, 0, 0, "w" },
         { "store_release", 1, 0x13, 0, 0, "w" },
-        { "store_seq", 1, 0x15, 1, 0, "wf" },
-        { "c11", 2, 0x1215, 1, 0, "wfr" },
+        { "store_seq", 1, 0x15, 0, 0, "m" },
+        { "store_seq_byte", 1, 0x15, 0, 0, "m" },
+        { "store_seq_short", 1, 0x15, 0, 0, "m" },
+        { "store_seq_long", 1, 0x15, 0, 0, "m" },
+        { "store_seq_pointer", 1, 0x15, 0, 0, "m" },
+        { "c11", 2, 0x1215, 0, 0, "mr" },
         { "pointer", 1, 0x11, 0, 0, "r" },
-        { "implicit", 2, 0x1515, 1, 0, "wwwfr" },
+        { "implicit", 2, 0x1515, 0, 0, "wwmr" },
         { "dynamic", 0, 0, 0, 1, "c" },
         { "scoped", 0, 0, 0, 1, "c" },
         { "floating", 0, 0, 0, 1, "cr" },
@@ -117,7 +126,7 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
         char description[224];
         snprintf(description, sizeof(description), "atomic accesses: the functions lower by the %s path", way);
         check_test_expect(test, ready && code.lowered.count == count, description);
-        // The lowered code: eleven marked accesses, nine builtins' and the implicit object's two (which have no builtin
+        // The lowered code: fifteen marked accesses, thirteen builtins' and the implicit object's two (which have no builtin
         // node, and no leaf); the plan: three builtins by their helper (the dynamic order's, the scoped one's and the
         // floating one's).
         const CheckProgramHelpers* helpers = &code.lowered.helpers;
@@ -133,7 +142,7 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
         }
         snprintf(description, sizeof(description), "atomic accesses (%s path): the code takes %u accesses directly and the plan %u builtins by their helper", way,
                  direct, uses);
-        check_test_expect(test, ready && direct == 11 && uses == 3, description);
+        check_test_expect(test, ready && direct == 15 && uses == 3, description);
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];
@@ -177,4 +186,20 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
                               "af=(float)n;r+=(long)(__c11_atomic_load(&af,__ATOMIC_ACQUIRE)*2);"
                               "r+=__scoped_atomic_load_n(&i,__ATOMIC_ACQUIRE,0);return (int)r;}",
                               "atomic-accesses-direct-and-helper-widths-orders-and-implicit", clang);
+    // Assignment yields the converted new value, never xchg's old bits. The address and value expressions run once;
+    // volatile objects, narrow conversions, pointer values and floating representations retain that rule too.
+    check_test_program_source(test,
+                              "static _Atomic unsigned ai;static volatile _Atomic unsigned char ac;static _Atomic unsigned short as;"
+                              "static _Atomic unsigned long al;static _Atomic float af;static _Atomic double ad;static _Atomic(int*) ap;"
+                              "static unsigned addresses,values;static _Atomic unsigned*address(void){addresses++;return &ai;}"
+                              "static unsigned value(unsigned n){values++;return n*17u+3u;}"
+                              "int tested(int n){unsigned u=(unsigned)n;addresses=values=0;unsigned r=(*address()=value(u));"
+                              "r=r*3u+(ac=(unsigned char)(u|128u));r=r*3u+(as=(unsigned short)(u|32768u));"
+                              "r=r*3u+(unsigned)(al=((unsigned long)u<<32)|u);"
+                              "r=r*3u+(unsigned)((af=(float)(u&255u)+0.5f)*2.0f);"
+                              "r=r*3u+(unsigned)((ad=(double)(u&511u)+0.25)*4.0);"
+                              "int cell=n;int*p=(ap=&cell);r=r*3u+(p==&cell);"
+                              "r=r*3u+(ai=(unsigned)(ac=(unsigned char)(u+7u)));"
+                              "return (int)((r+addresses*101u+values*1009u)&0x7fffffff);}",
+                              "atomic-store-assignment-results-and-single-evaluation", clang);
 }

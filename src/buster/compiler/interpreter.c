@@ -1410,8 +1410,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_ATOMIC_RMW)
         {
             // An integer class's exchange or addition of a C order (#1059, tier0_atomic_rmw_valid), its address and an
-            // operand of its class.
+            // operand of its class. A source store's exchange leaves only a placeholder, immediately discarded.
             shape = tier0_atomic_rmw_valid(class, value) && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class;
+            shape = shape && ((value & BUSTER_TYPED_RMW_STORE) == 0 ||
+                              (i + 1 < function->count && function->kinds[i + 1] == BUSTER_TYPED_DISCARD && function->classes[i + 1] == class));
         }
         else if (kind == BUSTER_TYPED_ATOMIC_CAS)
         {
@@ -1505,11 +1507,13 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_ATOMIC_RMW)
         {
             // With memory checks, its address refused where its natural alignment, which the producer proved (#1059),
-            // isn't, whatever its bytes hold; then its object checked as a load's, which reports reading undefined
-            // bytes, before a store's marks them written.
+            // isn't, whatever its bytes hold; then its object checked as a load's before a store's marks it written.
+            // A source store's discarded exchange result never reads its old, possibly undefined bytes (#1396).
             address = stack[top - 2].low;
             const uint64_t bytes = tier0_class_bytes(class);
-            result->status = runtime.check_memory && (address & (bytes - 1)) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, address, bytes, false);
+            const bool store = (value & BUSTER_TYPED_RMW_STORE) != 0;
+            result->status = runtime.check_memory && (address & (bytes - 1)) != 0 ? INTERPRETER_MEMORY :
+                             store ? INTERPRETER_OK : interpreter_memory_access(&runtime, address, bytes, false);
             if (result->status == INTERPRETER_OK)
             {
                 result->status = interpreter_memory_access(&runtime, address, bytes, true);
@@ -1876,9 +1880,13 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         {
             // An atomic read/modify/write (#1059), as one thread runs it: the object's old value, normalized as a load's,
             // replaces the address, and the operand (an exchange) or the sum (an addition) is written in its class's bytes.
+            // A source store's result is only a discarded placeholder; do not read its possibly undefined old bytes.
             const uint64_t bytes = tier0_class_bytes(class);
             uint64_t old = 0;
-            memcpy(&old, (const void*)(uintptr_t)address, bytes);
+            if ((value & BUSTER_TYPED_RMW_STORE) == 0)
+            {
+                memcpy(&old, (const void*)(uintptr_t)address, bytes);
+            }
             const uint64_t written = (value & BUSTER_TYPED_RMW_ADD) != 0 ? old + stack[top - 1].low : stack[top - 1].low;
             memcpy((void*)(uintptr_t)address, &written, bytes);
             stack[top - 2] = (InterpreterValue){

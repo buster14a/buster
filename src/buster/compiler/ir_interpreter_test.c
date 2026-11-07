@@ -822,6 +822,77 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
     arena_pop_to(memory, mark);
 }
 
+// #1396's seq_cst source store initializes its bytes without observing their previous representation. Its exchange
+// result is undefined, while bounds, alignment, permissions and the ordinary exchange's read check remain enforced.
+static void ir_interpreter_test_atomic_store(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    static const uint8_t types[] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(types); t += 1)
+    {
+        const uint64_t mark = memory->length;
+        IrFunction function = { 0 };
+        const IrSizes sizes = {
+            .instruction_count = 6,
+            .block_count = 1,
+            .constant_count = 1,
+            .slot_count = 1,
+            .address_count = 1,
+        };
+        const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+        ir_interpreter_test_expect(tally, created, "source atomic store fixture allocation");
+        if (created)
+        {
+            const uint8_t type = types[t];
+            const uint64_t bytes = (ir_type_bits[type] + 7) / 8;
+            const uint64_t mask = bytes == 8 ? UINT64_MAX : (UINT64_C(1) << (bytes * 8)) - 1;
+            const InterpreterValue expected = { .low = UINT64_C(0xfedcba9876543210) & mask };
+            function.result_type = type;
+            function.block_offsets[1] = 6;
+            function.slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64 };
+            function.constants[0].low = expected.low;
+            function.addresses[0] = (IrAddress){ .scale = 1 };
+            ir_interpreter_test_instruction(&function, 0, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 1, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+            ir_interpreter_test_instruction(&function, 2, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 3, IR_ATOMIC_RMW, type, 1, 2, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 4, IR_LOAD, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_instruction(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.alignment_log2[3] = (uint8_t)t;
+            function.alignment_log2[4] = (uint8_t)t;
+            const uint8_t store_flags = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_STORE;
+            function.flags[3] = store_flags;
+            const IrInterpreterFunction code = { .symbol = 71, .function = &function };
+            _Alignas(8) uint64_t data = UINT64_C(0x123456789abcdef0);
+            InterpreterBinding binding = { .symbol = 99, .bytes = (uint8_t*)&data, .size = sizeof(data), .writable = false };
+            const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .bindings = &binding, .binding_count = 1 };
+            ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, expected, "a source store initializes previously undefined bytes");
+            function.a[5] = 3;
+            ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){ 0 },
+                                    "a source store's exchange result remains undefined");
+            function.a[5] = 4;
+            function.flags[3] = store_flags & ~BUSTER_IR_RMW_STORE;
+            ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){ 0 },
+                                    "a true exchange retains its undefined-byte check");
+            function.flags[3] = store_flags;
+            function.addresses[0].offset = 8;
+            ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_MEMORY, (InterpreterValue){ 0 },
+                                    "a source atomic store checks its object's bounds");
+            if (bytes > 1)
+            {
+                function.addresses[0].offset = 1;
+                ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_MEMORY, (InterpreterValue){ 0 },
+                                        "a source atomic store checks its object's alignment");
+            }
+            function.addresses[0].offset = 0;
+            ir_interpreter_test_instruction(&function, 0, IR_SYMBOL_ADDR, IR_PTR, 99, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_MEMORY, (InterpreterValue){ 0 },
+                                    "a source atomic store rejects read-only memory");
+            ir_interpreter_test_expect(tally, data == UINT64_C(0x123456789abcdef0), "a refused source atomic store preserves its object's bytes");
+        }
+        arena_pop_to(memory, mark);
+    }
+}
+
 static void ir_interpreter_test_mappings(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -1080,6 +1151,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_native_records(&tally, &memory, &execution);
             ir_interpreter_test_memory(&tally, &memory, &execution);
             ir_interpreter_test_atomic_rmw(&tally, &memory, &execution);
+            ir_interpreter_test_atomic_store(&tally, &memory, &execution);
             ir_interpreter_test_mappings(&tally, &memory, &execution);
             ir_interpreter_test_generated(&tally, seed, count);
         }

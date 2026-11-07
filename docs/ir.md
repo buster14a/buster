@@ -533,6 +533,17 @@ clang, its `long`'s accesses printed `align=8`.
 
 ### Atomic read/modify/writes (#1059)
 
+The C producer's seq_cst stores use an exchange with `BUSTER_IR_RMW_STORE`
+provenance (#1396), printed `rmw.iN %p, %v align=N store seq_cst`. That flag is
+valid only for a seq_cst exchange without a compare-exchange's third operand.
+It preserves the source store's ability to initialize its destination: the
+interpreter checks alignment, bounds and writability without reading undefined
+old bytes, writes the operand, and marks the result undefined. The producer
+discards that result; the interpreter diagnoses a later use. Tier 1 emits its
+existing memory `xchg`, and true exchanges still require defined old bytes.
+Rebuilding and text round trips retain the flag. The typed producer likewise
+requires an immediate `DISCARD` after its source-store exchange.
+
 `rmw` (an integer of 1, 2, 4 or 8 bytes, a pointer's as `i64`; `a` the object's
 address, `b` the operand, of the result's type; its flags `BUSTER_IR_ATOMIC`, a C
 memory order, any of the six, since the locked access is a full barrier, and its

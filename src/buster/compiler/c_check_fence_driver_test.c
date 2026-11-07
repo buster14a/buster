@@ -6,11 +6,11 @@
 // fence that orders a store before a later load, and a seq_cst thread fence, or a seq_cst store before a seq_cst load,
 // forbids. The program runs it four times: with a signal fence (a compiler barrier alone: a control, which may show the
 // outcome), with a thread fence of seq_cst (the typed stream's FENCE, Tier 0's or Tier 1's mfence), with relaxed atomic
-// accesses (the other control) and with seq_cst ones (the typed stream's marked SET and LOAD, and the store's FENCE),
+// accesses (the other control) and with seq_cst ones (the store's exchange and the marked LOAD),
 // the second and the fourth of which must never show it, and prints how many of its iterations showed the outcome. Each
 // build is checked: by both paths, by Tier 0 and by --tier1 (every function Tier 1's), its fences and atomic accesses
-// taken directly (--helper-report), its fenced and seq_cst threads' objects with one mfence each and the others with
-// none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process with one CPU prints
+// taken directly (--helper-report), its fenced threads' objects with one mfence, its seq_cst threads' with one memory
+// xchg, and the controls with neither. A sequential interpreter shows no store buffer: the native runs are the evidence. A process with one CPU prints
 // that it skipped the runs. A concurrent counter litmus of the direct read/modify/writes (check_test_driver_counters),
 // built and checked the same four ways. And --helper-report's counts of a unit with every kind of helper call
 // (check_test_driver_helper_report), and Tier 1's order of two volatile reads (check_test_driver_volatile_order). Include
@@ -109,8 +109,8 @@ static const char check_test_fence_litmus_source[] =
     "    return fenced < 0 || control < 0 || sequential < 0 || relaxed < 0;\n"
     "}\n";
 
-// The mfence records of function `name` in object `path`, or UINT32_MAX where it doesn't decode.
-static uint32_t check_test_fence_records(const char* path, const char* name)
+// The mfence and memory-xchg records of function `name` in object `path`, or UINT32_MAX where it doesn't decode.
+static uint32_t check_test_fence_records(const char* path, const char* name, uint32_t* exchanges)
 {
     enum
     {
@@ -122,9 +122,14 @@ static uint32_t check_test_fence_records(const char* path, const char* name)
     uint32_t relocations = 0;
     const uint32_t count = records != NULL && offsets != NULL && types != NULL ? check_test_tier1_function(path, name, records, CHECK_TEST_FENCE_RECORDS, offsets, types, &relocations) : 0;
     uint32_t fences = count != 0 ? 0 : UINT32_MAX;
+    *exchanges = count != 0 ? 0 : UINT32_MAX;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        fences += (records[i].instruction.form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MFENCE;
+        const X86Instruction record = records[i].instruction;
+        const uint32_t form = record.form & BUSTER_X86_FORM_NUMBER;
+        const bool exchange = form == X86_FORM_XCHG_RM8_R8 || form == X86_FORM_XCHG_RM16_R16 || form == X86_FORM_XCHG_RM32_R32 || form == X86_FORM_XCHG_RM64_R64;
+        fences += form == X86_FORM_MFENCE;
+        *exchanges += exchange && (record.mode & BUSTER_X86_MODE_MEMORY) != 0;
     }
     free(records);
     free(offsets);
@@ -190,16 +195,23 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
         char message[256];
         snprintf(message, sizeof(message), "fences (%s): the litmus builds, its fences and atomic accesses taken directly%s", way, tier1 ? " and its threads Tier 1's" : "");
         check_test_expect(test, built, message);
-        // One mfence in each fenced thread, between its store and its load, and in each seq_cst one, after its store; none in
-        // the control's or the relaxed ones.
+        // One mfence in each fenced thread and one memory xchg in each seq_cst thread, with no redundant mfence.
+        // The control's and relaxed threads have neither.
         uint32_t fences[8];
+        uint32_t exchanges[8];
         for (uint32_t t = 0; t < 8; t += 1)
         {
-            fences[t] = built ? check_test_fence_records(object, names[t]) : UINT32_MAX;
+            exchanges[t] = UINT32_MAX;
+            fences[t] = built ? check_test_fence_records(object, names[t], &exchanges[t]) : UINT32_MAX;
         }
-        snprintf(message, sizeof(message), "fences (%s): the fenced and seq_cst threads have one mfence each, the others none (%u %u %u %u %u %u %u %u)", way, fences[0],
+        snprintf(message, sizeof(message), "fences (%s): only the fenced threads have mfence (%u %u %u %u %u %u %u %u)", way, fences[0],
                  fences[1], fences[2], fences[3], fences[4], fences[5], fences[6], fences[7]);
-        check_test_expect(test, fences[0] == 1 && fences[1] == 1 && fences[2] == 0 && fences[3] == 0 && fences[4] == 1 && fences[5] == 1 && fences[6] == 0 && fences[7] == 0,
+        check_test_expect(test, fences[0] == 1 && fences[1] == 1 && fences[2] == 0 && fences[3] == 0 && fences[4] == 0 && fences[5] == 0 && fences[6] == 0 && fences[7] == 0,
+                          message);
+        snprintf(message, sizeof(message), "fences (%s): only the seq_cst threads have memory xchg (%u %u %u %u %u %u %u %u)", way, exchanges[0], exchanges[1], exchanges[2],
+                 exchanges[3], exchanges[4], exchanges[5], exchanges[6], exchanges[7]);
+        check_test_expect(test, exchanges[0] == 0 && exchanges[1] == 0 && exchanges[2] == 0 && exchanges[3] == 0 && exchanges[4] == 1 && exchanges[5] == 1 &&
+                                  exchanges[6] == 0 && exchanges[7] == 0,
                           message);
         char captured[256] = { 0 };
         const bool ran = built && check_test_driver_capture(output, captured, sizeof(captured));

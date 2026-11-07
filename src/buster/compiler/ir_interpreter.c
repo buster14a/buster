@@ -1072,11 +1072,13 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     // value (a compare-exchange; the old value written back where they aren't, as x86's cmpxchg writes it),
                     // written, a byte at a time through volatile accesses as an atomic load's and store's are here, the old
                     // value the result. With memory checks, its address is refused where its declared alignment isn't,
-                    // whatever its bytes hold; then its object is checked as a load's, which reports reading undefined
-                    // bytes, before a store's marks them written.
+                    // whatever its bytes hold; then its object is checked as a load's before a store's marks it written.
+                    // A source store's exchange has an undefined result and never reads the old bytes (#1396).
                     const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
-                    result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
+                    const bool store = (function->flags[i] & BUSTER_IR_RMW_STORE) != 0;
+                    result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY :
+                                    store ? INTERPRETER_OK : interpreter_memory_access(&runtime, av.low, bytes, false);
                     if (result.status == INTERPRETER_OK)
                     {
                         result.status = interpreter_memory_access(&runtime, av.low, bytes, true);
@@ -1085,7 +1087,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     {
                         uint64_t old = 0;
                         volatile uint8_t* object = (volatile uint8_t*)(uintptr_t)av.low;
-                        for (uint32_t byte = 0; byte < bytes; byte += 1)
+                        for (uint32_t byte = 0; !store && byte < bytes; byte += 1)
                         {
                             old |= (uint64_t)object[byte] << (8 * byte);
                         }
@@ -1100,6 +1102,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             object[byte] = (uint8_t)(written >> (8 * byte));
                         }
                         value = interpreter_value_from_integer(old, type);
+                        defined = !store;
                     }
                 } break;
                 case IR_ALLOCA:

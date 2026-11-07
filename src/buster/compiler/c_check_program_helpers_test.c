@@ -261,10 +261,10 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     }
     else if (family == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS && (physical.reads_object != ((effects & BUSTER_CHECK_HELPER_READS) != 0) ||
                                                                physical.writes_object != ((effects & BUSTER_CHECK_HELPER_WRITES) != 0) ||
-                                                               ((effects & BUSTER_CHECK_HELPER_WRITES) != 0 && (physical.memory & BUSTER_X86_MEMORY_EFFECT_FENCE) == 0)))
+                                                               ((effects & BUSTER_CHECK_HELPER_WRITES) != 0 && (physical.memory & BUSTER_X86_MEMORY_EFFECT_ATOMIC) == 0)))
     {
-        // A load reads its object, and a store writes it and fences: the helpers' seq_cst.
-        *reason = "an atomic load's or store's code doesn't access its object as its contract says, or a store doesn't fence";
+        // A load reads its object; a store's exchange reads and writes it with a locked access, the helper's seq_cst.
+        *reason = "an atomic load's or store's code doesn't access its object as its contract says, or a store isn't locked";
     }
     else if (family == CHECK_PROGRAM_HELPER_ATOMIC_RMW && !physical.writes_object)
     {
@@ -324,7 +324,7 @@ static void check_test_program_helper_contracts(CheckTest* test)
     };
     static const CheckTestHelperClass classified[] = {
         { CBUILTIN_ATOMIC_LOAD_N, false, CHECK_PROGRAM_HELPER_ATOMIC_ACCESS, BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER },
-        { CBUILTIN_ATOMIC_STORE_N, false, CHECK_PROGRAM_HELPER_ATOMIC_ACCESS, BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER },
+        { CBUILTIN_ATOMIC_STORE_N, false, CHECK_PROGRAM_HELPER_ATOMIC_ACCESS, BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER },
         { CBUILTIN_ATOMIC_EXCHANGE_N, true, CHECK_PROGRAM_HELPER_ATOMIC_RMW, 0 },
         { CBUILTIN_ATOMIC_EXCHANGE_N, false, CHECK_PROGRAM_HELPER_UNMODELED, 0 },
         { CBUILTIN_ATOMIC_LOAD_N, true, CHECK_PROGRAM_HELPER_UNMODELED, 0 },
@@ -664,14 +664,11 @@ static void check_test_program_helpers(CheckTest* test)
             .id = CBUILTIN_ATOMIC_STORE_N,
             .width = 1,
             .parameters = 3,
-            .count = 7,
+            .count = 4,
             .bytes = {
                 0x40,
-                0x88,
+                0x86,
                 0x37,
-                0x0f,
-                0xae,
-                0xf0,
                 0xc3,
             },
         },
@@ -679,14 +676,11 @@ static void check_test_program_helpers(CheckTest* test)
             .id = CBUILTIN_ATOMIC_STORE_N,
             .width = 2,
             .parameters = 3,
-            .count = 7,
+            .count = 4,
             .bytes = {
                 0x66,
-                0x89,
+                0x87,
                 0x37,
-                0x0f,
-                0xae,
-                0xf0,
                 0xc3,
             },
         },
@@ -694,13 +688,10 @@ static void check_test_program_helpers(CheckTest* test)
             .id = CBUILTIN_ATOMIC_STORE_N,
             .width = 4,
             .parameters = 3,
-            .count = 6,
+            .count = 3,
             .bytes = {
-                0x89,
+                0x87,
                 0x37,
-                0x0f,
-                0xae,
-                0xf0,
                 0xc3,
             },
         },
@@ -708,14 +699,11 @@ static void check_test_program_helpers(CheckTest* test)
             .id = CBUILTIN_ATOMIC_STORE_N,
             .width = 8,
             .parameters = 3,
-            .count = 7,
+            .count = 4,
             .bytes = {
                 0x48,
-                0x89,
+                0x87,
                 0x37,
-                0x0f,
-                0xae,
-                0xf0,
                 0xc3,
             },
         },

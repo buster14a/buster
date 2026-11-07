@@ -163,7 +163,8 @@ typedef enum IrOp
     // is its `c`, which the others haven't). It returns the object's old value and leaves the operand (an exchange), the
     // sum (an addition) or, where the old value is the operand, the desired value (a compare-exchange) in it, as one
     // locked access; no pass moves an access across it or eliminates it, as an atomic store's and load's. The typed
-    // stream's ATOMIC_RMW and ATOMIC_CAS.
+    // stream's ATOMIC_RMW and ATOMIC_CAS. BUSTER_IR_RMW_STORE marks a source seq_cst store implemented by an exchange:
+    // its old bytes need not be initialized, and its result is undefined and must not be consumed.
     IR_ATOMIC_RMW,
     IR_OP_COUNT,
 } IrOp;
@@ -179,6 +180,8 @@ typedef enum IrOp
 #define BUSTER_IR_RMW_EXCHANGE 0x00u
 #define BUSTER_IR_RMW_ADD 0x20u
 #define BUSTER_IR_RMW_COMPARE 0x40u
+// A source seq_cst store implemented by an exchange, whose result is undefined rather than the object's old value.
+#define BUSTER_IR_RMW_STORE 0x80u
 // An IR_INTRINSIC's operation (#141), its `c`: mulhu an I64's alone, BMI operations an I32's or an I64's; splat's
 // result a vector, its only operand an I8, I16, I32, I64, F32 or F64 whose bit pattern is repeated in every lane. The bit
 // operations (#1374, from TZCNT on) take one operand, an I32 or an I64 of their result's type, as their x86 instructions
@@ -638,11 +641,15 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
-// is a full barrier, which every order takes; and of an exchange, an addition or a compare-exchange.
+// is a full barrier, which every order takes; and of an exchange, an addition or a compare-exchange. A source store's
+// provenance is valid only on a seq_cst exchange, whose result its producer discards.
 static bool ir_rmw_flags_valid(uint8_t flags)
 {
-    return (flags & ~(BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_RMW_OPERATION)) == 0 && (flags & BUSTER_IR_ATOMIC) != 0 &&
-           (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT <= 5 && (flags & BUSTER_IR_RMW_OPERATION) <= BUSTER_IR_RMW_COMPARE;
+    const uint32_t order = (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
+    const uint32_t operation = flags & BUSTER_IR_RMW_OPERATION;
+    return (flags & ~(BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_RMW_OPERATION | BUSTER_IR_RMW_STORE)) == 0 && (flags & BUSTER_IR_ATOMIC) != 0 &&
+           order <= BUSTER_IR_FENCE_SEQ_CST && operation <= BUSTER_IR_RMW_COMPARE &&
+           ((flags & BUSTER_IR_RMW_STORE) == 0 || (operation == BUSTER_IR_RMW_EXCHANGE && order == BUSTER_IR_FENCE_SEQ_CST));
 }
 
 // Whether an atomic access may be of `type` aligned to 1 << `alignment_log2` bytes: an integer's of 1, 2, 4 or 8 bytes,
@@ -2792,7 +2799,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             const uint32_t order = (f->flags[i] & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
                             const uint32_t operation = f->flags[i] & BUSTER_IR_RMW_OPERATION;
                             fprintf(output, " align=%" PRIu32 " %s %s", UINT32_C(1) << f->alignment_log2[i],
-                                    operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
+                                    (f->flags[i] & BUSTER_IR_RMW_STORE) != 0 ? "store" : operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
                                     order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)

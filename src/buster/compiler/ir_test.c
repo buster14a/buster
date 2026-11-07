@@ -837,6 +837,16 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         ir_test_instruction(&function, 3, IR_ATOMIC_RMW, IR_I64, 1, 0, BUSTER_IR_NONE);
         function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_EXCHANGE;
         ir_test_pair(tally, &function, scratch, 0, true, "a seq_cst atomic exchange rejected");
+        function.flags[3] |= BUSTER_IR_RMW_STORE;
+        ir_test_pair(tally, &function, scratch, 0, true, "a seq_cst source store's exchange rejected");
+        function.flags[3] = BUSTER_IR_ATOMIC | 3u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_STORE;
+        ir_test_pair(tally, &function, scratch, 0, false, "a source store's exchange with a weaker order accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD | BUSTER_IR_RMW_STORE;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic addition marked as a source store accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE | BUSTER_IR_RMW_STORE;
+        function.c[3] = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "a compare-exchange marked as a source store accepted");
+        function.c[3] = BUSTER_IR_NONE;
         function.flags[3] = BUSTER_IR_ATOMIC | 4u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
         ir_test_pair(tally, &function, scratch, 0, true, "an acq_rel atomic addition rejected");
         function.c[3] = 0;

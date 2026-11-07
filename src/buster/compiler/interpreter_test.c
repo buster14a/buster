@@ -569,6 +569,62 @@ static void interpreter_test_atomic_rmw(InterpreterTestTally* tally, Arena* scra
     interpreter_test_expect(tally, result.status == INTERPRETER_MEMORY, "a misaligned atomic read/modify/write rejected");
 }
 
+// #1396's source stores may initialize their objects: the exchange's old bits are never read and its result is
+// immediately discarded. True exchanges retain their undefined-read check, and no store tag may expose that result.
+static void interpreter_test_atomic_store(InterpreterTestTally* tally, Arena* scratch)
+{
+    uint8_t kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_DISCARD,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_RETURN,
+    };
+    uint8_t classes[BUSTER_ARRAY_LENGTH(kinds)] = { BUSTER_TYPED_CLASS_U64 };
+    uint64_t values[BUSTER_ARRAY_LENGTH(kinds)] = { 0 };
+    static const uint8_t widths[] = { BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_U16, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_U64 };
+    for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(widths); w += 1)
+    {
+        const uint8_t class = widths[w];
+        const uint64_t bytes = tier0_class_bytes(class);
+        const uint64_t mask = bytes == 8 ? UINT64_MAX : (UINT64_C(1) << (bytes * 8)) - 1;
+        for (uint32_t i = 1; i < BUSTER_ARRAY_LENGTH(classes); i += 1)
+        {
+            classes[i] = class;
+        }
+        values[1] = UINT64_C(0xfedcba9876543210) & mask;
+        values[2] = BUSTER_TYPED_RMW_STORE | BUSTER_TYPED_FENCE_SEQ_CST;
+        Tier0Function function = {
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .count = BUSTER_ARRAY_LENGTH(kinds),
+            .local_classes = &class,
+            .local_count = 1,
+        };
+        InterpreterResult result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == values[1], "a source store initializes its object's bytes");
+        values[2] = BUSTER_TYPED_FENCE_SEQ_CST;
+        result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == INTERPRETER_UNDEFINED, "a true exchange still diagnoses an uninitialized object's bytes");
+        values[2] = BUSTER_TYPED_RMW_STORE | BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST;
+        result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "a source store tag cannot hide an addition's read");
+        values[2] = BUSTER_TYPED_RMW_STORE;
+        result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "a source store tag requires seq_cst");
+        values[2] = BUSTER_TYPED_RMW_STORE | BUSTER_TYPED_FENCE_SEQ_CST;
+        kinds[3] = BUSTER_TYPED_RETURN;
+        result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "a source store's placeholder result cannot be returned");
+        kinds[3] = BUSTER_TYPED_DISCARD;
+        function.count = 3;
+        result = interpreter_test_run(&function, scratch, 0);
+        interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "a source store cannot end without its discard");
+    }
+}
+
 // #1059's atomic compare-exchanges as one thread runs them: x = 5; cas x, 5, 9 (5, x 9); cas x, 5, 7 (9, x 9); their
 // old values plus x, 23 (21 had the second stored, 15 had the first not), the address in a U64 local the entry names; and
 // an address local of another class refused.
@@ -1774,6 +1830,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
         interpreter_test_atomic_rmw(&tally, &scratch);
+        interpreter_test_atomic_store(&tally, &scratch);
         interpreter_test_atomic_cas(&tally, &scratch);
         interpreter_test_lookup(&tally);
         interpreter_test_copy(&tally, &scratch);

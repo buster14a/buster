@@ -6246,8 +6246,8 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 
 // A direct atomic load or store (#1059, check_program_direct_access's `marker`): the pointer's operand, for a store the
 // value's, converted to the object's value type, then the typed stream's LOAD or SET of the value type's class with the
-// marker, and after a seq_cst store the FENCE of seq_cst its order needs on x86-64 (a total store order's store buffer
-// must drain before a later load); its constant order evaluated for nothing, as a direct fence's. The tasks run in
+// marker. A seq_cst store uses an ATOMIC_RMW exchange and discards its old value: xchg supplies the store/load barrier
+// without a separate mfence. Its constant order is evaluated for nothing, as a direct fence's. The tasks run in
 // reverse.
 static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t marker)
 {
@@ -6263,9 +6263,13 @@ static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, c
         const TypeId checked = stream->argument_conversions[first + 1].type;
         if ((marker & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SEQ_CST);
+            check_lower_instruction(writer, BUSTER_TYPED_DISCARD, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_ATOMIC_RMW, class, BUSTER_TYPED_RMW_STORE | BUSTER_TYPED_FENCE_SEQ_CST);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_SET, class, marker);
+        else
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET, class, marker);
+        }
         check_lower_convert(writer, checked, effect->value_type);
         check_lower_operand(writer, node, 1 + 3, false, checked);
     }

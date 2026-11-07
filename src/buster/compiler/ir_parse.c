@@ -973,16 +973,18 @@ static void ir_parse_instruction(IrParseState* state)
                 }
                 if (row.op == IR_ATOMIC_RMW)
                 {
-                    // An atomic read/modify/write's operation and its order (#1059), after its alignment, as its flags.
-                    static const char* const operations[3] = {
+                    // An atomic read/modify/write's operation and its order (#1059), after its alignment, as its flags;
+                    // store is a source seq_cst store's exchange with an undefined, discarded result (#1396).
+                    static const char* const operations[4] = {
                         "xchg",
                         "add",
                         "cas",
+                        "store",
                     };
-                    const uint32_t operation = ir_parse_named(state, operations, 3);
+                    const uint32_t operation = ir_parse_named(state, operations, BUSTER_ARRAY_LENGTH(operations));
                     const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
                     row.flags = (uint8_t)(BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0) |
-                                          (operation < 3 ? operation << 5 : 0));
+                                          (operation < 3 ? operation << 5 : operation == 3 ? BUSTER_IR_RMW_STORE : 0));
                 }
                 if (row.op == IR_LOAD || row.op == IR_STORE)
                 {

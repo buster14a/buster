@@ -195,7 +195,10 @@
 //   - ATOMIC_RMW: an atomic read/modify/write (#1059), which pops an address (U64) and an operand of `class` (an
 //     integer's, 1 to 8 bytes) and pushes the object's old value, of `class`: `value` its operation
 //     (BUSTER_TYPED_RMW_ADD for an addition, an exchange without it) and its C memory order (BUSTER_TYPED_FENCE_ORDER's
-//     bits). It is one locked access of the class's bytes at the address, naturally aligned: xchg (an exchange) or lock
+//     bits). BUSTER_TYPED_RMW_STORE marks a seq_cst exchange used for a source store, whose old value the producer
+//     immediately discards; the validator requires that DISCARD, so the old bytes need not be initialized. This
+//     provenance keeps helper-family reporting separate from source read/modify/writes. It is one locked
+//     access of the class's bytes at the address, naturally aligned: xchg (an exchange) or lock
 //     xadd (an addition), each a full barrier on x86-64, which every order takes. A consumer keeps it as an atomic
 //     store's and load's barrier: no access moves across it, and it is never eliminated. Tier 0 defers it
 //     (tier0_emit_atomic_rmw); the C producer's exchanges, additions and subtractions of a constant order
@@ -312,6 +315,8 @@
 #define BUSTER_TYPED_ACCESS_ATOMIC 0x10
 // An ATOMIC_RMW's operation: an addition (lock xadd), and without it an exchange (xchg).
 #define BUSTER_TYPED_RMW_ADD 0x08
+// A source store implemented by a seq_cst exchange; its result is still the old value, which the producer discards.
+#define BUSTER_TYPED_RMW_STORE 0x10
 // Where an ATOMIC_CAS's value has its address's local, above its order.
 #define BUSTER_TYPED_CAS_LOCAL_SHIFT 8
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
@@ -891,11 +896,15 @@ static bool tier0_fence_valid(uint64_t value)
     return (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_FENCE_SIGNAL)) == 0 && (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
 }
 
-// Whether an ATOMIC_RMW is one: of an integer class, and of an order of C's (0 to 5) and the operation's bit, nothing else.
+// Whether an ATOMIC_RMW is one: an integer class and a C order (0 to 5), with an addition bit or a source store's
+// provenance. A source store must be an exchange of seq_cst, never an addition or a weaker order.
 static bool tier0_atomic_rmw_valid(uint32_t class, uint64_t value)
 {
-    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_RMW_ADD)) == 0 &&
-           (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
+    const bool store = (value & BUSTER_TYPED_RMW_STORE) != 0;
+    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 &&
+           (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_RMW_STORE)) == 0 &&
+           (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST &&
+           (!store || value == (BUSTER_TYPED_RMW_STORE | BUSTER_TYPED_FENCE_SEQ_CST));
 }
 
 // Whether an ATOMIC_CAS is one: of an integer class, of an order of C's (0 to 5) and of a local of U64, nothing else.
@@ -11778,9 +11787,11 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                     // An atomic read/modify/write takes its operand of its class and an address, and leaves the old value.
                     const uint32_t operand = tier0_pop(&validator, i);
                     const uint32_t address = tier0_pop(&validator, i);
-                    if (!tier0_atomic_rmw_valid(class, value) || operand != class || address != BUSTER_TYPED_CLASS_U64)
+                    const bool store = (value & BUSTER_TYPED_RMW_STORE) != 0;
+                    const bool discarded = i + 1 < function->count && function->kinds[i + 1] == BUSTER_TYPED_DISCARD && function->classes[i + 1] == class;
+                    if (!tier0_atomic_rmw_valid(class, value) || operand != class || address != BUSTER_TYPED_CLASS_U64 || (store && !discarded))
                     {
-                        tier0_reject(&validator, i, "an atomic read/modify/write's address, operand, class, operation or order");
+                        tier0_reject(&validator, i, "an atomic read/modify/write's address, operand, class, operation, order or store result");
                     }
                     tier0_push(&validator, class);
                     continue;

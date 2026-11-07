@@ -827,7 +827,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 
 | Family | Effects | Requirements | Direct form |
 | --- | --- | --- | --- |
-| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`); an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
+| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier; a store helper's exchange reads and writes | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET`, or a seq_cst store's exchange with its result discarded; an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
 | `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | an aligned integer's or enumeration's exchange, or addition or subtraction returning the old or the new value (a pointer's exchange and a test-and-set's too), of a constant order: the typed stream's `ATOMIC_RMW` (`xchg` or `lock xadd`); an implicit `_Atomic` integer's increment, decrement, `+=` or `-=` |
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
@@ -902,19 +902,36 @@ whose argument evaluates for no effect, as a direct fence's. The lowering
 (`check_lower_atomic_direct`) evaluates the pointer and, for a store, the value
 converted to the object's type, and writes the typed stream's `LOAD` or `SET` of
 that type's class with the atomic marker (`BUSTER_TYPED_ACCESS_ATOMIC` and the
-order), and after a seq_cst store the `FENCE` of seq_cst. An implicit `_Atomic`
+order). A seq_cst store instead writes an `ATOMIC_RMW` exchange of seq_cst,
+marked `BUSTER_TYPED_RMW_STORE`, immediately followed by `DISCARD` (#1396).
+An implicit `_Atomic`
 object's load and store, and an update's first load, are direct too
 (`check_lower_atomic_direct_plan`): its plan's address and buffers stay, and its
-leaf's call becomes the marked access of its bits' class, of seq_cst. Tier 0
+leaf's call becomes the marked load or exchange of its bits' class, of seq_cst.
+The exchange discards the old bits; an assignment's result still comes from
+the unchanged desired-value buffer, so it yields the converted new value and
+evaluates each operand once. Tier 0
 compiles a marked access as any other (`mov`, `movzx`; atomic when naturally
 aligned on x86-64, whose total store order gives a load's and a release store's
-orders), the store's `FENCE` its `mfence`; the IR keeps it as an atomic access
+orders); a seq_cst store uses memory `xchg`, without a separate `mfence`.
+The IR keeps the load and weaker store as atomic accesses
 ([the IR guide](ir.md)'s "Atomic accesses") that no pass splits, merges,
 eliminates or moves past another access, a call or a fence, and Tier 1 selects
-it as an ordinary access it never folds. clang's code is the same but for a
-seq_cst store, its `xchg` where this is `mov` and `mfence`, the helpers' and
-GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for the
-9700X's measurements. A dynamic or invalid order (which the helper strengthens
+them as ordinary accesses it never folds. The seq_cst store becomes an IR
+exchange with `BUSTER_IR_RMW_STORE` provenance; Tier 1 uses its existing `xchg`
+selection and certificate. Its result is undefined and must not be consumed.
+Both interpreters treat the source store as initializing its destination,
+without reading undefined old bytes; true exchanges retain their undefined-read
+checks. The typed validator requires the immediate discard, and the IR
+interpreter diagnoses a use of the undefined result. `--helper-report` still
+counts these exchanges as `atomic-access`, keeping the source families intact.
+Standalone seq_cst thread fences keep `mfence`.
+
+This follows [LLVM's documented x86 mapping](https://llvm.org/docs/Atomics.html#atomics-and-codegen).
+[#1396](https://github.com/buster14a/buster/issues/1396) records the historical
+9700X comparison motivating the change; this implementation makes no new
+timing claim. Current paired hardware measurements remain separate from its
+instruction-shape and correctness checks. A dynamic or invalid order (which the helper strengthens
 to seq_cst), a scoped family's, a floating object's and an unaligned or wider
 one keep their helper or libatomic's call. The planner reserves no leaf for an
 implicit object's access or update (its update loop's compare-exchange is
@@ -1024,7 +1041,8 @@ planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
-forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
+forms, an atomic access's marked `LOAD`, `STORE`, `SET` or source-store exchange,
+a read/modify/write's other
 `ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
 asm statement's `X86` entry in its caller, `helper`: the
 lowered code's call sites of a helper,
@@ -1057,11 +1075,13 @@ run whose threads never overlap, which leaves the fenced run's check weaker,
 not wrong; the test prints both counts. It also reads each build's
 `--helper-report` and its objects' fenced threads (one `mfence` each, the
 control's none). The same litmus runs twice more with atomic accesses: a
-seq_cst store and a seq_cst load (the direct marked `SET`, its `FENCE` and the
-marked `LOAD`), which must never show both loads reading 0, and relaxed ones, the
-second control; a seq_cst thread's object has one `mfence`, a relaxed one's
-none. On the same container, the relaxed control showed both loads reading 0 in
-50 to 18,745 of 100,000 iterations, and the seq_cst runs in none.
+seq_cst store and a seq_cst load (the direct exchange and marked `LOAD`), which
+must never show both loads reading 0, and relaxed ones, the second control.
+Each seq_cst thread's object must have one memory `xchg` and no `mfence`;
+each relaxed thread has neither. The historical run before #1396, using
+`mov` plus `mfence` for seq_cst stores, recorded both loads reading 0 in
+50 to 18,745 of 100,000 relaxed-control iterations, and in none of the
+seq_cst iterations.
 `test-checker`'s atomic-access section (`c_check_program_atomic_access_test.c`)
 lowers loads and stores of each width and order, C11's, a pointer's and an
 implicit object's by both paths, checks each function's marked entries, its
@@ -1221,8 +1241,9 @@ signed/unsigned pointer-valued stores retain Clang's pointer-sign warning.
 
 `c_builtin_atomic_helpers.c` emits original baseline SysV leaf bodies with
 explicit parameter/result classes. Naturally aligned 1/2/4/8-byte loads
-return zero-extended raw bits; width-specific stores followed by MFENCE and
-MOV loads provide conservative sequential consistency. Thread/sync fences
+return zero-extended raw bits; width-specific memory XCHG stores and MOV loads
+provide conservative sequential consistency. A store's old bits clobber only
+the caller-saved RSI and are discarded. Thread/sync fences
 use MFENCE. Signal fences require no machine instruction. A fence of a constant
 order is no helper's call at all, but the typed stream's `FENCE` ("Helper
 contracts and direct forms", above). Every helper CALL,

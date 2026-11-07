@@ -289,6 +289,9 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
         { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %1 align=2 xchg seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
         { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %0 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
+        // A source store's exchange has no desired operand and requires seq_cst (#1396).
+        { "function (ptr, i16) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=2 store release\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function (ptr, i16) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1, %1 align=2 store seq_cst\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
     };
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {
@@ -535,6 +538,36 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twi
     ir_parse_test_expect(test, zero_result.error == IR_PARSE_SYNTAX, "embedded NUL terminated the bounded source early");
 }
 
+static void ir_parse_test_atomic_store(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+{
+    static const char text[] =
+        "function (ptr, i32) -> i32 {\n"
+        "b0:\n"
+        "  %0 = param.ptr 0\n"
+        "  %1 = param.i32 1\n"
+        "  %2 = rmw.i32 %0, %1 align=4 store seq_cst\n"
+        "  %3 = load.i32 %0 align=4 atomic seq_cst\n"
+        "  %4 = ret.void %3\n"
+        "}\n";
+    const String8 source = {
+        .pointer = (char*)text,
+        .length = sizeof(text) - 1,
+    };
+    const uint64_t output_mark = output->length;
+    const uint64_t twin_mark = twin_output->length;
+    IrFunction function;
+    const IrParseResult result = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+    ir_parse_test_expect(test, result.error == IR_PARSE_OK, "a source store's exchange was rejected");
+    if (result.error == IR_PARSE_OK)
+    {
+        ir_parse_test_expect(test, function.flags[2] == (BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_STORE),
+                             "a source store's exchange lost its provenance");
+        ir_parse_test_expect(test, ir_parse_test_print(&function, source, scratch), "a source store's exchange changed canonical printer bytes");
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(twin_output, twin_mark);
+}
+
 static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
 {
     static const char canonical[] =
@@ -720,6 +753,7 @@ static int run_ir_parse_tests(int argc, char** argv)
             ir_parse_test_reachable(&test, &output, &twin_output, &scratch);
             ir_parse_test_comments(&test, &output, &twin_output, &scratch);
             ir_parse_test_locations(&test, &output, &twin_output, &scratch);
+            ir_parse_test_atomic_store(&test, &output, &twin_output, &scratch);
             ir_parse_test_normalization(&test, &output, &twin_output, &scratch);
             ir_parse_test_guards(&test, &output, &twin_output, &scratch);
             ir_parse_test_capacity(&test, &output, &scratch);

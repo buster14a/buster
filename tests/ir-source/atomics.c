@@ -3,7 +3,7 @@
 //
 // #1059's atomic loads and stores in the IR: every width and order, GNU's _n and C11's, a pointer's, and an implicit
 // _Atomic object's, each aligned and of a constant order and so taken directly (the typed stream's marked LOAD and SET,
-// and a seq_cst store's FENCE; the IR's atomic load and store, and its fence) rather than by a helper's call, which the
+// and a seq_cst store's tagged exchange; the IR's atomic load, store and rmw store) rather than by a helper's call, which the
 // IR's interpreter has no code for. Its read/modify/writes likewise: exchanges and additions returning the old value or
 // the new one, GNU's, __sync's and C11's, a test-and-set, a pointer's exchange, and an implicit _Atomic object's
 // increments, decrements and compound additions (the typed stream's ATOMIC_RMW; the IR's rmw); and compare-exchanges
@@ -23,6 +23,36 @@ static long wide;
 static short narrow;
 static int* pointer;
 static unsigned char byte;
+
+// A source seq_cst store is allowed to initialize the object. Its machine exchange's old bytes are not a C read,
+// including for an implicit assignment whose value must be the converted new value, with its operands evaluated once.
+static int initialized_stores(int value)
+{
+    unsigned char c;
+    unsigned short s;
+    unsigned int i;
+    unsigned long l;
+    int* p;
+    int pointee = value;
+    _Atomic int implicit;
+    _Atomic unsigned char tiny;
+    _Atomic int c11;
+    _Atomic int destinations[2];
+    int index = 0;
+    int rhs = 0;
+    __atomic_store_n(&c, (unsigned char)(value + 1), __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s, (unsigned short)(value + 3), __ATOMIC_SEQ_CST);
+    __atomic_store_n(&i, (unsigned int)value * 7u, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&l, (unsigned long)(unsigned int)value << 33, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&p, &pointee, __ATOMIC_SEQ_CST);
+    __c11_atomic_store(&c11, value + 5, __ATOMIC_SEQ_CST);
+    const int assigned = (implicit = value + 9);
+    const unsigned char converted = (tiny = (unsigned char)(value + 257));
+    const int once = (destinations[index++] = ++rhs);
+    unsigned long sum = c + s + (unsigned long)i + (l >> 33) + *p + c11 + implicit + tiny;
+    sum += (unsigned long)assigned + converted + once + index + rhs + destinations[0];
+    return (int)(sum & 0xffff);
+}
 
 static int published(int value)
 {
@@ -121,6 +151,7 @@ int main(void)
     total += (int)updated(total, &local);
     total += (int)exchanged(total);
     total += (int)fetched(total);
+    total += initialized_stores(total);
     printf("%d\n", total);
     return 0;
 }
