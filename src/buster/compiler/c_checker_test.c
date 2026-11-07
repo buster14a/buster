@@ -6239,6 +6239,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_embed_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
+#include "c_check_system_tokens_test.c"
 #include "c_check_input_scan_test.c"
 #include "c_check_warning_input_test.c"
 #include "c_check_selection_test.c"
@@ -6769,6 +6770,7 @@ static int run_checker_tests(int argc, char** argv)
             }
             if (check_test_takes())
             {
+                check_test_system_tokens(&test);
                 check_test_input_scans(&test);
             }
             if (check_test_takes())

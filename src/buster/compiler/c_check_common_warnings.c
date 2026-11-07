@@ -898,8 +898,10 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
         bool integer = left < graph->count && right < graph->count &&
                        check_common_integer(types, check_stream_type(stream, left), &left_width, &left_signed) &&
                        check_common_integer(types, check_stream_type(stream, right), &right_width, &right_signed);
-        // Integer promotions apply before the comparison: signed char and unsigned char both promote to
-        // int, so the sign comparison sees the promoted operand, not the narrow type spelled at the source.
+        // Keep the source operands' unsignedness before promotion: a narrow unsigned value still cannot
+        // be negative after it becomes int (#1391). Explicit casts retain their own result type here.
+        const bool unsigned_operands = integer && !left_signed && !right_signed;
+        // Promotions still determine which signed values the common comparison type can represent.
         if (left_width != 0 && left_width < 32)
         {
             left_width = 32;
@@ -948,7 +950,7 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
                                   signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR;
         }
-        if (integer && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
+        if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left), 0);
