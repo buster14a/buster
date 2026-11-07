@@ -839,8 +839,10 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
                 if (selected == TIER1_SELECT_OK)
                 {
+                    Tier1EmitDiagnostic diagnostic = { 0 };
                     const Tier1EmitOptions options = {
                         .certify = true,
+                        .diagnostic = &diagnostic,
                         .register_mask = tier1_liveness_register_mask(),
                         .frame_flags = flags == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                         .vector = vector != 0,
@@ -849,6 +851,11 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                     Tier1EmitResult emitted;
                     const uint64_t scratch_mark = test->scratch.length;
                     const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+                    if (error != TIER1_EMIT_OK && test->failures < 20)
+                    {
+                        fprintf(stderr, "tier1-emit: object emission (shape=%u, vector=%u, frame_flags=0x%x, error=%u, error_node=%u, cause=%u, cause_error=%u)\n",
+                                shape, vector, options.frame_flags, (unsigned)error, node, (unsigned)diagnostic.cause, diagnostic.error);
+                    }
                     tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "object pipeline emits through the CFG consumer");
                     if (error == TIER1_EMIT_OK)
                     {

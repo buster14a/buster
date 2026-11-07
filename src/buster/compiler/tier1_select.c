@@ -3684,6 +3684,78 @@ static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t ro
     return result;
 }
 
+static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first);
+
+// Fold a comparison's single-use load at the final consumer, including a fused branch or extended truth result. A
+// promoted byte/word/dword can be compared at its memory width only against a constant that the same extension
+// represents exactly. In particular, signed comparisons of a zero-extended load become unsigned narrow comparisons.
+// No truncation, shared extension, observable access or intervening memory operation can be hidden by this pattern.
+// The grammar prices direct load folds explicitly. Promotion removal is a legality-dependent refinement: its
+// grammar cost conservatively retains the extension/load even though this candidate emits neither separately.
+static inline __attribute__((always_inline)) void tier1_select_add_comparison(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
+{
+    static const uint8_t swapped[IR_PREDICATE_COUNT] =
+    {
+        IR_EQ,
+        IR_NE,
+        IR_GT,
+        IR_GE,
+        IR_LT,
+        IR_LE,
+        IR_UGT,
+        IR_UGE,
+        IR_ULT,
+        IR_ULE,
+    };
+    const IrFunction* function = forest->function;
+    const uint32_t left = pattern.values[0];
+    const uint32_t right = pattern.values[1];
+    const bool immediate = pattern.compare_immediate;
+    const bool right_load = !immediate && tier1_select_load_folds(forest, node, right);
+    uint32_t load = right_load ? right : left;
+    uint32_t extension = BUSTER_IR_NONE;
+    bool zero_extended = false;
+    bool representable = true;
+    uint64_t bits = pattern.immediate;
+    if (immediate && (function->op[load] == IR_ZEXT || function->op[load] == IR_SEXT))
+    {
+        extension = load;
+        load = function->a[extension];
+        zero_extended = function->op[extension] == IR_ZEXT;
+        const uint32_t source_width = tier1_select_memory_width(function->type[load]);
+        representable = source_width != 0 && source_width < pattern.width && tier1_select_tree_child(forest, node, extension);
+        if (representable)
+        {
+            const uint64_t sign = UINT64_C(1) << (source_width * 8 - 1);
+            const uint64_t mask = (sign << 1) - 1;
+            const uint64_t result_mask = pattern.width == 8 ? UINT64_MAX : UINT32_MAX;
+            bits &= mask;
+            const uint64_t extended = zero_extended ? bits : (bits ^ sign) - sign;
+            representable = (extended & result_mask) == (pattern.immediate & result_mask);
+        }
+    }
+    const uint32_t memory_width = tier1_select_memory_width(function->type[load]);
+    if (representable && memory_width != 0 && (extension != BUSTER_IR_NONE || memory_width == pattern.width) && tier1_select_load_folds(forest, node, load))
+    {
+        pattern.compare_memory = true;
+        pattern.width = (uint8_t)memory_width;
+        pattern.values[0] = immediate ? BUSTER_IR_NONE : right_load ? left : right;
+        pattern.immediate = bits;
+        pattern.condition = !immediate && !right_load ? swapped[pattern.condition] : pattern.condition;
+        if (zero_extended && pattern.condition >= IR_LT && pattern.condition <= IR_GE)
+        {
+            pattern.condition += IR_ULT - IR_LT;
+        }
+        tier1_select_fold(forest, node, load, &pattern);
+        if (extension != BUSTER_IR_NONE)
+        {
+            tier1_select_fold(forest, node, extension, &pattern);
+        }
+        tier1_select_memory(forest, node, function->a[load], &pattern, 1);
+    }
+    tier1_select_add_candidate(forest, node, candidates, pattern);
+}
+
 // The comparison `tested`, an FCMP of F32 or F64 values by <, <=, > or >= that only `root`'s pattern uses, as the
 // pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
 // condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
@@ -3871,76 +3943,6 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     pattern->displacement = (int32_t)address.displacement;
     pattern->fold_count += address.folds;
     return address.folds != 0;
-}
-
-// Fold a comparison's single-use load at the final consumer, including a fused branch or extended truth result. A
-// promoted byte/word/dword can be compared at its memory width only against a constant that the same extension
-// represents exactly. In particular, signed comparisons of a zero-extended load become unsigned narrow comparisons.
-// No truncation, shared extension, observable access or intervening memory operation can be hidden by this pattern.
-// The grammar prices direct load folds explicitly. Promotion removal is a legality-dependent refinement: its
-// grammar cost conservatively retains the extension/load even though this candidate emits neither separately.
-static inline __attribute__((always_inline)) void tier1_select_add_comparison(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
-{
-    static const uint8_t swapped[IR_PREDICATE_COUNT] =
-    {
-        IR_EQ,
-        IR_NE,
-        IR_GT,
-        IR_GE,
-        IR_LT,
-        IR_LE,
-        IR_UGT,
-        IR_UGE,
-        IR_ULT,
-        IR_ULE,
-    };
-    const IrFunction* function = forest->function;
-    const uint32_t left = pattern.values[0];
-    const uint32_t right = pattern.values[1];
-    const bool immediate = pattern.compare_immediate;
-    const bool right_load = !immediate && tier1_select_load_folds(forest, node, right);
-    uint32_t load = right_load ? right : left;
-    uint32_t extension = BUSTER_IR_NONE;
-    bool zero_extended = false;
-    bool representable = true;
-    uint64_t bits = pattern.immediate;
-    if (immediate && (function->op[load] == IR_ZEXT || function->op[load] == IR_SEXT))
-    {
-        extension = load;
-        load = function->a[extension];
-        zero_extended = function->op[extension] == IR_ZEXT;
-        const uint32_t source_width = tier1_select_memory_width(function->type[load]);
-        representable = source_width != 0 && source_width < pattern.width && tier1_select_tree_child(forest, node, extension);
-        if (representable)
-        {
-            const uint64_t sign = UINT64_C(1) << (source_width * 8 - 1);
-            const uint64_t mask = (sign << 1) - 1;
-            const uint64_t result_mask = pattern.width == 8 ? UINT64_MAX : UINT32_MAX;
-            bits &= mask;
-            const uint64_t extended = zero_extended ? bits : (bits ^ sign) - sign;
-            representable = (extended & result_mask) == (pattern.immediate & result_mask);
-        }
-    }
-    const uint32_t memory_width = tier1_select_memory_width(function->type[load]);
-    if (representable && memory_width != 0 && (extension != BUSTER_IR_NONE || memory_width == pattern.width) && tier1_select_load_folds(forest, node, load))
-    {
-        pattern.compare_memory = true;
-        pattern.width = (uint8_t)memory_width;
-        pattern.values[0] = immediate ? BUSTER_IR_NONE : right_load ? left : right;
-        pattern.immediate = bits;
-        pattern.condition = !immediate && !right_load ? swapped[pattern.condition] : pattern.condition;
-        if (zero_extended && pattern.condition >= IR_LT && pattern.condition <= IR_GE)
-        {
-            pattern.condition += IR_ULT - IR_LT;
-        }
-        tier1_select_fold(forest, node, load, &pattern);
-        if (extension != BUSTER_IR_NONE)
-        {
-            tier1_select_fold(forest, node, extension, &pattern);
-        }
-        tier1_select_memory(forest, node, function->a[load], &pattern, 1);
-    }
-    tier1_select_add_candidate(forest, node, candidates, pattern);
 }
 
 // Inlined at each of its two calls, the scalar path's batch (tier1_select_cover_munch) and the bottom-up path's pattern

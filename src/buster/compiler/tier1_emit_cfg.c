@@ -3505,11 +3505,15 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 }
                 else
                 {
-                    // The comparison's records, the selector's (its last two are the conditional jump and the jump),
-                    // with its immediate's request.
-                    const Tier1SelectRecords selected_records = tier1_select_expand(&holes);
+                    // The comparison's records, with any frame object's address resolved as in every other kernel.
+                    // Its last two records are the conditional jump and the jump; it has no symbolic reference.
+                    Tier1SelectRecords selected_records = { 0 };
+                    LinkReference reference = { 0 };
+                    bool referenced = false;
+                    error = tier1_emit_cfg_kernel(plan, emitted, &holes, node, &selected_records, &reference, &referenced);
                     const uint32_t compares = selected_records.count >= 2 ? selected_records.count - 2u : 0;
-                    error = !selected_records.overflowed && selected_records.count >= 2 && (!selected_records.requested || selected_records.request < compares) ? error : TIER1_EMIT_INVALID;
+                    error = error != TIER1_EMIT_OK || (!referenced && !selected_records.overflowed && selected_records.count >= 2 &&
+                                                     (!selected_records.requested || selected_records.request < compares)) ? error : TIER1_EMIT_INVALID;
                     const uint32_t compare_first = buffer.count;
                     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < compares; r += 1)
                     {
