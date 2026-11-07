@@ -1569,7 +1569,7 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
 }
 
 // The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify_path
-// and ir_uses_validated) stay out of line and start lines of their own, so that where the code before them ends doesn't
+// and ir_uses_path) stay out of line and start lines of their own, so that where the code before them ends doesn't
 // move their loops within lines, which changed their times between builds of the same code (#786).
 static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunction* f, bool vector)
 {
@@ -2256,10 +2256,142 @@ static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDom
     return ir_verify_path(f, scratch, dominance, false);
 }
 
-// The use lists of a verified function, which ir_build_uses verifies first; a caller that has just verified it, as the
-// optimizer has, builds them without verifying it again (#786). Arena and scratch are disjoint.
-static __attribute__((noinline, aligned(64))) IrError ir_uses_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+// #1634: the vector twin's interleave of 16 instructions' fixed operands, in the order ir_operand gives them: element k
+// of the 48 is column k % 3 (a, b, c) of lane k / 3. Each of the three vectors takes its a and b elements with one
+// two-source permute (b's lanes from 16), then its c elements, the slots ir_uses_c_slots marks, with a second.
+static const uint32_t ir_uses_ab_lanes[48] = {
+    0, 16, 0, 1, 17, 0, 2, 18, 0, 3, 19, 0, 4, 20, 0, 5,
+    21, 0, 6, 22, 0, 7, 23, 0, 8, 24, 0, 9, 25, 0, 10, 26,
+    0, 11, 27, 0, 12, 28, 0, 13, 29, 0, 14, 30, 0, 15, 31, 0,
+};
+static const uint32_t ir_uses_c_lanes[48] = {
+    0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0, 4, 0,
+    0, 5, 0, 0, 6, 0, 0, 7, 0, 0, 8, 0, 0, 9, 0, 0,
+    10, 0, 0, 11, 0, 0, 12, 0, 0, 13, 0, 0, 14, 0, 0, 15,
+};
+static const __mmask16 ir_uses_c_slots[3] = { 0x4924, 0x2492, 0x9249 };
+// Element k's lane << 2 | position, compressed beside the values so a use knows its instruction and operand.
+static const uint32_t ir_uses_codes[48] = {
+    0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20,
+    21, 22, 24, 25, 26, 28, 29, 30, 32, 33, 34, 36, 37, 38, 40, 41,
+    42, 44, 45, 46, 48, 49, 50, 52, 53, 54, 56, 57, 58, 60, 61, 62,
+};
+// Bit 3 * lane of the 48, where pdep deposits a 16-lane mask's bit for that lane's operand a; b's are one bit higher.
+#define BUSTER_IR_USES_LANE_BITS UINT64_C(0x249249249249)
+
+// One batch of up to 16 instructions from first, for either pass of the vector twin: with uses zero, counts each
+// operand's value in `counts` (offsets + 1); otherwise places each use at its value's cursor in `counts`. The fixed
+// operands come from the opcode tables by byte permute and compress into a stream already in ir_operand's order; a
+// phi's inputs or a call's arguments follow its own fixed operands, so the stream is cut at each such instruction.
+// Returns the batch's operand count.
+static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t count, uint32_t* counts, IrUse* uses)
 {
+    const __mmask16 active = (__mmask16)((1u << count) - 1u);
+    const __m128i op_bytes = _mm_maskz_loadu_epi8(active, f->op + first);
+    const __m512i op = _mm512_cvtepu8_epi32(op_bytes);
+    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op_bytes);
+    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op_bytes);
+    const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
+    const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
+    const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i two = _mm512_set1_epi32(2);
+    const __m512i four = _mm512_set1_epi32(4);
+    // ir_value_mask: an opcode's operands, and its optional ones where they aren't BUSTER_IR_NONE.
+    const __mmask16 use_a = active & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
+    const __mmask16 use_b = active & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
+    const __mmask16 use_c = active & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(c, none)));
+    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)));
+    __m512i values[3];
+    __m512i codes[3];
+    for (uint32_t part = 0; part < 3; part += 1)
+    {
+        const __m512i ab = _mm512_permutex2var_epi32(a, _mm512_loadu_si512(ir_uses_ab_lanes + part * 16), b);
+        values[part] = _mm512_mask_permutexvar_epi32(ab, ir_uses_c_slots[part], _mm512_loadu_si512(ir_uses_c_lanes + part * 16), c);
+        codes[part] = _mm512_loadu_si512(ir_uses_codes + part * 16);
+    }
+    const uint64_t present = _pdep_u64(use_a, BUSTER_IR_USES_LANE_BITS) | _pdep_u64(use_b, BUSTER_IR_USES_LANE_BITS << 1) | _pdep_u64(use_c, BUSTER_IR_USES_LANE_BITS << 2);
+    uint64_t total = 0;
+    uint32_t lane = 0;
+    bool more = true;
+    while (more)
+    {
+        // The fixed operands of lanes lane..last, where last is the next phi or call, or the batch's last lane.
+        const uint32_t last = variadic != 0 ? (uint32_t)__builtin_ctz(variadic) : count - 1;
+        const uint64_t segment = ((UINT64_C(1) << (3 * (last + 1))) - 1) & ~((UINT64_C(1) << (3 * lane)) - 1);
+        const uint64_t taken = present & segment;
+        uint32_t stream_values[64];
+        uint32_t stream_codes[64];
+        uint32_t streamed = 0;
+        for (uint32_t part = 0; part < 3; part += 1)
+        {
+            const __mmask16 keep = (__mmask16)(taken >> (part * 16));
+            _mm512_storeu_si512(stream_values + streamed, _mm512_maskz_compress_epi32(keep, values[part]));
+            _mm512_storeu_si512(stream_codes + streamed, _mm512_maskz_compress_epi32(keep, codes[part]));
+            streamed += (uint32_t)__builtin_popcount(keep);
+        }
+        if (uses == 0)
+        {
+            for (uint32_t k = 0; k < streamed; k += 1)
+            {
+                counts[stream_values[k]] += 1;
+            }
+        }
+        else
+        {
+            for (uint32_t k = 0; k < streamed; k += 1)
+            {
+                const uint32_t slot = counts[stream_values[k]];
+                counts[stream_values[k]] = slot + 1;
+                uses[slot] = (IrUse){
+                    .instruction = first + (stream_codes[k] >> 2),
+                    .operand = stream_codes[k] & 3,
+                };
+            }
+        }
+        total += streamed;
+        if (variadic != 0)
+        {
+            const uint32_t i = first + last;
+            const bool phi = f->op[i] == IR_PHI;
+            const uint32_t amount = phi ? f->b[i] : f->calls[f->b[i]].argument_count;
+            const uint32_t* const extra = phi ? f->extra + f->a[i] + 1 : f->extra + f->calls[f->b[i]].argument_first;
+            const uint32_t stride = phi ? 2 : 1;
+            for (uint32_t p = 0; p < amount; p += 1)
+            {
+                const uint32_t value = extra[(uint64_t)p * stride];
+                if (uses == 0)
+                {
+                    counts[value] += 1;
+                }
+                else
+                {
+                    const uint32_t slot = counts[value];
+                    counts[value] = slot + 1;
+                    uses[slot] = (IrUse){
+                        .instruction = i,
+                        .operand = 3 + p,
+                    };
+                }
+            }
+            total += amount;
+            variadic &= variadic - 1;
+        }
+        lane = last + 1;
+        more = lane < count;
+    }
+    return total;
+}
+
+// The use lists of a verified function, which ir_build_uses verifies first; a caller that has just verified it, as the
+// optimizer has, builds them without verifying it again (#786). Arena and scratch are disjoint. The scalar twin decodes
+// each operand with ir_operand; the vector twin (#1634) decodes 16 instructions at once in ir_uses_batch. Both count
+// each value's uses, sum the counts into offsets, then place every use in instruction order, then operand order.
+static __attribute__((noinline, aligned(64))) IrError ir_uses_path(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result, bool vector)
+{
+    (void)vector;
+
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
@@ -2278,7 +2410,17 @@ static __attribute__((noinline, aligned(64))) IrError ir_uses_validated(const Ir
         }
     }
     uint64_t total = 0;
-    for (uint32_t i = 0; check.error == IR_OK && i < f->instruction_count; i += 1)
+    if (check.error == IR_OK && BUSTER_VECTOR_PATH(vector))
+    {
+        // A count can't wrap before the total passes UINT32_MAX, which refuses the function as the scalar twin does.
+        for (uint32_t first = 0; first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
+        {
+            const uint32_t count = f->instruction_count - first < BUSTER_IR_VECTOR_COUNT ? f->instruction_count - first : BUSTER_IR_VECTOR_COUNT;
+            total += ir_uses_batch(f, first, count, uses.offsets + 1, 0);
+        }
+        check.error = total > UINT32_MAX ? IR_ERROR_LIMIT : IR_OK;
+    }
+    for (uint32_t i = 0; check.error == IR_OK && !BUSTER_VECTOR_PATH(vector) && i < f->instruction_count; i += 1)
     {
         const uint64_t count = ir_operand_count(f, i);
         total += count;
@@ -2311,7 +2453,12 @@ static __attribute__((noinline, aligned(64))) IrError ir_uses_validated(const Ir
             uses.offsets[value + 1] += uses.offsets[value];
             cursor[value] = uses.offsets[value];
         }
-        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        for (uint32_t first = 0; BUSTER_VECTOR_PATH(vector) && first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
+        {
+            const uint32_t count = f->instruction_count - first < BUSTER_IR_VECTOR_COUNT ? f->instruction_count - first : BUSTER_IR_VECTOR_COUNT;
+            ir_uses_batch(f, first, count, cursor, uses.uses);
+        }
+        for (uint32_t i = 0; !BUSTER_VECTOR_PATH(vector) && i < f->instruction_count; i += 1)
         {
             const uint64_t count = ir_operand_count(f, i);
             for (uint32_t p = 0; p < count; p += 1)
@@ -2333,6 +2480,16 @@ static __attribute__((noinline, aligned(64))) IrError ir_uses_validated(const Ir
     }
     arena_pop_to(scratch, temporary);
     return check.error;
+}
+
+static __attribute__((unused)) IrError ir_uses_validated_scalar(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+{
+    return ir_uses_path(f, arena, scratch, result, false);
+}
+
+static IrError ir_uses_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+{
+    return ir_uses_path(f, arena, scratch, result, true);
 }
 
 static IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)

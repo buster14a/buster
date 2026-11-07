@@ -1329,7 +1329,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
     }
     if (check.error == IR_OK)
     {
-        check.error = ir_uses_validated(function, scratch, output, &work->uses);
+        check.error = BUSTER_SCALAR_PATH(verify_scalar) ? ir_uses_validated_scalar(function, scratch, output, &work->uses) : ir_uses_validated(function, scratch, output, &work->uses);
     }
     if (check.error == IR_OK)
     {
