@@ -653,6 +653,18 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 9,
     },
     {
+        // A nullptr_t operand is a null pointer constant too (#1447, C23): `nullptr` and a nullptr_t variable through casts,
+        // not a volatile target.
+        .name = "null pointer dereferences of nullptr",
+        .source = "typedef typeof(nullptr) np;\nint g(np n) {\n"
+                  "  int a = *(int *)n; int b = *(int *)(nullptr); int c = *(volatile int *)nullptr; int d = *(int *)(void *)nullptr;\n"
+                  "  *(int *)nullptr = 1;\n"
+                  "  return a + b + c + d;\n}\n",
+        .c23 = true,
+        .warnings = 4,
+        .notes = 4,
+    },
+    {
         // Unreachable initializers (#1447): after a return, in a constant false branch and in a `while (0)`'s body,
         // clang's runtime behavior's warnings (array bounds, division by zero, null dereference) stay silent.
         .name = "runtime warnings skip unreachable initializers",
@@ -678,6 +690,19 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "int h(int n) {\n  while (n || 1) { if (n) return 2; }\n}\n"
                   "int k(int n) {\n  if (n && 1) return 1;\n}\n",
         .warnings = 2,
+    },
+    {
+        // The same conditions prune a conditional's arm and a logical operator's right operand (#1447, clang's CFG builder
+        // in VisitConditionalOperator and VisitLogicalOperator): `n && 1` and `n || 0` decide nothing.
+        .name = "short-circuit operands one operand decides",
+        .source = "int a[2];\nint f(int n) {\n"
+                  "  int r = (n && 0) ? n / 0 : (n || 1) ? 1 : *(int *)0;\n"
+                  "  r += ((n && 0) && n % 0) + ((n || 1) || a[5]) + (!(n || 1) ? a[5] : 0) + ((long)(n && 0) ? *(int *)0 : 1);\n"
+                  "  r += (n && 1) ? n / 0 : 0;\n"
+                  "  r += (n || 0) || *(int *)0;\n"
+                  "  return r;\n}\n",
+        .warnings = 2,
+        .notes = 1,
     },
     {
         // Clang decides by the context its parser is in (#147): an unselected _Generic association or choose_expr operand in

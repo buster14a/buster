@@ -7210,8 +7210,10 @@ arguments against the function. The checker now gives these as clang does.
   will be deleted, not trap" with its note "consider using __builtin_trap() or
   qualifying pointer with 'volatile'", both at the `*`, of a `*` whose operand
   is a null pointer constant through casts (an integer constant 0 once the
-  casts are passed: `*(int *)0`, `*(char *)(void *)0L`, `*(int *)(1 - 1)`), of
-  a type neither volatile nor an array's or a function's
+  casts are passed: `*(int *)0`, `*(char *)(void *)0L`, `*(int *)(1 - 1)`; or,
+  in C23, any expression of type `nullptr_t` once the casts and conversions are
+  passed: `*(int *)nullptr` and a `nullptr_t` variable's), of a type neither
+  volatile nor an array's or a function's
   (`check_common_null_dereference`), where an lvalue conversion or an
   assignment (a compound one's too) reads it: not under `&`, `.` or an
   increment, nor through a pointer variable, `->` or a subscript. As clang's
@@ -7226,7 +7228,11 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_branch_truth`, clang's `tryEvaluateBool`) also counts a
   logical operator that one operand decides though the other isn't known:
   `x && 0` and `x || 1`, through `!`, casts and conversions. That covers
-  `if (n && 0)`'s body, `if (n || 1)`'s else and `while (n && 0)`'s body.
+  `if (n && 0)`'s body, `if (n || 1)`'s else and `while (n && 0)`'s body, and,
+  as clang's `VisitConditionalOperator` and `VisitLogicalOperator` prune them,
+  `(n && 0) ? A : B`'s `A`, `(n || 1) ? A : B`'s `B` and `(n && 0) && A`'s `A`
+  (`check_common_operand_mask` takes the same truth where the condition's value
+  isn't constant).
   `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
   a function without the warning.
 - **A const variable's assignment.** "cannot assign to variable 'x' with

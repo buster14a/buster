@@ -968,9 +968,10 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
 static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node);
 
 // A dereference clang warns its optimizer deletes (#1447, -Wnull-dereference, clang's CheckForNullPointerDereference):
-// `*` of a null pointer constant through casts (its operand an integer constant 0 once the casts are passed, as
-// IgnoreParenCasts and isNullPointerConstant find it), of a type that is neither volatile nor an array's or a
-// function's, whose value an lvalue conversion would read. Whether its value is read is check_common_div_own's.
+// `*` of a null pointer constant through casts (its operand an integer constant 0 once the casts are passed, or any
+// expression of type nullptr_t once the conversions are passed too, as IgnoreParenCasts and isNullPointerConstant find
+// it), of a type that is neither volatile nor an array's or a function's, whose value an lvalue conversion would read.
+// Whether its value is read is check_common_div_own's.
 static bool check_common_null_dereference(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
 {
     bool result = false;
@@ -981,8 +982,17 @@ static bool check_common_null_dereference(const CheckGraph* graph, const CheckSt
         {
             operand = graph->operand0[operand];
         }
+        uint32_t inner = operand;
+        for (uint32_t steps = 0; inner < graph->count && (graph->ops[inner] == CHECK_OP_CAST || graph->ops[inner] == CHECK_OP_CONVERT) && steps < graph->count;
+             steps += 1)
+        {
+            inner = graph->operand0[inner];
+        }
+        const TypeId inner_type = inner < graph->count ? check_stream_type(stream, inner) : 0;
+        const TypeId inner_bare = inner_type != 0 ? type_unqualified(type_strip_aligned(types, inner_type)) : 0;
         // (Every dereference asks, as the reach is made: the constant first, which nearly none has.)
-        if (check_common_integer_constant(stream, operand) && check_stream_value(stream, operand).integer == 0)
+        if ((check_common_integer_constant(stream, operand) && check_stream_value(stream, operand).integer == 0) ||
+            (inner_bare != 0 && type_kind(types, inner_bare) == BUSTER_TYPE_KIND_NULLPTR))
         {
             const TypeId type = check_stream_type(stream, node);
             const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
@@ -4768,8 +4778,12 @@ static bool check_common_discards(const CheckGraph* graph, const CheckStream* st
 
 // The operands and arguments of `node` that its evaluation evaluates, as check_common_evaluated's reverse pass reads them:
 // an operand's or argument's bit `i`, any at 32 and past. A sizeof's or alignof's operand isn't, but a variably modified
-// type's bound; nor is a constant condition's unselected arm.
-static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+// type's bound; nor is a constant condition's unselected arm, nor the arm of a condition one operand of a logical
+// operator decides though the other isn't known (`x && 0`, `x || 1`, through `!` and casts), which clang's CFG builder
+// leaves unreachable for the runtime warnings (#1447, tryEvaluateBool in VisitConditionalOperator and
+// VisitLogicalOperator: check_program_branch_truth, with the unit's program).
+static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckProgram* program,
+                                          uint32_t node)
 {
     const CheckOp op = graph->ops[node];
     uint32_t mask = UINT32_MAX;
@@ -4788,7 +4802,12 @@ static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckSt
         const uint32_t condition = graph->operand0[node];
         const CheckValue condition_value = condition < graph->count ? check_stream_value(stream, condition) : (CheckValue){ 0 };
         bool truth = false;
-        if (condition < graph->count && check_action_truth(types, &condition_value, &truth))
+        bool known = condition < graph->count && check_action_truth(types, &condition_value, &truth);
+        if (!known && program != NULL && condition < graph->count)
+        {
+            known = check_program_branch_truth(program, node, condition, &truth);
+        }
+        if (known)
         {
             mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3u : 5u) :
                    ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1u : 3u;
@@ -4828,7 +4847,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
                 continue;
             }
             const CheckOp op = graph->ops[node];
-            const uint32_t mask = check_common_operand_mask(graph, stream, types, node);
+            const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
@@ -5105,7 +5124,7 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
             }
             else
             {
-                const uint32_t mask = check_common_operand_mask(graph, stream, types, node);
+                const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
                 const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
                 {
