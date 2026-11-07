@@ -1086,7 +1086,7 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
         const uint32_t argument = graph->argument_nodes[index];
         const CheckConversion conversion = stream->argument_conversions[index];
         const bool arms = check_common_conversion_arms(graph, argument);
-        if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+        if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
             (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 && check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) &&
             (check_common_emit_evaluated(emission, argument) || ((emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || arms))))
@@ -1536,8 +1536,10 @@ static void check_common_emit_run(CheckCommonEmission* emission)
         switch (kind)
         {
             case BUSTER_CHECK_EMIT_CONVERSIONS:
+                // (Not in an unevaluated query's operand, whose conversions clang's DiagRuntimeBehavior drops.)
                 if (node >= graph->count || (emission->emitted[node] & BUSTER_CHECK_EMITTED_CONVERSIONS) != 0 ||
-                    (!check_common_emit_evaluated(emission, node) && (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) == 0))
+                    (!check_common_emit_evaluated(emission, node) && (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) == 0) ||
+                    check_common_query_suppressed(graph, node))
                 {
                     break;
                 }
@@ -2771,7 +2773,8 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
         {
             // Range initializers have one conversion per selected element, even when every write uses
             // the same source node. The graph's expression is traversed once; its conversions remain distinct.
-            if (check_common_initializer_literal(parser, input, stream, emission->types, part))
+            // (Not a compound literal's in an unevaluated query's operand: check_common_query_suppressed.)
+            if (!check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
             {
                 const CheckValue value = check_stream_value(stream, root);
                 check_common_conversion_warning_at(parser, pp, input, stream, emission->types, emission->spell, root, &value, part->conversion.type,
@@ -5078,8 +5081,10 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     {
         for (uint32_t node = 0; node < graph->count; node += 1)
         {
-            // Exclude dropped ranges and detached unevaluated query roots before propagating evaluation.
-            evaluated[node] = parents[node] == BUSTER_CHECK_NONE && !check_common_query_suppressed(graph, node) &&
+            // Exclude dropped ranges before propagating evaluation. A detached root in an unevaluated query (a VLA bound in
+            // sizeof's pointer type) stays one, as clang's comma and unused-value warnings reach it; the conversion walk
+            // leaves its nodes out itself (check_common_query_suppressed).
+            evaluated[node] = parents[node] == BUSTER_CHECK_NONE &&
                               (program == NULL || program->dropped_range_count == 0 || !check_program_token_dropped(program, graph->tokens[node]));
         }
         // An unreachable initializer's roots, which no parent makes evaluated (check_common_unreachable); NULL in a unit
