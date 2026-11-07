@@ -807,7 +807,7 @@ static bool check_literal_table_record(TypeTable* types, TypeId record, uint32_t
         const TypeId member = types->members.type[begin + m];
         uint32_t width = 0;
         bool is_signed = false;
-        valid = types->members.bit_width[begin + m] == BUSTER_TYPE_NOT_BIT_FIELD && type_is_valid(types, member) &&
+        valid = (types->members.flags[begin + m] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 && type_is_valid(types, member) &&
                 (type_qualifiers(member) & BUSTER_TYPE_VOLATILE) == 0 && type_kind(types, member) == BUSTER_TYPE_KIND_INTEGER &&
                 type_unqualified(member) != BUSTER_TYPE_BOOL && check_action_integer_type(types, member, &width, &is_signed) &&
                 (width == 8 || width == 16 || width == 32 || width == 64);
