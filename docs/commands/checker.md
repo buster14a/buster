@@ -134,6 +134,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   and GNU range initialization, including preservation and removal of marks.
   Each body has at most one warned dereference because Clang's delayed warning
   order for multiple accesses is unstable across invocations.
+  Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
+  The existing postorder conditional/comma facts carry that discard intent through nested arms, while inner
+  comma and division diagnostics still run. `c_check_void_conditional_driver_test.c` covers those boundaries,
+  scalar-result controls, for clauses, macros and source policy through default, scalar and deferred readers.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and

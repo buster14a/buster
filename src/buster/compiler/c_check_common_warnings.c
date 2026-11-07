@@ -651,8 +651,8 @@ typedef struct CheckCommonEmission
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
-    // Whether a discarded conditional's arms carry an effect, held at the conditionals and the commas alone: CONDITIONAL
-    // answers its arms', COMMA its result operand's, and every other node is its own effect (check_common_arm_of).
+    // Whether a discarded arm is quiet: an effect or explicit void cast along its value path. CONDITIONAL answers
+    // its arms', COMMA its result operand's; other nodes are checked directly (check_common_arm_of).
     // Children precede parents in the graph, so one ascending pass fills it and every query stays iterative.
     const uint8_t* arm_effects;
     // What each node's subtree holds for the walks (BUSTER_CHECK_REACH_*), so that a walk enters only the subtrees where
@@ -772,30 +772,34 @@ static bool check_common_literal_zero(const Parser* parser, const CheckStream* s
     return result;
 }
 
-// Whether a conditional's arm carries an effect along its own value path and so keeps the statement quiet:
-// `x ? f() : y` and `x ? (y, x = 1) : z` do not report, while `x ? (x = 1, y) : z` still does because the
-// comma's value is the quiet `y`.
-static bool check_common_arm_of(const CheckGraph* graph, const uint8_t* arm_effects, uint32_t node)
+// Whether an arm's value path accepts discard: an effect or an explicit cast to void. Conditional and comma
+// results use their postorder facts, so nested void casts stay quiet while inner diagnostics still run.
+// An implicit conversion is not an explicit discard, and a side effect off the comma's result path is not enough.
+static bool check_common_arm_of(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
+                                 const uint8_t* arm_effects, uint32_t node)
 {
     const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
-    const bool result = node < graph->count &&
-                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ? arm_effects[node] != 0 : check_common_node_effect(graph, node));
+    const bool void_cast = op == CHECK_OP_CAST &&
+                           type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
+    const bool result = node < graph->count && (void_cast ||
+                        (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ? arm_effects[node] != 0 : check_common_node_effect(graph, node)));
     return result;
 }
 
 static bool check_common_arm_at(const CheckCommonEmission* emission, uint32_t node)
 {
-    return check_common_arm_of(&emission->input->graph, emission->arm_effects, node);
+    return check_common_arm_of(&emission->input->graph, emission->stream, emission->types, emission->arm_effects, node);
 }
 
-// One conditional's or comma's arm-effect column entry, in graph order so every operand's already holds.
-static bool check_common_arm_effect(const CheckGraph* graph, const uint8_t* arm_effects, uint32_t node)
+// One conditional's or comma's arm-quietness column entry, after every operand's entry.
+static bool check_common_arm_effect(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
+                                     const uint8_t* arm_effects, uint32_t node)
 {
     const CheckOp op = graph->ops[node];
     const uint32_t first = graph->operand1[node];
     const uint32_t second = graph->operand2[node];
-    const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, arm_effects, first) || check_common_arm_of(graph, arm_effects, second) :
-                        op == CHECK_OP_COMMA ? check_common_arm_of(graph, arm_effects, first) : check_common_node_effect(graph, node);
+    const bool result = op == CHECK_OP_CONDITIONAL ? check_common_arm_of(graph, stream, types, arm_effects, first) || check_common_arm_of(graph, stream, types, arm_effects, second) :
+                        op == CHECK_OP_COMMA ? check_common_arm_of(graph, stream, types, arm_effects, first) : check_common_node_effect(graph, node);
     return result;
 }
 
@@ -4486,7 +4490,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
             reach[node] = bits;
             if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA)
             {
-                arm_effects[node] = check_common_arm_effect(graph, arm_effects, node);
+                arm_effects[node] = check_common_arm_effect(graph, stream, types, arm_effects, node);
             }
         }
         evaluated = check_common_evaluated(graph, stream, types, parser, program, parents, scratch);
