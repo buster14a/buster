@@ -402,3 +402,34 @@ zeroed configuration on failure. The existing instrumentation tests retain
 coverage cancellation and non-emitting predefines. This is the `-f`/`-m`
 semantic boundary, not a claim to audit every `-g`, `-O`, `-W` or linker option.
 
+
+## Bit-precise format arguments (#1392)
+
+`_BitInt(N)` is a distinct integer type even when its width equals an ordinary
+`char`, `short` or `int`. Variadic argument promotions do not turn it into
+those types. The printf integer-class and dynamic width/precision checks
+therefore reject bit-precise arguments for ordinary conversions, including
+`%n`'s pointed-to class, string pointees and C23 `wN` modifiers. Explicit casts and arithmetic
+that produce the required ordinary type remain valid. A fixed parameter of
+an attributed nonvariadic function has already converted its argument: for a
+bit-precise source or target (including a pointer/array of bit-precise elements),
+format checking and its type spelling use that recorded assignment conversion
+rather than the source type.
+
+The behavior was checked in the pinned Clang 23.1.4 source, revision
+[7a941dfb](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/AST/FormatString.cpp#L445-L650),
+`ArgType::matchesType`, and `CheckPrintfHandler::HandleAmount` in
+[SemaChecking.cpp](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/Sema/SemaChecking.cpp).
+No upstream implementation or fixture is imported.
+
+`c_check_format_bitint_driver_test.c` adds 25 original fixtures to
+`test-checker-driver` through the shared default-warning harness. Independent
+warning counts and complete Clang diagnostics cover narrow and equal-width
+arguments, one-bit unsigned values, character conversions, string/count pointers,
+dynamic width/precision, C23 exact-width formats, explicit casts, usual
+arithmetic conversions, fixed-parameter conversions and ordinary integer and
+boolean controls. Syntax checks and object emission run under the default
+policy, `-Werror` and `-w`, through both kernels and requested lane counts;
+promoted errors must preserve existing output. This is the bit-precise
+subscope of #1392. Boolean-valued `int` expressions and typedef-sugar spelling
+remain separate work; this change does not advertise complete parity.
