@@ -467,6 +467,21 @@ half at 8, so that calls and the arms of `?:` need nothing of their own for it.
   (a 128-bit operand is in its slot), and whether rax and rdx (`MUL`) or rcx (a shift) are saved in the fixed slots,
   which they are where a value below the operands holds them. Both selections' tops and the emitter read it, so that the
   paths can't drift apart.
+- **Two shapes take shorter code** (#1397):
+  - **A shift by a constant count** absorbs the count's `CONST` (`BUSTER_TIER0_VARIANT_CONST`, deferred: both fusions
+    take it, the vector one from the property rows the slot gives) and takes the count's low 7 bits, as a count in `cl`
+    does: nothing for 0, `shld` or `shrd` and `shl`, `shr` or `sar` by the immediate below 64, and from 64 on the half that
+    moves shifted by the count less 64 into the other, the vacated one zero or the sign (`sar 63`). No `cl`, `test` or
+    `cmov`, and no rcx saved (`tier0_int128_constant_shift`).
+  - **A product of extended operands**, whose two operands' producers are both a `CONST` or a `CONVERT` from an integer
+    class and fill their high halves alike (zero, or the low half's sign: `tier0_int128_extension`), is the low halves'
+    whole product alone, one `mul` (both zero-extended) or one `imul` (both sign-extended), as `(u128)a * b`, the
+    multiply-high of wyhash, XXH3 and `fastrange`, is. The last operand's producer is the entry before the `MUL`; the
+    first's is found by a walk back over the entries' effects, at most `BUSTER_TIER0_INT128_REACH` (32) entries, where no
+    label is between them (`Tier0Entries.labels`) and the depth stays above the first operand's
+    (`tier0_int128_product`). The plan is the same as for any `MUL`, so that selection's tops don't depend on it; the
+    emitter and the measuring both decide it, from the effects rather than the depth columns, which a deep function's
+    deep entries rewrite. A `SHR` of the product by 64 is then a half moved and a zero stored.
 - **The front end's, not Tier 0's,** as clang's code has them: division and remainder (libgcc's `__divti3`,
   `__udivti3`, `__modti3` and `__umodti3`), conversions to and from the floating classes (`__floattidf`, `__fixdfti`
   and the rest), and calls. An argument of the classes is a 16-byte object passed by its address (`argument_sizes` 16),
@@ -1592,7 +1607,10 @@ Before the programs, checks of their own:
     the depths where `MUL` saves rax and rdx and a shift rcx, against the check's own stack machine over the stream. A
     program counts toward the coverage only once both paths compiled it, it ran and every output matched, and then only
     the entries the stack machine ran: those must reach, for each class apart (their signed and unsigned code differs),
-    every kind, every conversion to and from it, each of the saves and both arms of a `?:`, in bitmaps of their own.
+    every kind, every conversion to and from it, each of the saves (the rcx save only by a variable count), shifts by
+    constant counts below 64 and from 64 on, products of extended operands by `mul` and by `imul` (#1397: the operands'
+    producers followed on a model of the stack, cleared at every label, within Tier 0's reach) and both arms of a `?:`,
+    in bitmaps of their own.
 
   Every function must compile: an error of both paths alike fails the check, but a depth refusal in a random program
   (`TIER0_ERROR_DEPTH`, past the deep slots since #780), which is counted.
